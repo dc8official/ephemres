@@ -1,6 +1,6 @@
-# LNMP v3.3.0 — Disaster Recovery & Database Restoration Runbook
+# Ephemres v3.3.1n — Disaster Recovery & Database Restoration Runbook
 
-This runbook describes the standard operating procedures for restoring the LNMP v3.3.0 database and application environment from timestamped backups.
+This runbook describes the standard operating procedures for restoring the Ephemres v3.3.1n database and application environment from timestamped backups (including legacy v3.3.0 backups).
 
 ---
 
@@ -8,12 +8,13 @@ This runbook describes the standard operating procedures for restoring the LNMP 
 
 Automated pre-upgrade and decommissioning backups are generated in plaintext SQL format at:
 ```bash
-/var/backups/netmon/netmon_backup_<YYYYMMDD_HHMMSS>.sql
+/var/backups/ephemres/ephemres_backup_<YYYYMMDD_HHMMSS>.sql
 ```
+*(Legacy backups from earlier versions may be found in `/var/backups/netmon/`)*
 
 To list available backups sorted by date:
 ```bash
-ls -lht /var/backups/netmon/
+ls -lht /var/backups/ephemres/ /var/backups/netmon/ 2>/dev/null || true
 ```
 
 ---
@@ -26,12 +27,18 @@ ls -lht /var/backups/netmon/
    ```
 2. Stop the monitoring engine, API daemons, and flow telemetry collector to prevent write contention during data restoration:
    ```bash
-   sudo systemctl stop netmon-engine netmon-api netmon-flowd 2>/dev/null || true
+   sudo systemctl stop ephemres-engine ephemres-api ephemres-flowd netmon-engine netmon-api netmon-flowd 2>/dev/null || true
    ```
 3. Load database credentials from the environment file:
    ```bash
    set -a
-   source /etc/netmon/netmon.env
+   if [ -f /etc/ephemres/ephemres.env ]; then
+       source /etc/ephemres/ephemres.env
+   elif [ -f /opt/ephemres/backend/.env ]; then
+       source /opt/ephemres/backend/.env
+   elif [ -f /etc/netmon/netmon.env ]; then
+       source /etc/netmon/netmon.env
+   fi
    set +a
    ```
 
@@ -42,28 +49,33 @@ ls -lht /var/backups/netmon/
 ### Step 1: Re-create Clean Database Target (Optional / Clean Restore)
 If performing a full database rebuild:
 ```bash
-PGPASSWORD="${NETMON_DB_PASSWORD}" psql -h "${NETMON_DB_HOST:-127.0.0.1}" -U "${NETMON_DB_USER:-netmon_user}" -d postgres -c "DROP DATABASE IF EXISTS netmon;"
-PGPASSWORD="${NETMON_DB_PASSWORD}" psql -h "${NETMON_DB_HOST:-127.0.0.1}" -U "${NETMON_DB_USER:-netmon_user}" -d postgres -c "CREATE DATABASE netmon;"
-PGPASSWORD="${NETMON_DB_PASSWORD}" psql -h "${NETMON_DB_HOST:-127.0.0.1}" -U "${NETMON_DB_USER:-netmon_user}" -d netmon -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"
+DB_PASS="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD}}"
+DB_USER="${EPHEMRES_DB_USER:-${NETMON_DB_USER:-netmon_user}}"
+DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-netmon}}"
+DB_HOST="${EPHEMRES_DB_HOST:-${NETMON_DB_HOST:-127.0.0.1}}"
+
+PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -U "${DB_USER}" -d postgres -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -U "${DB_USER}" -d postgres -c "CREATE DATABASE ${DB_NAME};"
+PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -U "${DB_USER}" -d "${DB_NAME}" -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"
 ```
 
 ### Step 2: Ingest Backup SQL Dump
 ```bash
-RESTORE_FILE="/var/backups/netmon/netmon_backup_YYYYMMDD_HHMMSS.sql"
+RESTORE_FILE="/var/backups/ephemres/ephemres_backup_YYYYMMDD_HHMMSS.sql"
 
-PGPASSWORD="${NETMON_DB_PASSWORD}" psql \
-  -h "${NETMON_DB_HOST:-127.0.0.1}" \
-  -p "${NETMON_DB_PORT:-5432}" \
-  -U "${NETMON_DB_USER:-netmon_user}" \
-  -d "${NETMON_DB_NAME:-netmon}" \
+PGPASSWORD="${DB_PASS}" psql \
+  -h "${DB_HOST}" \
+  -p "${EPHEMRES_DB_PORT:-${NETMON_DB_PORT:-5432}}" \
+  -U "${DB_USER}" \
+  -d "${DB_NAME}" \
   -f "${RESTORE_FILE}"
 ```
 
 ### Step 3: Run Forward Alembic Migrations
 Ensure all schema tables, views, and continuous aggregates are up to date:
 ```bash
-cd /opt/netmon/noop/backend
-PYTHONPATH=/opt/netmon/noop:/opt/netmon/noop/backend /opt/netmon/venv/bin/alembic -c alembic.ini upgrade head
+cd /opt/ephemres/backend
+PYTHONPATH=/opt/ephemres:/opt/ephemres/backend /opt/ephemres/venv/bin/alembic -c alembic.ini upgrade head
 ```
 
 ### Step 4: Flush Redis Session Cache (If Redis Acceleration is Active)
@@ -72,11 +84,11 @@ If using the Redis storage driver, flush stale session keys:
 redis-cli flushdb
 ```
 
-### Step 5: Restart LNMP Daemons
+### Step 5: Restart Ephemres Daemons
 ```bash
 sudo systemctl restart redis-server || sudo systemctl restart redis || true
-sudo systemctl restart netmon-api netmon-engine nginx
-sudo systemctl is-enabled netmon-flowd &>/dev/null && sudo systemctl restart netmon-flowd || true
+sudo systemctl restart ephemres-api ephemres-engine nginx
+sudo systemctl is-enabled ephemres-flowd &>/dev/null && sudo systemctl restart ephemres-flowd || true
 ```
 
 ### Step 6: Verify Service Health
@@ -88,6 +100,6 @@ Expected response:
 ```json
 {
   "status": "ok",
-  "version": "3.3.0"
+  "version": "3.3.1n"
 }
 ```

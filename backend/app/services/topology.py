@@ -225,7 +225,7 @@ class TopologyGraphManager:
             root_node_id = "root"
             nodes[root_node_id] = {
                 "id": root_node_id,
-                "label": "LNMP Engine",
+                "label": "Ephemres Engine",
                 "type": "root",
                 "node_type": "root",
                 "state": "UP",

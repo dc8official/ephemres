@@ -92,7 +92,7 @@ async def test_pdf_rendering_and_immutability():
 
     pdf_bytes = await render_pdf_async(
         html_content=sample_html,
-        title="LNMP Security Audit",
+        title="Ephemres Security Audit",
     )
 
     assert isinstance(pdf_bytes, bytes)
@@ -119,7 +119,7 @@ async def test_pdf_rendering_and_immutability():
     metadata = reader.metadata
     assert metadata is not None
     assert "/Producer" in metadata
-    assert "LNMP Reporting Engine" in metadata["/Producer"]
+    assert "Ephemres Reporting Engine" in metadata["/Producer"]
 
 
 # =====================================================================

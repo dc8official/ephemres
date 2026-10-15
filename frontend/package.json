@@ -1,6 +1,6 @@
 {
-  "name": "lnmp-frontend",
-  "version": "3.3.0",
+  "name": "ephemres-frontend",
+  "version": "3.3.1n",
   "private": true,
   "scripts": {
     "dev": "vite",

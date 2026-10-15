@@ -281,7 +281,7 @@
             <div class="form-row-2">
               <div class="form-group">
                 <label class="setting-label">From Address *</label>
-                <input v-model="channelForm.config.from_email" type="email" placeholder="lnmp-alerts@corp.net" required class="form-input" />
+                <input v-model="channelForm.config.from_email" type="email" placeholder="ephemres-alerts@corp.net" required class="form-input" />
               </div>
               <div class="form-group">
                 <label class="setting-label">Recipient Email(s) * (comma-separated)</label>

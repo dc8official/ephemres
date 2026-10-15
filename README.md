@@ -1,4 +1,4 @@
-# LNMP: Network Monitoring Platform v3.3.0
+# Ephemres: Network Monitoring Platform v3.3.1n
 
 A high-precision, decoupled network telemetry and monitoring platform combining active multi-protocol health probing with passive high-volume network flow ingestion (NetFlow v5, NetFlow v9, and IPFIX) and per-interface throughput/utilization telemetry. Engineered for continuous endpoint verification, sub-second route diagnostics, adaptive statistical alerting, automated root-cause analysis (RCA), real-time Server-Sent Events (SSE), dual-driver storage acceleration, enterprise multi-channel incident dispatch, and dynamic topology visualization with crossing-free layout routing.
 
@@ -8,7 +8,7 @@ A high-precision, decoupled network telemetry and monitoring platform combining 
 
 The platform is decoupled into independent, modular layers to guarantee continuous telemetry collection regardless of client-side dashboard activity, heavy API load, or temporary network disruptions:
 
-* **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, IPFIX):** Dedicated, decoupled collector daemon (`netmon-flowd`) listening on UDP 2055 (NetFlow) and UDP 4739 (IPFIX) with 4MB kernel socket buffers (`SO_RCVBUF`), zero-allocation binary decoders, dynamic template caching (1,800s TTL), orphan data set ring buffering, and dual-stack IPv4/IPv6 support.
+* **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, IPFIX):** Dedicated, decoupled collector daemon (`ephemres-flowd`) listening on UDP 2055 (NetFlow) and UDP 4739 (IPFIX) with 4MB kernel socket buffers (`SO_RCVBUF`), zero-allocation binary decoders, dynamic template caching (1,800s TTL), orphan data set ring buffering, and dual-stack IPv4/IPv6 support.
 * **Dual-Role $\mathcal{O}(1)$ In-Memory Correlation & Discovery:** In-memory hash indexing providing sub-microsecond matching for both Exporters (primary IP + `flow_exporter_ips` aliases) and Monitored Participants without database lookups; automatic Redis-backed discovery banner for unmapped exporter candidates with 1-click UI alias binding.
 * **4-Tier Hierarchical Storage Lifecycle:** Sliding 2-hour Redis Stream shock-absorber (`stream:netflow:raw`) with memory circuit breaker (>85%), 7-day 1-minute TimescaleDB rollups (`flow_minute_rollups` and `flow_interface_minute_rollups`) with columnar compression, 30-day 1-hour continuous aggregates (`flow_hourly_rollups`), and 365-day daily totals (`flow_daily_rollups`).
 * **Fleet Bandwidth & Deep-Dive Perspective Tabs:** Fleet-wide `/bandwidth` dashboard featuring real-time KPI ribbon, Chart.js stacked Ingress/Egress area charts, Top Talkers, Application distribution donut, forensic IP-to-IP conversation explorer, and accessible tab switcher in `EndpointDetailView.vue` (ICMP Diagnostics ⇄ Flow Telemetry).
@@ -24,7 +24,7 @@ The platform is decoupled into independent, modular layers to guarantee continuo
 * **Interactive Crossing-Free Topology Map:** Vue 3 Vis-Network visualizer implementing **BFS DAG Longest-Path Layering** (`Level(v) = max(Level(u) + 1)`), **Sugiyama (1981)** barycenter crossing reduction, **Gansner (1993)** coordinate alignment, **frozen-physics real-time recoloring**, and **Horizontal (LR) ⇄ Vertical (UD)** layout switching.
 * **Enterprise Frontend & Accessibility Overhaul:** High-contrast monochrome design system, top summary KPI ribbon with instant filter pills, **Dual View Switcher** (Visual Card Grid vs. Dense Sortable Table), tabular monospace numbers, and WCAG 2.1 AA keyboard focus indicators.
 * **TimescaleDB Compression & Retention:** 7-day chunk compression (90%+ disk savings), automated continuous aggregates, and daily automated 90-day retention cleanup.
-* **Enterprise Logging Architecture:** Python `RotatingFileHandler` with bounded disk quotas (~150MB total footprint) and strict permission isolation (`0640 netmon:netmon`), preventing log exhaustion on high-volume production deployments.
+* **Enterprise Logging Architecture:** Python `RotatingFileHandler` with bounded disk quotas (~150MB total footprint) and strict permission isolation (`0640 ephemres:ephemres`), preventing log exhaustion on high-volume production deployments.
 * **Security & Session Governance:** Sliding 2-hour inactivity timeouts, token-based concurrent session quotas (max 2 active sessions with FIFO rotation), and IP-scoped failed login lockouts (`<Client_IP>:<Username>`).
 
 ---
@@ -36,9 +36,9 @@ For comprehensive guides, references, and operational procedures, refer to the `
 * **[v3.3.0 Release Notes](docs/release-notes/v3.3.0.md):** Major release highlights, new features, and upgrade instructions for v3.3.0.
 * **[v3.2.0 Release Notes](docs/release-notes/v3.2.0.md):** Network flow telemetry foundation notes.
 * **[v3.2 Hybrid Active/Passive Architecture Guide](docs/architecture/v3.2-hybrid-active-passive.md):** Architectural breakdown of active synthetic polling integrated with line-rate NetFlow/IPFIX flow ingestion.
-* **[Changelog & Technical Evolution](docs/changelog.md):** Complete release notes and evolutionary milestones from Version 1.0 to Version 3.3.0.
+* **[Changelog & Technical Evolution](docs/changelog.md):** Complete release notes and evolutionary milestones from Version 1.0 to Version 3.3.1n.
 * **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Production runbook for NetFlow v5/v9 and IPFIX collector setup, exporter vendor configuration templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), timeout standards, and UI alias mapping.
-* **[Architecture Deep-Dive](docs/architecture.md):** In-depth analysis of the Repository Layer, Dual-Driver Storage, Concurrency Sweeper, Network Flow Telemetry Pipeline (`netmon-flowd`), and Topology DAG.
+* **[Architecture Deep-Dive](docs/architecture.md):** In-depth analysis of the Repository Layer, Dual-Driver Storage, Concurrency Sweeper, Network Flow Telemetry Pipeline (`ephemres-flowd`), and Topology DAG.
 * **[Deployment & Operations Guide](docs/deployment.md):** Production installation, automated in-place upgrades (`upgrade.sh`), Redis configuration, and health verification.
 * **[Disaster Recovery & Restoration Runbook](deploy/RESTORE.md):** Step-by-step procedures for restoring TimescaleDB backups, running Alembic migrations, and flushing Redis cache.
 * **[User & Operator Guide](docs/user-guide.md):** Guide to navigating the Live KPI ribbon, Card/Table view switcher, High-Fidelity traceroutes, Bandwidth Fleet Dashboard, and Admin Settings.
@@ -56,7 +56,7 @@ For comprehensive guides, references, and operational procedures, refer to the `
 * **Backend:** Python 3.10+, FastAPI, SQLAlchemy 2.0 (Async Declarative Models & Repository Layer), Pydantic Settings, Alembic, Native `asyncio`, Argon2id, NetFlow v5/v9 & IPFIX binary protocol decoders
 * **Storage & Caching:** PostgreSQL 14+ with TimescaleDB Extension (Hypertables, Continuous Aggregates & Columnar Compression), Redis 6+ (Pub/Sub, Stream Shock-Absorber `stream:netflow:raw` & In-Memory Session Cache Acceleration)
 * **Frontend:** Vue 3 (Composition API), Vite, PrimeVue (Aura Theme Preset), Chart.js, `vis-network` (BFS + Sugiyama Crossing Reduction)
-* **System Layer:** Linux `systemd` (`netmon-api`, `netmon-engine`, `netmon-flowd`), Native Raw Sockets (`CAP_NET_RAW` capability), System `traceroute`, UDP Datagram Sockets (2055, 4739)
+* **System Layer:** Linux `systemd` (`ephemres-api`, `ephemres-engine`, `ephemres-flowd`), Native Raw Sockets (`CAP_NET_RAW` capability), System `traceroute`, UDP Datagram Sockets (2055, 4739)
 * **Logging:** Python `RotatingFileHandler` (~150MB bounded footprint) + `systemd-journald`
 
 ---
@@ -79,9 +79,9 @@ For comprehensive guides, references, and operational procedures, refer to the `
 
 > [!IMPORTANT]
 > **Timezone Alignment & Clock Synchronization**:
-> LNMP telemetry analysis, uptime SLA calculation, and real-time state transition logging rely on precise timestamp filtering (`start_time <= end_dt`). If the server's timezone or system clock is out of sync with your operational region or client endpoints, newly captured telemetry events, RTT trends, and transition logs may appear blank or be excluded from query windows.
+> Ephemres telemetry analysis, uptime SLA calculation, and real-time state transition logging rely on precise timestamp filtering (`start_time <= end_dt`). If the server's timezone or system clock is out of sync with your operational region or client endpoints, newly captured telemetry events, RTT trends, and transition logs may appear blank or be excluded from query windows.
 >
-> Before installing or starting LNMP services, configure your host's regional timezone and enable network time synchronization (NTP):
+> Before installing or starting Ephemres services, configure your host's regional timezone and enable network time synchronization (NTP):
 >
 > ```bash
 > # Set the server timezone to your operational region (e.g. Europe/London, America/New_York, UTC, Africa/Lagos)
@@ -98,31 +98,31 @@ For comprehensive guides, references, and operational procedures, refer to the `
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/lnmp.git
-cd lnmp/deploy
+git clone https://github.com/dc8official/ephemres.git
+cd ephemres/deploy
 ./install.sh
 ```
 
-### 2. Upgrading to v3.3.0 (Zero Historical Data Loss)
+### 2. Upgrading to v3.3.1n (Zero Historical Data Loss)
 
-To upgrade an existing installation to Version 3.3.0:
+To upgrade an existing installation to Version 3.3.1n:
 
 ```bash
-cd ~/lnmp
-git pull origin v3.1.35s
+cd ~/ephemres
+git pull origin v3.3.1n
 sudo ./deploy/upgrade.sh
 ```
 
-*(Alternatively, if running directly on the production host without a cloned repository, you can execute `sudo bash /opt/netmon/noop/deploy/upgrade.sh`)*
+*(Alternatively, if running directly on the production host without a cloned repository, you can execute `sudo bash /opt/ephemres/deploy/upgrade.sh`)*
 
 The upgrade utility automatically executes:
-1. **Pre-Upgrade Backup**: Dumps a timestamped PostgreSQL SQL backup to `/var/backups/netmon/`.
+1. **Pre-Upgrade Backup**: Dumps a timestamped PostgreSQL SQL backup to `/var/backups/ephemres/`.
 2. **System Dependencies**: Installs and starts `redis-server`, verifies `httpx`, and sets `CAP_NET_RAW` capabilities on `traceroute`.
-3. **Smart Config Migration**: Updates `/etc/netmon/config.toml` defaults (5 pings @ 8s, 120m timeout, Redis, Alerting, and `[flow]` telemetry sections) without overwriting secrets.
-4. **Service Pause**: Gracefully pauses background daemons (`netmon-api`, `netmon-engine`, and `netmon-flowd`).
+3. **Smart Config Migration**: Updates `/etc/ephemres/config.toml` defaults (5 pings @ 8s, 120m timeout, Redis, Alerting, and `[flow]` telemetry sections) without overwriting secrets.
+4. **Service Pause**: Gracefully pauses background daemons (`ephemres-api`, `ephemres-engine`, and `ephemres-flowd`).
 5. **Code & Dependency Sync**: Pulls latest updates, installs Python requirements, and compiles Vue 3 assets.
-6. **Alembic Forward Migrations**: Runs `alembic upgrade head` applying migration `0012_v3_3_flow_interface_telemetry.py` to add `device_role` (`ck_endpoints_device_role`) and create the `flow_interface_minute_rollups` hypertable (with 7-day retention) while preserving all historical ICMP/probe metrics and continuous aggregates.
-7. **Systemd Unit Refresh & Restart**: Installs `netmon-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `netmon-api`, `netmon-engine`, and `nginx`. If `[flow].enabled = true`, automatically enables and starts `netmon-flowd` and configures UFW firewall rules for UDP 2055 and UDP 4739.
+6. **Alembic Forward Migrations**: Runs `alembic upgrade head` applying forward database migrations while preserving all historical ICMP/probe metrics and continuous aggregates.
+7. **Systemd Unit Refresh & Restart**: Installs `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `ephemres-api`, `ephemres-engine`, and `nginx`. If `[flow].enabled = true`, automatically enables and starts `ephemres-flowd` and configures UFW firewall rules for UDP 2055 and UDP 4739.
 8. **Health Check**: Validates live API status and version endpoint (`/api/v1/version`).
 
 ---

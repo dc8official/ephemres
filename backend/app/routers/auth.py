@@ -38,7 +38,7 @@ from app.services.auth_service import (
 
 logger = logging.getLogger(__name__)
 
-cookie_name = "lnmp_access_token"
+cookie_name = "ephemres_access_token"
 
 
 def get_client_ip(request: Request) -> str:
@@ -196,7 +196,7 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     client_ip = get_client_ip(request)
-    token = request.cookies.get(cookie_name)
+    token = request.cookies.get(cookie_name) or request.cookies.get("lnmp_access_token")
     if not token:
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):

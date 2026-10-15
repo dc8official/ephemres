@@ -1,6 +1,6 @@
-# LNMP Deployment & Operations Guide — Version 3.3.0
+# Ephemres Deployment & Operations Guide — Version 3.3.1n
 
-This guide details the procedures for installing, maintaining, and upgrading the Network Monitoring Platform (LNMP) v3.3.0 on a production Linux server.
+This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.1n on a production Linux server.
 
 ---
 
@@ -10,7 +10,7 @@ This guide details the procedures for installing, maintaining, and upgrading the
 - **Hardware (Minimum for Production):** 2 vCPUs, 2 GB RAM, 10–25 GB SSD (edge); 4+ vCPUs, 8 GB RAM, 50 GB+ NVMe (large scale).
 - **Dependencies:** PostgreSQL 14+ with TimescaleDB, Redis 6+ (for Memory Acceleration & Flow Stream buffer), Node.js 18+, Python 3.10+, Nginx.
 - **Time Synchronization & Timezone:** Accurate system clock via NTP (`systemd-timesyncd` or `chrony`) and server timezone configured to match the operational region. Critical for TimescaleDB telemetry partitioning, RTT graph rendering, flow rollup boundaries, and SLA calculations.
-- **Network Permissions:** The `netmon-engine` daemon requires `CAP_NET_RAW` capability to send raw ICMP packets. `netmon-flowd` binds UDP 2055 and UDP 4739.
+- **Network Permissions:** The `ephemres-engine` daemon requires `CAP_NET_RAW` capability to send raw ICMP packets. `ephemres-flowd` binds UDP 2055 and UDP 4739.
 
 ---
 
@@ -19,7 +19,7 @@ This guide details the procedures for installing, maintaining, and upgrading the
 ### Pre-Installation: System Timezone & Clock Synchronization
 
 > [!IMPORTANT]
-> LNMP relies on strict time-window boundaries for calculating uptime percentages, transition logs, RTT telemetry graphs, and flow rollups. Ensure the server's timezone matches your operations region and NTP time sync is active before launching LNMP services:
+> Ephemres relies on strict time-window boundaries for calculating uptime percentages, transition logs, RTT telemetry graphs, and flow rollups. Ensure the server's timezone matches your operations region and NTP time sync is active before launching Ephemres services:
 >
 > ```bash
 > # 1. Set regional timezone (e.g., Europe/London, America/New_York, UTC, Africa/Lagos)
@@ -38,42 +38,42 @@ The initial installation is fully automated via `install.sh`:
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/lnmp.git
-cd lnmp/deploy
+git clone https://github.com/dc8official/ephemres.git
+cd ephemres/deploy
 ./install.sh
 ```
 
 **What the installer executes:**
 1. Installs system packages: `python3-pip`, `postgresql`, `timescaledb`, `redis-server`, `nginx`, `traceroute`, `libcap2-bin`.
-2. Creates dedicated system user `netmon` and virtual environment at `/opt/netmon/venv`.
+2. Creates dedicated system user `ephemres` and virtual environment at `/opt/ephemres/venv`.
 3. Compiles the Vue 3 production bundle (`npm run build`).
-4. Generates `/etc/netmon/netmon.env` and `/etc/netmon/config.toml` with v3.3.0 defaults (including `[flow]` telemetry configuration).
-5. Sets network capabilities: `setcap cap_net_raw+ep $(command -v traceroute)`.
-6. Enables and starts systemd units (`netmon-api`, `netmon-engine`, `netmon-flowd` if enabled, `redis-server`, `nginx`).
+4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.1n defaults (including `[flow]` telemetry configuration).
+5. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
+6. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `redis-server`, `nginx`).
 
 ---
 
-## 3. Upgrading to Version 3.3.0 (Zero Historical Data Loss)
+## 3. Upgrading to Version 3.3.1n (Zero Historical Data Loss)
 
-To perform an in-place upgrade to v3.3.0:
+To perform an in-place upgrade to v3.3.1n:
 
 ```bash
-cd ~/lnmp
-git pull origin v3.1.28s
+cd ~/ephemres
+git pull origin v3.3.1n
 sudo ./deploy/upgrade.sh
 ```
 
-*(Alternatively, if upgrading directly on the host without a local git clone, you can run `sudo bash /opt/netmon/noop/deploy/upgrade.sh`)*
+*(Alternatively, if upgrading directly on the host without a local git clone, you can run `sudo bash /opt/ephemres/deploy/upgrade.sh`)*
 
 ### Automated Upgrade Lifecycle Steps:
-1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/netmon/netmon_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
+1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies & Redis**: Installs missing packages (`redis-server`, `traceroute`, `libcap2-bin`, verifies Python package `httpx>=0.27.0`) and ensures Redis is enabled and started (`systemctl enable --now redis-server`).
-3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on `traceroute` for unprivileged ICMP discovery.
-4. **Smart Config Migration**: Patches `/etc/netmon/config.toml` with v3.2 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, `[redis]`, `[alerting]`, and `[flow]` sections).
-5. **Daemon Pause**: Gracefully stops `netmon-flowd`, `netmon-engine`, and `netmon-api`.
+3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
+4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, `[redis]`, `[alerting]`, and `[flow]` sections).
+5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, updates Python dependencies, and compiles frontend assets.
-7. **Forward Alembic Migrations**: Runs `alembic upgrade head` applying migration `0008_v3_2_network_flow_ingestion.py` to create `flow_exporter_ips`, `flow_interface_aliases`, `flow_minute_rollups` hypertable (with 1-day compression and 7-day retention), and continuous aggregate views while preserving all historical TimescaleDB chunks.
-8. **Unit Refresh & Daemon Restart**: Installs `netmon-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `netmon-api`, `netmon-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `netmon-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
+7. **Forward Alembic Migrations**: Runs `alembic upgrade head` to apply all database migrations while preserving all historical TimescaleDB chunks.
+8. **Unit Refresh & Daemon Restart**: Refreshes `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `ephemres-api`, `ephemres-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `ephemres-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
 9. **Health Verification**: Verifies API health and version endpoints (`/api/v1/version`).
 
 ---
@@ -84,18 +84,18 @@ For complete database restoration procedures from timestamped backups, refer to 
 
 Quick restore summary:
 ```bash
-sudo systemctl stop netmon-flowd netmon-engine netmon-api
-set -a && source /etc/netmon/netmon.env && set +a
-PGPASSWORD="${NETMON_DB_PASSWORD}" psql -h 127.0.0.1 -U netmon_user -d netmon -f /var/backups/netmon/netmon_backup_<TIMESTAMP>.sql
-cd /opt/netmon/noop/backend && /opt/netmon/venv/bin/alembic upgrade head
-sudo systemctl restart redis-server netmon-api netmon-engine netmon-flowd nginx
+sudo systemctl stop ephemres-flowd ephemres-engine ephemres-api
+set -a && source /etc/ephemres/ephemres.env && set +a
+PGPASSWORD="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD}}" psql -h 127.0.0.1 -U netmon_user -d netmon -f /var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql
+cd /opt/ephemres/backend && /opt/ephemres/venv/bin/alembic upgrade head
+sudo systemctl restart redis-server ephemres-api ephemres-engine ephemres-flowd nginx
 ```
 
 ---
 
 ## 5. Storage Driver & Flow Configuration
 
-In `/etc/netmon/config.toml`:
+In `/etc/ephemres/config.toml`:
 
 ```toml
 [redis]
@@ -119,22 +119,22 @@ buffer_memory_limit_mb = 512
 
 ```bash
 # Check service status across all daemons
-sudo systemctl status netmon-api netmon-engine netmon-flowd redis-server
+sudo systemctl status ephemres-api ephemres-engine ephemres-flowd redis-server
 
 # Live stream API server logs
-sudo journalctl -u netmon-api -f
+sudo journalctl -u ephemres-api -f
 
 # Live stream monitoring engine logs
-sudo journalctl -u netmon-engine -f
+sudo journalctl -u ephemres-engine -f
 
 # Live stream flow collector logs
-sudo journalctl -u netmon-flowd -f
+sudo journalctl -u ephemres-flowd -f
 
 # View rotating log files
-tail -f /var/log/netmon/api.log
-tail -f /var/log/netmon/engine.log
-tail -f /var/log/netmon/flowd.log
-tail -f /var/log/netmon/error.log
+tail -f /var/log/ephemres/ephemres-api.log
+tail -f /var/log/ephemres/ephemres-engine.log
+tail -f /var/log/ephemres/ephemres-flowd.log
+tail -f /var/log/ephemres/error.log
 ```
 
 ---
@@ -142,7 +142,7 @@ tail -f /var/log/netmon/error.log
 ## 7. Firewall Rules (Egress Alerts & Ingress Flow Telemetry)
 
 ### Ingress Firewall Policies (Passive Telemetry Collection)
-Routers and firewalls must be permitted to stream flow datagrams to the LNMP collector host:
+Routers and firewalls must be permitted to stream flow datagrams to the Ephemres collector host:
 
 | Flow Protocol | Protocol & Port | Source | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -151,12 +151,12 @@ Routers and firewalls must be permitted to stream flow datagrams to the LNMP col
 
 ```bash
 # Example UFW commands to allow flow ingestion from your management subnet:
-sudo ufw allow proto udp from 10.0.0.0/16 to any port 2055 comment 'NetFlow v5/v9 Ingestion'
-sudo ufw allow proto udp from 10.0.0.0/16 to any port 4739 comment 'IPFIX Ingestion'
+sudo ufw allow proto udp from 10.0.0.0/16 to any port 2055 comment 'Ephemres NetFlow v5/v9 Ingestion'
+sudo ufw allow proto udp from 10.0.0.0/16 to any port 4739 comment 'Ephemres IPFIX Ingestion'
 ```
 
 ### Egress Firewall Policies (Enterprise Alerting)
-LNMP dispatches outbound incident notifications directly to external endpoints:
+Ephemres dispatches outbound incident notifications directly to external endpoints:
 
 | Destination Service | Protocol & Ports | Purpose |
 | :--- | :--- | :--- |
@@ -168,22 +168,22 @@ LNMP dispatches outbound incident notifications directly to external endpoints:
 
 ---
 
-## 8. Database Migration 0008 Execution Procedure
+## 8. Database Migration Execution Procedure
 
 If executing migrations manually outside of `upgrade.sh`:
 
 ```bash
-cd /opt/netmon/noop/backend
+cd /opt/ephemres/backend
 
 # Activate python virtual environment and set path
-source /opt/netmon/venv/bin/activate
-export PYTHONPATH=/opt/netmon/noop:/opt/netmon/noop/backend
+source /opt/ephemres/venv/bin/activate
+export PYTHONPATH=/opt/ephemres:/opt/ephemres/backend
 
 # Inspect pending migrations
 alembic current
 alembic heads
 
-# Apply migration 0008 (creates flow rollups hypertable, continuous aggregates, and multi-IP columns)
+# Apply pending migrations
 alembic upgrade head
 
 # Verify table and hypertable creation in PostgreSQL

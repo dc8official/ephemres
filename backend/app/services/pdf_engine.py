@@ -90,8 +90,8 @@ def _render_pdf_sync(html_content: str, title: str) -> bytes:
     now_str = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
     writer.add_metadata({
         "/Title": title,
-        "/Author": "LNMP Enterprise Platform",
-        "/Producer": "LNMP Reporting Engine v3.3.0",
+        "/Author": "Ephemres Enterprise Platform",
+        "/Producer": "Ephemres Reporting Engine v3.3.1n",
         "/CreationDate": now_str,
         "/ModDate": now_str,
     })
@@ -112,7 +112,7 @@ def _render_pdf_sync(html_content: str, title: str) -> bytes:
     return output_stream.getvalue()
 
 
-async def render_pdf_async(html_content: str, title: str = "LNMP Network Telemetry Report") -> bytes:
+async def render_pdf_async(html_content: str, title: str = "Ephemres Network Telemetry Report") -> bytes:
     """
     Asynchronously executes PDF rendering offloaded to a worker thread.
     Guarantees that CPU-bound rasterization never starves the FastAPI event loop.

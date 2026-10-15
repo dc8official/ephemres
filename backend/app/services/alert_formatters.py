@@ -60,8 +60,8 @@ def build_polyglot_payload(
         theme_color = "#f59e0b"
         status_emoji = "⚠️"
 
-    title_text = f"{status_emoji} LNMP Alert: {endpoint_name} is {sev_upper}"
-    plain_text = f"{status_emoji} [LNMP Alert] {endpoint_name} ({ip_address}) - {sev_upper} | Event: {event_type} | Time: {ts_str}"
+    title_text = f"{status_emoji} Ephemres Alert: {endpoint_name} is {sev_upper}"
+    plain_text = f"{status_emoji} [Ephemres Alert] {endpoint_name} ({ip_address}) - {sev_upper} | Event: {event_type} | Time: {ts_str}"
 
     adaptive_card = {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -95,7 +95,7 @@ def build_polyglot_payload(
         "actions": [
             {
                 "type": "Action.OpenUrl",
-                "title": "Open LNMP Console",
+                "title": "Open Ephemres Console",
                 "url": url,
             }
         ],
@@ -116,7 +116,7 @@ def build_polyglot_payload(
     safe_ip = html.escape(str(ip_address))
     safe_event = html.escape(str(event_type))
     safe_sev = html.escape(str(sev_upper))
-    safe_title = f"{status_emoji} LNMP Alert: {safe_name} is {safe_sev}"
+    safe_title = f"{status_emoji} Ephemres Alert: {safe_name} is {safe_sev}"
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; border-left: 4px solid {theme_color}; padding: 12px 16px; background-color: #1e1e24; color: #f4f4f5; border-radius: 4px;">
@@ -195,16 +195,16 @@ def build_discord_payload(
             fields.append({"name": "Root Cause", "value": str(details["root_cause"]), "inline": False})
 
     return {
-        "content": f"{emoji} **LNMP Alert:** `{endpoint_name}` transitioned to **{sev_upper}**",
+        "content": f"{emoji} **Ephemres Alert:** `{endpoint_name}` transitioned to **{sev_upper}**",
         "allowed_mentions": {"parse": []},
         "embeds": [
             {
                 "title": f"{emoji} {endpoint_name} is {sev_upper}",
-                "description": f"Operational State Transition detected by LNMP Monitoring Engine.",
+                "description": f"Operational State Transition detected by Ephemres Monitoring Engine.",
                 "url": url,
                 "color": color,
                 "fields": fields,
-                "footer": {"text": "LNMP Enterprise Observability Engine v3.3.0"},
+                "footer": {"text": "Ephemres Enterprise Observability Engine v3.3.1n"},
             }
         ],
     }
@@ -238,7 +238,7 @@ def build_slack_payload(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"{emoji} LNMP Alert: {safe_name} is {safe_sev}",
+                "text": f"{emoji} Ephemres Alert: {safe_name} is {safe_sev}",
                 "emoji": True,
             },
         },
@@ -256,7 +256,7 @@ def build_slack_payload(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Timestamp (UTC): *{ts_str}* | LNMP Observability Platform v3.3.0",
+                    "text": f"Timestamp (UTC): *{ts_str}* | Ephemres Observability Platform v3.3.1n",
                 }
             ],
         },
@@ -276,7 +276,7 @@ def build_slack_payload(
         })
 
     return {
-        "text": f"{emoji} LNMP Alert: {safe_name} is {safe_sev}",
+        "text": f"{emoji} Ephemres Alert: {safe_name} is {safe_sev}",
         "blocks": blocks,
     }
 
@@ -302,7 +302,7 @@ def build_email_mime(
 
     clean_to = _sanitize_header(to_email)
     clean_from = _sanitize_header(from_email)
-    clean_subject = _sanitize_header(f"[{sev_upper}] LNMP Alert: {endpoint_name} ({ip_address})")
+    clean_subject = _sanitize_header(f"[{sev_upper}] Ephemres Alert: {endpoint_name} ({ip_address})")
 
     theme_color = "#ef4444" if sev_upper in ("DOWN", "CRITICAL") else ("#22c55e" if sev_upper in ("RECOVERED", "UP") else "#f59e0b")
 
@@ -312,8 +312,8 @@ def build_email_mime(
     safe_sev = html.escape(str(sev_upper))
 
     plain_body = f"""
-LNMP Enterprise Network Monitoring Alert
-========================================
+Ephemres Enterprise Network Monitoring Alert
+============================================
 Endpoint:   {endpoint_name}
 IP Address: {ip_address}
 Severity:   {sev_upper}
@@ -321,8 +321,8 @@ Event:      {event_type}
 Timestamp:  {ts_str}
 
 Console:    {url}
-----------------------------------------
-Sent by LNMP Enterprise Platform v3.3.0
+--------------------------------------------
+Sent by Ephemres Enterprise Platform v3.3.1n
 """.strip()
 
     html_body = f"""
@@ -332,7 +332,7 @@ Sent by LNMP Enterprise Platform v3.3.0
 <body style="font-family: Arial, sans-serif; background-color: #0f0f12; color: #f4f4f5; margin: 0; padding: 24px;">
   <div style="max-width: 600px; margin: 0 auto; background-color: #18181b; border: 1px solid #27272a; border-radius: 8px; overflow: hidden;">
     <div style="background-color: {theme_color}; color: #ffffff; padding: 16px 20px;">
-      <h2 style="margin: 0; font-size: 18px;">LNMP Alert: {safe_name} is {safe_sev}</h2>
+      <h2 style="margin: 0; font-size: 18px;">Ephemres Alert: {safe_name} is {safe_sev}</h2>
     </div>
     <div style="padding: 20px;">
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
@@ -343,11 +343,11 @@ Sent by LNMP Enterprise Platform v3.3.0
         <tr><td style="padding: 6px 0; color: #a1a1aa;">Timestamp:</td><td>{ts_str}</td></tr>
       </table>
       <div style="text-align: center; margin-top: 24px;">
-        <a href="{url}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">Open in LNMP Console</a>
+        <a href="{url}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">Open in Ephemres Console</a>
       </div>
     </div>
     <div style="background-color: #121215; padding: 12px 20px; text-align: center; font-size: 12px; color: #71717a;">
-      LNMP Enterprise Observability Engine v3.3.0 • Autonomous Network Reliability
+      Ephemres Enterprise Observability Engine v3.3.1n • Autonomous Network Reliability
     </div>
   </div>
 </body>

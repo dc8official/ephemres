@@ -751,10 +751,10 @@ async def generate_pdf_report(
         report_title = "Device Availability & Uptime Performance Report"
         template_name = "template_a_availability.html"
         theme_accent = "#2563eb"
-        filename = f"lnmp_availability_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+        filename = f"ephemres_availability_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
         context = {
             "org": org,
-            "report_title": f"{org.get('company_name', 'LNMP')} — {report_title}",
+            "report_title": f"{org.get('company_name', 'Ephemres')} — {report_title}",
             "report_type_label": report_title,
             "period_label": period_label,
             "generated_at": generated_at_str,
@@ -771,10 +771,10 @@ async def generate_pdf_report(
         report_title = "Network Bandwidth & Flow Telemetry Report"
         template_name = "template_b_bandwidth.html"
         theme_accent = "#059669"
-        filename = f"lnmp_bandwidth_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+        filename = f"ephemres_bandwidth_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
         context = {
             "org": org,
-            "report_title": f"{org.get('company_name', 'LNMP')} — {report_title}",
+            "report_title": f"{org.get('company_name', 'Ephemres')} — {report_title}",
             "report_type_label": report_title,
             "period_label": period_label,
             "generated_at": generated_at_str,
@@ -791,10 +791,10 @@ async def generate_pdf_report(
         report_title = "Comprehensive Master Operational Audit Dossier"
         template_name = "template_c_master.html"
         theme_accent = "#7c3aed"
-        filename = f"lnmp_master_audit_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+        filename = f"ephemres_master_audit_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
         context = {
             "org": org,
-            "report_title": f"{org.get('company_name', 'LNMP')} — {report_title}",
+            "report_title": f"{org.get('company_name', 'Ephemres')} — {report_title}",
             "report_type_label": report_title,
             "period_label": period_label,
             "generated_at": generated_at_str,

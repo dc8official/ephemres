@@ -1,14 +1,14 @@
-# LNMP Security Model, Threat Architecture & Defense Specification
+# Ephemres Security Model, Threat Architecture & Defense Specification
 
-**Document Version:** 3.3.0  
-**Last Updated:** September 2026  
+**Document Version:** 3.3.1n  
+**Last Updated:** October 2026  
 **Classification:** Public Security Specification & Threat Model  
 
 ---
 
 ## 1. Executive Summary & Security Philosophy
 
-The **Lightweight Network Monitoring Platform (LNMP)** is engineered for mission-critical enterprise environments. Because network monitoring systems frequently reside inside privileged network segments (Management VLANs, NOC subnets, or Cloud VPCs with access to core infrastructure), LNMP is designed under a **Zero-Trust, Defense-in-Depth** security philosophy:
+The **Ephemres Network Monitoring Platform** is engineered for mission-critical enterprise environments. Because network monitoring systems frequently reside inside privileged network segments (Management VLANs, NOC subnets, or Cloud VPCs with access to core infrastructure), Ephemres is designed under a **Zero-Trust, Defense-in-Depth** security philosophy:
 
 1. **No Outbound Trust:** Outbound telemetry and alerting calls to the public internet are intercepted at the socket level to eliminate Server-Side Request Forgery (SSRF) and DNS rebinding risks.
 2. **Zero Plaintext Secrets at Rest:** All third-party integration credentials (webhook URLs, SMTP passwords, custom authorization headers) are encrypted at rest using AES-256-GCM.
@@ -22,10 +22,11 @@ The **Lightweight Network Monitoring Platform (LNMP)** is engineered for mission
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.0** | Feature & Ingestion Release | **Active / Current Standard** | Production standard with Flow Exporter & Interface Telemetry. |
-| **v3.1.35s** | Maintenance Release | **Supported** | Supported long-term maintenance track. |
-| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.0 recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.0 immediately. |
+| **v3.3.1n** | Migration & Rebranding Release | **Active / Current Standard** | Production standard with Ephemres rebrand and flattened `/opt/ephemres` tree. |
+| **v3.3.0** | Feature & Ingestion Release | **Frozen Legacy Snapshot** | Frozen snapshot with Flow Exporter & Interface Telemetry. |
+| **v3.1.35s** | Maintenance Release | **Frozen Legacy Snapshot** | Frozen long-term maintenance track. |
+| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.1n recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.1n immediately. |
 
 ---
 
@@ -45,7 +46,7 @@ The **Lightweight Network Monitoring Platform (LNMP)** is engineered for mission
                        ▼                        ▼                        ▼
               ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
               │   FastAPI Core   │    │ Flow Collector   │    │  Traceroute/ICMP │
-              │   (netmon-api)   │    │  (netmon-flowd)  │    │  (netmon-engine) │
+              │  (ephemres-api)  │    │ (ephemres-flowd) │    │(ephemres-engine) │
               └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
                        │                       │                       │
                        └───────────────────────┼───────────────────────┘
@@ -60,8 +61,8 @@ The **Lightweight Network Monitoring Platform (LNMP)** is engineered for mission
 | Service Component | Port(s) | Binding Scope | Security Hardening Controls |
 | :--- | :--- | :--- | :--- |
 | **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Enforces TLS 1.2+, HSTS, Content Security Policy, and proxies internal API traffic. |
-| **FastAPI Backend (`netmon-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
-| **Flow Collector (`netmon-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
+| **FastAPI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
+| **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
 | **Redis Cache / Broker (Optional)** | `6379` | `127.0.0.1` (Loopback Only) | Internal session, stream buffer & pub/sub broker. Bound to loopback with `protected-mode yes`. |
 | **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
@@ -71,13 +72,13 @@ The **Lightweight Network Monitoring Platform (LNMP)** is engineered for mission
 
 ## 4. Outbound Egress & Zero-Trust SSRF Protection (CWE-918)
 
-LNMP v3.1.28s incorporates **Zero-Trust Socket-Level SSRF Protection** (`SSRFSafeBackend`) and **Pre-Resolved Socket DNS Pinning** (`synthetic.py`), replacing traditional pre-flight hostname checks with kernel-boundary connection verification.
+Ephemres incorporates **Zero-Trust Socket-Level SSRF Protection** (`SSRFSafeBackend`) and **Pre-Resolved Socket DNS Pinning** (`synthetic.py`), replacing traditional pre-flight hostname checks with kernel-boundary connection verification.
 
 ### A. The Threat: Time-of-Check to Time-of-Use (TOCTOU) DNS Rebinding
 In standard application architectures, validating a URL before making an HTTP request leaves an exploitable window: an attacker configures a domain with a 0-second TTL that returns a public IP during pre-flight validation, but rebinds to `169.254.169.254` (cloud metadata) or `127.0.0.1` when the HTTP client establishes its TCP connection.
 
 ### B. The Defense: Millisecond-Level Socket Interception & Socket DNS Pinning
-LNMP’s `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` engine, while `monitoring/synthetic.py` implements direct socket DNS pinning:
+Ephemres's `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` engine, while `monitoring/synthetic.py` implements direct socket DNS pinning:
 
 1. **Connection-Time Resolution & Pinning:** Performs an asynchronous DNS resolution immediately prior to opening sockets, and pins physical connections directly to the resolved IP.
 2. **Strict IP Enforcement:** Evaluates all returned addresses against the global routable IP specification:
@@ -96,18 +97,18 @@ LNMP’s `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` en
 
 ### A. AES-256-GCM Encryption at Rest
 All sensitive configuration attributes stored in PostgreSQL (webhook URLs, SMTP passwords, custom authorization headers) are encrypted at rest using **AES-256-GCM** (Galois/Counter Mode) authenticated encryption:
-* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`netmon-crypto-v1`).
+* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`ephemres-crypto-v1`).
 * **Random Initialization Vectors:** Every encrypted value receives a cryptographically secure, unique 12-byte random IV (`os.urandom(12)`).
 * **Cryptographic Tamper Resistance:** Decryption strictly validates the 16-byte GCM authentication tag. Any tampering or bit-flipping in the database raises an immediate authentication failure.
 * **Storage Format:** Ciphertexts are stored with an explicit version envelope: `ENC:v1:<base64-iv>:<base64-ciphertext-and-tag>`.
 
 ### B. Host-Level Environment File Protection
-The master encryption key (`NETMON_SECRET_KEY`) resides in `/etc/netmon/netmon.env`. 
-* The production installer (`deploy/install.sh`) and upgrade utility (`deploy/upgrade.sh`) automatically enforce `chmod 0600` and `chown netmon:netmon` on this file.
+The master encryption key (`EPHEMRES_SECRET_KEY`) resides in `/etc/ephemres/ephemres.env`. 
+* The production installer (`deploy/install.sh`) and upgrade utility (`deploy/upgrade.sh`) automatically enforce `chmod 0600` and `chown ephemres:ephemres` on this file.
 * Secrets are never stored in git or checked into repository assets.
 
 ### C. Secret Masking at the API Boundary
-When an authenticated administrator views alert channels (`GET /api/v1/alerts/channels`), LNMP executes context-aware secret masking:
+When an authenticated administrator views alert channels (`GET /api/v1/alerts/channels`), Ephemres executes context-aware secret masking:
 * **Microsoft Teams Webhooks:** Incoming webhook path tokens (`/IncomingWebhook/<token1>/<token2>`) are masked to `••••••••••••`.
 * **Discord & Slack Webhooks:** Webhook path tokens (`/api/webhooks/...` and `/services/T...`) are masked.
 * **Basic Auth Credentials:** URLs containing embedded credentials (`https://user:password@host/path`) are sanitized to `https://user:••••••••@host/path`.
@@ -124,7 +125,7 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 * **Sliding Inactivity Window:** User sessions expire after 120 minutes of inactivity, sliding forward on active requests.
 
 ### B. Distributed Multi-Worker Session Governance
-In production, `netmon-api` runs with multiple Uvicorn workers (`--workers 2`). LNMP prevents single-worker auth bypasses via distributed session drivers:
+In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
 * **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `RedisSessionStore` rather than volatile single-worker process memory.
 * **Concurrent Device Quota (Max 2 Sessions):** Accounts are restricted to 2 concurrent active devices. A third login automatically evicts the oldest session via FIFO retirement.
 * **Instantaneous Session Revocation:** Changing an account password or clicking "Sign Out Everywhere" immediately deletes active session records from the datastore, revoking access across all workers in real time.
@@ -144,7 +145,7 @@ When determining the client's real IP address for audit logs and security polici
 127.0.0.0/8 (IPv4 Loopback)
 ::1/128     (IPv6 Loopback)
 ```
-* LNMP will **only** parse `X-Forwarded-For` or `X-Real-IP` headers if the direct TCP peer connection originates from a trusted local proxy (Nginx).
+* Ephemres will **only** parse `X-Forwarded-For` or `X-Real-IP` headers if the direct TCP peer connection originates from a trusted local proxy (Nginx).
 * Direct external requests attempting to spoof `X-Forwarded-For: 127.0.0.1` are rejected, preventing bypass of brute-force shields and IP audit spoofing.
 
 ### B. IP-Scoped Brute-Force Lockouts
@@ -186,19 +187,19 @@ When determining the client's real IP address for audit logs and security polici
 ## 9. Operating System & Privilege Hardening
 
 ### A. Non-Root Daemon Execution
-* Both `netmon-api` and `netmon-engine` run under the dedicated unprivileged system user `netmon` (UID/GID isolated).
+* Both `ephemres-api` and `ephemres-engine` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
 * Daemons do not possess `sudo` or root privileges.
 
 ### B. Linux Capability Isolation (`CAP_NET_RAW`)
 * Raw socket creation for ICMP echo requests (ping) typically requires root privileges.
-* Instead of running daemons as root or marking Python setuid-root, LNMP isolates the capability strictly to the Python interpreter using Linux file capabilities:
+* Instead of running daemons as root or marking Python setuid-root, Ephemres isolates the capability strictly to the Python interpreter using Linux file capabilities:
   ```bash
-  setcap cap_net_raw+ep /opt/netmon/venv/bin/python3
+  setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)
   ```
 * This grants packet crafting rights strictly for network diagnostics without granting file system, memory, or administrative OS rights.
 
 ### C. Systemd Sandboxing Directives
-The production unit files (`deploy/netmon-api.service` and `deploy/netmon-engine.service`) enforce system-level isolation:
+The production unit files (`deploy/ephemres-api.service` and `deploy/ephemres-engine.service`) enforce system-level isolation:
 * `ProtectSystem=full`: Mounts `/usr`, `/boot`, and `/etc` read-only for daemon processes.
 * `PrivateTmp=true`: Allocates isolated, private `/tmp` directories inaccessible to other system users.
 * `NoNewPrivileges=true`: Prevents child processes from gaining elevated privileges via setuid binaries.
@@ -207,10 +208,10 @@ The production unit files (`deploy/netmon-api.service` and `deploy/netmon-engine
 
 ## 10. Role-Based Access Control (RBAC) Matrix
 
-LNMP enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), seeded directly in the database:
+Ephemres enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), seeded directly in the database:
 
 | Resource / Action | Unauthenticated | Viewer (`VIEWER`) | Administrator (`ADMIN`) |
-| :--- | :---: | :---: | :---: |
+| :--- | :--- | :--- | :--- |
 | **View Dashboard & Telemetry** | ❌ (Redirect Login) | ✅ | ✅ |
 | **Inspect Topology Map** | ❌ | ✅ | ✅ |
 | **Export Telemetry CSV** | ❌ | ✅ | ✅ |
@@ -226,20 +227,20 @@ LNMP enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), seede
 
 ## 11. Security Audit & Compliance Checklist for Administrators
 
-When deploying LNMP in production, ensure the following hardening steps are verified:
+When deploying Ephemres in production, ensure the following hardening steps are verified:
 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates and HSTS enabled.
-- [ ] **File Permissions:** Verify `/etc/netmon/netmon.env` has permissions `0600` owned by `netmon:netmon`.
+- [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
 - [ ] **Database Network Isolation:** Ensure PostgreSQL (`5432`) and Redis (`6379`) listen strictly on `127.0.0.1`.
 - [ ] **Admin Password Changed:** Verify the default administrator password was changed upon initial login.
-- [ ] **Firewall Egress Rules:** Restrict outbound egress from the LNMP server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).
+- [ ] **Firewall Egress Rules:** Restrict outbound egress from the Ephemres server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).
 
 ---
 
 ## 12. Vulnerability Reporting & Coordinated Disclosure
 
-If you discover a security vulnerability or potential threat in LNMP, please disclose it responsibly:
+If you discover a security vulnerability or potential threat in Ephemres, please disclose it responsibly:
 
-* **Security Contact:** `security@lnmp.internal` or via **GitHub Private Vulnerability Reporting** on the repository.
+* **Security Contact:** `security@ephemres.internal` or via **GitHub Private Vulnerability Reporting** on the repository (`https://github.com/dc8official/ephemres`).
 * **Policy:** Please do not file public GitHub issues for security vulnerabilities.
-* **Response SLA:** The LNMP security team acknowledges vulnerability reports within **24 hours** and aims to deliver patches within **72 hours** for high or critical severity findings.
+* **Response SLA:** The Ephemres security team acknowledges vulnerability reports within **24 hours** and aims to deliver patches within **72 hours** for high or critical severity findings.

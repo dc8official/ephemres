@@ -1,6 +1,6 @@
-# LNMP Architecture Overview — Version 3.3.0
+# Ephemres Architecture Overview — Version 3.3.1n
 
-The Network Monitoring Platform (LNMP) v3.3.0 is architected with a decoupled, asynchronous design engineered for high-concurrency telemetry collection, passive network flow telemetry ingestion (NetFlow v5, NetFlow v9, and IPFIX), per-interface throughput accounting, real-time Server-Sent Events (SSE), dual-driver storage acceleration, enterprise multi-channel notifications, crossing-free topology visualization, and enterprise security governance.
+Ephemres v3.3.1n is architected with a decoupled, asynchronous design engineered for high-concurrency telemetry collection, passive network flow telemetry ingestion (NetFlow v5, NetFlow v9, and IPFIX), per-interface throughput accounting, real-time Server-Sent Events (SSE), dual-driver storage acceleration, enterprise multi-channel notifications, crossing-free topology visualization, and enterprise security governance.
 
 ---
 
@@ -57,10 +57,10 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **Frozen Physics Real-Time Recoloring:** Updates node state colors in place on SSE `NODE_STATE_CHANGE` events with `physics: { enabled: false }` to prevent canvas shaking.
 
 ### 8. Enterprise Alerting Subsystem & Decoupling Invariant
-* **Decoupling Invariant:** Outbound webhooks and email notifications can experience unpredictable network delays, TLS handshakes, or third-party API rate limits (100ms – 10s+). Running alert dispatching inside the `netmon-engine` monitoring sweep would stall raw ICMP socket reading and blow the critical 32-second sweep budget. To preserve deterministic timing, the **Alert Dispatcher operates entirely within the `netmon-api` service as an independent asynchronous background task pool**.
+* **Decoupling Invariant:** Outbound webhooks and email notifications can experience unpredictable network delays, TLS handshakes, or third-party API rate limits (100ms – 10s+). Running alert dispatching inside the `ephemres-engine` monitoring sweep would stall raw ICMP socket reading and blow the critical 32-second sweep budget. To preserve deterministic timing, the **Alert Dispatcher operates entirely within the `ephemres-api` service as an independent asynchronous background task pool**.
 * **Inter-Process Decoupling Pipeline:**
-  1. `netmon-engine` executes ICMP/TCP probes and publishes transitions to `EventBroker` (`LISTEN/NOTIFY` or Redis Pub/Sub) in sub-millisecond time.
-  2. `TelemetryRelay` running in `netmon-api` receives the event and enqueues it into an in-memory `asyncio.Queue`.
+  1. `ephemres-engine` executes ICMP/TCP probes and publishes transitions to `EventBroker` (`LISTEN/NOTIFY` or Redis Pub/Sub) in sub-millisecond time.
+  2. `TelemetryRelay` running in `ephemres-api` receives the event and enqueues it into an in-memory `asyncio.Queue`.
   3. `AlertDispatcher` pulls from the queue and applies multi-layer filtering:
      - **Scope Filter:** Evaluates target scope (`all` vs. explicit endpoint UUIDs) and severity bitmasks.
      - **RCA Cascade Suppression:** Suppresses individual downstream endpoint notifications when an upstream parent node generates an active `RCA_INCIDENT`.
@@ -69,8 +69,8 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
      - **Polyglot Formatters:** Adapts payload to Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), or SMTP TLS 1.2+ MIME.
      - **Delivery Audit Logging:** Persists asynchronous results, HTTP response codes, and round-trip latencies into `alert_delivery_logs`.
 
-### 9. Network Flow Telemetry Ingestion Pipeline (`netmon-flowd`)
-* **Autonomous Ingestion Daemon:** `netmon-flowd` runs as an independent `systemd` daemon completely isolated from `netmon-engine` and `netmon-api`. Even under massive multi-gigabit traffic bursts, ICMP polling and REST API responsiveness remain completely unperturbed.
+### 9. Network Flow Telemetry Ingestion Pipeline (`ephemres-flowd`)
+* **Autonomous Ingestion Daemon:** `ephemres-flowd` runs as an independent `systemd` daemon completely isolated from `ephemres-engine` and `ephemres-api`. Even under massive multi-gigabit traffic bursts, ICMP polling and REST API responsiveness remain completely unperturbed.
 * **Async Datagram Sockets & Buffer Allocation:** Listens on UDP port 2055 (NetFlow v5/v9) and UDP port 4739 (IPFIX) with a 4MB kernel receive buffer (`SO_RCVBUF = 4 * 1024 * 1024`), eliminating UDP packet drops under highpps microbursts.
 * **Zero-Allocation Binary Decoders:** High-throughput `struct.unpack_from` byte-slice parsers with dynamic template caching (1,800s TTL) for NetFlow v9 and IPFIX options/flow records. Orphan data records received before templates are buffered in an in-memory ring buffer (up to 2,000 records) and flushed once the template arrives.
 * **Dual-Role $\mathcal{O}(1)$ In-Memory Correlator:**
@@ -128,7 +128,7 @@ flowchart TD
         RCA["RCA Topology & Inference Engine"]
     end
 
-    subgraph Flow_Ingestion["Flow Telemetry Ingestion (netmon-flowd)"]
+    subgraph Flow_Ingestion["Flow Telemetry Ingestion (ephemres-flowd)"]
         FLOWD["Flow Collector Daemon (UDP 2055 / 4739)"]
         CORR["Dual-Role O(1) Correlator"]
         FLOWD --> CORR
@@ -167,7 +167,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Engine_Sweep["netmon-engine (Strict 32s Sweeper Budget)"]
+    subgraph Engine_Sweep["ephemres-engine (Strict 32s Sweeper Budget)"]
         PROBE["ICMP / TCP Probes"]
         TRANS["State Classifier"]
         BROKER_PUB["EventBroker.publish()"]
@@ -176,7 +176,7 @@ flowchart TD
 
     BROKER_PUB -->|Inter-Process Channel| BROKER_SUB
 
-    subgraph API_Process["netmon-api (Decoupled Async Background Task)"]
+    subgraph API_Process["ephemres-api (Decoupled Async Background Task)"]
         BROKER_SUB["TelemetryRelay Listener"]
         ASYNC_Q["asyncio.Queue (alert_queue)"]
         DISPATCHER["AlertDispatcher Worker"]
@@ -235,7 +235,7 @@ flowchart TD
         R1 -->|IPFIX (UDP 4739)| UDP_4739["UDP Port 4739"]
     end
 
-    subgraph Ingestion_Daemon["Autonomous Daemon: netmon-flowd"]
+    subgraph Ingestion_Daemon["Autonomous Daemon: ephemres-flowd"]
         SO_RCV["4MB Kernel Socket Buffer (SO_RCVBUF)"]
         UDP_2055 --> SO_RCV
         UDP_4739 --> SO_RCV

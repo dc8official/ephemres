@@ -8,8 +8,8 @@ server {
     listen 443 ssl;
     server_name YOUR_DOMAIN;
     
-    ssl_certificate     /etc/ssl/certs/netmon.crt;
-    ssl_certificate_key /etc/ssl/private/netmon.key;
+    ssl_certificate     /etc/ssl/certs/ephemres.crt;
+    ssl_certificate_key /etc/ssl/private/ephemres.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
@@ -26,7 +26,7 @@ server {
     }
 
     location / {
-        root /opt/netmon/noop/frontend/dist;
+        root /opt/ephemres/frontend/dist;
         try_files $uri $uri/ /index.html;
     }
 

@@ -1,12 +1,12 @@
-# LNMP User & Operator Guide — Version 3.3.0
+# Ephemres User & Operator Guide — Version 3.3.1n
 
-Welcome to the LNMP Network Monitoring Platform v3.3.0 user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet bandwidth telemetry, configure multi-channel enterprise alert notifications, use the CSV report customizer, interpret multi-protocol probes, and manage system settings.
+Welcome to the Ephemres Network Monitoring Platform v3.3.1n user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet bandwidth telemetry, configure multi-channel enterprise alert notifications, use the CSV report customizer, interpret multi-protocol probes, and manage system settings.
 
 ---
 
 ## 1. Authentication & Session Security
 
-LNMP v3.3.0 provides enterprise-grade session protection:
+Ephemres v3.3.1n provides enterprise-grade session protection:
 * **Browser Password Autofill:** The login page supports native browser credential managers (Chrome, Edge, Safari, Firefox, Bitwarden, 1Password) for 1-click authentication.
 * **Sliding 2-Hour Inactivity Timeout:** Sessions slide forward on active requests. If idle for 120 minutes, sessions expire automatically.
 * **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions (managed via FIFO rotation).
@@ -72,30 +72,30 @@ Administrators can configure platform behavior across five dedicated tabs:
 
 ## 6. Configuring Enterprise Alert Channels
 
-LNMP v3.3.0 includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
+Ephemres v3.3.1n includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
 
 ### Microsoft Teams Workflows Setup
 Microsoft Teams supports two integration patterns:
 1. **Flow Bot Adaptive Cards (Recommended)**:
    - In Microsoft Teams, navigate to your channel and choose **Workflows** -> **Post to a channel when a webhook request is received**.
-   - Copy the generated Webhook URL into LNMP under **Alert Channels** -> **Add Channel** (Provider: `Microsoft Teams`).
+   - Copy the generated Webhook URL into Ephemres under **Alert Channels** -> **Add Channel** (Provider: `Microsoft Teams`).
    - Set Card Style to `Adaptive Card (v1.4)`. The alert will render rich facts, status colors, and incident metrics.
 2. **"Post as User" Fallback (For Restricted Tenants)**:
    - If your Microsoft 365 tenant administrator has disabled bots (`BotDisabledByAdmin`), configure the workflow to "Post as User" instead of "Flow Bot".
-   - In LNMP, select **HTML (Simple Webhook)** card style. The dispatcher will transmit a pre-rendered HTML payload compatible with standard user webhooks.
+   - In Ephemres, select **HTML (Simple Webhook)** card style. The dispatcher will transmit a pre-rendered HTML payload compatible with standard user webhooks.
 
 ### Discord Webhooks Setup
 1. In Discord, navigate to **Server Settings** -> **Integrations** -> **Webhooks** -> **New Webhook**.
 2. Select your channel and click **Copy Webhook URL**.
-3. In LNMP, select provider `Discord`, paste the URL, and select desired severities (`DOWN`, `UNSTABLE`). Notifications render with color-coded sidebars.
+3. In Ephemres, select provider `Discord`, paste the URL, and select desired severities (`DOWN`, `UNSTABLE`). Notifications render with color-coded sidebars.
 
 ### Slack Block Kit Setup
 1. In Slack, create an **Incoming Webhook** in your Slack App administration console.
-2. Paste the `https://hooks.slack.com/services/...` URL into LNMP.
+2. Paste the `https://hooks.slack.com/services/...` URL into Ephemres.
 3. Select provider `Slack`. Alerts render structured Block Kit sections with device status and telemetry.
 
 ### Direct Hardened SMTP Email Setup
-LNMP connects directly to external mail servers or internal relays without requiring a local postfix/sendmail agent:
+Ephemres connects directly to external mail servers or internal relays without requiring a local postfix/sendmail agent:
 - **Host & Port:** Cloud relays (`smtp.office365.com`, `smtp.gmail.com` on Port `587`) or on-premise internal relays (`localhost`, `127.0.0.1`, RFC 1918 subnets on Port `25`/`587`).
 - **Security:** Requires STARTTLS or SSL/TLS 1.2+ for remote servers.
 - **Credentials:** Username and Application-Specific Password (encrypted at rest via AES-256-GCM).
@@ -104,13 +104,13 @@ LNMP connects directly to external mail servers or internal relays without requi
 ### Live Diagnostic Validation
 Always verify channel reachability before saving:
 - In the channel modal, click **Send Diagnostic Test Alert**.
-- LNMP immediately dispatches a synthetic test payload and displays the HTTP status code, server round-trip latency (ms), and any diagnostic error feedback.
+- Ephemres immediately dispatches a synthetic test payload and displays the HTTP status code, server round-trip latency (ms), and any diagnostic error feedback.
 
 ---
 
 ## 7. Reports, Auditing & Compliance Documentation
 
-LNMP v3.3.0 provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
+Ephemres v3.3.1n provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
 
 ### 7.1 CSV Telemetry Export Stream
 Operators and Administrators can export raw or customized time-series telemetry to CSV:
@@ -149,7 +149,7 @@ Administrators can customize corporate identity settings to brand all compiled P
 
 ## 8. Fleet Bandwidth Monitoring & Flow Analytics (`/bandwidth`)
 
-LNMP v3.3.0 introduces passive network flow ingestion supporting NetFlow v5, NetFlow v9, and IPFIX along with per-interface telemetry and link utilization tracking. The dedicated `/bandwidth` dashboard provides complete visibility into network traffic volumes, protocol usage, router interfaces, and top communicating entities.
+Ephemres v3.3.1n introduces passive network flow ingestion supporting NetFlow v5, NetFlow v9, and IPFIX along with per-interface telemetry and link utilization tracking. The dedicated `/bandwidth` dashboard provides complete visibility into network traffic volumes, protocol usage, router interfaces, and top communicating entities.
 
 ### Accessing the Bandwidth Dashboard
 Click the **🌊 Bandwidth** item in the main navigation header or navigate directly to `/bandwidth`.
@@ -160,7 +160,7 @@ At the top of the dashboard, five real-time KPI cards present current network tr
 * **Total Egress Bandwidth:** Real-time outgoing throughput in bits per second.
 * **Active Exporters:** Count of network routers/switches actively streaming flow datagrams to the collector.
 * **Total Flows Ingested:** Cumulative count of discrete flow sessions processed in the selected window.
-* **Unmatched Candidates:** Count of unrecognized exporter IPs streaming flows to LNMP.
+* **Unmatched Candidates:** Count of unrecognized exporter IPs streaming flows to Ephemres.
 
 ### 2. Time Window Selection
 Select your analysis horizon using the time range switcher:
@@ -177,7 +177,7 @@ An interactive Chart.js area chart visualizes total Ingress vs. Egress throughpu
 
 ### 4. Top Talkers & Forensic IP Conversations
 The dashboard features two forensic traffic tables:
-* **Top Endpoints:** Identifies the highest-consuming devices on the network. For devices enrolled in LNMP inventory, the system automatically resolves and displays the friendly hostname alongside its IP address, total bytes transferred, and flow count.
+* **Top Endpoints:** Identifies the highest-consuming devices on the network. For devices enrolled in Ephemres inventory, the system automatically resolves and displays the friendly hostname alongside its IP address, total bytes transferred, and flow count.
 * **Top Conversations:** Uncovers high-volume IP-to-IP communication pairs. Displays Source IP, Destination IP, Protocol name (TCP, UDP, ICMP), Destination Port (e.g. 443 / HTTPS, 5432 / PostgreSQL), total bytes transferred, and session counts.
 
 ### 5. Application Protocol Distribution
@@ -186,7 +186,7 @@ A visual donut chart aggregates network consumption by application service and p
 * Ranks services by percentage share of total network volume to quickly identify bandwidth hogs or unauthorized file transfer activity.
 
 ### 6. Active Exporters & Direct Interface Configuration
-The **Flow Exporters & Interface Telemetry** section lists all networking equipment actively reporting to LNMP:
+The **Flow Exporters & Interface Telemetry** section lists all networking equipment actively reporting to Ephemres:
 * Displays device hostname, primary IP address, and active interface counts.
 * **Per-Interface Telemetry Grid:** Shows interface index (`#1`), configured alias (e.g. `WAN-Fiber`), line speed capacity (e.g. `1 Gbps`), average ingress/egress throughput (bps), peak traffic rates, and color-coded capacity utilization bars.
 * **Direct Admin Interface Configuration:**
@@ -195,7 +195,7 @@ The **Flow Exporters & Interface Telemetry** section lists all networking equipm
   * Saving configurations applies immediately, dynamically recalculating utilization meters across the dashboard and PDF reports.
 
 ### 7. Unmatched Exporter Discovery Banner
-When a network device begins exporting NetFlow/IPFIX to LNMP from an IP address not yet enrolled in the platform's inventory:
+When a network device begins exporting NetFlow/IPFIX to Ephemres from an IP address not yet enrolled in the platform's inventory:
 * An **amber warning banner** automatically appears across the top of the Bandwidth dashboard:
   > **⚠️ Unmatched Flow Exporters Detected**: Flows were received from `172.16.50.1` which is not mapped to any known device.
 * Administrators can click **"Map Exporter"** directly within the banner. A modal prompts the operator to select an existing endpoint to bind the exporter IP to its `flow_exporter_ips` array.

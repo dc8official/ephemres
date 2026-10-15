@@ -1,12 +1,12 @@
-# LNMP Version 2.0 (Beta) — Installation & Deployment Quick Start
+# Ephemres v3.3.1n — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **LNMP Network Monitoring Platform v2.0 (Beta)**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.1n**.
 
 ---
 
 ## 1. Prerequisites
 
-- **OS:** Ubuntu 22.04 LTS or 24.04 LTS (x86_64)
+- **OS:** Ubuntu 22.04 LTS or 24.04 LTS (x86_64), Debian 12+
 - **Privileges:** Root access (`sudo -i`)
 - **Hardware:** 1–2 vCPUs, 2 GB RAM, 10–25 GB SSD
 
@@ -18,8 +18,8 @@ Elevate to root and run the automated installer:
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/lnmp.git
-cd lnmp/deploy
+git clone https://github.com/dc8official/ephemres.git
+cd ephemres/deploy
 chmod +x *.sh
 ./install.sh
 ```
@@ -27,7 +27,7 @@ chmod +x *.sh
 **Post-Install Verification:**
 ```bash
 # Verify systemd services are active and enabled on boot
-systemctl status netmon-api netmon-engine
+systemctl status ephemres-api ephemres-engine ephemres-flowd
 
 # Verify API health
 curl -s http://127.0.0.1:8000/api/v1/health
@@ -41,11 +41,11 @@ To upgrade an existing installation without data loss:
 
 ```bash
 # Option A: From your git clone directory
-cd ~/lnmp/deploy
+cd ~/ephemres/deploy
 sudo ./upgrade.sh
 
-# Option B: Directly inside /opt/netmon/noop
-cd /opt/netmon/noop
+# Option B: Directly inside /opt/ephemres
+cd /opt/ephemres
 sudo git pull
 sudo ./deploy/upgrade.sh
 ```
@@ -57,7 +57,7 @@ sudo ./deploy/upgrade.sh
 To remove the platform, disable systemd services, and remove Nginx web routing:
 
 ```bash
-cd /opt/netmon/noop/deploy
+cd /opt/ephemres/deploy
 sudo ./uninstall.sh
 ```
 
@@ -65,8 +65,8 @@ sudo ./uninstall.sh
 
 ## 5. Password Reset (CLI)
 
-If you need to reset an admin or user password from the server console:
+If you need to reset an admin password from the server console:
 
 ```bash
-sudo /opt/netmon/noop/deploy/reset-admin-password.sh <username> <new_password>
+sudo /opt/ephemres/deploy/reset-admin-password.sh <new_password>
 ```

@@ -1,12 +1,12 @@
-# LNMP Network Flow Telemetry Configuration & Operations Guide (v3.3.0)
+# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.1n)
 
-This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** in LNMP v3.3.0.
+This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** in Ephemres v3.3.1n.
 
 ---
 
 ## 1. Architectural Overview
 
-LNMP v3.3.0 introduces real-time, high-volume flow ingestion and per-interface throughput accounting completely isolated from ICMP polling daemons:
+Ephemres v3.3.1n introduces real-time, high-volume flow ingestion and per-interface throughput accounting completely isolated from ICMP polling daemons:
 
 ```
 +-------------------------------------------------------------------------------+
@@ -17,7 +17,7 @@ LNMP v3.3.0 introduces real-time, high-volume flow ingestion and per-interface t
                    UDP 2055 (NetFlow v5/v9) / UDP 4739 (IPFIX)
                                         v
 +-------------------------------------------------------------------------------+
-|                       LNMP COLLECTOR DAEMON (netmon-flowd)                    |
+|                    EPHEMRES COLLECTOR DAEMON (ephemres-flowd)                 |
 |  - Async Datagram Listeners (4MB SO_RCVBUF)                                   |
 |  - Zero-alloc binary parsers (v5, v9 template cache, IPFIX RFC 7011/7012)     |
 |  - Fast wire pipeline into Redis 6+ Stream: stream:netflow:raw                 |
@@ -49,7 +49,7 @@ To ensure maximum telemetry fidelity, eliminate bursty traffic artifacts, and pr
 
 ### 2.1 Active Flow Timeout (Crucial for 1-Minute Rollups)
 * **Recommended Setting:** `60 seconds` (1 minute).
-* **Operational Rationale:** Routers and firewalls maintain state for long-running connections (such as multi-gigabyte file transfers, database backups, or video streams). If the active timeout is left at the vendor default of 30 minutes, the router only exports an aggregate byte counter once every 30 minutes, producing misleading, massive bandwidth spikes followed by flatlines. Configuring `active-timeout 60` forces the device to flush flow progress every minute, guaranteeing smooth, continuous, and accurate 1-minute rollups in LNMP.
+* **Operational Rationale:** Routers and firewalls maintain state for long-running connections (such as multi-gigabyte file transfers, database backups, or video streams). If the active timeout is left at the vendor default of 30 minutes, the router only exports an aggregate byte counter once every 30 minutes, producing misleading, massive bandwidth spikes followed by flatlines. Configuring `active-timeout 60` forces the device to flush flow progress every minute, guaranteeing smooth, continuous, and accurate 1-minute rollups in Ephemres.
 
 ### 2.2 Inactive Flow Timeout
 * **Recommended Setting:** `15 seconds`.
@@ -57,20 +57,20 @@ To ensure maximum telemetry fidelity, eliminate bursty traffic artifacts, and pr
 
 ### 2.3 Template Refresh Interval (NetFlow v9 & IPFIX)
 * **Recommended Setting:** Every `60 seconds` or every `1,000 packets`.
-* **Operational Rationale:** Unlike NetFlow v5 which features a static 48-byte record structure, NetFlow v9 and IPFIX decouple flow schemas using dynamic templates. If an exporting router reboots or switches supervisors without immediately sending template definitions, the collector cannot decode data flowsets. Although LNMP maintains an in-memory template cache with a 1,800-second TTL and buffers orphan flowsets, configuring a 60-second template refresh interval guarantees zero orphan data drops and instant cold-start recovery.
+* **Operational Rationale:** Unlike NetFlow v5 which features a static 48-byte record structure, NetFlow v9 and IPFIX decouple flow schemas using dynamic templates. If an exporting router reboots or switches supervisors without immediately sending template definitions, the collector cannot decode data flowsets. Although Ephemres maintains an in-memory template cache with a 1,800-second TTL and buffers orphan flowsets, configuring a 60-second template refresh interval guarantees zero orphan data drops and instant cold-start recovery.
 
 ### 2.4 Persistent Export Source IP (`Loopback0`)
 * **Recommended Setting:** Always bind the exporter source address to a stable virtual interface:
   * Cisco: `source Loopback0`
   * Juniper: `inline-jflow { source-address <Loopback0_IP>; }`
   * Linux: bind to static management IP.
-* **Operational Rationale:** When a router has multiple egress uplinks or dynamic routing protocols (BGP/OSPF/ECMP), packet routes can change. If the flow export source is not explicitly pinned to a Loopback IP, the router's egress interface IP will be used as the exporter IP, causing LNMP to detect spurious "unmatched exporters". Binding to `Loopback0` guarantees deterministic $\mathcal{O}(1)$ correlation.
+* **Operational Rationale:** When a router has multiple egress uplinks or dynamic routing protocols (BGP/OSPF/ECMP), packet routes can change. If the flow export source is not explicitly pinned to a Loopback IP, the router's egress interface IP will be used as the exporter IP, causing Ephemres to detect spurious "unmatched exporters". Binding to `Loopback0` guarantees deterministic $\mathcal{O}(1)$ correlation.
 
 ---
 
 ## 3. Firewall & Port Requirements
 
-Ensure that the LNMP host permits incoming UDP datagrams from your network infrastructure:
+Ensure that the Ephemres host permits incoming UDP datagrams from your network infrastructure:
 
 | Protocol | Default Port | Usage | Transport |
 | :--- | :--- | :--- | :--- |
@@ -99,7 +99,7 @@ sudo ufw allow from 192.168.0.0/16 to any port 4739 proto udp comment 'IPFIX Ing
 
 ```cisco
 ! 1. Define Flow Record
-flow record LNMP-FLOW-RECORD
+flow record EPHEMRES-FLOW-RECORD
  match ipv4 source address
  match ipv4 destination address
  match ipv4 protocol
@@ -113,8 +113,8 @@ flow record LNMP-FLOW-RECORD
  collect timestamp sys-uptime last
  collect transport tcp flags
 !
-! 2. Define Flow Exporter (Point to LNMP host)
-flow exporter LNMP-EXPORTER
+! 2. Define Flow Exporter (Point to Ephemres host)
+flow exporter EPHEMRES-EXPORTER
  destination 192.168.1.10
  source Loopback0
  transport udp 2055
@@ -122,16 +122,16 @@ flow exporter LNMP-EXPORTER
  template data timeout 60
 !
 ! 3. Define Flow Monitor
-flow monitor LNMP-MONITOR
- record LNMP-FLOW-RECORD
- exporter LNMP-EXPORTER
+flow monitor EPHEMRES-MONITOR
+ record EPHEMRES-FLOW-RECORD
+ exporter EPHEMRES-EXPORTER
  cache timeout active 60
  cache timeout inactive 15
 !
 ! 4. Apply to WAN/Core Interfaces
 interface GigabitEthernet0/0/0
- ip flow monitor LNMP-MONITOR input
- ip flow monitor LNMP-MONITOR output
+ ip flow monitor EPHEMRES-MONITOR input
+ ip flow monitor EPHEMRES-MONITOR output
 ```
 
 ---
@@ -142,7 +142,7 @@ interface GigabitEthernet0/0/0
 services {
     flow-monitoring {
         version-ipfix {
-            template LNMP-IPFIX-TEMPLATE {
+            template EPHEMRES-IPFIX-TEMPLATE {
                 flow-active-timeout 60;
                 flow-inactive-timeout 15;
                 template-refresh-rate {
@@ -156,7 +156,7 @@ services {
 }
 forwarding-options {
     sampling {
-        instance LNMP-SAMPLING {
+        instance EPHEMRES-SAMPLING {
             input {
                 rate 1;
             }
@@ -165,7 +165,7 @@ forwarding-options {
                     flow-server 192.168.1.10 {
                         port 4739;
                         version-ipfix {
-                            template LNMP-IPFIX-TEMPLATE;
+                            template EPHEMRES-IPFIX-TEMPLATE;
                         }
                     }
                     inline-jflow {
@@ -233,7 +233,7 @@ Install `softflowd` to export NetFlow directly from a Linux gateway or hyperviso
 ```bash
 sudo apt-get install -y softflowd
 
-# Run softflowd listening on eth0, exporting NetFlow v9 to LNMP
+# Run softflowd listening on eth0, exporting NetFlow v9 to Ephemres
 sudo softflowd -i eth0 -n 192.168.1.10:2055 -v 9 -m 8192 -t maxlife=60s
 ```
 
@@ -248,7 +248,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 2. Search for `softflowd` and click **Install**.
 3. Navigate to **Services** -> **softflowd**:
    - **Interface:** Select your internal gateway interfaces (e.g., `LAN`, `VLAN10`).
-   - **Host:** Enter the LNMP server IP (e.g., `192.168.1.10`).
+   - **Host:** Enter the Ephemres server IP (e.g., `192.168.1.10`).
    - **Port:** `2055`.
    - **NetFlow Version:** `9`.
    - **Max Flows:** `8192`.
@@ -264,7 +264,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 3. Navigate to **Services** -> **Softflowd**:
    - Check **Enable**.
    - **Listen Interfaces:** Select monitored ingress interfaces (`LAN`, `DMZ`).
-   - **Export Destination:** Set to `<LNMP_IP>:2055` (e.g., `192.168.1.10:2055`).
+   - **Export Destination:** Set to `<EPHEMRES_IP>:2055` (e.g., `192.168.1.10:2055`).
    - **NetFlow Version:** `9`.
    - **Active Timeout:** `60` seconds.
    - **Inactive Timeout:** `15` seconds.
@@ -272,26 +272,26 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 
 ---
 
-## 4. Enabling Flow Telemetry in LNMP
+## 4. Enabling Flow Telemetry in Ephemres
 
-1. Log in to the LNMP Web Interface as an **Administrator**.
+1. Log in to the Ephemres Web Interface as an **Administrator**.
 2. Navigate to **System Settings** -> **Tab 2: Performance & Telemetry Engine**.
 3. Under **Network Flow Telemetry Ingestion (v3.2.0)**:
    - Click **Run System Preflight Check** to verify Redis 6+ and stream write functionality.
    - Toggle **Enable Flow Telemetry Ingestion** to **Active**.
    - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match your network topology.
    - Click **Save Global Settings**.
-4. Start or restart the `netmon-flowd` service on the host:
+4. Start or restart the `ephemres-flowd` service on the host:
    ```bash
-   sudo systemctl enable --now netmon-flowd
-   sudo systemctl status netmon-flowd
+   sudo systemctl enable --now ephemres-flowd
+   sudo systemctl status ephemres-flowd
    ```
 
 ---
 
 ## 5. Exporter IP Mapping & Alias Management
 
-When network devices export flows from loopback interfaces, secondary management subnets, or CARP VIPs, LNMP's automatic correlator tracks them as **Unmatched Exporters**:
+When network devices export flows from loopback interfaces, secondary management subnets, or CARP VIPs, Ephemres's automatic correlator tracks them as **Unmatched Exporters**:
 
 1. Open the **Bandwidth** fleet dashboard from the top navigation bar.
 2. If unmatched exporters are detected, an alert banner appears:
@@ -307,8 +307,8 @@ When network devices export flows from loopback interfaces, secondary management
 
 ### Check Daemon Health
 ```bash
-sudo systemctl status netmon-flowd
-sudo journalctl -u netmon-flowd -f --no-tail
+sudo systemctl status ephemres-flowd
+sudo journalctl -u ephemres-flowd -f --no-tail
 ```
 
 ### Verify Packet Reception

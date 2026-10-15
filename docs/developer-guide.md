@@ -1,6 +1,6 @@
-# LNMP Developer & Contributor Guide
+# Ephemres Developer & Contributor Guide
 
-This guide details how to set up a local development environment for the Network Monitoring Platform (LNMP) v1.5 and outlines standard contribution procedures.
+This guide details how to set up a local development environment for the Ephemres Network Monitoring Platform and outlines standard contribution procedures.
 
 ## 1. Project Structure
 

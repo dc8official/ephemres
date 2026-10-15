@@ -6,7 +6,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-def setup_logging(service_name: str = "netmon-api", log_dir: Optional[str] = None, log_level: str = "INFO") -> logging.Logger:
+def setup_logging(service_name: str = "ephemres-api", log_dir: Optional[str] = None, log_level: str = "INFO") -> logging.Logger:
     """
     Configures unified dual console (systemd journal) and auto-rotating file handlers
     with strict ~150MB total storage bounding across the platform.
@@ -31,7 +31,7 @@ def setup_logging(service_name: str = "netmon-api", log_dir: Optional[str] = Non
     root_logger.addHandler(console_handler)
 
     # 2. Determine target log directory
-    target_dir = Path(log_dir) if log_dir else Path("/var/log/netmon")
+    target_dir = Path(log_dir) if log_dir else Path("/var/log/ephemres")
     use_file_logging = False
 
     try:

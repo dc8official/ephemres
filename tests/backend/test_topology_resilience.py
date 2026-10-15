@@ -140,7 +140,7 @@ def test_update_endpoint_path_stale_edge_pruning_and_leveling():
         # Seed initial state with endpoint connected directly to root
         async with mgr._lock:
             mgr._nodes = {
-                "root": {"id": "root", "label": "LNMP Engine", "type": "root", "level": 0},
+                "root": {"id": "root", "label": "Ephemres Engine", "type": "root", "level": 0},
                 str(ep_id): {
                     "id": str(ep_id),
                     "label": "server-1",

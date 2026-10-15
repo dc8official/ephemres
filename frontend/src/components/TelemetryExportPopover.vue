@@ -90,7 +90,7 @@ function executeExport() {
   exporting.value = true
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const filename = `lnmp-telemetry-${timeRange.value}-${timestamp}.${format.value}`
+    const filename = `ephemres-telemetry-${timeRange.value}-${timestamp}.${format.value}`
 
     let content = ''
     let mimeType = ''

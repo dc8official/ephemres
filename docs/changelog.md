@@ -1,8 +1,22 @@
-# LNMP Changelog & Evolutionary Architecture
+# Ephemres Changelog & Evolutionary Architecture
 
-All notable technical changes, architectural upgrades, security enhancements, and operational milestones for the Lightweight Network Monitoring Platform (LNMP) are documented in this file.
+All notable technical changes, architectural upgrades, security enhancements, and operational milestones for Ephemres are documented in this file.
 
 The versioning format follows [Semantic Versioning](https://semver.org/).
+
+## [Version 3.3.1n] — Ephemres Rebranding & Architectural Path Migration
+### 🚀 Platform Rebrand, Directory Flattening, Systemd Service Renaming & Environment Parity
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **Platform Rebranding** | Full rebranding of backend, frontend, documentation, and deployment tooling from LNMP/netmon to **Ephemres** (`ephemres-api`, `ephemres-engine`, `ephemres-flowd`). | Establishes unified project identity under the new official name and repository (`https://github.com/dc8official/ephemres.git`). |
+| **Host Directory Flattening** | Flattened production filesystem layout from legacy `/opt/netmon/noop` and `/opt/netmon/venv` to `/opt/ephemres` with production virtualenv at `/opt/ephemres/venv`. | Eliminates convoluted nested repository paths and aligns deployment directories with standard Linux `/opt` conventions. |
+| **Systemd Service Realignment** | Renamed units to `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service` executing under system user/group `ephemres:ephemres`. | Provides clean, isolated daemon supervision with native systemctl integration and hardened permissions. |
+| **Environment & Config Parity** | Supported `EPHEMRES_` environment variables and `/etc/ephemres/config.toml` / `/etc/ephemres/ephemres.env` while preserving seamless backward-compatible fallback for legacy `NETMON_` configurations. | Guarantees zero downtime during migrations and seamless restoration of TimescaleDB backups from `v3.3.0`. |
+| **Cryptographic Backward Compatibility** | Dual-key HKDF salt and info derivation supporting `ephemres-alert-crypto-salt-v1` for new secrets with fallback decryption for legacy `lnmp-alert-crypto-salt-v1`. | Ensures existing encrypted SMTP passwords, webhook URLs, and credentials from `v3.3.0` snapshots remain fully decryptable without data loss. |
+| **Frontend Brand Alignment** | Updated Vue 3 application package name (`ephemres-frontend`), page title, navigation header, login screen, export file presets, and production assets. | Provides consistent branding across all operator-facing UI views and exported telemetry artifacts. |
+
+---
 
 ## [Version 3.3.0] — Flow Exporter & Interface Telemetry (ManageEngine Benchmark)
 ### 📊 Per-Interface Throughput, Dedicated Exporter Roles, Utilization Tracking & 1-Click Enrollment

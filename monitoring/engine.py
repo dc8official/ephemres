@@ -22,8 +22,8 @@ from app.config import settings
 from app.services.driver_manager import driver_manager
 
 logger = setup_logging(
-    service_name="netmon-engine",
-    log_dir=getattr(settings.logging, "log_dir", "/var/log/netmon"),
+    service_name="ephemres-engine",
+    log_dir=getattr(settings.logging, "log_dir", "/var/log/ephemres"),
     log_level=getattr(settings.logging, "level", "INFO"),
 )
 
@@ -226,7 +226,7 @@ async def monitor_endpoint(
 
 
 async def main() -> None:
-    logger.info("lnmp monitoring engine starting.")
+    logger.info("Ephemres monitoring engine starting.")
     await driver_manager.initialize()
     async with AsyncSessionLocal() as db:
         await resolve_startup_state(db)
@@ -248,8 +248,8 @@ async def main() -> None:
                 active_endpoints = result.scalars().all()
 
             # PERF-01 / STAB-07: Multi-process engine partitioning
-            worker_id = int(os.environ.get("NETMON_ENGINE_WORKER_ID", "0"))
-            num_workers = int(os.environ.get("NETMON_ENGINE_NUM_WORKERS", "1"))
+            worker_id = int(os.environ.get("EPHEMRES_ENGINE_WORKER_ID") or os.environ.get("NETMON_ENGINE_WORKER_ID", "0"))
+            num_workers = int(os.environ.get("EPHEMRES_ENGINE_NUM_WORKERS") or os.environ.get("NETMON_ENGINE_NUM_WORKERS", "1"))
             if num_workers > 1:
                 assigned_endpoints = [
                     ep
