@@ -1,12 +1,12 @@
-# LNMP SLA Calculation & Availability Methodology
+# Ephemres SLA Calculation & Availability Methodology
 
-This document outlines the mathematical principles, state machine transitions, and outage neutralization formulas used by LNMP to calculate Service Level Agreement (SLA) uptime.
+This document outlines the mathematical principles, state machine transitions, and outage neutralization formulas used by Ephemres to calculate Service Level Agreement (SLA) uptime.
 
 ---
 
 ## 1. High-Density 10-Ping Sub-Cycle Polling
 
-Within every 60-second window aligned to the absolute minute mark, the LNMP monitoring daemon sends:
+Within every 60-second window aligned to the absolute minute mark, the Ephemres monitoring daemon sends:
 * **10 ICMP echo requests** spaced 6 seconds apart (`Interval = 6.0s`).
 * **Packet Loss & Latency Metrics**:
   - `failed_count` (`0 <= k <= 10`)
@@ -17,7 +17,7 @@ Within every 60-second window aligned to the absolute minute mark, the LNMP moni
 
 ## 2. Dual-State Health Engine
 
-To prevent momentary packet jitter from skewing SLA uptime, LNMP separates operational state from detailed packet health:
+To prevent momentary packet jitter from skewing SLA uptime, Ephemres separates operational state from detailed packet health:
 
 ```
 [Packet Health / Detailed State]
@@ -57,8 +57,8 @@ stateDiagram-v2
 ### The Problem with Traditional SLA Calculators
 If the monitoring server itself loses power or undergoes scheduled maintenance, traditional monitoring tools record the missing intervals as "outages" for all monitored clients, skewing SLA reports.
 
-### The LNMP Blackout Neutralization Formula
-LNMP computes availability exclusively over monitored lifetime intervals:
+### The Ephemres Blackout Neutralization Formula
+Ephemres computes availability exclusively over monitored lifetime intervals:
 
 ```
 SLA Availability (%) = [ T_online / (T_monitored_lifetime - T_blackout_neutralized) ] * 100

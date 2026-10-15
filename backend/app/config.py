@@ -85,7 +85,7 @@ class SecuritySettings(BaseModel):
 
 class LoggingSettings(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-    log_dir: str = "/var/log/netmon"
+    log_dir: str = "/var/log/ephemres"
 
     model_config = ConfigDict(extra="ignore")
 
@@ -113,18 +113,20 @@ class FlowSettings(BaseModel):
 
 def resolve_config_file() -> Optional[Path]:
     """Resolves configuration file path from environment or standard locations."""
-    env_path_str = os.environ.get("NETMON_CONFIG_PATH")
+    env_path_str = os.environ.get("EPHEMRES_CONFIG_PATH") or os.environ.get("NETMON_CONFIG_PATH")
     if env_path_str:
         p = Path(env_path_str)
         if not p.is_file():
+            var_name = "EPHEMRES_CONFIG_PATH" if os.environ.get("EPHEMRES_CONFIG_PATH") else "NETMON_CONFIG_PATH"
             raise ConfigurationError(
-                f"Config file specified by NETMON_CONFIG_PATH does not exist: {p}"
+                f"Config file specified by {var_name} does not exist: {p}"
             )
         return p
 
-    prod_path = Path("/etc/netmon/config.toml")
-    if prod_path.is_file():
-        return prod_path
+    for prod_candidate in ("/etc/ephemres/config.toml", "/etc/netmon/config.toml"):
+        prod_path = Path(prod_candidate)
+        if prod_path.is_file():
+            return prod_path
 
     # Development fallback in repository deploy/
     repo_fallback = (
@@ -153,7 +155,7 @@ class Settings(BaseSettings):
     flow: FlowSettings = Field(default_factory=FlowSettings)
 
     model_config = SettingsConfigDict(
-        env_prefix="NETMON_",
+        env_prefix="EPHEMRES_",
         env_nested_delimiter="__",
         extra="ignore",
     )
@@ -218,65 +220,73 @@ def load_settings() -> Settings:
             raise
         raise ConfigurationError(f"Error loading configuration: {exc}") from exc
 
-    # Legacy environment variable compatibility overrides
-    db_pass = os.environ.get("NETMON_DB_PASSWORD") or os.environ.get("POSTGRES_PASSWORD")
+    # Environment variable overrides (supporting EPHEMRES_ and legacy NETMON_)
+    db_pass = os.environ.get("EPHEMRES_DB_PASSWORD") or os.environ.get("NETMON_DB_PASSWORD") or os.environ.get("POSTGRES_PASSWORD")
     if db_pass:
         loaded.database.password = db_pass
 
-    db_user = os.environ.get("NETMON_DB_USER") or os.environ.get("POSTGRES_USER")
+    db_user = os.environ.get("EPHEMRES_DB_USER") or os.environ.get("NETMON_DB_USER") or os.environ.get("POSTGRES_USER")
     if db_user:
         loaded.database.user = db_user
 
-    db_host = os.environ.get("NETMON_DB_HOST") or os.environ.get("POSTGRES_HOST")
+    db_host = os.environ.get("EPHEMRES_DB_HOST") or os.environ.get("NETMON_DB_HOST") or os.environ.get("POSTGRES_HOST")
     if db_host:
         loaded.database.host = db_host
 
-    db_port = os.environ.get("NETMON_DB_PORT") or os.environ.get("POSTGRES_PORT")
+    db_port = os.environ.get("EPHEMRES_DB_PORT") or os.environ.get("NETMON_DB_PORT") or os.environ.get("POSTGRES_PORT")
     if db_port:
         try:
             loaded.database.port = int(db_port)
         except ValueError:
             raise ConfigurationError(f"Invalid integer for database port: {db_port}")
 
-    db_name = os.environ.get("NETMON_DB_NAME") or os.environ.get("POSTGRES_DB")
+    db_name = os.environ.get("EPHEMRES_DB_NAME") or os.environ.get("NETMON_DB_NAME") or os.environ.get("POSTGRES_DB")
     if db_name:
         loaded.database.name = db_name
 
-    db_pool = os.environ.get("NETMON_DB_POOL_SIZE")
+    db_pool = os.environ.get("EPHEMRES_DB_POOL_SIZE") or os.environ.get("NETMON_DB_POOL_SIZE")
     if db_pool:
         try:
             loaded.database.pool_size = int(db_pool)
         except ValueError:
             pass
 
-    db_overflow = os.environ.get("NETMON_DB_MAX_OVERFLOW")
+    db_overflow = os.environ.get("EPHEMRES_DB_MAX_OVERFLOW") or os.environ.get("NETMON_DB_MAX_OVERFLOW")
     if db_overflow:
         try:
             loaded.database.max_overflow = int(db_overflow)
         except ValueError:
             pass
 
-    secret_key = os.environ.get("NETMON_SECRET_KEY")
+    secret_key = os.environ.get("EPHEMRES_SECRET_KEY") or os.environ.get("NETMON_SECRET_KEY")
     if secret_key:
         loaded.security.secret_key = secret_key
 
-    jwt_secret = os.environ.get("NETMON_JWT_SECRET")
+    jwt_secret = os.environ.get("EPHEMRES_JWT_SECRET") or os.environ.get("NETMON_JWT_SECRET")
     if jwt_secret:
         loaded.security.jwt_secret = jwt_secret
 
-    crypto_key = os.environ.get("NETMON_CRYPTO_KEY")
+    crypto_key = os.environ.get("EPHEMRES_CRYPTO_KEY") or os.environ.get("NETMON_CRYPTO_KEY")
     if crypto_key:
         loaded.security.crypto_key = crypto_key
 
-    fallback_keys = os.environ.get("NETMON_FALLBACK_CRYPTO_KEYS")
+    fallback_keys = os.environ.get("EPHEMRES_FALLBACK_CRYPTO_KEYS") or os.environ.get("NETMON_FALLBACK_CRYPTO_KEYS")
     if fallback_keys:
         loaded.security.fallback_crypto_keys = [
             k.strip() for k in fallback_keys.split(",") if k.strip()
         ]
 
-    env_val = os.environ.get("NETMON_ENV") or os.environ.get("ENVIRONMENT")
+    env_val = os.environ.get("EPHEMRES_ENV") or os.environ.get("NETMON_ENV") or os.environ.get("ENVIRONMENT")
     if env_val:
         loaded.environment = env_val.strip().lower()
+
+    allowed_origins = os.environ.get("EPHEMRES_API__ALLOWED_ORIGINS") or os.environ.get("NETMON_API__ALLOWED_ORIGINS")
+    if allowed_origins:
+        import json
+        try:
+            loaded.api.allowed_origins = json.loads(allowed_origins)
+        except Exception:
+            pass
 
     # FIX-09 (SEC-02): Reject insecure default secret key in production / staging
     if loaded.environment.lower() not in ("development", "test"):

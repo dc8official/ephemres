@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# lnmp Network Monitoring Platform v3.3.0 - Production Installer
+# Ephemres Network Monitoring Platform v3.3.1n - Production Installer
 # Supports: Debian 12+, Ubuntu 22.04+
 # Usage: sudo bash deploy/install.sh [--dry-run]
 # ============================================================
@@ -22,12 +22,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Installation target directory
-INSTALL_DIR="/opt/netmon/noop"
-VENV_DIR="/opt/netmon/venv"
-CONFIG_DIR="/etc/netmon"
-LOG_DIR="/var/log/netmon"
-BACKUP_DIR="/var/backups/netmon"
-ENV_FILE="$CONFIG_DIR/netmon.env"
+INSTALL_DIR="/opt/ephemres"
+VENV_DIR="/opt/ephemres/venv"
+CONFIG_DIR="/etc/ephemres"
+LOG_DIR="/var/log/ephemres"
+BACKUP_DIR="/var/backups/ephemres"
+ENV_FILE="$CONFIG_DIR/ephemres.env"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 
 # ============================================================
@@ -186,17 +186,17 @@ echo "Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 # ============================================================
 print_header "Step 6: Creating system user and directories"
 
-if id "netmon" &>/dev/null; then
-    echo "User 'netmon' already exists."
+if id "ephemres" &>/dev/null; then
+    echo "User 'ephemres' already exists."
 else
-    run "Creating system user 'netmon'" \
-        useradd -r -s /usr/sbin/nologin netmon
+    run "Creating system user 'ephemres'" \
+        useradd -r -s /usr/sbin/nologin ephemres
 fi
 
-for dir in /opt/netmon "$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR" /run/netmon; do
+for dir in /opt/ephemres "$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR" /run/ephemres; do
     if [ ! -d "$dir" ]; then
         run "Creating directory $dir" mkdir -p "$dir"
-        run "Setting ownership: $dir" chown netmon:netmon "$dir"
+        run "Setting ownership: $dir" chown ephemres:ephemres "$dir"
     else
         echo "Directory $dir already exists."
     fi
@@ -221,7 +221,7 @@ if [ ! -d "$INSTALL_DIR" ]; then
         --exclude='certs' \
         "$PROJECT_ROOT/" "$INSTALL_DIR/"
     run "Setting project ownership" \
-        chown -R netmon:netmon "$INSTALL_DIR"
+        chown -R ephemres:ephemres "$INSTALL_DIR"
 else
     echo "Project files already exist at $INSTALL_DIR."
     echo "Updating project files..."
@@ -238,7 +238,7 @@ else
         --exclude='certs' \
         "$PROJECT_ROOT/" "$INSTALL_DIR/"
     run "Setting project ownership" \
-        chown -R netmon:netmon "$INSTALL_DIR"
+        chown -R ephemres:ephemres "$INSTALL_DIR"
 fi
 
 run "Marking install directory as git safe directory" \
@@ -251,19 +251,26 @@ if [ ! -d "$VENV_DIR" ]; then
     run "Creating virtual environment with $PYTHON_BIN" \
         $PYTHON_BIN -m venv "$VENV_DIR"
     run "Setting venv ownership" \
-        chown -R netmon:netmon "$VENV_DIR"
+        chown -R ephemres:ephemres "$VENV_DIR"
 fi
 
 run "Upgrading pip to latest version" \
-    sudo -H -u netmon "$VENV_DIR/bin/pip" install \
+    sudo -H -u ephemres "$VENV_DIR/bin/pip" install \
     --timeout 120 \
     --upgrade pip
 
 run "Installing Python dependencies" \
-    sudo -H -u netmon "$VENV_DIR/bin/pip" install \
+    sudo -H -u ephemres "$VENV_DIR/bin/pip" install \
     --timeout 120 \
     --retries 5 \
     -r "$INSTALL_DIR/backend/requirements.txt"
+
+# Set network capabilities on the virtualenv python binary
+PY3_TARGET="$(readlink -f "$VENV_DIR/bin/python3" 2>/dev/null || true)"
+if [ -n "$PY3_TARGET" ] && [ -f "$PY3_TARGET" ] && command -v setcap &>/dev/null; then
+    run "Setting network raw socket capabilities for Python binary ($PY3_TARGET)" \
+        setcap cap_net_raw+ep "$PY3_TARGET" || true
+fi
 
 # ============================================================
 print_header "Step 9: Building Vue frontend"
@@ -290,7 +297,7 @@ else
 fi
 
 run "Setting frontend ownership" \
-    chown -R netmon:netmon "$INSTALL_DIR/frontend/dist"
+    chown -R ephemres:ephemres "$INSTALL_DIR/frontend/dist"
 
 # ============================================================
 print_header "Step 10: Configuration"
@@ -301,12 +308,12 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
     if [ "$DRY_RUN" = false ]; then
         chmod 0600 "$ENV_FILE"
-        chown netmon:netmon "$ENV_FILE" 2>/dev/null || true
+        chown ephemres:ephemres "$ENV_FILE" 2>/dev/null || true
     fi
 else
     if [ "$DRY_RUN" = false ]; then
         echo ""
-        echo "Configuring Netmon Platform..."
+        echo "Configuring Ephemres Platform..."
         echo "These will be stored in $ENV_FILE"
         echo ""
 
@@ -328,13 +335,19 @@ else
         echo "Server domain/IP configured to: $DOMAIN_NAME"
 
         cat > "$ENV_FILE" <<EOF
+EPHEMRES_DB_PASSWORD=$DB_PASS
 NETMON_DB_PASSWORD=$DB_PASS
+EPHEMRES_SECRET_KEY=$SECRET_KEY
 NETMON_SECRET_KEY=$SECRET_KEY
 DOMAIN_NAME=$DOMAIN_NAME
 DEFAULT_ADMIN_PASSWORD=$ADMIN_PASS
 EOF
         chmod 0600 "$ENV_FILE"
-        chown netmon:netmon "$ENV_FILE" 2>/dev/null || true
+        chown ephemres:ephemres "$ENV_FILE" 2>/dev/null || true
+        # Keep backend/.env in sync for convenience
+        cp "$ENV_FILE" "$INSTALL_DIR/backend/.env"
+        chmod 0600 "$INSTALL_DIR/backend/.env"
+        chown ephemres:ephemres "$INSTALL_DIR/backend/.env"
         echo "Environment file created at $ENV_FILE"
     else
         DB_PASS="dryrun_password"
@@ -347,8 +360,8 @@ fi
 
 # Read values for subsequent steps
 if [ "$DRY_RUN" = false ]; then
-    DB_PASS=$(grep NETMON_DB_PASSWORD "$ENV_FILE" | cut -d'=' -f2-)
-    SECRET_KEY=$(grep NETMON_SECRET_KEY "$ENV_FILE" | cut -d'=' -f2-)
+    DB_PASS=$(grep -E '^(EPHEMRES|NETMON)_DB_PASSWORD' "$ENV_FILE" | head -n1 | cut -d'=' -f2-)
+    SECRET_KEY=$(grep -E '^(EPHEMRES|NETMON)_SECRET_KEY' "$ENV_FILE" | head -n1 | cut -d'=' -f2-)
     DOMAIN_NAME=$(grep DOMAIN_NAME "$ENV_FILE" | cut -d'=' -f2-)
     if grep -q DEFAULT_ADMIN_PASSWORD "$ENV_FILE"; then
         ADMIN_PASS=$(grep DEFAULT_ADMIN_PASSWORD "$ENV_FILE" | cut -d'=' -f2-)
@@ -369,7 +382,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     run "Copying config template" \
         cp "$INSTALL_DIR/deploy/config.template.toml" "$CONFIG_FILE"
     run "Setting config ownership" \
-        chown root:netmon "$CONFIG_FILE"
+        chown root:ephemres "$CONFIG_FILE"
     run "Setting config permissions" \
         chmod 640 "$CONFIG_FILE"
     echo "Config file created at $CONFIG_FILE"
@@ -430,10 +443,12 @@ fi
 print_header "Step 13: Running database migrations"
 
 run "Running Alembic migrations" \
-    sudo -H -u netmon bash -c "
+    sudo -H -u ephemres bash -c "
+        export EPHEMRES_DB_PASSWORD='$DB_PASS' &&
         export NETMON_DB_PASSWORD='$DB_PASS' &&
+        export EPHEMRES_SECRET_KEY='$SECRET_KEY' &&
         export NETMON_SECRET_KEY='$SECRET_KEY' &&
-        export PYTHONPATH='$INSTALL_DIR/backend' &&
+        export PYTHONPATH='$INSTALL_DIR/backend:$INSTALL_DIR' &&
         cd '$INSTALL_DIR/backend' &&
         '$VENV_DIR/bin/alembic' upgrade head
     "
@@ -443,11 +458,13 @@ print_header "Step 14: Creating default admin user"
 
 if [ "$DRY_RUN" = false ]; then
     run "Seeding default admin user" \
-        sudo -u netmon \
+        sudo -u ephemres \
+            EPHEMRES_DB_PASSWORD="$DB_PASS" \
             NETMON_DB_PASSWORD="$DB_PASS" \
+            EPHEMRES_SECRET_KEY="$SECRET_KEY" \
             NETMON_SECRET_KEY="$SECRET_KEY" \
             DEFAULT_ADMIN_PASSWORD="$ADMIN_PASS" \
-            PYTHONPATH="$INSTALL_DIR/backend" \
+            PYTHONPATH="$INSTALL_DIR/backend:$INSTALL_DIR" \
             "$VENV_DIR/bin/python3" -m app.seed_admin
 else
     echo "[DRY RUN] Would create default admin user (admin / $ADMIN_PASS)"
@@ -456,7 +473,7 @@ fi
 # ============================================================
 print_header "Step 15: Installing systemd services"
 
-for service in netmon-engine netmon-api netmon-flowd; do
+for service in ephemres-engine ephemres-api ephemres-flowd; do
     src="$INSTALL_DIR/deploy/${service}.service"
     dst="/etc/systemd/system/${service}.service"
     if [ ! -f "$dst" ] || ! diff -q "$src" "$dst" > /dev/null 2>&1; then
@@ -468,36 +485,36 @@ done
 
 run "Reloading systemd daemon" systemctl daemon-reload
 run "Enabling Redis service" bash -c "systemctl enable redis-server 2>/dev/null || systemctl enable redis 2>/dev/null || true"
-run "Enabling netmon-engine" systemctl enable netmon-engine
-run "Enabling netmon-api" systemctl enable netmon-api
-run "Enabling netmon-flowd" systemctl enable netmon-flowd
+run "Enabling ephemres-engine" systemctl enable ephemres-engine
+run "Enabling ephemres-api" systemctl enable ephemres-api
+run "Enabling ephemres-flowd" systemctl enable ephemres-flowd
 
-# Grant netmon user sudo privilege to start/stop netmon-flowd dynamically from web UI
+# Grant ephemres user sudo privilege to start/stop ephemres-flowd dynamically from web UI
 if [ "$DRY_RUN" = false ] && [ -d "/etc/sudoers.d" ]; then
-    cat << 'EOF' > /etc/sudoers.d/netmon
-netmon ALL=(ALL) NOPASSWD: /usr/bin/systemctl start netmon-flowd, /usr/bin/systemctl stop netmon-flowd, /usr/bin/systemctl restart netmon-flowd, /usr/bin/systemctl is-active netmon-flowd, /usr/bin/systemctl enable netmon-flowd, /usr/bin/systemctl disable netmon-flowd
+    cat << 'EOF' > /etc/sudoers.d/ephemres
+ephemres ALL=(ALL) NOPASSWD: /usr/bin/systemctl start ephemres-flowd, /usr/bin/systemctl stop ephemres-flowd, /usr/bin/systemctl restart ephemres-flowd, /usr/bin/systemctl is-active ephemres-flowd, /usr/bin/systemctl enable ephemres-flowd, /usr/bin/systemctl disable ephemres-flowd
 EOF
-    chmod 0440 /etc/sudoers.d/netmon
+    chmod 0440 /etc/sudoers.d/ephemres
 fi
 
 # ============================================================
 print_header "Step 16: Configuring Nginx"
 
-NGINX_CONF="/etc/nginx/sites-available/netmon"
+NGINX_CONF="/etc/nginx/sites-available/ephemres"
 
 if [ "$DRY_RUN" = false ]; then
     CERT_DIR="/etc/ssl/certs"
     KEY_DIR="/etc/ssl/private"
     mkdir -p "$CERT_DIR" "$KEY_DIR"
     
-    if [ ! -f "$CERT_DIR/netmon.crt" ] || [ ! -f "$KEY_DIR/netmon.key" ]; then
+    if [ ! -f "$CERT_DIR/ephemres.crt" ] || [ ! -f "$KEY_DIR/ephemres.key" ]; then
         echo "--> Generating self-signed SSL certificate for $DOMAIN_NAME"
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout "$KEY_DIR/netmon.key" \
-            -out "$CERT_DIR/netmon.crt" \
-            -subj "/C=US/ST=State/L=City/O=Netmon/CN=$DOMAIN_NAME" 2>/dev/null
-        chmod 600 "$KEY_DIR/netmon.key"
-        chmod 644 "$CERT_DIR/netmon.crt"
+            -keyout "$KEY_DIR/ephemres.key" \
+            -out "$CERT_DIR/ephemres.crt" \
+            -subj "/C=US/ST=State/L=City/O=Ephemres/CN=$DOMAIN_NAME" 2>/dev/null
+        chmod 600 "$KEY_DIR/ephemres.key"
+        chmod 644 "$CERT_DIR/ephemres.crt"
         echo "Self-signed certificate generated successfully."
     else
         echo "SSL certificate and key already exist."
@@ -510,7 +527,8 @@ if [ ! -f "$NGINX_CONF" ]; then
         sed "s/YOUR_DOMAIN/$DOMAIN_NAME/g" \
             "$INSTALL_DIR/deploy/nginx.conf.template" \
             > "$NGINX_CONF"
-        ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/netmon
+        ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/ephemres
+        rm -f /etc/nginx/sites-enabled/netmon
         nginx -t && systemctl reload nginx
         echo "Nginx configuration applied."
     else
@@ -523,7 +541,7 @@ fi
 # ============================================================
 print_header "Step 17: Configuring logrotate"
 
-LOGROTATE_DST="/etc/logrotate.d/netmon"
+LOGROTATE_DST="/etc/logrotate.d/ephemres"
 if [ ! -f "$LOGROTATE_DST" ]; then
     run "Installing logrotate config" \
         cp "$INSTALL_DIR/deploy/logrotate.conf" "$LOGROTATE_DST"
@@ -535,9 +553,9 @@ fi
 print_header "Step 18: Starting services"
 
 run "Starting Redis service" bash -c "systemctl start redis-server 2>/dev/null || systemctl start redis 2>/dev/null || true"
-run "Starting netmon-api" systemctl start netmon-api
-run "Starting netmon-engine" systemctl start netmon-engine
-run "Starting netmon-flowd" systemctl start netmon-flowd
+run "Starting ephemres-api" systemctl start ephemres-api
+run "Starting ephemres-engine" systemctl start ephemres-engine
+run "Starting ephemres-flowd" systemctl start ephemres-flowd
 
 # ============================================================
 print_header "Installation Complete"
@@ -546,7 +564,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "DRY RUN complete. No changes were made."
 else
     echo ""
-    echo "lnmp v3.3.0 is now running."
+    echo "Ephemres v3.3.1n is now running."
     echo ""
     echo "  Dashboard:  https://$DOMAIN_NAME"
     echo "  API docs:   https://$DOMAIN_NAME/api/docs"
@@ -566,14 +584,14 @@ else
     echo "--------------------------------------------------------"
     echo ""
     echo "  Service status:"
-    echo "  systemctl status netmon-api"
-    echo "  systemctl status netmon-engine"
-    echo "  systemctl status netmon-flowd"
+    echo "  systemctl status ephemres-api"
+    echo "  systemctl status ephemres-engine"
+    echo "  systemctl status ephemres-flowd"
     echo ""
     echo "  Logs:"
-    echo "  journalctl -u netmon-api -f"
-    echo "  journalctl -u netmon-engine -f"
-    echo "  journalctl -u netmon-flowd -f"
+    echo "  journalctl -u ephemres-api -f"
+    echo "  journalctl -u ephemres-engine -f"
+    echo "  journalctl -u ephemres-flowd -f"
     echo ""
 fi
 echo "========================================================"

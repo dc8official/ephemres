@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# LNMP Network Monitoring Platform v3.3.0 - Automated Upgrade Utility
+# Ephemres Network Monitoring Platform v3.3.1n - Automated Upgrade Utility
 # ==============================================================================
 
 set -euo pipefail
@@ -30,48 +30,55 @@ if [[ ${EUID} -ne 0 && ${DRY_RUN} -eq 0 ]]; then
 fi
 
 echo -e "${BLUE}========================================================================${NC}"
-echo -e "${BLUE}    LNMP Network Monitoring Platform v3.3.0 - Upgrade Utility            ${NC}"
+echo -e "${BLUE}    Ephemres Network Monitoring Platform v3.3.1n - Upgrade Utility      ${NC}"
 echo -e "${BLUE}========================================================================${NC}"
 
 # Resolve Script and Project Root Directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-INSTALL_DIR="/opt/netmon/noop"
-REPO_URL="${NETMON_REPO_URL:-https://github.com/dc8official/lnmp.git}"
-# Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.0)
+INSTALL_DIR="/opt/ephemres"
+REPO_URL="${EPHEMRES_REPO_URL:-https://github.com/dc8official/ephemres.git}"
+# Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.1n)
 CURRENT_GIT_BRANCH="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-UPGRADE_BRANCH="${NETMON_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.0}}"
+UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.1n}}"
 
 # 3. Read Configuration Values
-ENV_FILE="/etc/netmon/netmon.env"
-if [[ -f "${ENV_FILE}" ]]; then
+ENV_FILE=""
+for candidate in "/etc/ephemres/ephemres.env" "${PROJECT_ROOT}/backend/.env" "${PROJECT_ROOT}/.env" "/etc/netmon/netmon.env"; do
+    if [[ -f "${candidate}" ]]; then
+        ENV_FILE="${candidate}"
+        break
+    fi
+done
+
+if [[ -n "${ENV_FILE}" ]]; then
     echo -e "${GREEN}[INFO] Loading environment configuration from ${ENV_FILE}${NC}"
     if [[ ${DRY_RUN:-0} -eq 0 ]]; then
         chmod 0600 "${ENV_FILE}"
-        chown netmon:netmon "${ENV_FILE}" 2>/dev/null || true
+        chown ephemres:ephemres "${ENV_FILE}" 2>/dev/null || true
     fi
     # shellcheck disable=SC1090
     set -a
     source "${ENV_FILE}"
     set +a
 elif [[ -f "${PROJECT_ROOT}/backend/.env" ]]; then
-    echo -e "${YELLOW}[WARN] /etc/netmon/netmon.env not found. Loading local backend/.env${NC}"
+    echo -e "${YELLOW}[WARN] Configuration file not found in /etc/ephemres. Loading local backend/.env${NC}"
     # shellcheck disable=SC1090
     set -a
     source "${PROJECT_ROOT}/backend/.env"
     set +a
 fi
 
-DB_NAME="${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}"
-DB_USER="${NETMON_DB_USER:-${POSTGRES_USER:-netmon_user}}"
-DB_PASS="${NETMON_DB_PASSWORD:-${POSTGRES_PASSWORD:-netmon_secure_password}}"
-DB_HOST="${NETMON_DB_HOST:-${POSTGRES_HOST:-127.0.0.1}}"
-DB_PORT="${NETMON_DB_PORT:-${POSTGRES_PORT:-5432}}"
+DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}}"
+DB_USER="${EPHEMRES_DB_USER:-${NETMON_DB_USER:-${POSTGRES_USER:-netmon_user}}}"
+DB_PASS="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD:-${POSTGRES_PASSWORD:-netmon_secure_password}}}"
+DB_HOST="${EPHEMRES_DB_HOST:-${NETMON_DB_HOST:-${POSTGRES_HOST:-127.0.0.1}}}"
+DB_PORT="${EPHEMRES_DB_PORT:-${NETMON_DB_PORT:-${POSTGRES_PORT:-5432}}}"
 
 # 3. Pre-Upgrade Database Backup
-BACKUP_DIR="/var/backups/netmon"
+BACKUP_DIR="/var/backups/ephemres"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="${BACKUP_DIR}/netmon_backup_${TIMESTAMP}.sql"
+BACKUP_FILE="${BACKUP_DIR}/ephemres_backup_${TIMESTAMP}.sql"
 
 echo -e "\n${BLUE}--- Step 1/7: Executing Pre-Upgrade Database Backup ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
@@ -81,9 +88,10 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     fi
 
     # Gracefully stop services before backup to release database connection pool slots
-    if systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd 2>/dev/null; then
+    if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
+       systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd 2>/dev/null; then
         echo -e "${GREEN}[INFO] Pausing background services to release database connection slots...${NC}"
-        systemctl stop netmon-engine netmon-api netmon-flowd 2>/dev/null || true
+        systemctl stop ephemres-engine ephemres-api ephemres-flowd netmon-engine netmon-api netmon-flowd 2>/dev/null || true
     fi
 
     mkdir -p "${BACKUP_DIR}"
@@ -108,7 +116,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         echo -e "${GREEN}[SUCCESS] Pre-upgrade backup successfully saved to ${BACKUP_FILE}${NC}"
     else
         echo -e "${RED}[ERROR] Database backup failed. Aborting upgrade to preserve data safety.${NC}" >&2
-        echo -e "${YELLOW}[HINT] If PostgreSQL connection slots are exhausted, stop background services first: 'systemctl stop netmon-engine netmon-api netmon-flowd' or 'systemctl restart postgresql'.${NC}" >&2
+        echo -e "${YELLOW}[HINT] If PostgreSQL connection slots are exhausted, stop background services first: 'systemctl stop ephemres-engine ephemres-api ephemres-flowd' or 'systemctl restart postgresql'.${NC}" >&2
         exit 1
     fi
 else
@@ -116,12 +124,19 @@ else
 fi
 
 # 4. Smart Config Migration (In-Place Upgrade)
-CONFIG_FILE="/etc/netmon/config.toml"
+CONFIG_FILE=""
+for cfg_candidate in "/etc/ephemres/config.toml" "/etc/netmon/config.toml"; do
+    if [[ -f "${cfg_candidate}" ]]; then
+        CONFIG_FILE="${cfg_candidate}"
+        break
+    fi
+done
+
 echo -e "\n${BLUE}--- Step 2/7: Migrating System Configuration Defaults ---${NC}"
-if [[ ${DRY_RUN} -eq 0 && -f "${CONFIG_FILE}" ]]; then
+if [[ ${DRY_RUN} -eq 0 && -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]]; then
     echo -e "${GREEN}[INFO] Verifying configuration settings in ${CONFIG_FILE}...${NC}"
     
-    # Update ping timing budget to 5 pings @ 8.0s for v3.0.0
+    # Update ping timing budget to 5 pings @ 8.0s
     if grep -q "ping_count = 10" "${CONFIG_FILE}"; then
         sed -i 's/ping_count = 10/ping_count = 5/' "${CONFIG_FILE}"
         echo -e "${GREEN}[INFO] Updated ping_count to 5 probes.${NC}"
@@ -157,7 +172,7 @@ EOF
         echo -e "${GREEN}[INFO] Appended [redis] storage driver section to ${CONFIG_FILE}.${NC}"
     fi
 
-    # Add [flow] section if missing (v3.2.0 Network Flow Telemetry)
+    # Add [flow] section if missing (Network Flow Telemetry)
     if ! grep -q "\[flow\]" "${CONFIG_FILE}"; then
         cat << 'EOF' >> "${CONFIG_FILE}"
 
@@ -199,22 +214,28 @@ fi
 # 5. Service Pause
 echo -e "\n${BLUE}--- Step 3/7: Gracefully Pausing Platform Background Daemons ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
-    if systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd; then
-        echo -e "${GREEN}[INFO] Stopping netmon-engine, netmon-api, and netmon-flowd systemd services...${NC}"
-        systemctl stop netmon-engine netmon-api netmon-flowd || true
+    if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
+       systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd; then
+        echo -e "${GREEN}[INFO] Stopping ephemres-engine, ephemres-api, and ephemres-flowd systemd services...${NC}"
+        systemctl stop ephemres-engine ephemres-api ephemres-flowd netmon-engine netmon-api netmon-flowd || true
     else
         echo -e "${YELLOW}[INFO] Platform systemd services are not active. Skipping stop.${NC}"
     fi
 else
-    echo -e "[DRY-RUN] Would run: systemctl stop netmon-engine netmon-api netmon-flowd"
+    echo -e "[DRY-RUN] Would run: systemctl stop ephemres-engine ephemres-api ephemres-flowd"
 fi
 
 # 6. Fetch Latest Release Files from Repository
 echo -e "\n${BLUE}--- Step 4/7: Fetching Latest Release & Updating System Dependencies ---${NC}"
 SOURCE_DIR="${PROJECT_ROOT}"
-STAGE_DIR="/tmp/lnmp-upgrade-stage-$$"
+STAGE_DIR="/tmp/ephemres-upgrade-stage-$$"
 
 if [[ ${DRY_RUN} -eq 0 ]]; then
+    # Ensure system user ephemres exists
+    if ! id "ephemres" &>/dev/null; then
+        useradd -r -s /usr/sbin/nologin ephemres || true
+    fi
+
     # Ensure system dependencies (git, redis-server, traceroute, libcap2-bin)
     if command -v apt-get &>/dev/null; then
         PACKAGES_TO_CHECK="git redis-server traceroute libcap2-bin rsync libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0"
@@ -246,16 +267,16 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         cd "${PROJECT_ROOT}"
         git config --global --add safe.directory "${PROJECT_ROOT}" 2>/dev/null || true
         git fetch --all --tags --prune || true
-        git checkout "${UPGRADE_BRANCH}" 2>/dev/null || git checkout v3.3.0 2>/dev/null || git checkout v3.2.0 2>/dev/null || true
-        git pull origin "${UPGRADE_BRANCH}" 2>/dev/null || git pull origin v3.3.0 2>/dev/null || git pull origin v3.2.0 2>/dev/null || git pull || echo -e "${YELLOW}[WARN] Git pull finished with non-zero exit code. Proceeding with existing files.${NC}"
+        git checkout "${UPGRADE_BRANCH}" 2>/dev/null || git checkout v3.3.1n 2>/dev/null || git checkout v3.3.0 2>/dev/null || true
+        git pull origin "${UPGRADE_BRANCH}" 2>/dev/null || git pull origin v3.3.1n 2>/dev/null || git pull origin v3.3.0 2>/dev/null || git pull || echo -e "${YELLOW}[WARN] Git pull finished with non-zero exit code. Proceeding with existing files.${NC}"
         SOURCE_DIR="${PROJECT_ROOT}"
-    # Case B: Running from /opt/netmon/noop or non-git directory -> clone directly from remote
+    # Case B: Running from /opt/ephemres or non-git directory -> clone directly from remote
     else
         echo -e "${GREEN}[INFO] Staging fresh release from ${REPO_URL} (branch: ${UPGRADE_BRANCH})...${NC}"
         rm -rf "${STAGE_DIR}"
         if git clone --depth 1 --branch "${UPGRADE_BRANCH}" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
+           git clone --depth 1 --branch "v3.3.1n" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
            git clone --depth 1 --branch "v3.3.0" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 --branch "v3.2.0" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
            git clone --depth 1 "${REPO_URL}" "${STAGE_DIR}"; then
             echo -e "${GREEN}[SUCCESS] Downloaded latest codebase into staging directory.${NC}"
             SOURCE_DIR="${STAGE_DIR}"
@@ -288,8 +309,8 @@ fi
 # 7. Synchronize Production Files to Target Directory
 echo -e "\n${BLUE}--- Step 5/7: Synchronizing Codebase & Enforcing Production Structure ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
-    mkdir -p "${INSTALL_DIR}" /run/netmon /var/log/netmon
-    chown -R netmon:netmon /run/netmon /var/log/netmon 2>/dev/null || true
+    mkdir -p "${INSTALL_DIR}" /run/ephemres /var/log/ephemres
+    chown -R ephemres:ephemres /run/ephemres /var/log/ephemres 2>/dev/null || true
     if [[ "${SOURCE_DIR}" != "${INSTALL_DIR}" ]]; then
         echo -e "${GREEN}[INFO] Syncing repository files from ${SOURCE_DIR} to ${INSTALL_DIR}...${NC}"
         rsync -a --delete \
@@ -303,7 +324,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
             --exclude='scratch' \
             --exclude='certs' \
             "${SOURCE_DIR}/" "${INSTALL_DIR}/"
-        chown -R netmon:netmon "${INSTALL_DIR}"
+        chown -R ephemres:ephemres "${INSTALL_DIR}"
     fi
 
     # Clean up temporary staging directory if used
@@ -311,7 +332,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         rm -rf "${STAGE_DIR}"
     fi
 else
-    echo -e "[DRY-RUN] Would rsync codebase to ${INSTALL_DIR} and set ownership to netmon:netmon"
+    echo -e "[DRY-RUN] Would rsync codebase to ${INSTALL_DIR} and set ownership to ephemres:ephemres"
 fi
 
 # 8. Dependency Installation & Database Migrations
@@ -319,7 +340,9 @@ echo -e "\n${BLUE}--- Step 6/7: Upgrading Python Dependencies & Database Migrati
 if [[ ${DRY_RUN} -eq 0 ]]; then
     # Determine Python virtual environment path
     VENV_PATH=""
-    if [[ -d "/opt/netmon/venv" ]]; then
+    if [[ -d "/opt/ephemres/venv" ]]; then
+        VENV_PATH="/opt/ephemres/venv"
+    elif [[ -d "/opt/netmon/venv" ]]; then
         VENV_PATH="/opt/netmon/venv"
     elif [[ -d "${INSTALL_DIR}/backend/venv" ]]; then
         VENV_PATH="${INSTALL_DIR}/backend/venv"
@@ -331,8 +354,15 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         echo -e "${GREEN}[INFO] Upgrading Python dependencies in ${VENV_PATH}...${NC}"
         "${VENV_PATH}/bin/pip" install --upgrade pip
         "${VENV_PATH}/bin/pip" install -r "${INSTALL_DIR}/backend/requirements.txt" --upgrade
+
+        # Set network raw capabilities for unprivileged ICMP on virtual environment python3 binary
+        PY3_REAL="$(readlink -f "${VENV_PATH}/bin/python3" 2>/dev/null || true)"
+        if [[ -n "${PY3_REAL}" ]] && [[ -f "${PY3_REAL}" ]] && command -v setcap &>/dev/null; then
+            echo -e "${GREEN}[INFO] Applying cap_net_raw+ep to Python binary (${PY3_REAL})...${NC}"
+            setcap cap_net_raw+ep "${PY3_REAL}" || true
+        fi
     else
-        echo -e "${YELLOW}[WARN] Virtual environment not found at /opt/netmon/venv. Skipping pip upgrade.${NC}"
+        echo -e "${YELLOW}[WARN] Virtual environment not found at /opt/ephemres/venv. Skipping pip upgrade.${NC}"
     fi
 
     # Database Schema Migrations
@@ -340,6 +370,8 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     ALEMBIC_BIN=""
     if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/alembic" ]]; then
         ALEMBIC_BIN="${VENV_PATH}/bin/alembic"
+    elif [[ -f "/opt/ephemres/venv/bin/alembic" ]]; then
+        ALEMBIC_BIN="/opt/ephemres/venv/bin/alembic"
     elif [[ -f "/opt/netmon/venv/bin/alembic" ]]; then
         ALEMBIC_BIN="/opt/netmon/venv/bin/alembic"
     elif [[ -f "${PROJECT_ROOT}/.venv/bin/alembic" ]]; then
@@ -348,6 +380,8 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
 
     if [[ -d "${INSTALL_DIR}/backend/migrations" && -n "${ALEMBIC_BIN}" ]]; then
         echo -e "${GREEN}[INFO] Running Alembic schema migration (alembic upgrade head)...${NC}"
+        export EPHEMRES_DB_PASSWORD="${DB_PASS}"
+        export NETMON_DB_PASSWORD="${DB_PASS}"
         PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${ALEMBIC_BIN}" -c "${INSTALL_DIR}/backend/alembic.ini" upgrade head
         
         PYTHON_BIN="$(dirname "${ALEMBIC_BIN}")/python"
@@ -388,42 +422,34 @@ fi
 echo -e "\n${BLUE}--- Step 7/7: Refreshing Systemd Units, Enabling Auto-Start & Starting Services ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
     # Refresh systemd unit files if available in deploy/
-    if [[ -f "${INSTALL_DIR}/deploy/netmon-api.service" ]]; then
-        cp "${INSTALL_DIR}/deploy/netmon-api.service" /etc/systemd/system/
-    elif [[ -f "${PROJECT_ROOT}/deploy/netmon-api.service" ]]; then
-        cp "${PROJECT_ROOT}/deploy/netmon-api.service" /etc/systemd/system/
-    fi
-    if [[ -f "${INSTALL_DIR}/deploy/netmon-engine.service" ]]; then
-        cp "${INSTALL_DIR}/deploy/netmon-engine.service" /etc/systemd/system/
-    elif [[ -f "${PROJECT_ROOT}/deploy/netmon-engine.service" ]]; then
-        cp "${PROJECT_ROOT}/deploy/netmon-engine.service" /etc/systemd/system/
-    fi
-    if [[ -f "${INSTALL_DIR}/deploy/netmon-flowd.service" ]]; then
-        cp "${INSTALL_DIR}/deploy/netmon-flowd.service" /etc/systemd/system/
-    elif [[ -f "${PROJECT_ROOT}/deploy/netmon-flowd.service" ]]; then
-        cp "${PROJECT_ROOT}/deploy/netmon-flowd.service" /etc/systemd/system/
-    fi
+    for svc in ephemres-api ephemres-engine ephemres-flowd; do
+        if [[ -f "${INSTALL_DIR}/deploy/${svc}.service" ]]; then
+            cp "${INSTALL_DIR}/deploy/${svc}.service" /etc/systemd/system/
+        elif [[ -f "${PROJECT_ROOT}/deploy/${svc}.service" ]]; then
+            cp "${PROJECT_ROOT}/deploy/${svc}.service" /etc/systemd/system/
+        fi
+    done
 
     # Ensure runtime and log directories exist before daemon activation
-    mkdir -p /run/netmon /var/log/netmon
-    chown -R netmon:netmon /run/netmon /var/log/netmon 2>/dev/null || true
+    mkdir -p /run/ephemres /var/log/ephemres
+    chown -R ephemres:ephemres /run/ephemres /var/log/ephemres 2>/dev/null || true
 
-    # Grant netmon user sudo privilege to start/stop netmon-flowd dynamically from web UI
+    # Grant ephemres user sudo privilege to start/stop ephemres-flowd dynamically from web UI
     if [[ -d "/etc/sudoers.d" ]]; then
-        cat << 'EOF' > /etc/sudoers.d/netmon
-netmon ALL=(ALL) NOPASSWD: /usr/bin/systemctl start netmon-flowd, /usr/bin/systemctl stop netmon-flowd, /usr/bin/systemctl restart netmon-flowd, /usr/bin/systemctl is-active netmon-flowd, /usr/bin/systemctl enable netmon-flowd, /usr/bin/systemctl disable netmon-flowd
+        cat << 'EOF' > /etc/sudoers.d/ephemres
+ephemres ALL=(ALL) NOPASSWD: /usr/bin/systemctl start ephemres-flowd, /usr/bin/systemctl stop ephemres-flowd, /usr/bin/systemctl restart ephemres-flowd, /usr/bin/systemctl is-active ephemres-flowd, /usr/bin/systemctl enable ephemres-flowd, /usr/bin/systemctl disable ephemres-flowd
 EOF
-        chmod 0440 /etc/sudoers.d/netmon
+        chmod 0440 /etc/sudoers.d/ephemres
     fi
 
     echo -e "${GREEN}[INFO] Reloading systemd daemons and enabling auto-start on boot...${NC}"
     systemctl daemon-reload
     systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis 2>/dev/null || true
-    systemctl enable netmon-api netmon-engine || true
-    systemctl restart netmon-api netmon-engine
+    systemctl enable ephemres-api ephemres-engine || true
+    systemctl restart ephemres-api ephemres-engine
     systemctl restart nginx || true
 
-    # Network Flow Telemetry Ingestion (v3.2.0)
+    # Network Flow Telemetry Ingestion
     FLOW_ENABLED=false
     if [[ -n "${DB_PASS:-}" ]]; then
         DB_FLOW_VAL=$(PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc "SELECT setting_value FROM app_settings WHERE setting_key = 'flow_ingestion_enabled';" 2>/dev/null || echo "")
@@ -436,31 +462,31 @@ EOF
     fi
 
     if [[ "${FLOW_ENABLED}" == "true" ]]; then
-        echo -e "${GREEN}[INFO] Flow telemetry ingestion is enabled. Starting netmon-flowd...${NC}"
-        systemctl enable netmon-flowd || true
-        systemctl restart netmon-flowd || true
+        echo -e "${GREEN}[INFO] Flow telemetry ingestion is enabled. Starting ephemres-flowd...${NC}"
+        systemctl enable ephemres-flowd || true
+        systemctl restart ephemres-flowd || true
 
         # Manage firewall if ufw is active
         if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
             echo -e "${GREEN}[INFO] Configuring firewall rules for NetFlow (UDP 2055) and IPFIX (UDP 4739)...${NC}"
-            ufw allow 2055/udp comment 'LNMP NetFlow v5/v9 Telemetry' || true
-            ufw allow 4739/udp comment 'LNMP IPFIX Telemetry' || true
+            ufw allow 2055/udp comment 'Ephemres NetFlow v5/v9 Telemetry' || true
+            ufw allow 4739/udp comment 'Ephemres IPFIX Telemetry' || true
         fi
     else
-        echo -e "${YELLOW}[INFO] Flow telemetry is disabled in settings. netmon-flowd service installed and ready for UI activation.${NC}"
+        echo -e "${YELLOW}[INFO] Flow telemetry is disabled in settings. ephemres-flowd service installed and ready for UI activation.${NC}"
     fi
 
     sleep 2
-    if systemctl is-active --quiet netmon-api && systemctl is-active --quiet netmon-engine; then
-        echo -e "${GREEN}[SUCCESS] Primary platform services (netmon-api, netmon-engine) are active, enabled on boot, and healthy.${NC}"
+    if systemctl is-active --quiet ephemres-api && systemctl is-active --quiet ephemres-engine; then
+        echo -e "${GREEN}[SUCCESS] Primary platform services (ephemres-api, ephemres-engine) are active, enabled on boot, and healthy.${NC}"
     else
-        echo -e "${YELLOW}[WARN] Check service status via: systemctl status netmon-api netmon-engine${NC}"
+        echo -e "${YELLOW}[WARN] Check service status via: systemctl status ephemres-api ephemres-engine${NC}"
     fi
 else
-    echo -e "[DRY-RUN] Would run: systemctl enable & restart redis-server netmon-api netmon-engine (and netmon-flowd if enabled)"
+    echo -e "[DRY-RUN] Would run: systemctl enable & restart redis-server ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"
-echo -e "${GREEN}   [UPGRADE COMPLETE] LNMP v3.3.0 Platform upgraded successfully!        ${NC}"
+echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.1n Platform upgraded successfully!   ${NC}"
 echo -e "${GREEN}   Pre-Upgrade Database Backup Saved At: ${BACKUP_FILE}${NC}"
 echo -e "${GREEN}========================================================================${NC}"

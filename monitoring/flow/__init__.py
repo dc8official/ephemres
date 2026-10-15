@@ -1,4 +1,4 @@
 """
-Network Flow Telemetry Ingestion package for LNMP v3.3.0.
+Network Flow Telemetry Ingestion package for Ephemres v3.3.1n.
 Supports NetFlow v5, NetFlow v9, and IPFIX.
 """

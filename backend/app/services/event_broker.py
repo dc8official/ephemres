@@ -156,7 +156,7 @@ class RedisEventBroker(EventBroker):
                 pass
 
     async def subscribe_stream(
-        self, channel: str, group: str = "netmon-workers", consumer: Optional[str] = None
+        self, channel: str, group: str = "ephemres-workers", consumer: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Subscribes to durable Redis Streams with consumer group checkpointing and ACK semantics.

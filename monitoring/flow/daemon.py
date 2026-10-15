@@ -19,14 +19,14 @@ from monitoring.flow.collector import FlowCollector
 from monitoring.flow.correlator import FlowCorrelator
 
 logger = setup_logging(
-    service_name="netmon-flowd",
-    log_dir=getattr(settings.logging, "log_dir", "/var/log/netmon"),
+    service_name="ephemres-flowd",
+    log_dir=getattr(settings.logging, "log_dir", "/var/log/ephemres"),
     log_level=getattr(settings.logging, "level", "INFO"),
 )
 
 
 async def run_flow_daemon() -> None:
-    logger.info("Starting netmon-flowd Network Flow Telemetry Daemon (v3.3.0)...")
+    logger.info("Starting ephemres-flowd Network Flow Telemetry Daemon (v3.3.1n)...")
 
     # Verify database connection
     await check_database_connection()
@@ -48,10 +48,10 @@ async def run_flow_daemon() -> None:
         )
         await client.ping()
         redis_client = client
-        logger.info("netmon-flowd: Connected to Redis at %s:%d/%d", r_host, r_port, r_db)
+        logger.info("ephemres-flowd: Connected to Redis at %s:%d/%d", r_host, r_port, r_db)
     except Exception as e:
         logger.error(
-            "netmon-flowd: Redis is required for flow ingestion buffer but could not connect: %s",
+            "ephemres-flowd: Redis is required for flow ingestion buffer but could not connect: %s",
             e,
         )
         sys.exit(1)
@@ -69,7 +69,7 @@ async def run_flow_daemon() -> None:
     await aggregator.start()
 
     logger.info(
-        "netmon-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d).",
+        "ephemres-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d).",
         netflow_port,
         ipfix_port,
     )
@@ -85,13 +85,13 @@ async def run_flow_daemon() -> None:
 
     await stop_event.wait()
 
-    logger.info("netmon-flowd: Shutdown signal received. Stopping services...")
+    logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
     await collector.stop()
     await aggregator.stop()
     await correlator.stop()
     if redis_client:
         await redis_client.aclose()
-    logger.info("netmon-flowd shutdown complete.")
+    logger.info("ephemres-flowd shutdown complete.")
 
 
 def main() -> None:

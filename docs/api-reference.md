@@ -1,6 +1,6 @@
-# LNMP API Reference — Version 3.3.0
+# Ephemres API Reference — Version 3.3.1n
 
-The LNMP (Network Monitoring Platform) v3.3.0 exposes a RESTful and Server-Sent Events (SSE) API built on FastAPI. The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
+Ephemres v3.3.1n exposes a RESTful and Server-Sent Events (SSE) API built on FastAPI. The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
 
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
@@ -15,12 +15,12 @@ Returns the current platform version metadata.
   ```json
   {
     "status": "ok",
-    "version": "3.3.0"
+    "version": "3.3.1n"
   }
   ```
 
 ### `GET /api/v1/health`
-Performs system health check (database connection, monitoring engine status). Returns `{"status": "ok", "version": "3.3.0"}`.
+Performs system health check (database connection, monitoring engine status). Returns `{"status": "ok", "version": "3.3.1n"}`.
 
 ### `GET /api/v1/events/stream`
 Connects to the real-time Server-Sent Events (SSE) telemetry stream.

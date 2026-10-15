@@ -5,8 +5,8 @@
     <header class="app-header" v-if="showNav">
       <div class="header-inner">
         <div class="brand">
-          <span class="brand-name">lnmp</span>
-          <span class="brand-version">{{ appVersion || 'v3.3.0' }}</span>
+          <span class="brand-name">Ephemres</span>
+          <span class="brand-version">{{ appVersion || 'v3.3.1n' }}</span>
         </div>
         <nav class="header-nav" aria-label="Main Navigation">
           <RouterLink to="/" class="nav-link">Dashboard</RouterLink>

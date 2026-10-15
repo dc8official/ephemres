@@ -33,7 +33,7 @@ class TestSSEAuthPoolDecoupling(unittest.TestCase):
         """
         async def _run():
             mock_request = MagicMock()
-            mock_request.cookies = {"lnmp_access_token": "valid.token.test"}
+            mock_request.cookies = {"ephemres_access_token": "valid.token.test"}
             mock_request.headers = {}
             mock_request.url.path = "/api/v1/events/stream"
 

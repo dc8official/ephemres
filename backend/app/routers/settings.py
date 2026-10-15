@@ -25,17 +25,21 @@ import os
 
 async def manage_flow_service(enable: bool) -> tuple[bool, str]:
     """
-    Attempts to start or stop the netmon-flowd systemd service.
+    Attempts to start or stop the ephemres-flowd (or legacy netmon-flowd) systemd service.
     First tries passwordless sudo systemctl, falling back to direct systemctl.
     """
-    if not os.path.exists("/etc/systemd/system/netmon-flowd.service"):
-        logger.debug("netmon-flowd.service not installed; skipping service management")
-        return False, "netmon-flowd.service not installed"
+    service_name = "ephemres-flowd"
+    if not os.path.exists(f"/etc/systemd/system/{service_name}.service"):
+        if os.path.exists("/etc/systemd/system/netmon-flowd.service"):
+            service_name = "netmon-flowd"
+        else:
+            logger.debug("%s.service not installed; skipping service management", service_name)
+            return False, f"{service_name}.service not installed"
 
     action = "restart" if enable else "stop"
     commands = [
-        ["sudo", "-n", "systemctl", action, "netmon-flowd"],
-        ["systemctl", action, "netmon-flowd"],
+        ["sudo", "-n", "systemctl", action, service_name],
+        ["systemctl", action, service_name],
     ]
     last_err = ""
     for cmd in commands:
@@ -47,9 +51,9 @@ async def manage_flow_service(enable: bool) -> tuple[bool, str]:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode == 0:
-                logger.info("Successfully executed %s for netmon-flowd via %s", action, cmd[0])
+                logger.info("Successfully executed %s for %s via %s", action, service_name, cmd[0])
                 if enable:
-                    for en_cmd in [["sudo", "-n", "systemctl", "enable", "netmon-flowd"], ["systemctl", "enable", "netmon-flowd"]]:
+                    for en_cmd in [["sudo", "-n", "systemctl", "enable", service_name], ["systemctl", "enable", service_name]]:
                         try:
                             en_proc = await asyncio.create_subprocess_exec(*en_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
                             await en_proc.communicate()
@@ -58,7 +62,7 @@ async def manage_flow_service(enable: bool) -> tuple[bool, str]:
                         except Exception:
                             pass
                 else:
-                    for dis_cmd in [["sudo", "-n", "systemctl", "disable", "netmon-flowd"], ["systemctl", "disable", "netmon-flowd"]]:
+                    for dis_cmd in [["sudo", "-n", "systemctl", "disable", service_name], ["systemctl", "disable", service_name]]:
                         try:
                             dis_proc = await asyncio.create_subprocess_exec(*dis_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
                             await dis_proc.communicate()
@@ -66,13 +70,13 @@ async def manage_flow_service(enable: bool) -> tuple[bool, str]:
                                 break
                         except Exception:
                             pass
-                return True, f"Service netmon-flowd {action}ed successfully."
+                return True, f"Service {service_name} {action}ed successfully."
             else:
                 last_err = stderr.decode().strip() or stdout.decode().strip()
         except Exception as exc:
             last_err = str(exc)
 
-    logger.debug("Could not automatically %s netmon-flowd via systemctl: %s", action, last_err)
+    logger.debug("Could not automatically %s %s via systemctl: %s", action, service_name, last_err)
     return False, last_err
 
 

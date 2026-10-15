@@ -955,7 +955,7 @@ async function triggerPdfExport() {
     const link = document.createElement('a')
     link.href = url
     const templateName = pdfTemplate.value.toUpperCase()
-    link.download = `LNMP_${templateName}_Report_${pdfRange.value}_${Date.now()}.pdf`
+    link.download = `Ephemres_${templateName}_Report_${pdfRange.value}_${Date.now()}.pdf`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)

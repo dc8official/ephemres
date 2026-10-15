@@ -34,7 +34,8 @@ class SSRFSafeBackend(httpcore.AsyncNetworkBackend):
     ):
         self._inner = inner if inner is not None else httpcore.AsyncNetworkBackend()
         if allow_private is None:
-            self._allow_private = os.environ.get("NETMON_ALLOW_PRIVATE_WEBHOOKS", "false").lower() in (
+            raw_val = os.environ.get("EPHEMRES_ALLOW_PRIVATE_WEBHOOKS") or os.environ.get("NETMON_ALLOW_PRIVATE_WEBHOOKS", "false")
+            self._allow_private = raw_val.lower() in (
                 "true",
                 "1",
                 "yes",
@@ -150,7 +151,8 @@ def validate_outbound_url(
         raise ValueError("URL cannot be empty.")
 
     if allow_private is None:
-        allow_private = os.environ.get("NETMON_ALLOW_PRIVATE_WEBHOOKS", "false").lower() in (
+        raw_val = os.environ.get("EPHEMRES_ALLOW_PRIVATE_WEBHOOKS") or os.environ.get("NETMON_ALLOW_PRIVATE_WEBHOOKS", "false")
+        allow_private = raw_val.lower() in (
             "true",
             "1",
             "yes",

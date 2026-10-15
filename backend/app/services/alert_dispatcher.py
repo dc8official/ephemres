@@ -49,7 +49,7 @@ def _safe_uuid(val: Any) -> Optional[UUID]:
 class AlertDispatcher:
     """
     Enterprise Alert Dispatcher and Suppression Engine.
-    Executes in background tasks within the netmon-api process.
+    Executes in background tasks within the ephemres-api process.
     Completely decoupled from the monitoring probe loop.
     """
 
@@ -742,7 +742,7 @@ class AlertDispatcher:
             if not to_emails:
                 raise ValueError("No recipient email address specified in SMTP configuration.")
 
-            from_email = config.get("from_email") or "lnmp-alerts@local.network"
+            from_email = config.get("from_email") or "ephemres-alerts@local.network"
 
             for to_addr in to_emails:
                 msg = build_email_mime(
@@ -875,7 +875,7 @@ class AlertDispatcher:
                 event_type="TEST_PROBE",
                 severity="RECOVERED",
                 timestamp=now,
-                details={"diagnostic_test": True, "initiated_by": "LNMP Administrator"},
+                details={"diagnostic_test": True, "initiated_by": "Ephemres Administrator"},
             )
 
             # Record in delivery logs if channel exists in DB

@@ -1,0 +1,32 @@
+[Unit]
+Description=Ephemres Network Flow Telemetry Collector Daemon (NetFlow/IPFIX)
+After=network.target postgresql.service redis-server.service
+Requires=redis-server.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ephemres
+Group=ephemres
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+RuntimeDirectory=ephemres
+RuntimeDirectoryMode=0755
+LogsDirectory=ephemres
+LogsDirectoryMode=0755
+WorkingDirectory=/opt/ephemres
+EnvironmentFile=-/etc/ephemres/ephemres.env
+EnvironmentFile=-/opt/ephemres/.env
+EnvironmentFile=-/opt/ephemres/backend/.env
+Environment=PYTHONPATH=/opt/ephemres/backend:/opt/ephemres
+Environment=HOME=/opt/ephemres
+ExecStart=/opt/ephemres/venv/bin/python -m monitoring.flow.daemon
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ephemres-flowd
+
+[Install]
+WantedBy=multi-user.target

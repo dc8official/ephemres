@@ -3,7 +3,7 @@ host = "localhost"
 port = 5432
 name = "netmon"
 user = "netmon_user"
-# Password loaded from environment variable: NETMON_DB_PASSWORD
+# Password loaded from environment variable: EPHEMRES_DB_PASSWORD (or NETMON_DB_PASSWORD)
 
 [monitoring]
 interval_seconds = 60
@@ -21,7 +21,7 @@ allowed_origins = ["https://monitor.yourdomain.com"]
 session_timeout_minutes = 120
 max_active_sessions_per_user = 2
 hsts_enabled = true
-# Secret key loaded from environment variable: NETMON_SECRET_KEY
+# Secret key loaded from environment variable: EPHEMRES_SECRET_KEY (or NETMON_SECRET_KEY)
 
 [redis]
 host = "127.0.0.1"
@@ -32,7 +32,7 @@ performance_mode = false
 
 [logging]
 level = "INFO"
-log_dir = "/var/log/netmon"
+log_dir = "/var/log/ephemres"
 
 [flow]
 enabled = false

@@ -12,17 +12,19 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.config import settings
 
-_SALT = b"lnmp-alert-crypto-salt-v1"
-_INFO = b"lnmp-aes-256-gcm-key-derivation"
+_SALT = b"ephemres-alert-crypto-salt-v1"
+_INFO = b"ephemres-aes-256-gcm-key-derivation"
+_LEGACY_SALT = b"lnmp-alert-crypto-salt-v1"
+_LEGACY_INFO = b"lnmp-aes-256-gcm-key-derivation"
 
 
-def _derive_key(secret_str: str) -> bytes:
+def _derive_key(secret_str: str, salt: bytes = _SALT, info: bytes = _INFO) -> bytes:
     master_secret = secret_str.encode("utf-8")
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=_SALT,
-        info=_INFO,
+        salt=salt,
+        info=info,
     )
     return hkdf.derive(master_secret)
 
@@ -85,14 +87,15 @@ def decrypt_secret(ciphertext: str) -> str:
 
     last_exc = None
     for key_str in candidate_keys:
-        try:
-            key = _derive_key(key_str)
-            aesgcm = AESGCM(key)
-            decrypted = aesgcm.decrypt(nonce, raw_ct, None)
-            return decrypted.decode("utf-8")
-        except Exception as exc:
-            last_exc = exc
-            continue
+        for s, i in [(_SALT, _INFO), (_LEGACY_SALT, _LEGACY_INFO)]:
+            try:
+                key = _derive_key(key_str, salt=s, info=i)
+                aesgcm = AESGCM(key)
+                decrypted = aesgcm.decrypt(nonce, raw_ct, None)
+                return decrypted.decode("utf-8")
+            except Exception as exc:
+                last_exc = exc
+                continue
 
     raise DecryptionError(f"Failed to decrypt secret payload: {last_exc}") from last_exc
 

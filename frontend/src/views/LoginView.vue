@@ -3,7 +3,7 @@
     <div class="login-container">
       <div class="login-card">
         <div class="brand-header">
-          <h1 class="brand-title">lnmp v3.3.0</h1>
+          <h1 class="brand-title">Ephemres v3.3.1n</h1>
           <p class="brand-subtitle">Network Uptime Monitoring Platform</p>
         </div>
 
@@ -129,12 +129,12 @@ const handleLogin = async () => {
       } else if (status === 429) {
         error.value = 'Too many requests. Please wait a moment before trying again.'
       } else if (status >= 500) {
-        error.value = 'Server connection error. Please ensure the LNMP backend service is running.'
+        error.value = 'Server connection error. Please ensure the Ephemres backend service is running.'
       } else {
         error.value = detail || 'Authentication failed. Please check your credentials and try again.'
       }
     } else {
-      error.value = 'Unable to connect to LNMP server. Please check your network connection.'
+      error.value = 'Unable to connect to Ephemres server. Please check your network connection.'
     }
   } finally {
     loading.value = false

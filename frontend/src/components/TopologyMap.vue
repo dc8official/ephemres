@@ -68,7 +68,7 @@
         <div class="legend-items">
           <div class="legend-item">
             <span class="node-icon square state-root"></span>
-            <span>LNMP Engine</span>
+            <span>Ephemres Engine</span>
             <span class="count-badge glow-root">{{ legendCounts.root }}</span>
           </div>
           <div class="legend-item">
@@ -296,7 +296,7 @@ watch(isDark, () => {
 })
 
 function formatNodeType(type) {
-  if (type === 'root') return 'LNMP Engine (Root)'
+  if (type === 'root') return 'Ephemres Engine (Root)'
   if (type === 'monitored') return 'Monitored Target'
   if (type === 'subnet_hub') return 'Subnet Hub (L2)'
   return 'Transit Router'

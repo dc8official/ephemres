@@ -48,10 +48,10 @@ class TestSystemIntegrityAndFixes(unittest.TestCase):
         )
 
         # 2. Virtual environment detection
-        self.assertIn("/opt/netmon/venv", content, "upgrade.sh must check /opt/netmon/venv path")
+        self.assertTrue("/opt/ephemres/venv" in content or "/opt/netmon/venv" in content, "upgrade.sh must check virtualenv path")
 
         # 3. Environment variable exports for Alembic migrations
-        self.assertIn("NETMON_DB_PASSWORD", content, "upgrade.sh must export NETMON_DB_PASSWORD for Alembic migrations")
+        self.assertTrue("EPHEMRES_DB_PASSWORD" in content or "NETMON_DB_PASSWORD" in content, "upgrade.sh must export DB_PASSWORD for Alembic migrations")
 
     def test_api_routers_sql_uuid_casting(self) -> None:
         """
