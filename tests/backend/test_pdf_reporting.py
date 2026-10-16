@@ -8,7 +8,6 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pypdf import PdfReader
 
 from app.database import get_db
 from app.models.endpoint import Endpoint
@@ -17,7 +16,7 @@ from app.models.system_setting import AppSetting
 from app.routers.auth import get_current_user, require_admin, require_operator_or_admin
 from app.routers.reports import router as reports_router
 from app.routers.settings import router as settings_router
-from app.services.pdf_engine import render_pdf_async, secure_url_fetcher
+from app.services.pdf_engine import NativePdfReader as PdfReader, render_pdf_async, secure_url_fetcher
 from app.services.report_compiler import (
     compile_availability_report_data,
     compile_bandwidth_report_data,

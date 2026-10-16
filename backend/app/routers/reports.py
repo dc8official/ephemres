@@ -15,7 +15,6 @@ from sqlalchemy import and_, or_, select, text
 import hashlib
 import os
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
@@ -39,6 +38,7 @@ from app.services.report_compiler import (
     compile_master_report_data,
     get_organization_branding,
 )
+from app.services.template_engine import TemplateEnvironment
 from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
@@ -50,9 +50,9 @@ logger = logging.getLogger(__name__)
 REPORTS_TEMPLATES_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "templates", "reports")
 )
-jinja_env = Environment(
-    loader=FileSystemLoader(REPORTS_TEMPLATES_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
+jinja_env = TemplateEnvironment(
+    search_path=REPORTS_TEMPLATES_DIR,
+    autoescape=True,
 )
 
 router = APIRouter(prefix="/reports", tags=["reports"])
