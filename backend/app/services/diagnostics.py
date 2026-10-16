@@ -35,34 +35,11 @@ def is_local_subnet_destination(target_ip: str) -> bool:
         if target_obj.is_loopback:
             return True
 
-        import psutil
+        from app.services.net_interfaces import get_local_interface_networks
 
-        addrs = psutil.net_if_addrs()
-        for nic_name, nic_addrs in addrs.items():
-            for addr in nic_addrs:
-                fam = getattr(addr, "family", None)
-                is_ipv4 = False
-                if fam is not None:
-                    fam_name = getattr(fam, "name", None)
-                    if fam_name == "AF_INET" or fam == 2 or str(fam) == "AddressFamily.AF_INET":
-                        is_ipv4 = True
-                if is_ipv4 and getattr(addr, "address", None):
-                    if not addr.address.startswith("127."):
-                        try:
-                            if getattr(addr, "netmask", None):
-                                local_net = ipaddress.ip_network(
-                                    f"{addr.address}/{addr.netmask}", strict=False
-                                )
-                            else:
-                                local_net = ipaddress.ip_network(
-                                    f"{addr.address}/24", strict=False
-                                )
-                        except Exception:
-                            local_net = ipaddress.ip_network(
-                                f"{addr.address}/24", strict=False
-                            )
-                        if target_obj in local_net:
-                            return True
+        for local_net in get_local_interface_networks():
+            if target_obj.version == local_net.version and target_obj in local_net:
+                return True
     except Exception:
         pass
     return False

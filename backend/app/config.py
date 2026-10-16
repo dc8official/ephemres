@@ -1,16 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field
+import json
 import os
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple, Type
-
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pydantic_settings import (
-    BaseSettings,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-    TomlConfigSettingsSource,
-)
+import tomllib
+from typing import Any, Dict, List, Literal, Optional
 
 
 class ConfigurationError(Exception):
@@ -18,32 +13,97 @@ class ConfigurationError(Exception):
     pass
 
 
-class DatabaseSettings(BaseModel):
+def _coerce_bool(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return bool(val)
+    if isinstance(val, str):
+        low = val.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+    raise ConfigurationError(f"Invalid boolean value: {val!r}")
+
+
+def _coerce_int(val: Any, name: str, ge: Optional[int] = None, le: Optional[int] = None) -> int:
+    if isinstance(val, bool):
+        raise ConfigurationError(f"Invalid integer for {name}: {val!r}")
+    try:
+        res = int(val)
+    except (ValueError, TypeError) as exc:
+        raise ConfigurationError(f"Invalid integer for {name}: {val}") from exc
+    if ge is not None and res < ge:
+        raise ConfigurationError(f"Configuration validation failed: {name}={res} must be >= {ge}")
+    if le is not None and res > le:
+        raise ConfigurationError(f"Configuration validation failed: {name}={res} must be <= {le}")
+    return res
+
+
+def _coerce_str_list(val: Any, name: str) -> List[str]:
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed]
+            except Exception as exc:
+                raise ConfigurationError(f"Invalid list JSON for {name}: {val}") from exc
+        return [x.strip() for x in s.split(",") if x.strip()]
+    raise ConfigurationError(f"Invalid list value for {name}: {val!r}")
+
+
+@dataclass
+class DatabaseSettings:
     host: str = "localhost"
-    port: int = Field(default=5432, ge=1, le=65535)
+    port: int = 5432
     name: str = "netmon"
     user: str = "netmon_user"
     password: str = "postgres"
-    pool_size: int = Field(default=10, ge=1, le=100)
-    max_overflow: int = Field(default=10, ge=0, le=100)
+    pool_size: int = 10
+    max_overflow: int = 10
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        self.host = str(self.host)
+        self.port = _coerce_int(self.port, "database.port", ge=1, le=65535)
+        self.name = str(self.name)
+        self.user = str(self.user)
+        self.password = str(self.password)
+        self.pool_size = _coerce_int(self.pool_size, "database.pool_size", ge=1, le=100)
+        self.max_overflow = _coerce_int(self.max_overflow, "database.max_overflow", ge=0, le=100)
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class MonitoringSettings(BaseModel):
-    interval_seconds: int = Field(default=60, ge=10, le=3600)
-    ping_count: int = Field(default=10, ge=1, le=20)
-    ping_interval_seconds: int = Field(default=6, ge=1, le=60)
-    state_confirmation_cycles: int = Field(default=3, ge=1, le=10)
-    retention_days: int = Field(default=730, ge=30, le=3650)
+@dataclass
+class MonitoringSettings:
+    interval_seconds: int = 60
+    ping_count: int = 10
+    ping_interval_seconds: int = 6
+    state_confirmation_cycles: int = 3
+    retention_days: int = 730
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        self.interval_seconds = _coerce_int(self.interval_seconds, "monitoring.interval_seconds", ge=10, le=3600)
+        self.ping_count = _coerce_int(self.ping_count, "monitoring.ping_count", ge=1, le=20)
+        self.ping_interval_seconds = _coerce_int(self.ping_interval_seconds, "monitoring.ping_interval_seconds", ge=1, le=60)
+        self.state_confirmation_cycles = _coerce_int(self.state_confirmation_cycles, "monitoring.state_confirmation_cycles", ge=1, le=10)
+        self.retention_days = _coerce_int(self.retention_days, "monitoring.retention_days", ge=30, le=3650)
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class ApiSettings(BaseModel):
+@dataclass
+class ApiSettings:
     host: str = "0.0.0.0"
-    port: int = Field(default=8000, ge=1, le=65535)
-    allowed_origins: List[str] = Field(
+    port: int = 8000
+    allowed_origins: List[str] = field(
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
@@ -52,17 +112,39 @@ class ApiSettings(BaseModel):
         ]
     )
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        self.host = str(self.host)
+        self.port = _coerce_int(self.port, "api.port", ge=1, le=65535)
+        self.allowed_origins = _coerce_str_list(self.allowed_origins, "api.allowed_origins")
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class SecuritySettings(BaseModel):
-    session_timeout_minutes: int = Field(default=120, ge=1, le=1440)
-    max_active_sessions_per_user: int = Field(default=2, ge=1, le=10)
+@dataclass
+class SecuritySettings:
+    session_timeout_minutes: int = 120
+    max_active_sessions_per_user: int = 2
     hsts_enabled: bool = False
-    secret_key: str = Field(default="dev-secret-key-change-in-production-min-32-chars")
+    secret_key: str = "dev-secret-key-change-in-production-min-32-chars"
     jwt_secret: Optional[str] = None
     crypto_key: Optional[str] = None
-    fallback_crypto_keys: List[str] = Field(default_factory=list)
+    fallback_crypto_keys: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.session_timeout_minutes = _coerce_int(
+            self.session_timeout_minutes, "security.session_timeout_minutes", ge=1, le=1440
+        )
+        self.max_active_sessions_per_user = _coerce_int(
+            self.max_active_sessions_per_user, "security.max_active_sessions_per_user", ge=1, le=10
+        )
+        self.hsts_enabled = _coerce_bool(self.hsts_enabled)
+        self.secret_key = str(self.secret_key)
+        if self.jwt_secret is not None:
+            self.jwt_secret = str(self.jwt_secret)
+        if self.crypto_key is not None:
+            self.crypto_key = str(self.crypto_key)
+        self.fallback_crypto_keys = _coerce_str_list(self.fallback_crypto_keys, "security.fallback_crypto_keys")
 
     @property
     def effective_jwt_secret(self) -> str:
@@ -80,35 +162,65 @@ class SecuritySettings(BaseModel):
     def effective_crypto_key(self, val: str) -> None:
         self.crypto_key = val
 
-    model_config = ConfigDict(extra="ignore")
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class LoggingSettings(BaseModel):
+@dataclass
+class LoggingSettings:
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_dir: str = "/var/log/ephemres"
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        lvl = str(self.level).upper()
+        if lvl not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise ConfigurationError(f"Invalid logging level: {self.level}")
+        self.level = lvl  # type: ignore[assignment]
+        self.log_dir = str(self.log_dir)
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class RedisSettings(BaseModel):
+@dataclass
+class RedisSettings:
     host: str = "127.0.0.1"
-    port: int = Field(default=6379, ge=1, le=65535)
-    db: int = Field(default=0, ge=0, le=15)
+    port: int = 6379
+    db: int = 0
     password: Optional[str] = None
     enabled: bool = True
     performance_mode: bool = False
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        self.host = str(self.host)
+        self.port = _coerce_int(self.port, "redis.port", ge=1, le=65535)
+        self.db = _coerce_int(self.db, "redis.db", ge=0, le=15)
+        if self.password is not None:
+            self.password = str(self.password)
+        self.enabled = _coerce_bool(self.enabled)
+        self.performance_mode = _coerce_bool(self.performance_mode)
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
-class FlowSettings(BaseModel):
+@dataclass
+class FlowSettings:
     enabled: bool = False
-    netflow_port: int = Field(default=2055, ge=1, le=65535)
-    ipfix_port: int = Field(default=4739, ge=1, le=65535)
-    sampling_multiplier: int = Field(default=1, ge=1)
-    buffer_memory_limit_mb: int = Field(default=512, ge=64)
+    netflow_port: int = 2055
+    ipfix_port: int = 4739
+    sampling_multiplier: int = 1
+    buffer_memory_limit_mb: int = 512
 
-    model_config = ConfigDict(extra="ignore")
+    def __post_init__(self) -> None:
+        self.enabled = _coerce_bool(self.enabled)
+        self.netflow_port = _coerce_int(self.netflow_port, "flow.netflow_port", ge=1, le=65535)
+        self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
+        self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
+        self.buffer_memory_limit_mb = _coerce_int(self.buffer_memory_limit_mb, "flow.buffer_memory_limit_mb", ge=64)
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 def resolve_config_file() -> Optional[Path]:
@@ -144,55 +256,114 @@ def resolve_config_file() -> Optional[Path]:
     return None
 
 
-class Settings(BaseSettings):
-    environment: str = Field(default="development")
-    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
-    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
-    api: ApiSettings = Field(default_factory=ApiSettings)
-    security: SecuritySettings = Field(default_factory=SecuritySettings)
-    logging: LoggingSettings = Field(default_factory=LoggingSettings)
-    redis: RedisSettings = Field(default_factory=RedisSettings)
-    flow: FlowSettings = Field(default_factory=FlowSettings)
+def _parse_dotenv_file(dotenv_path: Path) -> Dict[str, str]:
+    """Lightweight stdlib .env parser."""
+    env_vars: Dict[str, str] = {}
+    if not dotenv_path.is_file():
+        return env_vars
+    try:
+        with open(dotenv_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+                    v = v[1:-1]
+                if k:
+                    env_vars[k] = v
+    except Exception:
+        pass
+    return env_vars
 
-    model_config = SettingsConfigDict(
-        env_prefix="EPHEMRES_",
-        env_nested_delimiter="__",
-        extra="ignore",
-    )
 
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: Type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> Tuple[PydanticBaseSettingsSource, ...]:
-        cfg_file = resolve_config_file()
+def _load_merged_env() -> Dict[str, str]:
+    """Merges .env (EPHEMRES_* variables) with os.environ (os.environ takes precedence)."""
+    merged: Dict[str, str] = {}
+    for candidate in (
+        Path(__file__).resolve().parent.parent.parent / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(".env"),
+    ):
+        if candidate.is_file():
+            for k, v in _parse_dotenv_file(candidate).items():
+                if k.upper().startswith("EPHEMRES_"):
+                    merged[k] = v
+    merged.update(os.environ)
+    return merged
+
+
+def _build_section(cls: type, toml_data: Dict[str, Any], section_name: str, env_map: Dict[str, str]) -> Any:
+    raw_section = dict(toml_data.get(section_name, {})) if isinstance(toml_data.get(section_name), dict) else {}
+    valid_fields = set(cls.__dataclass_fields__.keys())  # type: ignore[attr-defined]
+    kwargs: Dict[str, Any] = {k: v for k, v in raw_section.items() if k in valid_fields}
+
+    # Apply nested delimiter overrides: EPHEMRES_<SECTION>__<FIELD> and NETMON_<SECTION>__<FIELD>
+    for prefix in ("EPHEMRES_", "NETMON_"):
+        sec_prefix = f"{prefix}{section_name.upper()}__"
+        for env_k, env_v in env_map.items():
+            if env_k.upper().startswith(sec_prefix):
+                field_name = env_k[len(sec_prefix):].lower()
+                if field_name in valid_fields:
+                    kwargs[field_name] = env_v
+
+    return cls(**kwargs)
+
+
+class Settings:
+    """Zero-dependency application settings loader using stdlib tomllib and os.environ."""
+
+    def __init__(
+        self,
+        environment: Optional[str] = None,
+        database: Optional[DatabaseSettings] = None,
+        monitoring: Optional[MonitoringSettings] = None,
+        api: Optional[ApiSettings] = None,
+        security: Optional[SecuritySettings] = None,
+        logging: Optional[LoggingSettings] = None,
+        redis: Optional[RedisSettings] = None,
+        flow: Optional[FlowSettings] = None,
+        _toml_file: Optional[Path] = None,
+    ) -> None:
+        cfg_file = _toml_file if _toml_file is not None else resolve_config_file()
+        toml_data: Dict[str, Any] = {}
         if cfg_file is not None:
             try:
-                toml_source = TomlConfigSettingsSource(
-                    settings_cls,
-                    toml_file=cfg_file,
-                )
-                return (
-                    init_settings,
-                    env_settings,
-                    dotenv_settings,
-                    toml_source,
-                    file_secret_settings,
-                )
+                with open(cfg_file, "rb") as f:
+                    toml_data = tomllib.load(f)
             except Exception as e:
                 raise ConfigurationError(
                     f"Failed to parse TOML configuration file at {cfg_file}: {e}"
                 ) from e
-        return (
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            file_secret_settings,
+
+        env_map = _load_merged_env()
+
+        env_from_toml = toml_data.get("environment", "development")
+        env_from_vars = (
+            env_map.get("EPHEMRES_ENVIRONMENT")
+            or env_map.get("NETMON_ENVIRONMENT")
+            or env_map.get("EPHEMRES_ENV")
+            or env_map.get("NETMON_ENV")
+            or env_map.get("ENVIRONMENT")
         )
+        resolved_env = environment or env_from_vars or env_from_toml or "development"
+        self.environment: str = str(resolved_env).strip().lower()
+
+        self.database: DatabaseSettings = database or _build_section(DatabaseSettings, toml_data, "database", env_map)
+        self.monitoring: MonitoringSettings = monitoring or _build_section(MonitoringSettings, toml_data, "monitoring", env_map)
+        self.api: ApiSettings = api or _build_section(ApiSettings, toml_data, "api", env_map)
+        self.security: SecuritySettings = security or _build_section(SecuritySettings, toml_data, "security", env_map)
+        self.logging: LoggingSettings = logging or _build_section(LoggingSettings, toml_data, "logging", env_map)
+        self.redis: RedisSettings = redis or _build_section(RedisSettings, toml_data, "redis", env_map)
+        self.flow: FlowSettings = flow or _build_section(FlowSettings, toml_data, "flow", env_map)
+
+        _apply_env_overrides_and_validate(self, env_map)
 
     @property
     def db_url(self) -> str:
@@ -202,89 +373,115 @@ class Settings(BaseSettings):
         )
 
     @property
+    def async_database_url(self) -> str:
+        return self.db_url
+
+    @property
     def sync_db_url(self) -> str:
         return (
             f"postgresql+psycopg2://{self.database.user}:{self.database.password}@"
             f"{self.database.host}:{self.database.port}/{self.database.name}"
         )
 
+    @property
+    def sync_database_url(self) -> str:
+        return self.sync_db_url
 
-def load_settings() -> Settings:
-    """Load settings with environment variable fallbacks and validation."""
-    try:
-        loaded = Settings()
-    except ValidationError as err:
-        raise ConfigurationError(f"Configuration validation failed:\n{err}") from err
-    except Exception as exc:
-        if isinstance(exc, ConfigurationError):
-            raise
-        raise ConfigurationError(f"Error loading configuration: {exc}") from exc
+    @property
+    def effective_jwt_secret(self) -> str:
+        return self.security.effective_jwt_secret
 
+    @property
+    def effective_crypto_key(self) -> str:
+        return self.security.effective_crypto_key
+
+    @property
+    def fallback_crypto_keys(self) -> List[str]:
+        return self.security.fallback_crypto_keys
+
+    def model_dump(self) -> Dict[str, Any]:
+        return {
+            "environment": self.environment,
+            "database": self.database.model_dump(),
+            "monitoring": self.monitoring.model_dump(),
+            "api": self.api.model_dump(),
+            "security": self.security.model_dump(),
+            "logging": self.logging.model_dump(),
+            "redis": self.redis.model_dump(),
+            "flow": self.flow.model_dump(),
+        }
+
+
+def _apply_env_overrides_and_validate(loaded: Settings, env_map: Dict[str, str]) -> None:
     # Environment variable overrides (supporting EPHEMRES_ and legacy NETMON_)
-    db_pass = os.environ.get("EPHEMRES_DB_PASSWORD") or os.environ.get("NETMON_DB_PASSWORD") or os.environ.get("POSTGRES_PASSWORD")
+    db_pass = env_map.get("EPHEMRES_DB_PASSWORD") or env_map.get("NETMON_DB_PASSWORD") or env_map.get("POSTGRES_PASSWORD")
     if db_pass:
         loaded.database.password = db_pass
 
-    db_user = os.environ.get("EPHEMRES_DB_USER") or os.environ.get("NETMON_DB_USER") or os.environ.get("POSTGRES_USER")
+    db_user = env_map.get("EPHEMRES_DB_USER") or env_map.get("NETMON_DB_USER") or env_map.get("POSTGRES_USER")
     if db_user:
         loaded.database.user = db_user
 
-    db_host = os.environ.get("EPHEMRES_DB_HOST") or os.environ.get("NETMON_DB_HOST") or os.environ.get("POSTGRES_HOST")
+    db_host = env_map.get("EPHEMRES_DB_HOST") or env_map.get("NETMON_DB_HOST") or env_map.get("POSTGRES_HOST")
     if db_host:
         loaded.database.host = db_host
 
-    db_port = os.environ.get("EPHEMRES_DB_PORT") or os.environ.get("NETMON_DB_PORT") or os.environ.get("POSTGRES_PORT")
+    db_port = env_map.get("EPHEMRES_DB_PORT") or env_map.get("NETMON_DB_PORT") or env_map.get("POSTGRES_PORT")
     if db_port:
         try:
             loaded.database.port = int(db_port)
-        except ValueError:
-            raise ConfigurationError(f"Invalid integer for database port: {db_port}")
+        except ValueError as err:
+            raise ConfigurationError(f"Invalid integer for database port: {db_port}") from err
 
-    db_name = os.environ.get("EPHEMRES_DB_NAME") or os.environ.get("NETMON_DB_NAME") or os.environ.get("POSTGRES_DB")
+    db_name = env_map.get("EPHEMRES_DB_NAME") or env_map.get("NETMON_DB_NAME") or env_map.get("POSTGRES_DB")
     if db_name:
         loaded.database.name = db_name
 
-    db_pool = os.environ.get("EPHEMRES_DB_POOL_SIZE") or os.environ.get("NETMON_DB_POOL_SIZE")
+    db_pool = env_map.get("EPHEMRES_DB_POOL_SIZE") or env_map.get("NETMON_DB_POOL_SIZE")
     if db_pool:
         try:
             loaded.database.pool_size = int(db_pool)
         except ValueError:
             pass
 
-    db_overflow = os.environ.get("EPHEMRES_DB_MAX_OVERFLOW") or os.environ.get("NETMON_DB_MAX_OVERFLOW")
+    db_overflow = env_map.get("EPHEMRES_DB_MAX_OVERFLOW") or env_map.get("NETMON_DB_MAX_OVERFLOW")
     if db_overflow:
         try:
             loaded.database.max_overflow = int(db_overflow)
         except ValueError:
             pass
 
-    secret_key = os.environ.get("EPHEMRES_SECRET_KEY") or os.environ.get("NETMON_SECRET_KEY")
+    secret_key = env_map.get("EPHEMRES_SECRET_KEY") or env_map.get("NETMON_SECRET_KEY")
     if secret_key:
         loaded.security.secret_key = secret_key
 
-    jwt_secret = os.environ.get("EPHEMRES_JWT_SECRET") or os.environ.get("NETMON_JWT_SECRET")
+    jwt_secret = env_map.get("EPHEMRES_JWT_SECRET") or env_map.get("NETMON_JWT_SECRET")
     if jwt_secret:
         loaded.security.jwt_secret = jwt_secret
 
-    crypto_key = os.environ.get("EPHEMRES_CRYPTO_KEY") or os.environ.get("NETMON_CRYPTO_KEY")
+    crypto_key = env_map.get("EPHEMRES_CRYPTO_KEY") or env_map.get("NETMON_CRYPTO_KEY")
     if crypto_key:
         loaded.security.crypto_key = crypto_key
 
-    fallback_keys = os.environ.get("EPHEMRES_FALLBACK_CRYPTO_KEYS") or os.environ.get("NETMON_FALLBACK_CRYPTO_KEYS")
+    fallback_keys = env_map.get("EPHEMRES_FALLBACK_CRYPTO_KEYS") or env_map.get("NETMON_FALLBACK_CRYPTO_KEYS")
     if fallback_keys:
         loaded.security.fallback_crypto_keys = [
             k.strip() for k in fallback_keys.split(",") if k.strip()
         ]
 
-    env_val = os.environ.get("EPHEMRES_ENV") or os.environ.get("NETMON_ENV") or os.environ.get("ENVIRONMENT")
+    env_val = env_map.get("EPHEMRES_ENV") or env_map.get("NETMON_ENV") or env_map.get("ENVIRONMENT")
     if env_val:
         loaded.environment = env_val.strip().lower()
 
-    allowed_origins = os.environ.get("EPHEMRES_API__ALLOWED_ORIGINS") or os.environ.get("NETMON_API__ALLOWED_ORIGINS")
+    allowed_origins = (
+        env_map.get("EPHEMRES_API__ALLOWED_ORIGINS")
+        or env_map.get("NETMON_API__ALLOWED_ORIGINS")
+        or env_map.get("EPHEMRES_ALLOWED_ORIGINS")
+        or env_map.get("NETMON_ALLOWED_ORIGINS")
+    )
     if allowed_origins:
-        import json
         try:
-            loaded.api.allowed_origins = json.loads(allowed_origins)
+            loaded.api.allowed_origins = _coerce_str_list(allowed_origins, "api.allowed_origins")
         except Exception:
             pass
 
@@ -305,7 +502,15 @@ def load_settings() -> Settings:
             "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
         )
 
-    return loaded
+
+def load_settings() -> Settings:
+    """Load settings with environment variable fallbacks and validation."""
+    try:
+        return Settings()
+    except (ConfigurationError, ValueError):
+        raise
+    except Exception as exc:
+        raise ConfigurationError(f"Error loading configuration: {exc}") from exc
 
 
 settings = load_settings()

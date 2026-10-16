@@ -1,25 +1,221 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 import ipaddress
+import json
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+import time
 from typing import Any, Dict, List, Optional, Sequence
-
-from argon2 import PasswordHasher
-from argon2.exceptions import (
-    InvalidHashError,
-    VerificationError,
-    VerifyMismatchError,
-)
-from jose import JWTError, jwt
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_ph = PasswordHasher()
+
+# ---------------------------------------------------------------------------
+# Custom OpenSSL hashlib.scrypt Password Hasher (Zero External Dependencies)
+# ---------------------------------------------------------------------------
+class ScryptPasswordHasher:
+    """
+    Zero-dependency password hasher backed by OpenSSL hashlib.scrypt.
+    Format: $scrypt$n=16384,r=8,p=1$<salt_b64>$<hash_b64>
+    """
+
+    N = 16384
+    R = 8
+    P = 1
+    MAXMEM = 32 * 1024 * 1024
+    DKLEN = 64
+
+    def hash(self, password: str) -> str:
+        if not isinstance(password, str):
+            raise TypeError("Password must be a string")
+        salt = secrets.token_bytes(16)
+        derived = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=self.N,
+            r=self.R,
+            p=self.P,
+            maxmem=self.MAXMEM,
+            dklen=self.DKLEN,
+        )
+        salt_b64 = base64.b64encode(salt).decode("ascii")
+        hash_b64 = base64.b64encode(derived).decode("ascii")
+        return f"$scrypt$n={self.N},r={self.R},p={self.P}${salt_b64}${hash_b64}"
+
+    def verify(self, hashed: str, plain: str) -> bool:
+        if not hashed or not isinstance(hashed, str) or not isinstance(plain, str):
+            return False
+        parts = hashed.split("$")
+        if len(parts) != 5 or parts[1] != "scrypt":
+            return False
+        params_str, salt_b64, hash_b64 = parts[2], parts[3], parts[4]
+        try:
+            params: Dict[str, int] = {}
+            for item in params_str.split(","):
+                k, v = item.split("=", 1)
+                params[k.strip()] = int(v.strip())
+            n = params["n"]
+            r = params["r"]
+            p = params["p"]
+            salt = base64.b64decode(salt_b64.encode("ascii"), validate=True)
+            expected_dk = base64.b64decode(hash_b64.encode("ascii"), validate=True)
+            derived = hashlib.scrypt(
+                plain.encode("utf-8"),
+                salt=salt,
+                n=n,
+                r=r,
+                p=p,
+                maxmem=self.MAXMEM,
+                dklen=len(expected_dk),
+            )
+            return hmac.compare_digest(derived, expected_dk)
+        except Exception:
+            return False
+
+
+_ph = ScryptPasswordHasher()
+
+
+# ---------------------------------------------------------------------------
+# Custom RFC 7519 HS256 JWT Codec (Zero External Dependencies)
+# ---------------------------------------------------------------------------
+class JWTError(Exception):
+    """Raised when JWT encoding, decoding, signature verification, or claim validation fails."""
+    pass
+
+
+ALGORITHM = "HS256"
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(segment: str) -> bytes:
+    if not segment or not isinstance(segment, str):
+        raise JWTError("Empty or invalid JWT segment.")
+    try:
+        raw = segment.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise JWTError("Invalid non-ASCII characters in JWT segment.") from exc
+    pad_len = (-len(raw)) % 4
+    padded = raw + (b"=" * pad_len)
+    try:
+        decoded = base64.urlsafe_b64decode(padded)
+    except Exception as exc:
+        raise JWTError(f"Invalid base64url encoding: {exc}") from exc
+    if _b64url_encode(decoded) != segment.rstrip("="):
+        raise JWTError("Non-canonical base64url encoding in JWT segment.")
+    return decoded
+
+
+def jwt_encode(payload: Dict[str, Any], key: str, algorithm: str = "HS256") -> str:
+    """Encodes a payload dictionary into an RFC 7519 HS256 JWT string."""
+    if algorithm != "HS256":
+        raise JWTError(f"Unsupported JWT algorithm '{algorithm}'. Only HS256 is supported.")
+    if not key or not isinstance(key, (str, bytes)):
+        raise JWTError("Signing key must be a non-empty string or bytes.")
+
+    serializable_payload: Dict[str, Any] = {}
+    for k, v in payload.items():
+        if isinstance(v, datetime):
+            serializable_payload[k] = int(v.timestamp())
+        else:
+            serializable_payload[k] = v
+
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_b64 = _b64url_encode(
+        json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    payload_b64 = _b64url_encode(
+        json.dumps(serializable_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+    signature = hmac.new(key_bytes, signing_input, hashlib.sha256).digest()
+    sig_b64 = _b64url_encode(signature)
+    return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+
+def jwt_decode(
+    token: str,
+    key: str,
+    algorithms: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Decodes and validates an RFC 7519 HS256 JWT string."""
+    allowed_algs = algorithms if algorithms is not None else ["HS256"]
+    if not allowed_algs or "HS256" not in allowed_algs or any(a != "HS256" for a in allowed_algs):
+        raise JWTError("Unsupported or insecure JWT algorithm specified.")
+    if not token or not isinstance(token, str):
+        raise JWTError("Token must be a non-empty string.")
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise JWTError("Invalid JWT structure: expected 3 dot-separated segments.")
+
+    header_b64, payload_b64, sig_b64 = parts
+
+    try:
+        header_raw = _b64url_decode(header_b64)
+        header = json.loads(header_raw.decode("utf-8"))
+    except Exception as exc:
+        raise JWTError(f"Malformed JWT header: {exc}") from exc
+
+    if not isinstance(header, dict) or header.get("alg") != "HS256":
+        raise JWTError(f"Invalid or rejected JWT header algorithm: {header.get('alg') if isinstance(header, dict) else header}")
+
+    actual_sig = _b64url_decode(sig_b64)
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else key
+    expected_sig = hmac.new(key_bytes, signing_input, hashlib.sha256).digest()
+
+    if not hmac.compare_digest(actual_sig, expected_sig):
+        raise JWTError("JWT signature verification failed.")
+
+    try:
+        payload_raw = _b64url_decode(payload_b64)
+        payload = json.loads(payload_raw.decode("utf-8"))
+    except Exception as exc:
+        raise JWTError(f"Malformed JWT payload: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise JWTError("JWT payload must be a JSON object.")
+
+    now = time.time()
+
+    if "exp" in payload:
+        try:
+            exp_ts = float(payload["exp"])
+        except (ValueError, TypeError) as exc:
+            raise JWTError("Invalid 'exp' claim in JWT.") from exc
+        if now >= exp_ts:
+            raise JWTError("JWT token has expired.")
+
+    if "nbf" in payload:
+        try:
+            nbf_ts = float(payload["nbf"])
+        except (ValueError, TypeError) as exc:
+            raise JWTError("Invalid 'nbf' claim in JWT.") from exc
+        if now < nbf_ts:
+            raise JWTError("JWT token is not yet valid ('nbf' claim).")
+
+    return payload
+
+
+class _JWTNamespace:
+    encode = staticmethod(jwt_encode)
+    decode = staticmethod(jwt_decode)
+
+
+jwt = _JWTNamespace()
+
 
 # Default trusted reverse proxy CIDR networks (strictly loopback)
 DEFAULT_TRUSTED_PROXIES = [
@@ -35,37 +231,33 @@ _failed_attempts: dict[str, dict] = {}
 # Key format: "<user_id>" -> [jti_1, jti_2] (ordered list of active session JWT IDs, FIFO rotated)
 _active_user_sessions: dict[str, list[str]] = {}
 
+
 def generate_readable_password() -> str:
     """Generate high-entropy password (96 bits of entropy via secrets.token_urlsafe(16))."""
     return secrets.token_urlsafe(16)
 
 
 def hash_password(password: str) -> str:
-    """Synchronous Argon2id hashing."""
+    """Synchronous OpenSSL scrypt password hashing."""
     return _ph.hash(password)
 
 
 async def hash_password_async(password: str) -> str:
-    """Non-blocking Argon2id hashing delegated to asyncio worker thread."""
+    """Non-blocking OpenSSL scrypt password hashing delegated to asyncio worker thread."""
     return await asyncio.to_thread(_ph.hash, password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Synchronous Argon2id password verification."""
+    """Synchronous OpenSSL scrypt password verification."""
     try:
         return _ph.verify(hashed, plain)
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        return False
     except Exception:
         return False
 
 
 async def verify_password_async(plain: str, hashed: str) -> bool:
-    """Non-blocking Argon2id password verification delegated to asyncio worker thread."""
+    """Non-blocking OpenSSL scrypt password verification delegated to asyncio worker thread."""
     return await asyncio.to_thread(verify_password, plain, hashed)
-
-
-ALGORITHM = "HS256"
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +440,7 @@ def create_access_token(
         "exp": datetime.now(timezone.utc)
         + timedelta(minutes=settings.security.session_timeout_minutes),
     }
-    return jwt.encode(
+    return jwt_encode(
         payload,
         settings.security.effective_jwt_secret,
         algorithm=ALGORITHM,
@@ -257,7 +449,7 @@ def create_access_token(
 
 def decode_access_token(token: str) -> Optional[dict]:
     try:
-        return jwt.decode(
+        return jwt_decode(
             token,
             settings.security.effective_jwt_secret,
             algorithms=[ALGORITHM],

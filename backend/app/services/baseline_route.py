@@ -11,12 +11,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-import psutil
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.services.diagnostics import run_throttled_traceroute
+from app.services.net_interfaces import get_local_interface_networks
 from app.services.timezone_utils import get_local_timezone
 
 logger = logging.getLogger(__name__)
@@ -147,20 +147,12 @@ def is_local_subnet(target_ip_str: str) -> bool:
     Determines if target IP resides in the local subnet/VLAN of the monitoring server.
     """
     try:
-        target = ipaddress.ip_address(target_ip_str)
+        target = ipaddress.ip_address(target_ip_str.strip())
         if target.is_loopback:
             return True
-        for iface, addrs in psutil.net_if_addrs().items():
-            for addr in addrs:
-                if addr.family == socket.AF_INET and addr.address and addr.netmask:
-                    try:
-                        net = ipaddress.ip_network(
-                            f"{addr.address}/{addr.netmask}", strict=False
-                        )
-                        if target in net:
-                            return True
-                    except Exception:
-                        pass
+        for net in get_local_interface_networks():
+            if target.version == net.version and target in net:
+                return True
     except Exception:
         pass
     return False
