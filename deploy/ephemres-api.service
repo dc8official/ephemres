@@ -1,8 +1,7 @@
 [Unit]
 Description=Ephemres API Server
-After=network.target postgresql.service redis-server.service
+After=network.target postgresql.service
 Requires=postgresql.service
-Wants=redis-server.service
 
 [Service]
 Type=simple

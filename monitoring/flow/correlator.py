@@ -7,7 +7,10 @@ import time
 from typing import Any, Dict, Optional, Set, Tuple
 from uuid import UUID
 
-from sqlalchemy import select
+try:
+    from sqlalchemy import select
+except ModuleNotFoundError:  # pragma: no cover
+    select = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

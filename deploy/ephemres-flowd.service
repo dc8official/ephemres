@@ -1,7 +1,6 @@
 [Unit]
 Description=Ephemres Network Flow Telemetry Collector Daemon (NetFlow/IPFIX)
-After=network.target postgresql.service redis-server.service
-Requires=redis-server.service
+After=network.target postgresql.service
 Wants=postgresql.service
 
 [Service]
