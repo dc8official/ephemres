@@ -103,6 +103,7 @@ class RedisSettings(BaseModel):
 
 class FlowSettings(BaseModel):
     enabled: bool = False
+    bind_host: str = Field(default="0.0.0.0", description="Host interface IP to bind UDP flow listeners")
     netflow_port: int = Field(default=2055, ge=1, le=65535)
     ipfix_port: int = Field(default=4739, ge=1, le=65535)
     sampling_multiplier: int = Field(default=1, ge=1)

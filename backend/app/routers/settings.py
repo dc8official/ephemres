@@ -466,12 +466,14 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
     # 2. UDP Ports bind availability check
     netflow_p = getattr(app_cfg.flow, "netflow_port", 2055)
     ipfix_p = getattr(app_cfg.flow, "ipfix_port", 4739)
+    flow_bind = getattr(app_cfg.flow, "bind_host", "127.0.0.1")
+    check_host = "127.0.0.1" if flow_bind == "0.0.0.0" else flow_bind
     port_conflicts = []
     for p in (netflow_p, ipfix_p):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("0.0.0.0", p))
+            s.bind((check_host, p))
             s.close()
         except OSError:
             port_conflicts.append(p)
