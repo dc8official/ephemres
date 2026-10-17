@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
+import weakref
 
 
 class FastStoreError(Exception):
@@ -32,7 +33,7 @@ class ResponseError(FastStoreError):
 
 _SHM_DIR = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else "/tmp"
 _DB_LOCK = threading.RLock()
-_PUBSUB_WAITERS: Dict[str, Set[asyncio.Queue]] = {}
+_PUBSUB_WAITERS: Dict[str, weakref.WeakSet[asyncio.Queue]] = {}
 
 
 def _get_db_path(db: int = 0) -> str:
@@ -65,6 +66,8 @@ class _SharedSQLiteStore:
         with _DB_LOCK:
             cur = self._conn.cursor()
             cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA wal_autocheckpoint=1000;")
+            cur.execute("PRAGMA journal_size_limit=16777216;")
             cur.execute("PRAGMA synchronous=OFF;")
             cur.execute("PRAGMA temp_store=MEMORY;")
             cur.execute("PRAGMA busy_timeout=10000;")
@@ -74,6 +77,10 @@ class _SharedSQLiteStore:
                     k TEXT PRIMARY KEY,
                     v BLOB,
                     expires_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS key_expiry (
+                    k TEXT PRIMARY KEY,
+                    expires_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS set_store (
                     k TEXT,
@@ -233,7 +240,7 @@ class PubSub:
             c_str = _to_str(ch)
             self._channels.add(c_str)
             with _DB_LOCK:
-                _PUBSUB_WAITERS.setdefault(c_str, set()).add(self._queue)
+                _PUBSUB_WAITERS.setdefault(c_str, weakref.WeakSet()).add(self._queue)
         self._ensure_poller()
 
     async def unsubscribe(self, *channels: Union[str, bytes]) -> None:
@@ -320,12 +327,41 @@ class Pipeline:
         results = []
         ops = list(self._ops)
         self._ops.clear()
-        for name, args, kwargs in ops:
-            fn = getattr(self._client, name)
-            res = fn(*args, **kwargs)
-            if asyncio.iscoroutine(res):
-                res = await res
-            results.append(res)
+        if not ops:
+            return results
+
+        if self._transaction:
+            def _begin(conn: sqlite3.Connection) -> None:
+                conn.execute("BEGIN IMMEDIATE")
+
+            def _commit(conn: sqlite3.Connection) -> None:
+                conn.execute("COMMIT")
+
+            def _rollback(conn: sqlite3.Connection) -> None:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+
+            self._client._store.execute_sync(_begin)
+            try:
+                for name, args, kwargs in ops:
+                    fn = getattr(self._client, name)
+                    res = fn(*args, **kwargs)
+                    if asyncio.iscoroutine(res):
+                        res = await res
+                    results.append(res)
+                self._client._store.execute_sync(_commit)
+            except Exception:
+                self._client._store.execute_sync(_rollback)
+                raise
+        else:
+            for name, args, kwargs in ops:
+                fn = getattr(self._client, name)
+                res = fn(*args, **kwargs)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                results.append(res)
         return results
 
 
@@ -379,7 +415,11 @@ class FastStoreClient:
         pass
 
     async def ping(self) -> bool:
-        return True
+        def _op(conn: sqlite3.Connection) -> bool:
+            res = conn.execute("SELECT 1").fetchone()
+            return bool(res and res[0] == 1)
+
+        return self._store.execute_sync(_op)
 
     def pipeline(self, transaction: bool = True) -> Pipeline:
         return Pipeline(self, transaction=transaction)
@@ -397,6 +437,7 @@ class FastStoreClient:
             cur.execute("DELETE FROM stream_groups;")
             cur.execute("DELETE FROM stream_pel;")
             cur.execute("DELETE FROM pubsub_log;")
+            cur.execute("DELETE FROM key_expiry;")
             cur.close()
             return True
 
@@ -423,13 +464,26 @@ class FastStoreClient:
     # KV Store & Expiration
     # -----------------------------------------------------------------------
     def _evict_expired_sync(self, conn: sqlite3.Connection) -> None:
-        conn.execute("DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?", (time.time(),))
+        now = time.time()
+        conn.execute("DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
+        rows = conn.execute("SELECT k FROM key_expiry WHERE expires_at <= ?", (now,)).fetchall()
+        if rows:
+            for r in rows:
+                k_exp = r[0]
+                conn.execute("DELETE FROM kv_store WHERE k = ?", (k_exp,))
+                conn.execute("DELETE FROM set_store WHERE k = ?", (k_exp,))
+                conn.execute("DELETE FROM zset_store WHERE k = ?", (k_exp,))
+                conn.execute("DELETE FROM stream_entries WHERE stream = ?", (k_exp,))
+                conn.execute("DELETE FROM stream_groups WHERE stream = ?", (k_exp,))
+                conn.execute("DELETE FROM stream_pel WHERE stream = ?", (k_exp,))
+                conn.execute("DELETE FROM key_expiry WHERE k = ?", (k_exp,))
 
     async def get(self, name: Union[str, bytes]) -> Any:
         k_str = _to_str(name)
         now = time.time()
 
         def _op(conn: sqlite3.Connection) -> Any:
+            self._evict_expired_sync(conn)
             row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
             if row is None:
                 return None
@@ -460,6 +514,7 @@ class FastStoreClient:
             expires_at = now + (float(px) / 1000.0)
 
         def _op(conn: sqlite3.Connection) -> Optional[bool]:
+            self._evict_expired_sync(conn)
             existing = conn.execute("SELECT expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
             exists = existing is not None and (existing[0] is None or existing[0] > now)
             if nx and exists:
@@ -470,6 +525,10 @@ class FastStoreClient:
                 "INSERT OR REPLACE INTO kv_store (k, v, expires_at) VALUES (?, ?, ?)",
                 (k_str, v_bytes, expires_at),
             )
+            if expires_at is not None:
+                conn.execute("INSERT OR REPLACE INTO key_expiry (k, expires_at) VALUES (?, ?)", (k_str, expires_at))
+            else:
+                conn.execute("DELETE FROM key_expiry WHERE k = ?", (k_str,))
             return True
 
         return self._store.execute_sync(_op)
@@ -497,6 +556,7 @@ class FastStoreClient:
                 c4 = conn.execute("DELETE FROM stream_entries WHERE stream = ?", (k_str,)).rowcount
                 conn.execute("DELETE FROM stream_groups WHERE stream = ?", (k_str,))
                 conn.execute("DELETE FROM stream_pel WHERE stream = ?", (k_str,))
+                conn.execute("DELETE FROM key_expiry WHERE k = ?", (k_str,))
                 if c1 > 0 or c2 > 0 or c3 > 0 or c4 > 0:
                     deleted_count += 1
             return deleted_count
@@ -533,6 +593,7 @@ class FastStoreClient:
         now = time.time()
 
         def _op(conn: sqlite3.Connection) -> int:
+            self._evict_expired_sync(conn)
             row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
             if row is None or (row[1] is not None and row[1] <= now):
                 new_val = int(amount)
@@ -558,19 +619,23 @@ class FastStoreClient:
         new_exp = now + float(time_sec)
 
         def _op(conn: sqlite3.Connection) -> bool:
+            self._evict_expired_sync(conn)
+            found = False
             row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
             if row is not None and (row[1] is None or row[1] > now):
                 conn.execute("UPDATE kv_store SET expires_at = ? WHERE k = ?", (new_exp, k_str))
-                return True
-            # Also check if it exists in other tables
-            if (
+                found = True
+            elif (
                 conn.execute("SELECT 1 FROM set_store WHERE k = ? LIMIT 1", (k_str,)).fetchone()
                 or conn.execute("SELECT 1 FROM zset_store WHERE k = ? LIMIT 1", (k_str,)).fetchone()
                 or conn.execute("SELECT 1 FROM stream_entries WHERE stream = ? LIMIT 1", (k_str,)).fetchone()
             ):
+                found = True
+
+            if found:
                 conn.execute(
-                    "INSERT OR REPLACE INTO kv_store (k, v, expires_at) VALUES (?, ?, ?)",
-                    (k_str, b"", new_exp),
+                    "INSERT OR REPLACE INTO key_expiry (k, expires_at) VALUES (?, ?)",
+                    (k_str, new_exp),
                 )
                 return True
             return False
@@ -582,6 +647,14 @@ class FastStoreClient:
         now = time.time()
 
         def _op(conn: sqlite3.Connection) -> int:
+            self._evict_expired_sync(conn)
+            exp_row = conn.execute("SELECT expires_at FROM key_expiry WHERE k = ?", (k_str,)).fetchone()
+            if exp_row is not None:
+                expires_at = exp_row[0]
+                if expires_at <= now:
+                    return -2
+                return max(0, int(expires_at - now))
+
             row = conn.execute("SELECT expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
             if row is None:
                 if (
@@ -637,6 +710,7 @@ class FastStoreClient:
         k_str = _to_str(name)
 
         def _op(conn: sqlite3.Connection) -> int:
+            self._evict_expired_sync(conn)
             added = 0
             for v in values:
                 m_bytes = _encode_val(v)
@@ -660,6 +734,7 @@ class FastStoreClient:
         k_str = _to_str(name)
 
         def _op(conn: sqlite3.Connection) -> int:
+            self._evict_expired_sync(conn)
             removed = 0
             for v in values:
                 m_bytes = _encode_val(v)
@@ -678,6 +753,7 @@ class FastStoreClient:
         k_str = _to_str(name)
 
         def _op(conn: sqlite3.Connection) -> Set[Any]:
+            self._evict_expired_sync(conn)
             rows = conn.execute("SELECT member FROM set_store WHERE k = ?", (k_str,)).fetchall()
             return {
                 row[0].decode("utf-8", errors="replace") if self.decode_responses else row[0]
@@ -690,6 +766,7 @@ class FastStoreClient:
         k_str = _to_str(name)
 
         def _op(conn: sqlite3.Connection) -> int:
+            self._evict_expired_sync(conn)
             row = conn.execute("SELECT COUNT(*) FROM set_store WHERE k = ?", (k_str,)).fetchone()
             return int(row[0]) if row else 0
 
@@ -700,6 +777,7 @@ class FastStoreClient:
         m_bytes = _encode_val(value)
 
         def _op(conn: sqlite3.Connection) -> bool:
+            self._evict_expired_sync(conn)
             row = conn.execute(
                 "SELECT 1 FROM set_store WHERE k = ? AND member = ?",
                 (k_str, m_bytes),
@@ -991,15 +1069,22 @@ class FastStoreClient:
             )
 
             if maxlen is not None and int(maxlen) >= 0:
-                conn.execute(
-                    """
-                    DELETE FROM stream_entries
-                    WHERE stream = ? AND rowid NOT IN (
-                        SELECT rowid FROM stream_entries WHERE stream = ? ORDER BY id_ms DESC, id_seq DESC LIMIT ?
+                do_trim = True
+                if approximate:
+                    s_counter = getattr(self._store, "_xadd_counter", 0) + 1
+                    self._store._xadd_counter = s_counter
+                    do_trim = (s_counter % 100 == 0)
+
+                if do_trim:
+                    conn.execute(
+                        """
+                        DELETE FROM stream_entries
+                        WHERE stream = ? AND rowid NOT IN (
+                            SELECT rowid FROM stream_entries WHERE stream = ? ORDER BY id_ms DESC, id_seq DESC LIMIT ?
+                        )
+                        """,
+                        (s_name, s_name, int(maxlen)),
                     )
-                    """,
-                    (s_name, s_name, int(maxlen)),
-                )
             return entry_id if self.decode_responses else entry_id.encode("utf-8")
 
         return self._store.execute_sync(_op)
@@ -1114,11 +1199,15 @@ class FastStoreClient:
                     out.append([ret_stream, entries])
             return out
 
-        res = self._store.execute_sync(_query_op)
-        if not res and block is not None and int(block) > 0:
-            await asyncio.sleep(min(float(block) / 1000.0, 0.05))
+        deadline = time.time() + (float(block) / 1000.0) if block is not None and int(block) > 0 else 0
+        while True:
             res = self._store.execute_sync(_query_op)
-        return res
+            if res:
+                return res
+            if not deadline or time.time() >= deadline:
+                return res
+            sleep_time = min(0.05, max(0.005, deadline - time.time()))
+            await asyncio.sleep(sleep_time)
 
     async def xack(
         self,
