@@ -1774,36 +1774,32 @@ class TestClient:
         self.cookies = dict(cookies or {})
         self.client_addr = client
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._lifespan_ctx: Optional[Any] = None
 
     def __enter__(self) -> TestClient:
-        # Run lifespan startup
-        self._run_async(self._lifespan_startup())
+        # Run lifespan startup if configured on the application
+        if getattr(self.app, "lifespan", None):
+            try:
+                self._lifespan_ctx = self.app.lifespan(self.app)
+                if hasattr(self._lifespan_ctx, "__aenter__"):
+                    self._run_async(self._lifespan_ctx.__aenter__())
+                elif hasattr(self._lifespan_ctx, "__enter__"):
+                    self._lifespan_ctx.__enter__()
+            except Exception as exc:
+                logger.error("TestClient lifespan startup failed: %s", exc)
+                raise
         return self
 
     def __exit__(self, *args: Any) -> None:
         # Run lifespan shutdown
         try:
-            self._run_async(self._lifespan_shutdown())
+            if self._lifespan_ctx is not None:
+                if hasattr(self._lifespan_ctx, "__aexit__"):
+                    self._run_async(self._lifespan_ctx.__aexit__(None, None, None))
+                elif hasattr(self._lifespan_ctx, "__exit__"):
+                    self._lifespan_ctx.__exit__(None, None, None)
         finally:
             self._executor.shutdown(wait=False)
-
-    async def _lifespan_startup(self) -> None:
-        startup_scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
-        async def send_msg(m): pass
-        async def recv_msg(): return {"type": "lifespan.startup"}
-        try:
-            await self.app(startup_scope, recv_msg, send_msg)
-        except Exception:
-            pass
-
-    async def _lifespan_shutdown(self) -> None:
-        shutdown_scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
-        async def send_msg(m): pass
-        async def recv_msg(): return {"type": "lifespan.shutdown"}
-        try:
-            await self.app(shutdown_scope, recv_msg, send_msg)
-        except Exception:
-            pass
 
     def _run_async(self, coro: Any) -> Any:
         """Executes an async coroutine safely, even when called from inside a running loop."""

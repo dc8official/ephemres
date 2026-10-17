@@ -37,14 +37,37 @@ Eliminate external Python library dependencies from `backend/requirements.txt` a
    - Built `backend/app/core/asgi.py` implementing a 100% Python stdlib ASGI3 framework (`FastAPI`, `APIRouter`, per-request DI cache with `dependency_overrides` and async generator teardown, `Response` parameter merging, multi-header `Set-Cookie`, static-before-dynamic route matching, path/`Query` coercion + HTTP 422 validation, `StreamingResponse` + `request.is_disconnected()`, `BaseHTTPMiddleware`, `CORSMiddleware`, and loop-safe in-process `TestClient`).
    - Added in-tree compatibility shims `backend/pydantic/`, `backend/fastapi/`, and `backend/starlette/`, and removed `fastapi` and `pydantic` from `backend/requirements.txt`.
 
+9. **Stage 5C Complete (Zero-Dependency SQL Compiler & `asyncpg` ORM Engine — `backend/app/core/orm.py` & `backend/sqlalchemy/`):**
+   - Built `backend/app/core/orm.py` implementing a 100% Python stdlib + `asyncpg` SQL compiler, PostgreSQL DDL engine, and declarative ORM runtime (`DeclarativeBase`, `Mapped`, `mapped_column`, `Column`, `relationship`, `joinedload`, `Select`, `Insert` with PostgreSQL `on_conflict_do_update` & `.excluded`, `Update`, `Delete`, `func`, `case`, `cast`, window functions, chained CTEs, subqueries, `CreateTable`, `CreateIndex`, `AsyncEngine`, `AsyncSession` with dirty tracking & `flush()` ID hydration, `:param` to `$1` compiler with `executemany` batching, hybrid `Result`/`Row` unpacking, and `JSONB`/`UUID`/`INET` marshaling).
+   - Created in-tree compatibility shims `backend/sqlalchemy/` (`__init__.py`, `orm/`, `ext/asyncio/`, `dialects/postgresql/`, `types.py`, `exc.py`).
+   - Removed `sqlalchemy[asyncio]>=2.0.0` from `backend/requirements.txt`, leaving **ONLY `uvicorn[standard]>=0.30.0` and `asyncpg>=0.29.0`**.
+   - Verified across all unit and integration test suites: 100% passing (`test_core_orm.py`, `test_migrator_stage5a.py`, `test_core_asgi.py`, `test_schema_engine.py`, `test_bandwidth_api.py`).
+
 ---
 
-## Remaining Roadmap (`v3.3.2v`)
+## Final Status & Architecture Verification (`v3.3.2v`)
 
-### Stage 5C: Zero-Dependency SQL Compiler & `asyncpg` ORM Engine (`backend/app/core/orm.py` + `backend/sqlalchemy/`) — **CURRENT & FINAL STAGE**
-- **Stage 5C-1 (Core SQL AST, Expressions, Declarative Models, PostgreSQL Upserts & DDL Compiler):**
-  - Build `backend/app/core/orm.py` containing the complete SQL expression AST (`ColumnClause`, `BinaryExpression`, `BooleanClauseList`, `UnaryExpression`, `FunctionCall`, `WindowClause`, `CaseExpression`, `CastExpression`, `Subquery`, `CTE`, `TableClause`), DML/Query builders (`Select`, `Insert` with PostgreSQL `on_conflict_do_update` / `on_conflict_do_nothing` & `.excluded`, `Update`, `Delete`), Declarative ORM metaclass (`DeclarativeBase`, `Mapped`, `mapped_column`, `Column`, `relationship`, `joinedload`, `selectinload`), and PostgreSQL DDL compiler (`MetaData`, `Table`, `Index`, `ForeignKey`, constraints, `CreateTable`, `CreateIndex`, `dialect().ddl_compiler(...)` for `migrator.py`).
-- **Stage 5C-2 (`AsyncEngine`, `AsyncSession`, `:param` Text Compiler, Hybrid `Result`/`Row` Hydration & `backend/sqlalchemy/` Cutover):**
-  - Complete `backend/app/core/orm.py` with `AsyncEngine` (wrapping `asyncpg` connection pool), `AsyncConnection`, `AsyncSession` (per-session identity map, dirty attribute tracking, `db.add` + `flush()`/`commit()` `INSERT ... RETURNING *` hydration, `db.delete`, `db.get`, `db.refresh`, automatic `lazy="joined"`/`joinedload` relationship loading for `User.role` and `UserSession.user`, `:param` -> `$1` regex compiler ignoring `::type` casts and string literals, `executemany` support for `list[dict]`, and `JSONB`/`UUID`/`INET` type marshaling), and hybrid `Result`/`Row` unpacking.
-  - Create the `backend/sqlalchemy/` shim package (`__init__.py`, `orm/__init__.py`, `ext/asyncio/__init__.py`, `dialects/postgresql/__init__.py`, `types.py`, `exc.py`), remove `sqlalchemy[asyncio]>=2.0.0` from `backend/requirements.txt` (leaving ONLY `uvicorn[standard]>=0.30.0` and `asyncpg>=0.29.0`), and verify the unit/integration test suites.
+**The Ephemres Vertical Integration Architecture on branch `v3.3.2v` is 100% COMPLETE.**
+All external library dependencies and standalone service daemons have been eliminated:
+- `psutil` -> `/proc` + `fcntl.ioctl` socket interfaces
+- `pydantic-settings` -> `tomllib` + `@dataclass` hierarchy
+- `python-jose` -> RFC 7519 HS256 JWT codec
+- `argon2-cffi` -> OpenSSL `hashlib.scrypt`
+- `cryptography` -> OpenSSL `libcrypto.so.3` `EVP_aes_256_gcm` + HKDF-SHA256
+- `httpx` & `httpcore` -> Zero-trust `asyncio.open_connection` + `ssl`
+- `icmplib` -> 3-tier stdlib ICMP raw socket engine (`SOCK_RAW`, `SOCK_DGRAM`, `ping` subprocess)
+- `jinja2` -> In-process template compiler
+- `weasyprint` & `pypdf` -> Zero-dependency PDF 1.4 vector typesetter & ISO 32000-1 RC4/MD5 security handler
+- `redis-server` & `redis` -> In-RAM `/dev/shm` SQLite WAL FastStore + in-tree `backend/redis/`
+- `alembic` & `psycopg2-binary` -> In-tree zero-dependency migrator + `backend/alembic/`
+- `pydantic` -> `backend/app/core/schema.py` + `backend/pydantic/`
+- `fastapi` & `starlette` -> `backend/app/core/asgi.py` + `backend/fastapi/` + `backend/starlette/`
+- `sqlalchemy[asyncio]` -> `backend/app/core/orm.py` + `backend/sqlalchemy/`
+
+`backend/requirements.txt` contains strictly:
+```text
+uvicorn[standard]>=0.30.0
+asyncpg>=0.29.0
+```
+
 
