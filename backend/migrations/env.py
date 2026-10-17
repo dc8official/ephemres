@@ -8,12 +8,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 context = None  # alembic.context replaced by app.core.migrator
 from app.database import Base, sync_engine
 
-config = context.config
-
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-target_metadata = Base.metadata
+if context is not None:
+    config = context.config
+    if config.config_file_name is not None:
+        fileConfig(config.config_file_name)
+    target_metadata = getattr(Base, "metadata", None)
+else:
+    config = None
+    target_metadata = getattr(Base, "metadata", None)
 
 
 def run_migrations_offline() -> None:

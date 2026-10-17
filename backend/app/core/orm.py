@@ -291,6 +291,9 @@ class CompileContext:
         return f"${len(self.params)}"
 
 
+CompilationContext = CompileContext
+
+
 def format_sql_literal(val: Any) -> str:
     """Formats a Python literal value directly into safe SQL syntax."""
     if val is None:
@@ -735,7 +738,12 @@ class WindowExpression(SQLElement):
         return f"{e_sql} OVER ({over_content})"
 
 
-class FunctionCall(SQLElement):
+class Expression(SQLElement):
+    """Base expression AST element supporting Python operator overloading."""
+    pass
+
+
+class FunctionCall(Expression):
     def __init__(self, name: str, args: Sequence[Any]) -> None:
         self.name = name.upper()
         self.args = list(args)
@@ -1363,9 +1371,16 @@ class Select(SQLElement):
                     visit(g)
                 for o in obj._order_by:
                     visit(o)
+            elif isinstance(obj, (Subquery, ScalarSubquery)):
+                if hasattr(obj, "select_stmt"):
+                    visit(obj.select_stmt)
             elif isinstance(obj, SQLElement):
                 if hasattr(obj, "expr"):
                     visit(getattr(obj, "expr"))
+                if hasattr(obj, "target"):
+                    visit(getattr(obj, "target"))
+                if hasattr(obj, "select_stmt"):
+                    visit(getattr(obj, "select_stmt"))
                 if hasattr(obj, "clauses"):
                     for c in getattr(obj, "clauses"):
                         visit(c)
@@ -1565,6 +1580,7 @@ class Insert(SQLElement):
         ctx = ctx or CompileContext()
         parts: List[str] = [f'INSERT INTO "{self._table_name}"']
 
+        model_cols = getattr(self._target, "__table_columns__", {})
         if isinstance(self._values, list):
             if not self._values:
                 return f'INSERT INTO "{self._table_name}" DEFAULT VALUES'
@@ -1574,7 +1590,7 @@ class Insert(SQLElement):
             row_tuples: List[str] = []
             for row in self._values:
                 row_placeholders = [
-                    row[c].compile(ctx) if isinstance(row.get(c), SQLElement) else ctx.add_param(row.get(c))
+                    row[c].compile(ctx) if isinstance(row.get(c), SQLElement) else ctx.add_param(row.get(c), getattr(model_cols.get(c), "type", None))
                     for c in columns
                 ]
                 row_tuples.append(f"({', '.join(row_placeholders)})")
@@ -1583,7 +1599,7 @@ class Insert(SQLElement):
             columns = list(self._values.keys())
             cols_joined = ", ".join(f'"{c}"' for c in columns)
             placeholders = [
-                self._values[c].compile(ctx) if isinstance(self._values[c], SQLElement) else ctx.add_param(self._values[c])
+                self._values[c].compile(ctx) if isinstance(self._values[c], SQLElement) else ctx.add_param(self._values[c], getattr(model_cols.get(c), "type", None))
                 for c in columns
             ]
             parts.append(f"({cols_joined}) VALUES ({', '.join(placeholders)})")
@@ -1596,7 +1612,7 @@ class Insert(SQLElement):
             idx_sql = f"({', '.join(f'\"{c}\"' for c in idx_els)})" if idx_els else ""
             set_parts: List[str] = []
             for k, v in set_dict.items():
-                v_sql = v.compile(ctx) if isinstance(v, SQLElement) else ctx.add_param(v)
+                v_sql = v.compile(ctx) if isinstance(v, SQLElement) else ctx.add_param(v, getattr(model_cols.get(k), "type", None))
                 set_parts.append(f'"{k}" = {v_sql}')
             parts.append(f"ON CONFLICT {idx_sql} DO UPDATE SET {', '.join(set_parts)}")
         elif self._on_conflict_nothing is not None:
@@ -1653,13 +1669,15 @@ class Update(SQLElement):
 
         # Auto-update columns with onupdate=func.now()
         model_cols = getattr(self._target, "__table_columns__", {})
+        vals = dict(self._values)
         for col_name, col_obj in model_cols.items():
-            if col_obj.onupdate is not None and col_name not in self._values:
-                self._values[col_name] = func.now()
+            if col_obj.onupdate is not None and col_name not in vals:
+                vals[col_name] = func.now()
 
         set_pairs: List[str] = []
-        for k, v in self._values.items():
-            v_sql = v.compile(ctx) if isinstance(v, SQLElement) else ctx.add_param(v)
+        for k, v in vals.items():
+            col_type = model_cols[k].type if k in model_cols else None
+            v_sql = v.compile(ctx) if isinstance(v, SQLElement) else ctx.add_param(v, col_type)
             set_pairs.append(f'"{k}" = {v_sql}')
         parts.append(", ".join(set_pairs))
 
@@ -2074,6 +2092,14 @@ class Result:
         return iter(self._rows)
 
 
+def _is_row_returning_sql(sql: str) -> bool:
+    """Returns True if the SQL query returns tabular rows (SELECT, WITH, SHOW, etc.)."""
+    cleaned = re.sub(r"--[^\n]*\n", "\n", sql).strip()
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL).strip()
+    upper = cleaned.upper()
+    return upper.startswith(("SELECT", "WITH", "SHOW", "VALUES", "TABLE", "EXPLAIN")) or "RETURNING" in upper
+
+
 # ---------------------------------------------------------------------------
 # 10. AsyncEngine & Connection Pool Management
 # ---------------------------------------------------------------------------
@@ -2087,11 +2113,32 @@ class AsyncConnection:
 
     async def execute(self, stmt: Any, params: Optional[Any] = None) -> Result:
         if isinstance(stmt, TextClause):
+            if isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
+                # Batch executemany
+                token_matches = [m.group(4) for m in _TEXT_TOKEN_RE.finditer(stmt.text_str) if m.group(4)]
+                seen_tokens: Set[str] = set()
+                param_order: List[str] = []
+                for name in token_matches:
+                    if name not in seen_tokens:
+                        seen_tokens.add(name)
+                        param_order.append(name)
+                sql, _ = compile_text_clause(stmt.text_str, params[0])
+                args_list = [[prepare_bind_param(row.get(k), None) for k in param_order] for row in params]
+                await self._conn.executemany(sql, args_list)
+                return Result([], rowcount=len(params))
+
             sql, bound = compile_text_clause(stmt.text_str, params if isinstance(params, dict) else None)
+            if _is_row_returning_sql(sql):
+                records = await self._conn.fetch(sql, *bound)
+                return Result([Row(list(r.values()), list(r.keys()), dict(r)) for r in records], rowcount=len(records))
             res = await self._conn.execute(sql, *bound)
-            rowcount = parse_rowcount(res)
-            return Result([], rowcount=rowcount)
+            return Result([], rowcount=parse_rowcount(res))
+
         sql = stmt.compile() if isinstance(stmt, SQLElement) else str(stmt)
+        if _is_row_returning_sql(sql):
+            p = getattr(stmt, "_params", None) or (params if isinstance(params, (list, tuple)) else [])
+            records = await self._conn.fetch(sql, *p)
+            return Result([Row(list(r.values()), list(r.keys()), dict(r)) for r in records], rowcount=len(records))
         res = await self._conn.execute(sql)
         return Result([], rowcount=parse_rowcount(res))
 
@@ -2446,32 +2493,52 @@ class AsyncSession:
         res = await self.execute(stmt)
         return res.scalar_one_or_none()
 
+    @property
+    def dirty(self) -> Set[DeclarativeBase]:
+        dirty_objs: Set[DeclarativeBase] = set()
+        for (model_cls, _), obj in self._identity_map.items():
+            if obj in self._deleted:
+                continue
+            for col_name in getattr(model_cls, "__table_columns__", {}):
+                if getattr(obj, col_name, None) != getattr(obj, "_orm_state", {}).get(col_name):
+                    dirty_objs.add(obj)
+                    break
+        return dirty_objs
+
+    def _get_dirty_attributes(self, obj: DeclarativeBase) -> Set[str]:
+        dirty_cols: Set[str] = set()
+        model_cls = obj.__class__
+        for col_name in getattr(model_cls, "__table_columns__", {}):
+            if getattr(obj, col_name, None) != getattr(obj, "_orm_state", {}).get(col_name):
+                dirty_cols.add(col_name)
+        return dirty_cols
+
     async def execute(self, stmt: Any, params: Optional[Any] = None) -> Result:
         conn = await self._get_conn()
 
         # 1. TextClause with batch params (executemany)
-        if isinstance(stmt, TextClause) and isinstance(params, list):
+        if isinstance(stmt, TextClause) and isinstance(params, (list, tuple)):
             if not params:
                 return Result([], rowcount=0)
-            sql, _ = compile_text_clause(stmt.text_str, params[0])
-            # Build positional args matrix for executemany
-            token_matches = [m.group(4) for m in _TEXT_TOKEN_RE.finditer(stmt.text_str) if m.group(4)]
-            # Deduplicate order
-            seen: Set[str] = set()
-            param_order: List[str] = []
-            for name in token_matches:
-                if name not in seen:
-                    seen.add(name)
-                    param_order.append(name)
-            args_list = [[prepare_bind_param(row.get(k), None) for k in param_order] for row in params]
-            await conn.executemany(sql, args_list)
-            return Result([], rowcount=len(params))
+            if isinstance(params[0], dict):
+                sql, _ = compile_text_clause(stmt.text_str, params[0])
+                # Build positional args matrix for executemany
+                token_matches = [m.group(4) for m in _TEXT_TOKEN_RE.finditer(stmt.text_str) if m.group(4)]
+                # Deduplicate order
+                seen: Set[str] = set()
+                param_order: List[str] = []
+                for name in token_matches:
+                    if name not in seen:
+                        seen.add(name)
+                        param_order.append(name)
+                args_list = [[prepare_bind_param(row.get(k), None) for k in param_order] for row in params]
+                await conn.executemany(sql, args_list)
+                return Result([], rowcount=len(params))
 
         # 2. TextClause with single dict params or None
         if isinstance(stmt, TextClause):
             sql, bound = compile_text_clause(stmt.text_str, params if isinstance(params, dict) else None)
-            is_select = sql.lstrip().upper().startswith("SELECT") or "RETURNING" in sql.upper()
-            if is_select:
+            if _is_row_returning_sql(sql):
                 records = await conn.fetch(sql, *bound)
                 rows = self._records_to_rows(records)
                 return Result(rows, rowcount=len(rows))
@@ -2493,6 +2560,21 @@ class AsyncSession:
             has_returning = bool(getattr(stmt, "_returning", []))
             if has_returning:
                 records = await conn.fetch(sql, *ctx.params)
+                ret_models = [r for r in getattr(stmt, "_returning", []) if isinstance(r, type) and issubclass(r, DeclarativeBase)]
+                if len(ret_models) == 1:
+                    model_cls = ret_models[0]
+                    rows: List[Row] = []
+                    for rec in records:
+                        rec_dict = dict(rec)
+                        inst = model_cls()
+                        self._hydrate_instance_from_record(inst, rec_dict, model_cls)
+                        inst._orm_persisted = True
+                        inst._orm_state = _snapshot_model(inst)
+                        pk_val = self._extract_pk(inst)
+                        if pk_val:
+                            self._identity_map[(model_cls, pk_val)] = inst
+                        rows.append(Row([inst], [model_cls.__name__], rec_dict))
+                    return Result(rows, rowcount=len(rows))
                 rows = self._records_to_rows(records)
                 return Result(rows, rowcount=len(rows))
             res = await conn.execute(sql, *ctx.params)
@@ -2500,7 +2582,7 @@ class AsyncSession:
 
         # Raw SQL string
         sql = str(stmt)
-        if sql.lstrip().upper().startswith("SELECT"):
+        if _is_row_returning_sql(sql):
             records = await conn.fetch(sql)
             rows = self._records_to_rows(records)
             return Result(rows, rowcount=len(rows))
@@ -2548,7 +2630,18 @@ class AsyncSession:
                     if pk_val:
                         if (model_cls, pk_val) in self._identity_map:
                             inst = self._identity_map[(model_cls, pk_val)]
-                            self._hydrate_instance_from_record(inst, rec_dict, model_cls)
+                            if inst in self.dirty:
+                                dirty_attrs = self._get_dirty_attributes(inst)
+                                for c_name, val in rec_dict.items():
+                                    if c_name not in dirty_attrs and hasattr(inst, c_name):
+                                        col_type = getattr(model_cls, "__table_columns__", {}).get(c_name, None)
+                                        hydrated = hydrate_column_value(val, getattr(col_type, "type", None))
+                                        setattr(inst, c_name, hydrated)
+                                        if hasattr(inst, "_orm_state") and c_name in inst._orm_state:
+                                            inst._orm_state[c_name] = hydrated
+                            else:
+                                self._hydrate_instance_from_record(inst, rec_dict, model_cls)
+                                inst._orm_state = _snapshot_model(inst)
                         else:
                             self._identity_map[(model_cls, pk_val)] = inst
                     slot_values.append(inst)
@@ -2561,6 +2654,10 @@ class AsyncSession:
                 else:
                     col_name = target
                     val = rec_dict.get(col_name)
+                    if val is None and isinstance(col_name, str):
+                        val = rec_dict.get(col_name.lower())
+                    if val is None and len(slot_values) < len(rec):
+                        val = list(rec.values())[len(slot_values)]
                     slot_values.append(val)
                     row_mapping[col_name] = val
 
