@@ -9,7 +9,7 @@ This guide details how to set up a local development environment for the Ephemre
 Ephemres v3.3.2.v operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
 
 > [!IMPORTANT]
-> **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 11 Layer 0 engines in `backend/app/core/`.
+> **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 13 Layer 0 engines in `backend/app/core/`.
 
 ---
 
@@ -19,16 +19,19 @@ Ephemres v3.3.2.v operates on a strict **zero-dependency runtime foundation**. A
 ephemres/
 ├── backend/
 │   ├── app/
-│   │   ├── core/           # Layer 0: 11 Pure-Stdlib Infrastructure Engines
+│   │   ├── core/           # Layer 0: 13 Pure-Stdlib Infrastructure Engines
 │   │   │   ├── asgi.py         # Native ASGI 3.0 router, dependency injection, SSE
 │   │   │   ├── orm.py          # Native Async ORM compiled directly over asyncpg
 │   │   │   ├── schema.py       # Pure-stdlib SchemaModel validation & serialization
 │   │   │   ├── faststore.py    # In-RAM /dev/shm SQLite WAL cache, pub/sub & streams
 │   │   │   ├── migrator.py     # Native async migration engine (0001-0012)
 │   │   │   ├── crypto.py       # Scrypt key derivation & AES-256-GCM encryption
+│   │   │   ├── der.py          # ASN.1 DER parser for X.509 certs & TLS SAN extraction
+│   │   │   ├── restore.py      # Cross-version database backup restoration engine
+│   │   │   ├── logging.py      # Structured rotating file & stream logger
 │   │   │   ├── http_client.py  # Asynchronous socket HTTP client with SSRF defense
 │   │   │   ├── netlink.py      # Linux kernel RTNETLINK & /proc stat readers
-│   │   │   ├── pdf.py          # Direct PostScript/PDF vector compiler
+│   │   │   ├── pdf.py          # Direct binary PDF 1.4 vector emitter
 │   │   │   ├── template.py     # Jinja2-compatible AST template compiler
 │   │   │   └── watchdog.py     # Systemd sd_notify watchdog supervisor
 │   │   ├── models/         # Declarative database models (app.core.orm)
@@ -39,9 +42,9 @@ ephemres/
 │   │   └── main.py         # EphemresApp initialization & lifecycle
 │   ├── migrations/         # Migration versions (0001-0012)
 │   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
-├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue
+├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
-├── deploy/                 # Systemd units, install.sh, upgrade.sh, nginx config
+├── deploy/                 # Systemd units, install.sh, upgrade.sh, restore.sh, nginx config
 └── tests/                  # Pytest unit & integration test suite
 ```
 
@@ -125,29 +128,33 @@ from app.core.schema import SchemaModel, Field, field_validator, ConfigDict, to_
 class EndpointCreate(SchemaModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     
-    name: str = Field(..., min_length=1, max_length=128)
-    target_ip: str
-    port: int | None = Field(default=None, ge=1, le=65535)
+    hostname: str = Field(..., min_length=1, max_length=255)
+    ip_address: str
+    device_type: str = Field(default="ENDPOINT")
+    device_role: str = Field(default="ACTIVE_HOST")
 
-    @field_validator("name")
-    def validate_name(cls, v: str) -> str:
+    @field_validator("hostname")
+    def validate_hostname(cls, v: str) -> str:
         return v.strip()
 ```
 
 ### 4.2 Data Models & Queries (`app.core.orm`)
-Use `DeclarativeBase` and `app.core.orm` query builders:
+Use `DeclarativeBase` (or `app.database.Base`) and `app.core.orm` query builders:
 ```python
-from app.core.orm import DeclarativeBase, Column, Integer, String, Boolean, DateTime, select
+from app.core.orm import Boolean, DateTime, INET, Integer, Mapped, String, mapped_column, select
+from app.database import Base
 
-class Endpoint(DeclarativeBase):
+class Endpoint(Base):
     __tablename__ = "endpoints"
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String(128), nullable=False)
-    is_active = Column(Boolean, default=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    ip_address: Mapped[str] = mapped_column(INET, unique=True, nullable=False)
+    device_role: Mapped[str] = mapped_column(String(30), default="ACTIVE_HOST")
+    monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 # Querying via AsyncSession:
-stmt = select(Endpoint).where(Endpoint.is_active == True).order_by(Endpoint.name)
+stmt = select(Endpoint).where(Endpoint.monitoring_enabled == True).order_by(Endpoint.hostname)
 result = await session.execute(stmt)
 endpoints = result.scalars().all()
 ```
@@ -194,16 +201,9 @@ status_code = response.status_code
 
 ## 5. Verification & Testing
 
-Always verify all tests pass before opening a Pull Request:
+Always verify that all tests pass before opening a Pull Request:
 ```bash
-# Run unit & integration test suite
-PYTHONPATH=.:backend pytest tests/ -q \
-  --ignore=tests/e2e \
-  --ignore=tests/test_snmp_live.py \
-  --ignore=tests/backend/test_Phase2_verification.py \
-  --ignore=tests/backend/test_dual_driver_integration.py \
-  --ignore=tests/backend/test_migration_003.py \
-  --ignore=tests/backend/test_reporting_api.py \
-  --ignore=tests/backend/test_v3_1_features.py
+# Run unit & integration test suite from workspace root
+./backend/venv/bin/pytest tests/
 ```
-All 346 tests must complete with 0 failures.
+All 371+ tests must complete with 0 failures.

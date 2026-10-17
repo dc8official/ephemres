@@ -4,32 +4,30 @@ This document outlines the mathematical principles, state machine transitions, a
 
 ---
 
-## 1. High-Density 10-Ping Sub-Cycle Polling
+## 1. High-Precision Polling Architecture
+Traditional monitoring tools send a single ICMP Echo Request every 60 seconds. In that model, a single dropped packet due to transient congestion falsely records a full minute of downtime (a 1.67% SLA penalty over an hour).
 
-Within every 60-second window aligned to the absolute minute mark, the Ephemres monitoring daemon sends:
-* **10 ICMP echo requests** spaced 6 seconds apart (`Interval = 6.0s`).
-* **Packet Loss & Latency Metrics**:
-  - `failed_count` (`0 <= k <= 10`)
-  - `packet_loss_percent` = `(k / 10) * 100%`
-  - `avg_rtt_ms`, `min_rtt_ms`, `max_rtt_ms` (calculated across successful pings).
+Ephemres eliminates false-positive SLA penalties through **5-Ping Sub-Cycle Burst Sweeping**:
+* **1-Minute Master Cycle**: Every monitored endpoint is evaluated once per 60-second window.
+* **5-Ping Sub-Cycle Sweep**: Within each 60-second window, the `ephemres-ping` engine dispatches **5 ICMP Echo Requests** spaced **8.0 seconds apart** (`~32s` active sweep window + `28s` cycle headroom, 3000ms per-packet timeout).
+* **Metrics Captured per Cycle**:
+  * `packets_sent`: `5`
+  * `packets_lost`: `0` to `5`
+  * `loss_pct`: `(packets_lost / 5) * 100.0`
+  * `avg_latency_ms`: Arithmetic mean of all received replies in the 5-ping burst.
+  * `jitter_ms`: Mean absolute deviation between consecutive RTT samples in the burst.
 
 ---
 
-## 2. Dual-State Health Engine
+## 2. Four-State Classification Matrix
+At the conclusion of each 5-ping cycle, `classify_ping_state()` (`backend/app/monitoring/ping.py`) classifies the endpoint into one of four operational states:
 
-To prevent momentary packet jitter from skewing SLA uptime, Ephemres separates operational state from detailed packet health:
-
-```
-[Packet Health / Detailed State]
-  - UP              (0 packet drops, normal RTT)
-  - UP-UNSTABLE     (1 to 4 packet drops or high jitter)
-  - DOWN-UNSTABLE   (5 to 9 packet drops)
-  - DOWN            (10 packet drops / 100% loss)
-
-[Production Availability / Operational State]
-  - UP              (Endpoint is operational; contributes to uptime)
-  - DOWN            (Endpoint is unavailable; counts as SLA outage)
-```
+| Operational State | Packets Lost (out of 5) | Packet Loss % | SLA Availability Credit | Operational Meaning |
+| :--- | :--- | :--- | :--- | :--- |
+| **`UP`** | `0` | `0%` | **Counted as Available (`1.0`)** | Healthy link; zero packet loss. |
+| **`UP-UNSTABLE`** | `1 – 2` | `20% – 40%` | **Counted as Available (`1.0`)** | Link is reachable and passing traffic, but experiencing minor congestion or jitter. Triggers early warning visibility without penalizing contractual uptime SLA. |
+| **`DOWN-UNSTABLE`** | `3 – 4` | `60% – 80%` | **Counted as Unavailable (`0.0`)** | Severe packet loss rendering synchronous protocols unusable. Triggers degradation alerting and deducts from SLA availability. |
+| **`DOWN`** | `5` | `100%` | **Counted as Unavailable (`0.0`)** | Complete loss of reachability across the entire 32-second sweep window. Triggers critical outage alerting. |
 
 ---
 

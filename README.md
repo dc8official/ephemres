@@ -4,7 +4,7 @@
 
 A high-precision, decoupled network telemetry and autonomous monitoring platform combining active multi-protocol health probing with passive high-volume network flow ingestion (NetFlow v5, NetFlow v9, and IPFIX) and per-interface throughput/utilization telemetry. Engineered for continuous endpoint verification, sub-second route diagnostics, adaptive statistical alerting, automated root-cause analysis (RCA), real-time Server-Sent Events (SSE), in-RAM accelerated storage, enterprise multi-channel incident dispatch, and dynamic topology visualization with crossing-free layout routing.
 
-Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **11 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform now runs on the pure Python Standard Library plus just two lightweight production drivers: `uvicorn` (ASGI HTTP server) and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver).
+Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **13 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform now runs on the pure Python Standard Library plus just two lightweight production drivers: `uvicorn` (ASGI HTTP server) and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver).
 
 ---
 
@@ -93,12 +93,16 @@ For complete architectural references, operational runbooks, and developer guide
 
 ## 💻 Technical Stack
 
-* **Core Runtime:** Pure Python 3.12+ Standard Library (`asyncio`, `sqlite3`, `socket`, `struct`, `typing`, `dataclasses`, `hashlib`, `json`, `inspect`, `re`)
-* **Production Drivers:** `uvicorn[standard]` (ASGI server), `asyncpg` (TimescaleDB/PostgreSQL driver)
-* **Storage & Caching:** PostgreSQL 15+ with TimescaleDB Extension (Hypertables, Continuous Aggregates & Columnar Compression), FastStore (`/dev/shm` In-RAM SQLite WAL shock-absorber & session store)
-* **Frontend:** Vue 3 (Composition API), Vite, PrimeVue (Aura Theme Preset), Chart.js, `vis-network` (BFS + Sugiyama Crossing Reduction), Tailwind CSS
-* **System Layer:** Linux `systemd` (`ephemres-api`, `ephemres-engine`, `ephemres-flowd`), Native Raw Sockets (`CAP_NET_RAW` capability), UDP Datagram Sockets (2055, 4739)
-* **Logging:** Python `RotatingFileHandler` (~150MB bounded footprint) + `systemd-journald`
+### Core Stack
+* **Backend Runtime**: Python 3.12+ (Strict `asyncio` event loop)
+* **Web Framework**: Native ASGI (`app.core.web` — Zero-Dependency FastAPI/Starlette Replacement)
+* **Validation & Config**: Native Schema Engine (`app.core.schema` & `app.core.config` — Zero-Dependency Pydantic Replacement)
+* **Database Layer**: PostgreSQL 16 + TimescaleDB (`asyncpg` + `app.core.orm` — Zero-Dependency SQLAlchemy Replacement)
+* **IPC & Streaming**: FastStore (`app.core.faststore` — Shared-Memory `/dev/shm` SQLite WAL Engine replacing Redis)
+* **Security & Crypto**: Native JWT (`app.core.jwt`), Native Scrypt (`hashlib.scrypt`), Native AES-128-CBC + HMAC-SHA256 Token Engine (`app.core.crypto`), Native ASN.1 DER X.509 Parser (`app.core.der`)
+* **Networking & Harvesters**: Raw Socket ICMP (`monitoring/ping.py`), Native Linux `/proc/net` Parser (`app.core.netif`), Native Async HTTP/1.1 + SSRF Guard (`app.core.http_client`)
+* **Reporting Engine**: Native Binary PDF 1.4 Generator with PNG/JPEG XObject embedding (`app.core.pdf`) & Native AST Template Engine (`app.core.template`)
+* **Frontend**: Vue 3 (Composition API), Vite, Pinia, PrimeVue (Aura Theme), Custom CSS Design System, Native `fetch` Client (Zero Axios/CDN dependencies), Chart.js
 
 ---
 
@@ -156,6 +160,6 @@ The upgrade utility automatically:
 
 Core Architecture designed and authored by **Kenneth Nnorom**.
 
-Website: [kennethnnorom.com](https://kennethnnorom.com) | LinkedIn: [linkedin.com/in/kennethnnorom](https://www.google.com/search?q=https://linkedin.com/in/kennethnnorom)
+Website: [kennethnnorom.com](https://kennethnnorom.com) | LinkedIn: [linkedin.com/in/kennethnnorom](https://linkedin.com/in/kennethnnorom)
 
 This project is licensed under the terms of the **Apache License 2.0**. See the [LICENSE](LICENSE) file for complete details.

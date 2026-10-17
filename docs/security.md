@@ -46,7 +46,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
                        │ (Port 8000)            │ (UDP 2055 / 4739)      │
                        ▼                        ▼                        ▼
               ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-              │   FastAPI Core   │    │ Flow Collector   │    │  Traceroute/ICMP │
+              │ Native ASGI Core │    │ Flow Collector   │    │  Traceroute/ICMP │
               │  (ephemres-api)  │    │ (ephemres-flowd) │    │(ephemres-engine) │
               └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
                        │                       │                       │
@@ -54,20 +54,20 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
                                                │
                                                ▼
                               ┌──────────────────────────────────┐
-                              │  Internal Loopback Services      │
-                              │  PostgreSQL (5432) / Redis (6379)│
+                              │  Internal Loopback & FastStore   │
+                              │  PostgreSQL (5432) / FastStore   │
                               └──────────────────────────────────┘
 ```
 
 | Service Component | Port(s) | Binding Scope | Security Hardening Controls |
 | :--- | :--- | :--- | :--- |
 | **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Enforces TLS 1.2+, HSTS, Content Security Policy, and proxies internal API traffic. |
-| **FastAPI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
+| **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
 | **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
-| **Redis Cache / Broker (Optional)** | `6379` | `127.0.0.1` (Loopback Only) | Internal session, stream buffer & pub/sub broker. Bound to loopback with `protected-mode yes`. |
+| **FastStore IPC** | `/dev/shm/ephemres_faststore.db` | UNIX Filesystem | `0600 (ephemres:ephemres)` | Shared-memory WAL state store & NetFlow stream buffer (No TCP port exposed). |
 | **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
-| **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `SSRFSafeBackend`. |
+| **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `AsyncHttpClient` SSRF guard. |
 
 ---
 
@@ -79,7 +79,7 @@ Ephemres incorporates **Zero-Trust Socket-Level SSRF Protection** (`SSRFSafeBack
 In standard application architectures, validating a URL before making an HTTP request leaves an exploitable window: an attacker configures a domain with a 0-second TTL that returns a public IP during pre-flight validation, but rebinds to `169.254.169.254` (cloud metadata) or `127.0.0.1` when the HTTP client establishes its TCP connection.
 
 ### B. The Defense: Millisecond-Level Socket Interception & Socket DNS Pinning
-Ephemres's `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` engine, while `monitoring/synthetic.py` implements direct socket DNS pinning:
+Ephemres implements a native zero-dependency HTTP/1.1 client (`app.core.http_client.AsyncHttpClient`) paired with pre-connect DNS resolution and IP validation (`validate_outbound_url` / `is_ip_safe`) that intercepts all outbound webhook and OIDC requests at the socket layer **before** `asyncio.open_connection()` is invoked:
 
 1. **Connection-Time Resolution & Pinning:** Performs an asynchronous DNS resolution immediately prior to opening sockets, and pins physical connections directly to the resolved IP.
 2. **Strict IP Enforcement:** Evaluates all returned addresses against the global routable IP specification:
@@ -127,13 +127,13 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### B. Distributed Multi-Worker Session Governance
 In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
-* **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `RedisSessionStore` rather than volatile single-worker process memory.
+* **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`) rather than volatile single-worker process memory.
 * **Concurrent Device Quota (Max 2 Sessions):** Accounts are restricted to 2 concurrent active devices. A third login automatically evicts the oldest session via FIFO retirement.
 * **Instantaneous Session Revocation:** Changing an account password or clicking "Sign Out Everywhere" immediately deletes active session records from the datastore, revoking access across all workers in real time.
 * **Forced Initial Password Reset:** Newly provisioned user accounts (`ADMIN` or `VIEWER`) must change their temporary password upon first login before accessing system telemetry.
 
 ### C. Password Hashing
-* Passwords are hashed using **Argon2id** (memory-hard, resistant to GPU/ASIC cracking) with fallback support for **bcrypt** (cost factor 12).
+* **Password Hashing**: Passwords are hashed using Python's native OpenSSL-backed **`hashlib.scrypt`** (`$scrypt$n=16384,r=8,p=1$`, 16-byte cryptographic salt, 64-byte derived key) verified in constant time via `hmac.compare_digest`. Legacy `$argon2id$` hashes from pre-`v3.3.2v` backups are automatically invalidated and flagged for password reset during cross-version restore.
 * Plaintext passwords are never logged or stored.
 
 ---
@@ -158,7 +158,7 @@ When determining the client's real IP address for audit logs and security polici
 ## 8. Input Sanitization & Attack Mitigations
 
 ### A. SQL Injection Neutralization
-* 100% of database interactions execute through **SQLAlchemy Core / ORM parameterized queries** (`:endpoint_id`, `:ip_address`) or explicit type-casted bindings (`CAST(:id AS uuid)`).
+* 100% of database interactions execute through **app.core.orm parameterized queries ($1, $2 positional asyncpg bindings)** or explicit type-casted bindings (`CAST($1 AS uuid)`).
 * Raw string concatenation into SQL statements is strictly prohibited.
 
 ### B. CSV Formula Injection Defense (Spreadsheet Execution)
@@ -171,17 +171,14 @@ When determining the client's real IP address for audit logs and security polici
 * **Discord Mention Storms:** Discord webhooks enforce `"allowed_mentions": {"parse": []}`, preventing malicious hostnames (e.g. `@everyone` or `@here`) from triggering server-wide notification storms.
 * **Slack MRKDWN Escaping:** Dynamic strings in Slack Block Kit payloads escape special formatting characters (`<`, `>`, `&`).
 
-### D. Air-Gapped PDF Generation & SSRF/LFI Defense
-* **Risk Model:** PDF rendering engines that support HTML/CSS are historically susceptible to Server-Side Request Forgery (SSRF) and Local File Inclusion (LFI) through tags like `<img src="...">`, `<link>`, or `@import`.
-* **Air-Gapped URL Fetcher:** In `backend/app/services/pdf_engine.py`, the `secure_url_fetcher` intercepts all resource loading attempts:
-  * **External Schemas Blocked:** All network URI schemes (`http://`, `https://`, `ftp://`) raise an immediate `PermissionError`, preventing remote requests or credential exfiltration.
-  * **Filesystem Whitelisting:** Local `file://` URIs are verified to reside strictly within authorized static asset roots (`backend/app/templates/reports/` and `frontend/src/assets/`). Traversal attempts outside these paths (e.g., `/etc/passwd`) are blocked with a `PermissionError`.
-  * **Safe Data URIs:** Permits inline Base64 data URIs (`data:image/png;base64,...`) for corporate branding logos.
+### D. Zero-Dependency Binary PDF Emitter (`app.core.pdf`)
+Ephemres eliminates external HTML-to-PDF rendering engines (`WeasyPrint`, `wkhtmltopdf`, headless browsers) and their associated Local File Inclusion (LFI) / SSRF attack surface.
+* Executive SLA reports are compiled directly into raw **PDF 1.4 binary streams** in memory using `app.core.pdf`.
+* Organization logos are validated strictly in-memory as binary PNG or JPEG byte headers and embedded directly as native PDF `/Subtype /Image` XObjects—no external URLs, stylesheets, or filesystem paths are ever fetched during report generation.
 
-### E. Cryptographic Document Immutability & Permission Encryption
-* **Read-Only Permission Encryption:** In `backend/app/services/pdf_engine.py`, rendered PDFs are processed through `pypdf.PdfWriter` applying standard permission encryption with an empty user password and randomized 256-bit owner password.
-* **Tamper Prevention:** Permissions are locked strictly to `UserAccessPermissions.PRINT | UserAccessPermissions.PRINT_TO_REPRESENTATION`. Annotation editing, form filling, text modifications, and content extraction are prohibited by standard PDF viewers.
-* **Out-of-Band Integrity Checksum:** The cryptographic SHA-256 hash of the generated document is transmitted via the `X-Report-SHA256` HTTP header, allowing verification against audit logs without cluttering the printed visual page.
+### E. Cryptographic Integrity Verification (`X-Report-SHA256`)
+Every generated PDF byte stream is hashed prior to transmission:
+* **SHA-256 Digest Header**: The HTTP response attaches an `X-Report-SHA256` header containing the hex-encoded SHA-256 digest of the exact PDF payload so auditors can verify document authenticity and detect post-export tampering.
 
 ---
 

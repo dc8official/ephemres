@@ -20,7 +20,7 @@ Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-inter
 |                    EPHEMRES COLLECTOR DAEMON (ephemres-flowd)                 |
 |  - Async Datagram Listeners (4MB SO_RCVBUF)                                   |
 |  - Zero-alloc binary parsers (v5, v9 template cache, IPFIX RFC 7011/7012)     |
-|  - Fast wire pipeline into Redis 6+ Stream: stream:netflow:raw                 |
+|  - Fast wire pipeline into FastStore shared-memory stream: stream:netflow:raw |
 +---------------------------------------+---------------------------------------+
                                         |
                                         v
@@ -28,7 +28,7 @@ Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-inter
 |                  CORRELATOR & MICRO-BATCH AGGREGATOR                          |
 |  - Dual-role O(1) in-memory lookup table (Exporters & Monitored Participants) |
 |  - Port normalizer (collapses ephemeral ports 1024-65535 to preserve index)  |
-|  - Unmatched exporter candidate discovery (15-minute TTL in Redis)            |
+|  - Unmatched exporter candidate discovery (15-minute TTL in FastStore)        |
 |  - 1-minute micro-batch accumulator with bulk UPSERT                          |
 +---------------------------------------+---------------------------------------+
                                         |
@@ -277,7 +277,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 1. Log in to the Ephemres Web Interface as an **Administrator**.
 2. Navigate to **System Settings** -> **Tab 2: Performance & Telemetry Engine**.
 3. Under **Network Flow Telemetry Ingestion (v3.2.0)**:
-   - Click **Run System Preflight Check** to verify Redis 6+ and stream write functionality.
+   - Click **Run System Preflight Check** to verify FastStore (`/dev/shm`) shared memory and stream write functionality.
    - Toggle **Enable Flow Telemetry Ingestion** to **Active**.
    - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match your network topology.
    - Click **Save Global Settings**.
@@ -299,7 +299,7 @@ When network devices export flows from loopback interfaces, secondary management
 3. Click **Map Exporter IP**:
    - Select the corresponding managed device from the dropdown.
    - Click **Bind Exporter IP**.
-4. The secondary IP is added to the endpoint's `flow_exporter_ips` array and immediately synchronized to the in-memory correlator via Redis Pub/Sub (`channel:registry_sync`).
+4. The secondary IP is added to the endpoint's `flow_exporter_ips` array and immediately synchronized to the in-memory correlator via FastStore / PostgreSQL sync (`channel:registry_sync`).
 
 ---
 
@@ -320,13 +320,13 @@ sudo tcpdump -ni any udp port 2055 -c 5
 sudo tcpdump -ni any udp port 4739 -c 5
 ```
 
-### Inspect Redis Wire Buffer
+### Inspect FastStore Shared-Memory Wire Buffer (`/dev/shm`)
 ```bash
-# Check raw stream queue depth
-redis-cli xlen stream:netflow:raw
+# Check raw stream queue depth and queued batches
+sqlite3 /dev/shm/ephemres_faststore.db "SELECT stream_key, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream_key;"
 
-# Read the last 2 flow packets ingested
-redis-cli xrevrange stream:netflow:raw + - count 2
+# Inspect the last 2 raw flow packet entries ingested
+sqlite3 /dev/shm/ephemres_faststore.db "SELECT id, stream_key, substr(fields, 1, 120) FROM stream_entries ORDER BY id DESC LIMIT 2;"
 ```
 
 ### Query Database Rollups

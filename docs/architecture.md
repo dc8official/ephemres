@@ -92,7 +92,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 
 ## 10. Layer 0 Core Foundation (Zero-Dependency Engines)
 
-At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 11 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
+At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 13 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
 
 | Module | Engine Functionality | Technical Mechanics & Stdlib Primitives |
 | :--- | :--- | :--- |
@@ -101,7 +101,9 @@ At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 11 
 | **`app.core.schema`** | Pure-Stdlib Type Validation & Serialization | Replaces `pydantic`. Implements `SchemaModel`, `Field`, `validator`, `field_validator`, `model_validator`, `ConfigDict`, and `to_camel` using stdlib `typing`, `inspect`, and `re`. |
 | **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/dev/shm` SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
 | **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0012` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
-| **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`) with constant-time verification (`hmac.compare_digest`), AES-256-GCM symmetric encryption, and backward-compatible Argon2 hash verification. |
+| **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`, `$scrypt$n=16384,r=8,p=1$`) with constant-time verification (`hmac.compare_digest`) and AES-256-GCM symmetric encryption. Legacy `$argon2id$` hashes from `v3.1.35s`–`v3.3.1n` are migrated during backup restore via automatic admin password reset (`must_change_password = TRUE`). |
+| **`app.core.der`** | Native ASN.1 DER Certificate Parser | Replaces `cryptography.x509`. Pure-stdlib ASN.1 DER parser reading X.509 certificate validity dates (`notBefore`, `notAfter`) and Subject Alternative Names directly from binary TLS socket handshakes. |
+| **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
 | **`app.core.http_client`** | Socket-Level SSRF-Immune HTTP Client | Replaces `httpx`. Asynchronous raw socket HTTP/1.1 client (`asyncio.open_connection`, `ssl`) performing pre-connection DNS validation against RFC 1918, RFC 3927 (cloud metadata `169.254.169.254`), and loopback IPs. |
 | **`app.core.netlink`** | Pure Linux Kernel RTNETLINK Engine | Replaces `psutil`. Pure Linux kernel Netlink binary parser (`AF_NETLINK`, `NETLINK_ROUTE`, `RTM_GETADDR`) and `/proc` stat readers for asynchronous interface and system telemetry. |
 | **`app.core.pdf`** | Direct PostScript/PDF Binary Emitter | Replaces `weasyprint`, `cairo`, `pango`, and `pypdf`. Generates vector-styled executive compliance reports, tables, typography matrices, and Base64 logos without external shared libraries. |

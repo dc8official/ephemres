@@ -52,11 +52,11 @@ cd ephemres/deploy
 
 **What the installer executes:**
 1. Installs minimal system packages: `python3-pip`, `postgresql-16`, `timescaledb-2-postgresql-16`, `nginx`, `traceroute`, `libcap2-bin`, `nodejs`.
-2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
+2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/backend/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
 4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
 5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`).
-6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
+6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/backend/venv/bin/python3)`.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
 ---
@@ -76,7 +76,7 @@ sudo ./deploy/upgrade.sh
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
-3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
+3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/backend/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
 4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.2.v defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, cleans obsolete dependencies from the virtual environment, installs minimal requirements (`uvicorn`, `asyncpg`), and compiles frontend assets.
@@ -86,42 +86,70 @@ sudo ./deploy/upgrade.sh
 
 ---
 
-## 4. Disaster Recovery & Backup Restoration
+## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` $\rightarrow$ `v3.3.2v+`)
 
-For complete database restoration procedures from timestamped backups, refer to the **[Disaster Recovery & Database Restoration Runbook](deploy/RESTORE.md)**.
+Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s`, `v3.3.0`, `v3.3.1n`, or `v3.3.2v+`:
 
-Quick restore summary:
 ```bash
-sudo systemctl stop ephemres-flowd ephemres-engine ephemres-api
-set -a && source /etc/ephemres/ephemres.env && set +a
-PGPASSWORD="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD}}" psql -h 127.0.0.1 -U netmon_user -d netmon -f /var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql
-cd /opt/ephemres/backend && /opt/ephemres/venv/bin/python3 -m app.core.migrator upgrade head
-sudo systemctl restart ephemres-api ephemres-engine ephemres-flowd nginx
+# Interactive restore (prompts for a new Admin password if legacy $argon2id$ hashes are detected)
+sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz
+
+# Non-interactive / automated restore with explicit admin password reset
+sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz \
+  --admin-password 'NewSecureAdminPassword123!'
 ```
+
+See [`deploy/RESTORE.md`](../deploy/RESTORE.md) for full details on cross-version column reconciliation, TimescaleDB chunk remapping, and `SECRET_KEY` migration.
 
 ---
 
 ## 5. Storage Driver & Flow Configuration
 
-In `/etc/ephemres/config.toml`:
+Ephemres configuration is declared in `/etc/ephemres/config.toml`:
 
 ```toml
-[storage]
-# Active driver: "postgres" or "faststore"
-driver = "faststore"
+[database]
+host = "localhost"
+port = 5432
+name = "netmon"
+user = "netmon_user"
 
-[faststore]
-# In-RAM SQLite WAL database location (defaults to /dev/shm)
-db_path = "/dev/shm/ephemres_faststore.db"
+[monitoring]
+interval_seconds = 60
+ping_count = 5
+ping_interval_seconds = 8
+state_confirmation_cycles = 3
+retention_days = 730
+
+[api]
+host = "127.0.0.1"
+port = 8000
+allowed_origins = ["https://monitor.yourdomain.com"]
+
+[security]
+session_timeout_minutes = 120
+max_active_sessions_per_user = 2
+hsts_enabled = true
+
+[redis]
+# FastStore shared-memory configuration (in-RAM /dev/shm)
+host = "127.0.0.1"
+port = 6379
+db = 0
 enabled = true
+performance_mode = false
 
 [flow]
-enabled = true
+enabled = false
 netflow_port = 2055
 ipfix_port = 4739
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
 ```
+
+> [!NOTE]
+> **Performance Mode Toggling**:
+> **Performance Mode** (switching between Standard PostgreSQL Mode and high-velocity FastStore `/dev/shm` shared-memory streaming) is managed live from the **Admin Settings UI $\rightarrow$ Performance & Telemetry** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
 
 ---
 
@@ -186,7 +214,7 @@ If executing migrations manually outside of `upgrade.sh`:
 cd /opt/ephemres/backend
 
 # Activate python virtual environment and set path
-source /opt/ephemres/venv/bin/activate
+source /opt/ephemres/backend/venv/bin/activate
 export PYTHONPATH=/opt/ephemres:/opt/ephemres/backend
 
 # Inspect pending migrations
