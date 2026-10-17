@@ -60,11 +60,17 @@ async def run_flow_daemon() -> None:
         sys.exit(1)
 
     flow_cfg = getattr(settings, "flow", None)
+    bind_host = getattr(flow_cfg, "bind_host", "0.0.0.0") if flow_cfg else "0.0.0.0"
     netflow_port = getattr(flow_cfg, "netflow_port", 2055) if flow_cfg else 2055
     ipfix_port = getattr(flow_cfg, "ipfix_port", 4739) if flow_cfg else 4739
 
     correlator = FlowCorrelator(AsyncSessionLocal, store_client=store_client)
-    collector = FlowCollector(store_client=store_client, netflow_port=netflow_port, ipfix_port=ipfix_port)
+    collector = FlowCollector(
+        store_client=store_client,
+        bind_host=bind_host,
+        netflow_port=netflow_port,
+        ipfix_port=ipfix_port,
+    )
     aggregator = FlowAggregator(store_client=store_client, correlator=correlator, db_session_factory=AsyncSessionLocal)
 
     await correlator.start()

@@ -210,6 +210,7 @@ RedisSettings = FastStoreSettings
 @dataclass
 class FlowSettings:
     enabled: bool = False
+    bind_host: str = "0.0.0.0"
     netflow_port: int = 2055
     ipfix_port: int = 4739
     sampling_multiplier: int = 1
@@ -217,6 +218,7 @@ class FlowSettings:
 
     def __post_init__(self) -> None:
         self.enabled = _coerce_bool(self.enabled)
+        self.bind_host = str(self.bind_host).strip() or "0.0.0.0"
         self.netflow_port = _coerce_int(self.netflow_port, "flow.netflow_port", ge=1, le=65535)
         self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
         self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
