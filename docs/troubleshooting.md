@@ -17,7 +17,7 @@ Ephemres incorporates a dual-logging architecture: all standard console output i
 | **Flow Collector Daemon** *(v3.2.0+)* | `journalctl -u ephemres-flowd`<br>`/var/log/ephemres/ephemres-flowd.log` | Passive NetFlow v5/v9 and IPFIX UDP packet decoding, template caching, and FastStore shared-memory stream buffering (`/dev/shm`). | 10 MB per file, 5 rotated backups (max 60 MB total). |
 | **Platform Error Aggregator** | `/var/log/ephemres/error.log` | Unified platform-wide sink capturing all `ERROR` and `CRITICAL` log records across all Ephemres Python components. | 10 MB per file, 3 rotated backups (max 30 MB total). |
 | **Reverse Proxy (Nginx)** | `/var/log/nginx/access.log`<br>`/var/log/nginx/error.log` | Inbound client HTTP requests, TLS termination, SSE long-polling connection lifecycle, and upstream proxy dispatch. | Managed by system `logrotate` (daily / weekly compression). |
-| **Database & Cache Services** | `journalctl -u postgresql`<br>`/dev/shm/ephemres_faststore.db` | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and FastStore In-RAM IPC WAL engine state. | Managed by PostgreSQL engine and FastStore RAM lifecycle. |
+| **Database & Cache Services** | `journalctl -u postgresql`<br>`/dev/shm/ephemres_faststore_*.sqlite3` | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and FastStore In-RAM IPC WAL engine state. | Managed by PostgreSQL engine and FastStore RAM lifecycle. |
 
 > [!NOTE]
 > **Total Log Footprint Ceiling**: Application file logging in `/var/log/ephemres/` is bounded to a maximum ceiling of **$\sim$150 MB** across all services combined, preventing disk exhaustion on lean edge or VPS instances.
@@ -91,7 +91,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 * **Fix**:
   ```bash
   # Resolve symlinked python binary in virtual environment and grant raw socket access
-  PYTHON_BIN=$(readlink -f /opt/ephemres/backend/venv/bin/python3)
+  PYTHON_BIN=$(readlink -f /opt/ephemres/venv/bin/python3)
   sudo setcap cap_net_raw+ep "${PYTHON_BIN}"
   
   # Ensure traceroute also retains raw network capabilities
@@ -279,20 +279,22 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 * **Diagnosis**:
   1. Inspect FastStore shared-memory database file existence, permissions, and size:
      ```bash
-     ls -lh /dev/shm/ephemres_faststore.db*
+     ls -lh /dev/shm/ephemres_faststore*
      ```
   2. Query FastStore internal tables and stream backlog using the standard `sqlite3` CLI:
      ```bash
+     FASTSTORE_DB=$(ls /dev/shm/ephemres_faststore_*.sqlite3 2>/dev/null | head -n 1)
+
      # Inspect queued NetFlow stream batches
-     sqlite3 /dev/shm/ephemres_faststore.db "SELECT stream_key, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream_key;"
+     sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream;"
 
      # Inspect active cached sessions
-     sqlite3 /dev/shm/ephemres_faststore.db "SELECT count(*) FROM session_entries WHERE expires_at > unixepoch();"
+     sqlite3 "${FASTSTORE_DB}" "SELECT count(*) FROM kv_store WHERE k LIKE 'session:%' AND (expires_at IS NULL OR expires_at > unixepoch());"
      ```
   3. If the database file is corrupted or locked by an orphaned process:
      ```bash
      sudo systemctl stop ephemres-api ephemres-engine ephemres-flowd
-     rm -f /dev/shm/ephemres_faststore.db*
+     rm -f /dev/shm/ephemres_faststore*
      sudo systemctl start ephemres-api ephemres-engine ephemres-flowd
      ```
 
@@ -327,8 +329,8 @@ curl -s http://127.0.0.1:8000/api/v1/health | jq .
 curl -s http://127.0.0.1:8000/api/v1/version | jq .
 
 # 3. ICMP raw socket capability check
-getcap $(readlink -f /opt/ephemres/backend/venv/bin/python3) $(command -v traceroute)
+getcap $(readlink -f /opt/ephemres/venv/bin/python3) $(command -v traceroute)
 
 # 4. FastStore IPC shared memory check
-ls -l /dev/shm/ephemres_faststore.db*
+ls -l /dev/shm/ephemres_faststore*
 ```

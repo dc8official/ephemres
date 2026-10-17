@@ -101,7 +101,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    ```
 
 ### 3.3 In-RAM FastStore Cache
-FastStore requires **zero external daemons**. You do not need to install, start, or configure `redis-server`. FastStore automatically creates and manages its in-RAM SQLite WAL database in `/dev/shm/ephemres_faststore.db` with sub-microsecond access times.
+FastStore requires **zero external daemons**. You do not need to install, start, or configure `redis-server`. FastStore automatically creates and manages its in-RAM SQLite WAL database in `/dev/shm/ephemres_faststore_u<UID>_db0.sqlite3` with sub-microsecond access times.
 
 ### 3.4 Frontend Setup (Vue 3 / Vite)
 1. **Install Dependencies:**

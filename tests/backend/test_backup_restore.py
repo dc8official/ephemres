@@ -211,32 +211,29 @@ async def test_v3_3_0_dump_restore_and_secret_reencryption(tmp_path: Path):
     dump_content = f"""
 -- Ephemres v3.3.0 Synthetic Dump with Flow Telemetry and Legacy Alert Channel Secret
 CREATE TABLE _timescaledb_internal._hyper_2_1_chunk (
-    id uuid NOT NULL,
-    endpoint_id uuid,
-    bucket_start timestamp with time zone NOT NULL,
-    src_ip inet,
-    dst_ip inet,
-    src_port integer,
-    dst_port integer,
-    protocol smallint,
-    byte_count bigint,
-    packet_count bigint,
-    flow_count integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    bucket timestamp with time zone NOT NULL,
+    exporter_id uuid NOT NULL,
+    src_endpoint_id uuid,
+    dst_endpoint_id uuid,
+    src_ip inet NOT NULL,
+    dst_ip inet NOT NULL,
+    protocol smallint NOT NULL,
+    dst_port integer NOT NULL,
+    bytes bigint DEFAULT 0 NOT NULL,
+    packets bigint DEFAULT 0 NOT NULL,
+    flow_count integer DEFAULT 1 NOT NULL
 )
 INHERITS (public.flow_minute_rollups);
 
 CREATE TABLE _timescaledb_internal._hyper_3_1_chunk (
-    id uuid NOT NULL,
-    endpoint_id uuid,
-    bucket_start timestamp with time zone NOT NULL,
-    input_snmp integer,
-    output_snmp integer,
-    in_bytes bigint,
-    out_bytes bigint,
-    in_packets bigint,
-    out_packets bigint,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    bucket timestamp with time zone NOT NULL,
+    exporter_id uuid NOT NULL,
+    interface_idx integer NOT NULL,
+    in_bytes bigint DEFAULT 0 NOT NULL,
+    out_bytes bigint DEFAULT 0 NOT NULL,
+    in_packets bigint DEFAULT 0 NOT NULL,
+    out_packets bigint DEFAULT 0 NOT NULL,
+    flow_count integer DEFAULT 0 NOT NULL
 )
 INHERITS (public.flow_interface_minute_rollups);
 
@@ -248,33 +245,29 @@ COPY public.users (id, username, password_hash, role_id, is_active, must_change_
 b0000000-0000-0000-0000-000000000001	admin	$argon2id$v=19$m=65536,t=3,p=4$v33hash	a0000000-0000-0000-0000-000000000001	t	f	\\N	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00
 \\.
 
-COPY public.endpoints (id, ip_address, hostname, device_type, location, description, monitoring_enabled, endpoint_status, created_by, created_at, updated_at, flow_exporter_ips, flow_interface_aliases, device_role) FROM stdin;
-e0000000-0000-0000-0000-000000000002	10.0.0.1	border-gw	ROUTER	HQ	Border Router	t	ACTIVE	b0000000-0000-0000-0000-000000000001	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00	{{10.0.0.1,10.0.0.2}}	{{"1": "Gig0/0"}}	gateway
+-- Child endpoint appears BEFORE parent endpoint to verify two-pass manual_parent_id FK safety
+COPY public.endpoints (id, ip_address, hostname, device_type, location, description, monitoring_enabled, endpoint_status, manual_parent_id, created_by, created_at, updated_at, flow_exporter_ips, flow_interface_aliases, device_role) FROM stdin;
+e0000000-0000-0000-0000-000000000003	10.0.0.10	access-sw	SWITCH	HQ	Access Switch	t	ACTIVE	e0000000-0000-0000-0000-000000000002	b0000000-0000-0000-0000-000000000001	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00	{{}}	{{}}	CORE_SWITCH
+e0000000-0000-0000-0000-000000000002	10.0.0.1	border-gw	ROUTER	HQ	Border Router	t	ACTIVE	\\N	b0000000-0000-0000-0000-000000000001	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00	{{10.0.0.1,10.0.0.2}}	{{"1": "Gig0/0"}}	gateway
 \\.
 
 COPY public.alert_channels (id, name, channel_type, is_enabled, config, endpoint_ids, subnet_filters, severity_filters, created_at, updated_at) FROM stdin;
 ch000000-0000-0000-0000-000000000001	Discord Alerts	DISCORD	t	{enc_legacy_secret}	[]	[]	["DOWN"]	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00
 \\.
 
-COPY _timescaledb_internal._hyper_2_1_chunk (id, endpoint_id, bucket_start, src_ip, dst_ip, src_port, dst_port, protocol, byte_count, packet_count, flow_count, created_at) FROM stdin;
-fl000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000002	2026-01-01 02:00:00+00	10.0.0.5	10.0.0.6	443	51234	6	1048576	1000	10	2026-01-01 02:01:00+00
+COPY _timescaledb_internal._hyper_2_1_chunk (bucket, exporter_id, src_endpoint_id, dst_endpoint_id, src_ip, dst_ip, protocol, dst_port, bytes, packets, flow_count) FROM stdin;
+2026-01-01 02:00:00+00	e0000000-0000-0000-0000-000000000002	e0000000-0000-0000-0000-000000000003	\\N	10.0.0.5	10.0.0.6	6	443	1048576	1000	10
 \\.
 
-COPY _timescaledb_internal._hyper_3_1_chunk (id, endpoint_id, bucket_start, input_snmp, output_snmp, in_bytes, out_bytes, in_packets, out_packets, created_at) FROM stdin;
-if000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000002	2026-01-01 02:00:00+00	1	2	524288	1048576	500	1000	2026-01-01 02:01:00+00
+COPY _timescaledb_internal._hyper_3_1_chunk (bucket, exporter_id, interface_idx, in_bytes, out_bytes, in_packets, out_packets, flow_count) FROM stdin;
+2026-01-01 02:00:00+00	e0000000-0000-0000-0000-000000000002	1	524288	1048576	500	1000	10
 \\.
 """
     dump_file = tmp_path / "backup_v3.3.0.sql"
     dump_file.write_text(dump_content, encoding="utf-8")
 
-    mock_conn = MockDbConnection({
-        "roles": {"id": "uuid", "role_name": "varchar", "description": "text", "created_at": "timestamptz"},
-        "users": {"id": "uuid", "username": "varchar", "password_hash": "text", "role_id": "uuid", "is_active": "bool", "must_change_password": "bool", "created_at": "timestamptz", "updated_at": "timestamptz"},
-        "endpoints": {"id": "uuid", "ip_address": "inet", "hostname": "varchar", "device_type": "varchar", "location": "varchar", "description": "text", "monitoring_enabled": "bool", "endpoint_status": "varchar", "created_by": "uuid", "created_at": "timestamptz", "updated_at": "timestamptz", "flow_exporter_ips": "_inet", "flow_interface_aliases": "jsonb", "device_role": "varchar"},
-        "alert_channels": {"id": "uuid", "name": "varchar", "channel_type": "varchar", "is_enabled": "bool", "config": "text", "endpoint_ids": "jsonb", "subnet_filters": "jsonb", "severity_filters": "jsonb", "created_at": "timestamptz", "updated_at": "timestamptz"},
-        "flow_minute_rollups": {"id": "uuid", "endpoint_id": "uuid", "bucket_start": "timestamptz", "src_ip": "inet", "dst_ip": "inet", "src_port": "int4", "dst_port": "int4", "protocol": "int2", "byte_count": "int8", "packet_count": "int8", "flow_count": "int4", "created_at": "timestamptz"},
-        "flow_interface_minute_rollups": {"id": "uuid", "endpoint_id": "uuid", "bucket_start": "timestamptz", "input_snmp": "int4", "output_snmp": "int4", "in_bytes": "int8", "out_bytes": "int8", "in_packets": "int8", "out_packets": "int8", "created_at": "timestamptz"},
-    })
+    from app.core.restore import _get_default_v332_schema
+    mock_conn = MockDbConnection(_get_default_v332_schema())
 
     summary = await reconcile_and_restore_database(
         conn=mock_conn,
@@ -286,6 +279,7 @@ if000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000002	2026-0
     assert summary["channels_re_encrypted"] == 1
     assert summary["channels_disabled"] == 0
     assert summary["telemetry_rows_restored"] == 2
+    assert summary["endpoint_count"] == 2
 
     # 1. Verify channel secret re-encrypted and readable by decrypt_secret()
     ch_row = mock_conn.tables["alert_channels"][0]
@@ -296,19 +290,25 @@ if000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000002	2026-0
     decrypted_json = decrypt_secret(re_encrypted)
     assert json.loads(decrypted_json) == json.loads(legacy_webhook_cfg)
 
-    # 2. Verify endpoints array and jsonb columns preserved
-    ep_row = mock_conn.tables["endpoints"][0]
-    assert ep_row["flow_exporter_ips"] == ["10.0.0.1", "10.0.0.2"]
-    assert ep_row["device_role"] == "gateway"
+    # 2. Verify endpoints array, jsonb, normalized device_role, and deferred manual_parent_id
+    sw_row = next(e for e in mock_conn.tables["endpoints"] if e["hostname"] == "access-sw")
+    gw_row = next(e for e in mock_conn.tables["endpoints"] if e["hostname"] == "border-gw")
+    assert sw_row["device_role"] == "L2_SWITCH"
+    assert sw_row["manual_parent_id"] is None  # Deferred in pass 1 before parent existed
+    assert any('UPDATE "endpoints" SET "manual_parent_id"' in q for q in mock_conn.executed_queries)
+    assert gw_row["flow_exporter_ips"] == ["10.0.0.1", "10.0.0.2"]
+    assert gw_row["device_role"] == "HYBRID_GATEWAY"
 
-    # 3. Verify hypertable chunks routed to flow tables
+    # 3. Verify hypertable chunks routed to real flow tables
     flow_row = mock_conn.tables["flow_minute_rollups"][0]
-    assert flow_row["byte_count"] == 1048576
+    assert flow_row["bytes"] == 1048576
+    assert flow_row["packets"] == 1000
     assert flow_row["flow_count"] == 10
 
     if_row = mock_conn.tables["flow_interface_minute_rollups"][0]
-    assert if_row["input_snmp"] == 1
-    assert if_row["output_snmp"] == 2
+    assert if_row["interface_idx"] == 1
+    assert if_row["in_bytes"] == 524288
+    assert if_row["out_bytes"] == 1048576
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,9 @@ Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integra
 │   • faststore.py   In-RAM /dev/shm SQLite WAL engine with Redis async API      │
 │   • migrator.py    Native async TimescaleDB/PostgreSQL DDL migration engine    │
 │   • crypto.py      Pure-stdlib Scrypt key derivation & constant-time validation│
+│   • der.py         Pure-stdlib ASN.1 DER X.509 certificate & SAN parser        │
+│   • restore.py     Cross-version database backup restoration engine            │
+│   • logging.py     Structured rotating file & stream logging engine            │
 │   • http_client.py RFC-compliant SSRF-hardened async HTTP socket client        │
 │   • netlink.py     Pure Linux RTNETLINK binary parser & /proc diagnostics      │
 │   • pdf.py         Pure-stdlib PostScript/PDF binary document generator        │
@@ -77,7 +80,7 @@ For complete architectural references, operational runbooks, and developer guide
 
 * **[v3.3.2.v Release Notes](docs/release-notes/v3.3.2.v.md):** Complete release notes detailing the 6 stages of the Vertical Integration Architecture.
 * **[Changelog & Technical Evolution](docs/changelog.md):** Complete evolutionary matrix and milestone chronicle from Version 1.0 to Version 3.3.2.v.
-* **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 11 native core engines, data pipelines, and concurrency sweeper.
+* **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 13 native core engines, data pipelines, and concurrency sweeper.
 * **[Developer Guide](docs/developer-guide.md):** Guidelines for contributing with `app.core.orm`, `app.core.schema`, `app.core.asgi`, and `FastStoreClient`.
 * **[Deployment & Operations Guide](docs/deployment.md):** Production deployment runbook, `/dev/shm` shared memory tuning, and zero-Redis service supervision.
 * **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9 and IPFIX setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), and interface metrics.
@@ -95,12 +98,12 @@ For complete architectural references, operational runbooks, and developer guide
 
 ### Core Stack
 * **Backend Runtime**: Python 3.12+ (Strict `asyncio` event loop)
-* **Web Framework**: Native ASGI (`app.core.web` — Zero-Dependency FastAPI/Starlette Replacement)
-* **Validation & Config**: Native Schema Engine (`app.core.schema` & `app.core.config` — Zero-Dependency Pydantic Replacement)
+* **Web Framework**: Native ASGI (`app.core.asgi` — Zero-Dependency FastAPI/Starlette Replacement)
+* **Validation & Config**: Native Schema Engine (`app.core.schema` & `app.config` — Zero-Dependency Pydantic Replacement)
 * **Database Layer**: PostgreSQL 16 + TimescaleDB (`asyncpg` + `app.core.orm` — Zero-Dependency SQLAlchemy Replacement)
 * **IPC & Streaming**: FastStore (`app.core.faststore` — Shared-Memory `/dev/shm` SQLite WAL Engine replacing Redis)
-* **Security & Crypto**: Native JWT (`app.core.jwt`), Native Scrypt (`hashlib.scrypt`), Native AES-128-CBC + HMAC-SHA256 Token Engine (`app.core.crypto`), Native ASN.1 DER X.509 Parser (`app.core.der`)
-* **Networking & Harvesters**: Raw Socket ICMP (`monitoring/ping.py`), Native Linux `/proc/net` Parser (`app.core.netif`), Native Async HTTP/1.1 + SSRF Guard (`app.core.http_client`)
+* **Security & Crypto**: Native Scrypt (`hashlib.scrypt`), Native AES-128-CBC + HMAC-SHA256 Token Engine (`app.core.crypto`), Native ASN.1 DER X.509 Parser (`app.core.der`)
+* **Networking & Harvesters**: Raw Socket ICMP (`monitoring/ping.py`), Native Linux RTNETLINK & `/proc/net` Parser (`app.core.netlink`), Native Async HTTP/1.1 + SSRF Guard (`app.core.http_client`)
 * **Reporting Engine**: Native Binary PDF 1.4 Generator with PNG/JPEG XObject embedding (`app.core.pdf`) & Native AST Template Engine (`app.core.template`)
 * **Frontend**: Vue 3 (Composition API), Vite, Pinia, PrimeVue (Aura Theme), Custom CSS Design System, Native `fetch` Client (Zero Axios/CDN dependencies), Chart.js
 

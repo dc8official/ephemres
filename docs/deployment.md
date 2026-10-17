@@ -52,11 +52,11 @@ cd ephemres/deploy
 
 **What the installer executes:**
 1. Installs minimal system packages: `python3-pip`, `postgresql-16`, `timescaledb-2-postgresql-16`, `nginx`, `traceroute`, `libcap2-bin`, `nodejs`.
-2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/backend/venv` (installing only `uvicorn` and `asyncpg`).
+2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
 4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
 5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`).
-6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/backend/venv/bin/python3)`.
+6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
 ---
@@ -76,7 +76,7 @@ sudo ./deploy/upgrade.sh
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
-3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/backend/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
+3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
 4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.2.v defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, cleans obsolete dependencies from the virtual environment, installs minimal requirements (`uvicorn`, `asyncpg`), and compiles frontend assets.
@@ -214,7 +214,7 @@ If executing migrations manually outside of `upgrade.sh`:
 cd /opt/ephemres/backend
 
 # Activate python virtual environment and set path
-source /opt/ephemres/backend/venv/bin/activate
+source /opt/ephemres/venv/bin/activate
 export PYTHONPATH=/opt/ephemres:/opt/ephemres/backend
 
 # Inspect pending migrations

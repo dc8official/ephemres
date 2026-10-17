@@ -322,11 +322,13 @@ sudo tcpdump -ni any udp port 4739 -c 5
 
 ### Inspect FastStore Shared-Memory Wire Buffer (`/dev/shm`)
 ```bash
+FASTSTORE_DB=$(ls /dev/shm/ephemres_faststore_*.sqlite3 2>/dev/null | head -n 1)
+
 # Check raw stream queue depth and queued batches
-sqlite3 /dev/shm/ephemres_faststore.db "SELECT stream_key, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream_key;"
+sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream;"
 
 # Inspect the last 2 raw flow packet entries ingested
-sqlite3 /dev/shm/ephemres_faststore.db "SELECT id, stream_key, substr(fields, 1, 120) FROM stream_entries ORDER BY id DESC LIMIT 2;"
+sqlite3 "${FASTSTORE_DB}" "SELECT entry_id, stream, substr(fields_json, 1, 120) FROM stream_entries ORDER BY id_ms DESC, id_seq DESC LIMIT 2;"
 ```
 
 ### Query Database Rollups

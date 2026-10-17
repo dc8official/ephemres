@@ -2,7 +2,7 @@
 
 Ephemres v3.3.2.v is engineered around a **Vertical Integration Architecture** — a decoupled, asynchronous, high-performance monitoring platform built entirely on pure Python Standard Library primitives, native Linux kernel sockets, and TimescaleDB/PostgreSQL storage. 
 
-By replacing 13 third-party runtime frameworks with 11 in-tree standard library engines (`backend/app/core/`), v3.3.2.v achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust multi-protocol network observability.
+By replacing 13 third-party runtime frameworks with 13 in-tree standard library engines (`backend/app/core/`), v3.3.2.v achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust multi-protocol network observability.
 
 ---
 
@@ -104,6 +104,7 @@ At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 13 
 | **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`, `$scrypt$n=16384,r=8,p=1$`) with constant-time verification (`hmac.compare_digest`) and AES-256-GCM symmetric encryption. Legacy `$argon2id$` hashes from `v3.1.35s`–`v3.3.1n` are migrated during backup restore via automatic admin password reset (`must_change_password = TRUE`). |
 | **`app.core.der`** | Native ASN.1 DER Certificate Parser | Replaces `cryptography.x509`. Pure-stdlib ASN.1 DER parser reading X.509 certificate validity dates (`notBefore`, `notAfter`) and Subject Alternative Names directly from binary TLS socket handshakes. |
 | **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
+| **`app.core.logging`** | Structured Rotating File & Stream Logger | Pure-stdlib structured logging system configuring RFC 3339 timestamps, dual console/file sinks, and bounded file rotation (`RotatingFileHandler`). |
 | **`app.core.http_client`** | Socket-Level SSRF-Immune HTTP Client | Replaces `httpx`. Asynchronous raw socket HTTP/1.1 client (`asyncio.open_connection`, `ssl`) performing pre-connection DNS validation against RFC 1918, RFC 3927 (cloud metadata `169.254.169.254`), and loopback IPs. |
 | **`app.core.netlink`** | Pure Linux Kernel RTNETLINK Engine | Replaces `psutil`. Pure Linux kernel Netlink binary parser (`AF_NETLINK`, `NETLINK_ROUTE`, `RTM_GETADDR`) and `/proc` stat readers for asynchronous interface and system telemetry. |
 | **`app.core.pdf`** | Direct PostScript/PDF Binary Emitter | Replaces `weasyprint`, `cairo`, `pango`, and `pypdf`. Generates vector-styled executive compliance reports, tables, typography matrices, and Base64 logos without external shared libraries. |

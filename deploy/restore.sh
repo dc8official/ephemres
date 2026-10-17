@@ -155,8 +155,8 @@ fi
 # Locate Python binary
 PYTHON_BIN=""
 for candidate in \
-    "${INSTALL_DIR}/backend/venv/bin/python" \
     "${INSTALL_DIR}/venv/bin/python" \
+    "${INSTALL_DIR}/backend/venv/bin/python" \
     "./backend/venv/bin/python" \
     "$(which python3 2>/dev/null)"; do
     if [[ -x "${candidate}" ]]; then
@@ -172,8 +172,8 @@ fi
 
 # 4. Stop Daemons Prior to Live Restore
 if [[ -z "${DRY_RUN}" ]]; then
-    echo -e "\n${BLUE}[INFO] Pausing background engine daemons for database consistency...${NC}"
-    systemctl stop ephemres-engine ephemres-flowd 2>/dev/null || true
+    echo -e "\n${BLUE}[INFO] Pausing platform services for database consistency...${NC}"
+    systemctl stop ephemres-api ephemres-engine ephemres-flowd 2>/dev/null || true
 fi
 
 # 5. Execute Restore Engine
@@ -187,7 +187,8 @@ PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend:.:backend" "${PYTHON_BIN}" -m 
 
 # 6. Restart Platform Services
 if [[ -z "${DRY_RUN}" ]]; then
-    echo -e "\n${BLUE}[INFO] Restarting platform services...${NC}"
+    echo -e "\n${BLUE}[INFO] Clearing stale FastStore shared-memory state and restarting platform services...${NC}"
+    rm -f /dev/shm/ephemres_faststore* 2>/dev/null || true
     systemctl restart ephemres-api ephemres-engine ephemres-flowd 2>/dev/null || true
     echo -e "${GREEN}==================================================================${NC}"
     echo -e "${GREEN} Restoration Complete! Platform is operational.                   ${NC}"

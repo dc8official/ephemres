@@ -141,10 +141,40 @@ def _open_dump_file(sql_path: Path | str) -> Any:
     return open(sql_path, "r", encoding="utf-8", errors="replace")
 
 
+VALID_DEVICE_ROLES = {"ACTIVE_HOST", "FLOW_EXPORTER", "HYBRID_GATEWAY", "L2_SWITCH"}
+LEGACY_ROLE_MAP = {
+    "STANDARD": "ACTIVE_HOST",
+    "ENDPOINT": "ACTIVE_HOST",
+    "EDGE_ROUTER": "HYBRID_GATEWAY",
+    "GATEWAY": "HYBRID_GATEWAY",
+    "ROOT_GATEWAY": "HYBRID_GATEWAY",
+    "AGGREGATION": "HYBRID_GATEWAY",
+    "CORE_SWITCH": "L2_SWITCH",
+    "SWITCH": "L2_SWITCH",
+    "ACCESS": "L2_SWITCH",
+    "FLOW_EXPORTER": "FLOW_EXPORTER",
+}
+
+
+def _normalize_device_role(raw_role: Optional[str]) -> str:
+    """Maps legacy v3.1.35s / v3.3.0 / v3.3.1n device_role strings to ck_endpoints_device_role."""
+    if not raw_role:
+        return "ACTIVE_HOST"
+    role_upper = str(raw_role).strip().upper()
+    if role_upper in VALID_DEVICE_ROLES:
+        return role_upper
+    return LEGACY_ROLE_MAP.get(role_upper, "ACTIVE_HOST")
+
+
 def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
-    """Returns canonical v3.3.2v+ public table schema for introspection fallbacks."""
+    """Returns canonical v3.3.2v+ public table schema matching migrations 0001-0012."""
     return {
-        "roles": {"id": "uuid", "role_name": "varchar", "description": "text", "created_at": "timestamptz"},
+        "roles": {
+            "id": "uuid",
+            "role_name": "varchar",
+            "description": "text",
+            "created_at": "timestamptz",
+        },
         "users": {
             "id": "uuid",
             "username": "varchar",
@@ -156,9 +186,24 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "created_at": "timestamptz",
             "updated_at": "timestamptz",
         },
-        "app_settings": {"id": "uuid", "setting_key": "varchar", "setting_value": "text", "updated_at": "timestamptz"},
-        "system_settings": {"id": "uuid", "setting_key": "varchar", "setting_value": "text", "updated_at": "timestamptz"},
-        "endpoint_groups": {"id": "uuid", "name": "varchar", "description": "text", "created_at": "timestamptz"},
+        "app_settings": {
+            "id": "uuid",
+            "setting_key": "varchar",
+            "setting_value": "text",
+            "updated_at": "timestamptz",
+        },
+        "system_settings": {
+            "id": "uuid",
+            "setting_key": "varchar",
+            "setting_value": "text",
+            "updated_at": "timestamptz",
+        },
+        "endpoint_groups": {
+            "id": "uuid",
+            "name": "varchar",
+            "description": "text",
+            "created_at": "timestamptz",
+        },
         "endpoints": {
             "id": "uuid",
             "ip_address": "inet",
@@ -168,38 +213,45 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "description": "text",
             "monitoring_enabled": "bool",
             "endpoint_status": "varchar",
-            "created_by": "uuid",
-            "created_at": "timestamptz",
-            "updated_at": "timestamptz",
+            "allow_incident_trace": "bool",
+            "allow_topology_discovery": "bool",
+            "manual_parent_id": "uuid",
+            "enable_rca": "bool",
+            "enable_scheduled_discovery": "bool",
+            "is_l2_segment": "bool",
             "flow_exporter_ips": "_inet",
             "flow_interface_aliases": "jsonb",
             "device_role": "varchar",
+            "created_by": "uuid",
+            "created_at": "timestamptz",
+            "updated_at": "timestamptz",
+            "deleted_at": "timestamptz",
         },
         "endpoint_baseline_routes": {
-            "id": "uuid",
             "endpoint_id": "uuid",
-            "route_hash": "varchar",
-            "hop_count": "int4",
+            "updated_at": "timestamptz",
+            "total_hops": "int4",
             "hops": "jsonb",
-            "created_at": "timestamptz",
         },
         "endpoint_diagnostic_traces": {
             "id": "uuid",
             "endpoint_id": "uuid",
-            "trace_type": "varchar",
+            "timestamp": "timestamptz",
+            "trigger_reason": "varchar",
             "trace_data": "jsonb",
-            "created_at": "timestamptz",
         },
         "endpoint_rca_incidents": {
             "id": "uuid",
             "endpoint_id": "uuid",
-            "incident_type": "varchar",
-            "summary": "text",
-            "root_cause_analysis": "jsonb",
-            "status": "varchar",
-            "started_at": "timestamptz",
-            "resolved_at": "timestamptz",
-            "created_at": "timestamptz",
+            "incident_timestamp": "timestamptz",
+            "status_at_execution": "varchar",
+            "failed_hop_number": "int4",
+            "failed_hop_ip": "varchar",
+            "last_known_good_hop_ip": "varchar",
+            "rca_summary": "text",
+            "baseline_snapshot": "jsonb",
+            "failure_trace_snapshot": "jsonb",
+            "is_resolved": "bool",
         },
         "alert_channels": {
             "id": "uuid",
@@ -225,11 +277,16 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
         "alert_delivery_logs": {
             "id": "uuid",
             "channel_id": "uuid",
-            "alert_id": "uuid",
+            "channel_name": "varchar",
+            "endpoint_id": "uuid",
+            "endpoint_name": "varchar",
+            "event_type": "varchar",
             "status": "varchar",
-            "attempt_count": "int4",
-            "error_message": "text",
-            "dispatched_at": "timestamptz",
+            "status_code": "int4",
+            "retry_count": "int4",
+            "response_message": "text",
+            "latency_ms": "int4",
+            "timestamp": "timestamptz",
         },
         "audit_logs": {
             "id": "uuid",
@@ -237,16 +294,15 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "action": "varchar",
             "target_type": "varchar",
             "target_id": "uuid",
+            "details": "jsonb",
             "created_at": "timestamptz",
         },
         "user_sessions": {
             "id": "uuid",
             "user_id": "uuid",
-            "session_token": "varchar",
-            "ip_address": "inet",
-            "user_agent": "text",
-            "expires_at": "timestamptz",
+            "jti": "varchar",
             "created_at": "timestamptz",
+            "expires_at": "timestamptz",
         },
         "endpoint_events": {
             "id": "uuid",
@@ -260,33 +316,32 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "is_split_event": "bool",
             "start_time": "timestamptz",
             "end_time": "timestamptz",
+            "duration_seconds": "int8",
+            "monitoring_cycle_count": "int4",
             "created_at": "timestamptz",
         },
         "flow_minute_rollups": {
-            "id": "uuid",
-            "endpoint_id": "uuid",
-            "bucket_start": "timestamptz",
+            "bucket": "timestamptz",
+            "exporter_id": "uuid",
+            "src_endpoint_id": "uuid",
+            "dst_endpoint_id": "uuid",
             "src_ip": "inet",
             "dst_ip": "inet",
-            "src_port": "int4",
-            "dst_port": "int4",
             "protocol": "int2",
-            "byte_count": "int8",
-            "packet_count": "int8",
+            "dst_port": "int4",
+            "bytes": "int8",
+            "packets": "int8",
             "flow_count": "int4",
-            "created_at": "timestamptz",
         },
         "flow_interface_minute_rollups": {
-            "id": "uuid",
-            "endpoint_id": "uuid",
-            "bucket_start": "timestamptz",
-            "input_snmp": "int4",
-            "output_snmp": "int4",
+            "bucket": "timestamptz",
+            "exporter_id": "uuid",
+            "interface_idx": "int4",
             "in_bytes": "int8",
             "out_bytes": "int8",
             "in_packets": "int8",
             "out_packets": "int8",
-            "created_at": "timestamptz",
+            "flow_count": "int4",
         },
     }
 
@@ -543,11 +598,24 @@ def scan_backup_metadata_and_configs(
                     if schema == "_timescaledb_internal":
                         parent = chunk_to_parent.get(raw_table)
                         if not parent:
-                            if "event_timestamp" in cols or ("status_code" in cols and "endpoint_id" in cols) or ("detailed_state" in cols and "endpoint_id" in cols):
+                            if (
+                                ("operational_state" in cols and "start_time" in cols)
+                                or ("detailed_state" in cols and "endpoint_id" in cols)
+                                or "event_timestamp" in cols
+                            ):
                                 parent = "endpoint_events"
-                            elif "input_snmp" in cols or "output_snmp" in cols:
+                            elif (
+                                "interface_idx" in cols
+                                or ("in_bytes" in cols and "out_bytes" in cols)
+                                or "input_snmp" in cols
+                                or "output_snmp" in cols
+                            ):
                                 parent = "flow_interface_minute_rollups"
-                            elif ("src_ip" in cols and "dst_ip" in cols) or ("byte_count" in cols and "flow_count" in cols):
+                            elif (
+                                ("src_ip" in cols and "dst_ip" in cols)
+                                or ("bytes" in cols and "packets" in cols)
+                                or ("byte_count" in cols and "flow_count" in cols)
+                            ):
                                 parent = "flow_minute_rollups"
                         if parent:
                             chunk_to_parent[raw_table] = parent
@@ -623,6 +691,8 @@ async def reconcile_and_restore_database(
     if dry_run:
         logger.info("[DRY RUN] Simulating restoration without committing database changes.")
         for t in CONFIG_TABLE_ORDER:
+            if t == "user_sessions":
+                continue
             if t in config_data:
                 cols, rows = config_data[t]
                 target_cols = target_schema.get(t, {})
@@ -635,13 +705,25 @@ async def reconcile_and_restore_database(
                     summary["endpoint_count"] = len(rows)
         return summary
 
+    # Ensure TimescaleDB decompression limit is relaxed before inserting into hypertables
+    try:
+        await _execute_sql(conn, "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;")
+    except Exception:
+        pass
+
     role_id_map: Dict[str, str] = {}
     user_id_map: Dict[str, str] = {}
     valid_endpoint_ids: Set[str] = set()
+    valid_channel_ids: Set[str] = set()
 
-    # Query pre-existing endpoints in target database
+    # Query pre-existing endpoints and alert_channels in target database
     existing_eps = await _fetch_all(conn, "SELECT id FROM endpoints;")
     valid_endpoint_ids.update(str(r["id"]) for r in existing_eps)
+    try:
+        existing_chs = await _fetch_all(conn, "SELECT id FROM alert_channels;")
+        valid_channel_ids.update(str(r["id"]) for r in existing_chs)
+    except Exception:
+        pass
 
     # 1. Restore roles
     if "roles" in config_data and "roles" in target_schema:
@@ -681,8 +763,6 @@ async def reconcile_and_restore_database(
             dump_id = str(row.get("id"))
             pwd = str(row.get("password_hash") or "")
 
-            if dump_id in target_user_map.values():
-                pass
             if uname in target_user_map:
                 user_id_map[dump_id] = target_user_map[uname]
             else:
@@ -727,7 +807,6 @@ async def reconcile_and_restore_database(
         target_cols = target_schema[settings_table]
 
         if "setting_key" in target_cols and "setting_key" in cols:
-            # Key-value app_settings format
             usable = [c for c in cols if c in target_cols]
             col_names = ", ".join(f'"{c}"' for c in usable)
             placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
@@ -750,7 +829,7 @@ async def reconcile_and_restore_database(
             await _execute_sql(conn, sql, *vals)
         summary["tables_restored"].append("endpoint_groups")
 
-    # 5. Restore endpoints
+    # 5. Restore endpoints (Two-pass for self-referential manual_parent_id FK safety)
     if "endpoints" in config_data and "endpoints" in target_schema:
         cols, rows = config_data["endpoints"]
         target_cols = target_schema["endpoints"]
@@ -761,6 +840,8 @@ async def reconcile_and_restore_database(
         update_cols = [c for c in usable if c not in ("id", "created_at")]
         set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
 
+        deferred_parents: List[Tuple[Any, Any]] = []
+
         for row in rows:
             ep_id = str(row.get("id"))
             valid_endpoint_ids.add(ep_id)
@@ -768,12 +849,32 @@ async def reconcile_and_restore_database(
             if row.get("created_by") and str(row["created_by"]) in user_id_map:
                 row["created_by"] = user_id_map[str(row["created_by"])]
 
+            if "device_role" in usable:
+                row["device_role"] = _normalize_device_role(row.get("device_role"))
+
+            parent_id = row.get("manual_parent_id")
+            if "manual_parent_id" in usable and parent_id and str(parent_id) not in valid_endpoint_ids:
+                # Defer setting manual_parent_id until all endpoints exist
+                deferred_parents.append((ep_id, str(parent_id)))
+                row = dict(row)
+                row["manual_parent_id"] = None
+
             vals = [_prepare_column_val(row.get(c), target_cols.get(c, "varchar")) for c in usable]
             if set_clause:
                 sql = f'INSERT INTO "endpoints" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("id") DO UPDATE SET {set_clause};'
             else:
                 sql = f'INSERT INTO "endpoints" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("id") DO NOTHING;'
             await _execute_sql(conn, sql, *vals)
+
+        # Second pass: link deferred manual_parent_id references if parent exists
+        for ep_id_str, parent_id_str in deferred_parents:
+            if parent_id_str in valid_endpoint_ids:
+                await _execute_sql(
+                    conn,
+                    'UPDATE "endpoints" SET "manual_parent_id" = $1 WHERE "id" = $2;',
+                    _prepare_column_val(parent_id_str, "uuid"),
+                    _prepare_column_val(ep_id_str, "uuid"),
+                )
 
         summary["endpoint_count"] = len(rows)
         summary["tables_restored"].append("endpoints")
@@ -790,6 +891,9 @@ async def reconcile_and_restore_database(
         set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
 
         for row in rows:
+            ch_id = str(row.get("id"))
+            valid_channel_ids.add(ch_id)
+
             raw_cfg = str(row.get("config") or "")
             new_cfg, is_valid = re_encrypt_alert_channel_config(raw_cfg, old_secret_key)
             row["config"] = new_cfg
@@ -809,12 +913,14 @@ async def reconcile_and_restore_database(
             await _execute_sql(conn, sql, *vals)
         summary["tables_restored"].append("alert_channels")
 
-    # 7. Restore remaining non-hypertable config tables
-    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents", "user_sessions"]:
+    # 7. Restore remaining non-hypertable config tables (skipping ephemeral user_sessions)
+    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents"]:
         if t in config_data and t in target_schema:
             cols, rows = config_data[t]
             target_cols = target_schema[t]
             usable = [c for c in cols if c in target_cols]
+            if not usable:
+                continue
             col_names = ", ".join(f'"{c}"' for c in usable)
             placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
             sql = f'INSERT INTO "{t}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
@@ -823,8 +929,11 @@ async def reconcile_and_restore_database(
             for row in rows:
                 if "endpoint_id" in row and row["endpoint_id"] and str(row["endpoint_id"]) not in valid_endpoint_ids:
                     continue
-                if "user_id" in row and row["user_id"] and str(row["user_id"]) in user_id_map:
-                    row["user_id"] = user_id_map[str(row["user_id"])]
+                if "channel_id" in row and row["channel_id"] and valid_channel_ids and str(row["channel_id"]) not in valid_channel_ids:
+                    continue
+                if "user_id" in row and row["user_id"]:
+                    if str(row["user_id"]) in user_id_map:
+                        row["user_id"] = user_id_map[str(row["user_id"])]
 
                 vals = [_prepare_column_val(row.get(c), target_cols.get(c, "varchar")) for c in usable]
                 batch.append(vals)
@@ -845,6 +954,7 @@ async def reconcile_and_restore_database(
         usable_cols: List[str] = []
         insert_sql: str = ""
         batch_rows: List[List[Any]] = []
+        restored_hyper_tables: Set[str] = set()
 
         with _open_dump_file(backup_path) as f:
             for line in f:
@@ -863,21 +973,23 @@ async def reconcile_and_restore_database(
                             mapped = None
 
                         if mapped and mapped in target_schema:
-                            in_hyper = True
-                            current_target_table = mapped
-                            current_cols = raw_cols
                             target_cols = target_schema[mapped]
-                            usable_cols = [c for c in current_cols if c in target_cols]
-                            col_names = ", ".join(f'"{c}"' for c in usable_cols)
-                            placeholders = ", ".join(f"${i+1}" for i in range(len(usable_cols)))
-                            insert_sql = f'INSERT INTO "{mapped}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
-                            batch_rows.clear()
+                            usable_cols = [c for c in raw_cols if c in target_cols]
+                            if usable_cols:
+                                in_hyper = True
+                                current_target_table = mapped
+                                current_cols = raw_cols
+                                col_names = ", ".join(f'"{c}"' for c in usable_cols)
+                                placeholders = ", ".join(f"${i+1}" for i in range(len(usable_cols)))
+                                insert_sql = f'INSERT INTO "{mapped}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
+                                batch_rows.clear()
                 else:
                     stripped = line.rstrip("\r\n")
                     if stripped == r"\.":
-                        if batch_rows:
+                        if batch_rows and current_target_table:
                             await _execute_batch(conn, insert_sql, batch_rows)
                             summary["telemetry_rows_restored"] += len(batch_rows)
+                            restored_hyper_tables.add(current_target_table)
                             batch_rows.clear()
                         in_hyper = False
                         current_target_table = None
@@ -885,10 +997,15 @@ async def reconcile_and_restore_database(
                         parts = stripped.split("\t")
                         if len(parts) == len(current_cols) and current_target_table:
                             row_dict = {c: _unescape_pg_copy_field(p) for c, p in zip(current_cols, parts)}
-                            # Filter by endpoint_id
-                            ep_id = row_dict.get("endpoint_id")
-                            if ep_id and str(ep_id) not in valid_endpoint_ids:
-                                continue
+                            # Filter FK-constrained endpoint_events by valid_endpoint_ids
+                            if current_target_table == "endpoint_events":
+                                ep_id = row_dict.get("endpoint_id")
+                                if ep_id and str(ep_id) not in valid_endpoint_ids:
+                                    continue
+                            elif current_target_table == "flow_minute_rollups":
+                                for fk_col in ("src_endpoint_id", "dst_endpoint_id"):
+                                    if row_dict.get(fk_col) and str(row_dict[fk_col]) not in valid_endpoint_ids:
+                                        row_dict[fk_col] = None
 
                             t_cols = target_schema[current_target_table]
                             vals = [_prepare_column_val(row_dict.get(c), t_cols.get(c, "varchar")) for c in usable_cols]
@@ -897,10 +1014,12 @@ async def reconcile_and_restore_database(
                             if len(batch_rows) >= 1000:
                                 await _execute_batch(conn, insert_sql, batch_rows)
                                 summary["telemetry_rows_restored"] += len(batch_rows)
+                                restored_hyper_tables.add(current_target_table)
                                 batch_rows.clear()
 
-        if current_target_table not in summary["tables_restored"] and summary["telemetry_rows_restored"] > 0:
-            summary["tables_restored"].append(current_target_table)
+        for ht in sorted(restored_hyper_tables):
+            if ht not in summary["tables_restored"]:
+                summary["tables_restored"].append(ht)
 
     logger.info("Restoration finished successfully: %s", summary)
     return summary

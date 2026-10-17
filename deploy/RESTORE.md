@@ -72,14 +72,14 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
 ```
 
 ### What `app.core.restore` Executes Automatically:
-1. **Daemon Quiescence:** Temporarily halts `ephemres-engine` and `ephemres-flowd` to prevent concurrent write collisions.
+1. **Daemon Quiescence:** Temporarily halts `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` to prevent concurrent write collisions and stale session cache hits.
 2. **Schema Introspection:** Inspects the live PostgreSQL `information_schema` on the target database.
 3. **Hypertable Re-mapping:** Translates internal `_hyper_*_chunk` COPY blocks directly into the parent hypertable targets (`public.endpoint_events`, `public.flow_minute_rollups`, `public.flow_interface_minute_rollups`).
 4. **Column Intersection:** Dynamically intersects backup dump column lists with target table schemas, safely loading available fields while applying database defaults for missing columns.
 5. **Credential Migration:**
    - Resets the `admin` account password to the provided temporary password using native `$scrypt$` with `must_change_password = TRUE`.
    - Flags all non-admin accounts possessing legacy `$argon2id$` hashes with `disabled = TRUE` and invalidates their hash to force an administrator password reset.
-6. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore.db*`).
+6. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore*`).
 7. **Daemon Resumption:** Restarts API and engine daemons and runs health verification.
 
 ---
@@ -120,7 +120,7 @@ PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d 
 ### Step 4: Run Forward Schema Migrations
 ```bash
 cd /opt/ephemres/backend
-source /opt/ephemres/backend/venv/bin/activate
+source /opt/ephemres/venv/bin/activate
 export PYTHONPATH=/opt/ephemres:/opt/ephemres/backend
 
 python3 -m app.core.migrator upgrade head
@@ -135,7 +135,7 @@ python3 -m app.core.restore \
 
 ### Step 6: Clear FastStore In-RAM Shared Memory
 ```bash
-rm -f /dev/shm/ephemres_faststore.db*
+rm -f /dev/shm/ephemres_faststore*
 ```
 
 ### Step 7: Restart Ephemres Daemons
