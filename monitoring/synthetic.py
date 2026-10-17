@@ -21,7 +21,18 @@ RESTRICTED_NETWORKS = [
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
 ]
+
+
+def _check_ip_restricted(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    if getattr(ip_obj, "ipv4_mapped", None):
+        ip_obj = ip_obj.ipv4_mapped
+    for net in RESTRICTED_NETWORKS:
+        if ip_obj in net:
+            raise ValueError(
+                f"SSRF Protection: Access to restricted network {net} is forbidden ({ip_obj})"
+            )
 
 
 def validate_probe_target(host_or_ip: str) -> str:
@@ -33,29 +44,36 @@ def validate_probe_target(host_or_ip: str) -> str:
     cleaned = host_or_ip.strip()
     try:
         ip_obj = ipaddress.ip_address(cleaned)
-        for net in RESTRICTED_NETWORKS:
-            if ip_obj in net:
-                raise ValueError(
-                    f"SSRF Protection: Access to restricted network {net} is forbidden ({cleaned})"
-                )
+        _check_ip_restricted(ip_obj)
         return cleaned
     except ValueError as e:
         if "SSRF Protection" in str(e):
             raise
-        # If it's a hostname, resolve it and check resolved IP
+        # If it's a hostname, resolve and validate all dual-stack IPs
+        resolved_ip: str | None = None
         try:
+            # Check gethostbyname first (preserves test patches and standard IPv4 lookup)
             resolved_ip = socket.gethostbyname(cleaned)
-            ip_obj = ipaddress.ip_address(resolved_ip)
-            for net in RESTRICTED_NETWORKS:
-                if ip_obj in net:
-                    raise ValueError(
-                        f"SSRF Protection: Hostname {cleaned} resolved to restricted IP {resolved_ip}"
-                    )
-            return resolved_ip
-        except (socket.gaierror, ValueError) as res_err:
-            if "SSRF Protection" in str(res_err):
+            _check_ip_restricted(ipaddress.ip_address(resolved_ip))
+        except (socket.gaierror, ValueError) as err:
+            if "SSRF Protection" in str(err):
                 raise
-            return cleaned
+
+        # Check all addresses via getaddrinfo (covers IPv6 and dual-stack records)
+        try:
+            addr_info = socket.getaddrinfo(cleaned, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for item in addr_info:
+                ip_cand = item[4][0]
+                _check_ip_restricted(ipaddress.ip_address(ip_cand))
+                if resolved_ip is None:
+                    resolved_ip = ip_cand
+        except (socket.gaierror, ValueError) as err:
+            if "SSRF Protection" in str(err):
+                raise
+
+        if resolved_ip is not None:
+            return resolved_ip
+        return cleaned
 
 
 async def async_validate_probe_target(host_or_ip: str) -> str:

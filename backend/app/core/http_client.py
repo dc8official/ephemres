@@ -117,7 +117,8 @@ class SSRFSafeBackend:
 
     async def resolve_and_validate(self, host: str, port: int) -> str:
         try:
-            addr_info = socket.getaddrinfo(
+            loop = asyncio.get_running_loop()
+            addr_info = await loop.getaddrinfo(
                 host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
             )
         except socket.gaierror as err:
@@ -179,7 +180,7 @@ def _decode_chunked_body(raw_body: bytes) -> bytes:
         except ValueError:
             break
         idx = rn + 2
-        if chunk_size == 0:
+        if chunk_size <= 0 or idx + chunk_size > n:
             break
         out.extend(raw_body[idx : idx + chunk_size])
         idx += chunk_size + 2
@@ -198,10 +199,11 @@ class SSRFSafeHttpClient:
     def __init__(
         self,
         timeout: float = 5.0,
+        follow_redirects: bool = False,
         allow_private: bool | None = None,
     ) -> None:
         self.timeout = float(timeout)
-        self.follow_redirects = False
+        self.follow_redirects = bool(follow_redirects)
         self._allow_private = _resolve_allow_private(allow_private)
         self._backend = SSRFSafeBackend(allow_private=self._allow_private)
 
@@ -221,6 +223,7 @@ class SSRFSafeHttpClient:
         json: typing.Any = None,
         content: bytes | str | None = None,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
         return await self.request(
@@ -229,6 +232,7 @@ class SSRFSafeHttpClient:
             json=json,
             content=content,
             headers=headers,
+            follow_redirects=follow_redirects,
             timeout=timeout,
         )
 
@@ -237,12 +241,14 @@ class SSRFSafeHttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
         return await self.request(
             "GET",
             url,
             headers=headers,
+            follow_redirects=follow_redirects,
             timeout=timeout,
         )
 
@@ -254,6 +260,7 @@ class SSRFSafeHttpClient:
         json: typing.Any = None,
         content: bytes | str | None = None,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
         if not url or not isinstance(url, str):
@@ -367,8 +374,46 @@ class SSRFSafeHttpClient:
                     hk, hv = decoded_hdr.split(":", 1)
                     resp_headers[hk.strip().lower()] = hv.strip()
 
-            raw_resp_body = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
-            if resp_headers.get("transfer-encoding", "").lower() == "chunked":
+            body_chunks = bytearray()
+            cl_hdr = resp_headers.get("content-length")
+            is_chunked = resp_headers.get("transfer-encoding", "").lower() == "chunked"
+
+            if cl_hdr is not None:
+                try:
+                    content_len = int(cl_hdr)
+                except ValueError:
+                    content_len = None
+            else:
+                content_len = None
+
+            if content_len is not None:
+                while len(body_chunks) < content_len:
+                    chunk = await asyncio.wait_for(
+                        reader.read(min(65536, content_len - len(body_chunks))),
+                        timeout=eff_timeout,
+                    )
+                    if not chunk:
+                        break
+                    body_chunks.extend(chunk)
+            elif is_chunked:
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
+                    if not chunk:
+                        break
+                    body_chunks.extend(chunk)
+                    if b"0\r\n\r\n" in body_chunks:
+                        break
+            else:
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
+                    if not chunk:
+                        break
+                    body_chunks.extend(chunk)
+                    if len(body_chunks) > 10 * 1024 * 1024:
+                        break
+
+            raw_resp_body = bytes(body_chunks)
+            if is_chunked:
                 raw_resp_body = _decode_chunked_body(raw_resp_body)
 
             resp_text = raw_resp_body.decode("utf-8", errors="replace")
@@ -395,6 +440,7 @@ class SSRFSafeHttpClient:
 
 def create_ssrf_safe_client(
     timeout: float = 5.0,
+    follow_redirects: bool = False,
     allow_private: bool | None = None,
 ) -> SSRFSafeHttpClient:
     """
@@ -403,6 +449,7 @@ def create_ssrf_safe_client(
     """
     return SSRFSafeHttpClient(
         timeout=timeout,
+        follow_redirects=follow_redirects,
         allow_private=allow_private,
     )
 
