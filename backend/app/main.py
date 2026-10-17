@@ -238,7 +238,8 @@ async def health_readiness():
             await session.execute(text("SELECT 1"))
     except Exception as exc:
         db_ok = False
-        db_err = str(exc)
+        db_err = "Database connection failed"
+        logger.error("Readiness check: database connectivity failure: %s", exc, exc_info=True)
 
     redis_ok = True
     redis_err = None
@@ -249,10 +250,11 @@ async def health_readiness():
                 await client.ping()
             else:
                 redis_ok = False
-                redis_err = "Redis client not initialized"
+                redis_err = "Redis service unavailable"
         except Exception as exc:
             redis_ok = False
-            redis_err = str(exc)
+            redis_err = "Redis connection failed"
+            logger.error("Readiness check: redis connectivity failure: %s", exc, exc_info=True)
 
     is_ready = db_ok and (not settings.redis.enabled or redis_ok)
     status_code = (

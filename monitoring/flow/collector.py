@@ -47,6 +47,7 @@ class FlowCollector:
     def __init__(
         self,
         store_client: Any = None,
+        bind_host: str = "0.0.0.0",
         netflow_port: int = 2055,
         ipfix_port: int = 4739,
         batch_size: int = 1000,
@@ -55,6 +56,7 @@ class FlowCollector:
         redis_client: Any = None,
     ):
         self.store = store_client if store_client is not None else redis_client
+        self.bind_host = bind_host
         self.netflow_port = netflow_port
         self.ipfix_port = ipfix_port
         self.batch_size = batch_size
@@ -178,7 +180,7 @@ class FlowCollector:
         except Exception as e:
             logger.warning("Could not set SO_RCVBUF to 4MB: %s", e)
         sock.setblocking(False)
-        sock.bind(("0.0.0.0", port))
+        sock.bind((self.bind_host, port))
         return sock
 
     async def start(self) -> None:
