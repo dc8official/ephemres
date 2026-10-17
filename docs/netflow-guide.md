@@ -1,12 +1,12 @@
-# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.1n)
+# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.2.v)
 
-This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** in Ephemres v3.3.1n.
+This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** in Ephemres v3.3.2.v.
 
 ---
 
 ## 1. Architectural Overview
 
-Ephemres v3.3.1n introduces real-time, high-volume flow ingestion and per-interface throughput accounting completely isolated from ICMP polling daemons:
+Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-interface throughput accounting completely isolated from ICMP polling daemons:
 
 ```
 +-------------------------------------------------------------------------------+

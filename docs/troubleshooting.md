@@ -1,4 +1,4 @@
-# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.1n
+# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.2.v
 
 This guide provides systematic diagnostic steps, platform logging architecture specifications, log triage procedures, and solutions for operational issues encountered when running Ephemres in production.
 

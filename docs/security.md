@@ -1,6 +1,6 @@
 # Ephemres Security Model, Threat Architecture & Defense Specification
 
-**Document Version:** 3.3.1n  
+**Document Version:** 3.3.2.v  
 **Last Updated:** October 2026  
 **Classification:** Public Security Specification & Threat Model  
 
@@ -22,11 +22,12 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.1n** | Migration & Rebranding Release | **Active / Current Standard** | Production standard with Ephemres rebrand and flattened `/opt/ephemres` tree. |
+| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 11 zero-dependency engines. |
+| **v3.3.1n** | Migration & Rebranding Release | **Supported Maintenance** | Production standard with Ephemres rebrand and flattened `/opt/ephemres` tree. |
 | **v3.3.0** | Feature & Ingestion Release | **Frozen Legacy Snapshot** | Frozen snapshot with Flow Exporter & Interface Telemetry. |
 | **v3.1.35s** | Maintenance Release | **Frozen Legacy Snapshot** | Frozen long-term maintenance track. |
-| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.1n recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.1n immediately. |
+| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.2.v recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.2.v immediately. |
 
 ---
 

@@ -1,6 +1,6 @@
-# Ephemres Database & TimescaleDB Architecture — Version 3.3.1n
+# Ephemres Database & TimescaleDB Architecture — Version 3.3.2.v
 
-This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.1n.
+This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.2.v.
 
 ---
 
