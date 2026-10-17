@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+backend/venv
+**/venv
 env/
 *.egg-info/
 dist/

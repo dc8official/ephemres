@@ -14,6 +14,7 @@ if str(backend_dir) not in sys.path:
 from app.config import settings
 from app.database import AsyncSessionLocal, check_database_connection
 from app.logging_config import setup_logging
+from app.core.watchdog import start_systemd_watchdog
 from monitoring.flow.aggregator import FlowAggregator
 from monitoring.flow.collector import FlowCollector
 from monitoring.flow.correlator import FlowCorrelator
@@ -70,6 +71,8 @@ async def run_flow_daemon() -> None:
     await collector.start()
     await aggregator.start()
 
+    watchdog_task = await start_systemd_watchdog(interval_seconds=10)
+
     logger.info(
         "ephemres-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d).",
         netflow_port,
@@ -88,6 +91,11 @@ async def run_flow_daemon() -> None:
     await stop_event.wait()
 
     logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
+    watchdog_task.cancel()
+    try:
+        await watchdog_task
+    except asyncio.CancelledError:
+        pass
     await collector.stop()
     await aggregator.stop()
     await correlator.stop()

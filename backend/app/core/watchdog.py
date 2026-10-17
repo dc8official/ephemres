@@ -35,7 +35,17 @@ async def start_systemd_watchdog(interval_seconds: int = 10) -> asyncio.Task:
     """
     Spawns an asynchronous background worker that notifies systemd of readiness (READY=1)
     and periodically sends watchdog heartbeats (WATCHDOG=1) to prevent WatchdogSec timeouts.
+    Respects systemd $WATCHDOG_USEC if provided, sending heartbeats at half the watchdog interval.
     """
+    watchdog_usec = os.environ.get("WATCHDOG_USEC")
+    if watchdog_usec:
+        try:
+            usec = int(watchdog_usec)
+            if usec > 0:
+                interval_seconds = max(1, min(interval_seconds, int(usec / 2_000_000)))
+        except (ValueError, TypeError):
+            pass
+
     async def _watchdog_loop():
         # Signal systemd that application startup is complete
         notify_systemd("READY=1")
@@ -49,3 +59,4 @@ async def start_systemd_watchdog(interval_seconds: int = 10) -> asyncio.Task:
 
     task = asyncio.create_task(_watchdog_loop(), name="systemd_watchdog")
     return task
+

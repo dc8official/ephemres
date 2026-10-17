@@ -20,6 +20,7 @@ from monitoring.state_machine import EndpointState, StateMachine
 from app.logging_config import setup_logging
 from app.config import settings
 from app.services.driver_manager import driver_manager
+from app.core.watchdog import start_systemd_watchdog
 
 logger = setup_logging(
     service_name="ephemres-engine",
@@ -234,66 +235,74 @@ async def main() -> None:
         await db.commit()
 
     await start_baseline_refresh_task(AsyncSessionLocal, interval_seconds=3600)
+    watchdog_task = await start_systemd_watchdog(interval_seconds=10)
 
     state_machine = StateMachine(confirmation_threshold=3)
 
-    while True:
-        try:
-            async with AsyncSessionLocal() as db:
-                stmt = select(Endpoint).where(
-                    Endpoint.endpoint_status == "ACTIVE",
-                    Endpoint.monitoring_enabled == True,  # noqa: E712
+    try:
+        while True:
+            try:
+                async with AsyncSessionLocal() as db:
+                    stmt = select(Endpoint).where(
+                        Endpoint.endpoint_status == "ACTIVE",
+                        Endpoint.monitoring_enabled == True,  # noqa: E712
+                    )
+                    result = await db.execute(stmt)
+                    active_endpoints = result.scalars().all()
+
+                # PERF-01 / STAB-07: Multi-process engine partitioning
+                worker_id = int(os.environ.get("EPHEMRES_ENGINE_WORKER_ID") or os.environ.get("NETMON_ENGINE_WORKER_ID", "0"))
+                num_workers = int(os.environ.get("EPHEMRES_ENGINE_NUM_WORKERS") or os.environ.get("NETMON_ENGINE_NUM_WORKERS", "1"))
+                if num_workers > 1:
+                    assigned_endpoints = [
+                        ep
+                        for ep in active_endpoints
+                        if (int.from_bytes(ep.id.bytes[:4], "big") % num_workers) == worker_id
+                    ]
+                else:
+                    assigned_endpoints = list(active_endpoints)
+
+                db_active_map = {ep.id: ep for ep in assigned_endpoints}
+
+                # Sync in-memory endpoint registry
+                for ep in assigned_endpoints:
+                    def _spawn(target: MonitoredEndpoint):
+                        return monitor_endpoint(
+                            target.id,
+                            target.ip_address,
+                            state_machine,
+                        )
+
+                    await endpoint_registry.add_endpoint(ep, spawn_coro_fn=_spawn)
+
+                # Evict removed or deactivated endpoints
+                current_registered = endpoint_registry.list_active_endpoints()
+                for reg_ep in current_registered:
+                    if reg_ep.id not in db_active_map:
+                        logger.info(
+                            "Deactivating monitoring for removed endpoint %s",
+                            reg_ep.id,
+                        )
+                        await endpoint_registry.remove_endpoint(reg_ep.id)
+                        async with states_lock:
+                            endpoint_states.pop(str(reg_ep.id), None)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    "Error in master orchestration loop: %s: %s",
+                    type(e).__name__,
+                    e,
                 )
-                result = await db.execute(stmt)
-                active_endpoints = result.scalars().all()
 
-            # PERF-01 / STAB-07: Multi-process engine partitioning
-            worker_id = int(os.environ.get("EPHEMRES_ENGINE_WORKER_ID") or os.environ.get("NETMON_ENGINE_WORKER_ID", "0"))
-            num_workers = int(os.environ.get("EPHEMRES_ENGINE_NUM_WORKERS") or os.environ.get("NETMON_ENGINE_NUM_WORKERS", "1"))
-            if num_workers > 1:
-                assigned_endpoints = [
-                    ep
-                    for ep in active_endpoints
-                    if (int.from_bytes(ep.id.bytes[:4], "big") % num_workers) == worker_id
-                ]
-            else:
-                assigned_endpoints = list(active_endpoints)
-
-            db_active_map = {ep.id: ep for ep in assigned_endpoints}
-
-            # Sync in-memory endpoint registry
-            for ep in assigned_endpoints:
-                def _spawn(target: MonitoredEndpoint):
-                    return monitor_endpoint(
-                        target.id,
-                        target.ip_address,
-                        state_machine,
-                    )
-
-                await endpoint_registry.add_endpoint(ep, spawn_coro_fn=_spawn)
-
-            # Evict removed or deactivated endpoints
-            current_registered = endpoint_registry.list_active_endpoints()
-            for reg_ep in current_registered:
-                if reg_ep.id not in db_active_map:
-                    logger.info(
-                        "Deactivating monitoring for removed endpoint %s",
-                        reg_ep.id,
-                    )
-                    await endpoint_registry.remove_endpoint(reg_ep.id)
-                    async with states_lock:
-                        endpoint_states.pop(str(reg_ep.id), None)
-
+            await asyncio.sleep(30)
+    finally:
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
         except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(
-                "Error in master orchestration loop: %s: %s",
-                type(e).__name__,
-                e,
-            )
-
-        await asyncio.sleep(30)
+            pass
 
 
 if __name__ == "__main__":
