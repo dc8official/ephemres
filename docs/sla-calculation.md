@@ -4,14 +4,14 @@ This document outlines the mathematical principles, state machine transitions, a
 
 ---
 
-## 1. High-Density 10-Ping Sub-Cycle Polling
+## 1. High-Precision 5-Ping Sub-Cycle Polling
 
-Within every 60-second window aligned to the absolute minute mark, the LNMP monitoring daemon sends:
-* **10 ICMP echo requests** spaced 6 seconds apart (`Interval = 6.0s`).
+Within every 60-second window aligned to the absolute minute mark (with `0–2000ms` randomized startup jitter), the LNMP monitoring daemon sends:
+* **5 ICMP echo requests** spaced **8 seconds apart** (`Interval = 8.0s`, active sweep window `~32s`, leaving a **28-second headroom window** before the next minute boundary).
 * **Packet Loss & Latency Metrics**:
-  - `failed_count` (`0 <= k <= 10`)
-  - `packet_loss_percent` = `(k / 10) * 100%`
-  - `avg_rtt_ms`, `min_rtt_ms`, `max_rtt_ms` (calculated across successful pings).
+  - `failed_count` (`0 <= k <= 5`)
+  - `packet_loss_percent` = `(k / 5) * 100%`
+  - `avg_rtt_ms`, `min_rtt_ms`, `max_rtt_ms` (calculated across successful replies).
 
 ---
 
@@ -21,14 +21,14 @@ To prevent momentary packet jitter from skewing SLA uptime, LNMP separates opera
 
 ```
 [Packet Health / Detailed State]
-  - UP              (0 packet drops, normal RTT)
-  - UP-UNSTABLE     (1 to 4 packet drops or high jitter)
-  - DOWN-UNSTABLE   (5 to 9 packet drops)
-  - DOWN            (10 packet drops / 100% loss)
+  - UP              (0 packet drops / 0% loss, normal RTT)
+  - UP-UNSTABLE     (1 to 2 packet drops / 20%–40% loss or high Z-score jitter)
+  - DOWN-UNSTABLE   (3 to 4 packet drops / 60%–80% loss)
+  - DOWN            (5 packet drops / 100% loss)
 
 [Production Availability / Operational State]
-  - UP              (Endpoint is operational; contributes to uptime)
-  - DOWN            (Endpoint is unavailable; counts as SLA outage)
+  - UP              (0 to 2 packet drops; endpoint is operational and contributes to SLA uptime)
+  - DOWN            (3 to 5 packet drops; endpoint is unavailable and counts as SLA outage once confirmed)
 ```
 
 ---

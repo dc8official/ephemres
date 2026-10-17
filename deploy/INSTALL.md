@@ -1,6 +1,6 @@
-# LNMP Version 2.0 (Beta) — Installation & Deployment Quick Start
+# LNMP Version 3.1.35s (Enterprise LTS) — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **LNMP Network Monitoring Platform v2.0 (Beta)**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **LNMP Network Monitoring Platform v3.1.35s (Enterprise LTS)**.
 
 ---
 

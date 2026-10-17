@@ -1,11 +1,11 @@
 # LNMP Developer & Contributor Guide
 
-This guide details how to set up a local development environment for the Network Monitoring Platform (LNMP) v1.5 and outlines standard contribution procedures.
+This guide details how to set up a local development environment for the Network Monitoring Platform (LNMP) v3.1.35s (Enterprise LTS) and outlines standard contribution procedures.
 
 ## 1. Project Structure
 
 The project is split into two primary domains:
-- `/backend`: Python 3.10+, FastAPI, SQLAlchemy, Alembic.
+- `/backend`: Python 3.10+, FastAPI, SQLAlchemy 2.0 (Async), Pydantic Settings, Alembic, Redis 6+ (optional acceleration).
 - `/frontend`: Node.js, Vue 3 (Composition API), Vite, PrimeVue.
 
 ## 2. Local Environment Setup

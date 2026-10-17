@@ -1,6 +1,6 @@
-# LNMP Architecture Overview — Version 3.1.28s
+# LNMP Architecture Overview — Version 3.1.35s
 
-The Network Monitoring Platform (LNMP) v3.1.28s is architected with a decoupled, asynchronous design engineered for high-concurrency telemetry collection, continuous zero-bloat state lifecycles, deterministic second-slot probe staggering, real-time Server-Sent Events (SSE), dual-driver storage acceleration, enterprise multi-channel notifications, crossing-free topology visualization, and enterprise security governance.
+The Network Monitoring Platform (LNMP) v3.1.35s is architected with a decoupled, asynchronous design engineered for high-concurrency telemetry collection, continuous zero-bloat state lifecycles, deterministic second-slot probe staggering, real-time Server-Sent Events (SSE), dual-driver storage acceleration, enterprise multi-channel notifications, crossing-free topology visualization, and enterprise security governance.
 
 ---
 

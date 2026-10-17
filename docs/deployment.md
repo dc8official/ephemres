@@ -1,6 +1,6 @@
-# LNMP Deployment & Operations Guide — Version 3.1.28s
+# LNMP Deployment & Operations Guide — Version 3.1.35s
 
-This guide details the procedures for installing, maintaining, and upgrading the Network Monitoring Platform (LNMP) v3.1.28s on a production Linux server.
+This guide details the procedures for installing, maintaining, and upgrading the Network Monitoring Platform (LNMP) v3.1.35s on a production Linux server.
 
 ---
 
@@ -47,19 +47,19 @@ cd lnmp/deploy
 1. Installs system packages: `python3-pip`, `postgresql`, `timescaledb`, `redis-server`, `nginx`, `traceroute`, `libcap2-bin`.
 2. Creates dedicated system user `netmon` and virtual environment at `/opt/netmon/venv`.
 3. Compiles the Vue 3 production bundle (`npm run build`).
-4. Generates `/etc/netmon/netmon.env` and `/etc/netmon/config.toml` with v3.1.28s defaults.
+4. Generates `/etc/netmon/netmon.env` and `/etc/netmon/config.toml` with v3.1.35s defaults.
 5. Sets network capabilities: `setcap cap_net_raw+ep $(command -v traceroute)`.
 6. Enables and starts systemd units (`netmon-api`, `netmon-engine`, `redis-server`, `nginx`).
 
 ---
 
-## 3. Upgrading to Version 3.1.28s (Zero Historical Data Loss)
+## 3. Upgrading to Version 3.1.35s (Zero Historical Data Loss)
 
-To perform an in-place upgrade to v3.1.28s:
+To perform an in-place upgrade to v3.1.35s:
 
 ```bash
 cd ~/lnmp
-git pull origin v3.1.28s
+git pull origin v3.1.35s
 sudo ./deploy/upgrade.sh
 ```
 

@@ -4,6 +4,16 @@ All notable technical changes, architectural upgrades, security enhancements, an
 
 The versioning format follows [Semantic Versioning](https://semver.org/).
 
+## [Version 3.1.35s] — Enterprise Long-Term Support (LTS) Consolidation
+### 🛡️ SLA Boundary Clamping, SSRF Socket Hardening, SSE Token Stripping & TimescaleDB Safety
+
+| Upgrade Domain | Technical Implementation | Operational & Security Benefit |
+| :--- | :--- | :--- |
+| **Window-Clamped SLA Uptime Math (`BUG-01` & `BUG-01b`)** | Updated `EndpointRepository` and `ReportRepository` to query boundary-overlapping intervals (`start_time <= end_dt AND (end_time IS NULL OR end_time >= start_dt)`) with SQL `GREATEST`/`LEAST` window clamping. | Eliminates false `0.00%` or `0.07%` SLA readings on multi-day continuous `UP` events and guarantees 100% mathematical parity between Dashboard KPI cards and Detailed Endpoint reports. |
+| **Zero-Trust SSRF Socket Validation** | Enforced pre-connect DNS resolution and private/loopback/link-local IP rejection inside `SafeConnectBackend` with `follow_redirects=False`. | Blocks DNS rebinding and HTTP 301/302 redirect-based Server-Side Request Forgery (SSRF) across synthetic HTTP probes and outbound webhook dispatchers. |
+| **TimescaleDB Decompression Guard** | Set database-level `timescaledb.max_tuples_decompressed_per_dml_transaction = 0` during installation and migrations. | Prevents background retention pruning and continuous aggregate refreshes from failing when updating or deleting compressed historical hypertable chunks. |
+| **Enterprise LTS Baseline Lock** | Unified version identifier `3.1.35s` across API `/version`, frontend footer, deployment scripts, and disaster recovery runbooks. | Establishes a deterministic, zero-churn Long-Term Support (LTS) baseline for production network monitoring fleets. |
+
 ---
 
 ## [Version 3.1.28s] — Enterprise Hardening, Zero Row Bloat & Security Governance

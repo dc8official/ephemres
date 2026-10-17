@@ -1,6 +1,6 @@
-# LNMP Database & TimescaleDB Architecture
+# LNMP Database & TimescaleDB Architecture — Version 3.1.35s
 
-This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, and compression policies in LNMP v2.0 (Beta).
+This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, and compression policies in LNMP v3.1.35s (Enterprise LTS).
 
 ---
 
@@ -12,6 +12,8 @@ erDiagram
     endpoints ||--o{ endpoint_baseline_routes : "stores baseline traceroute"
     endpoints ||--o{ endpoint_diagnostic_traces : "stores ephemeral JSONB traces"
     endpoints ||--o{ endpoint_rca_incidents : "tracks root cause outages"
+    alert_channels ||--o{ alert_delivery_logs : "records dispatch audit"
+    users ||--o{ user_sessions : "maintains active sessions"
     users ||--o{ audit_logs : "records admin actions"
 ```
 
@@ -68,6 +70,39 @@ Tracks root cause incidents and upstream failure points.
 * `is_resolved` (BOOLEAN)
 * `created_at` (TIMESTAMPTZ)
 * *Retention*: Automatically purged after 90 days if resolved.
+
+### `alert_channels`
+Stores enterprise notification destinations and credentials with AES-256-GCM encryption.
+* `id` (UUID, Primary Key)
+* `name` (VARCHAR(100))
+* `channel_type` (VARCHAR(50): `TEAMS`, `DISCORD`, `SLACK`, `EMAIL`, `WEBHOOK`)
+* `is_enabled` (BOOLEAN, default: `true`)
+* `config` (TEXT) — AES-256-GCM encrypted JSON payload containing webhook URLs, tokens, and SMTP credentials.
+* `endpoint_ids` (JSONB, default: `'[]'::jsonb`) — Target endpoint UUID filtering.
+* `subnet_filters` (JSONB, default: `'[]'::jsonb`) — Subnet CIDR filtering (e.g. `["10.0.0.0/24"]`).
+* `severity_filters` (JSONB, default: `'["DOWN", "RECOVERED"]'::jsonb`) — Severity states triggering dispatch.
+* `created_at` (TIMESTAMPTZ)
+* `updated_at` (TIMESTAMPTZ)
+
+### `alert_delivery_logs`
+Audit log of outbound notification dispatch attempts.
+* `id` (UUID, Primary Key)
+* `channel_id` (UUID, Foreign Key to `alert_channels.id`)
+* `event_type` (VARCHAR(50))
+* `endpoint_id` (UUID, Nullable)
+* `status` (VARCHAR(20): `DELIVERED`, `FAILED`, `SUPPRESSED`)
+* `response_code` (INTEGER, Nullable)
+* `latency_ms` (NUMERIC(8, 2), Nullable)
+* `error_message` (TEXT, Nullable)
+* `created_at` (TIMESTAMPTZ)
+
+### `user_sessions`
+Stores active user session tokens for stateful session validation and multi-worker synchronization.
+* `id` (UUID, Primary Key)
+* `user_id` (UUID, Foreign Key to `users.id`)
+* `jti` (VARCHAR(64), Unique) — Cryptographic JWT identifier.
+* `created_at` (TIMESTAMPTZ)
+* `expires_at` (TIMESTAMPTZ)
 
 ---
 
