@@ -22,12 +22,12 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 11 zero-dependency engines. |
-| **v3.3.1n** | Migration & Rebranding Release | **Supported Maintenance** | Production standard with Ephemres rebrand and flattened `/opt/ephemres` tree. |
-| **v3.3.0** | Feature & Ingestion Release | **Frozen Legacy Snapshot** | Frozen snapshot with Flow Exporter & Interface Telemetry. |
-| **v3.1.35s** | Maintenance Release | **Frozen Legacy Snapshot** | Frozen long-term maintenance track. |
-| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.2.v recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.2.v immediately. |
+| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 13 zero-dependency engines. |
+| **v3.3.0** | Feature & Ingestion Release | **Supported (Frozen Snapshot)** | Supported frozen production snapshot with Flow Exporter & Interface Telemetry. |
+| **v3.1.35s** | Enterprise LTS Release | **Supported (Frozen Snapshot)** | Supported frozen long-term maintenance track. |
+| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.2.v`. |
+| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.2.v` recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.2.v` immediately. |
 
 ---
 
@@ -65,7 +65,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 | **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
 | **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
-| **FastStore IPC** | `/dev/shm/ephemres_faststore.db` | UNIX Filesystem | `0600 (ephemres:ephemres)` | Shared-memory WAL state store & NetFlow stream buffer (No TCP port exposed). |
+| **FastStore IPC** | `/dev/shm/ephemres_faststore_*.sqlite3` | UNIX Filesystem | Shared-memory WAL state store & NetFlow stream buffer (`0600 ephemres:ephemres`, no TCP port exposed). |
 | **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
 | **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `AsyncHttpClient` SSRF guard. |
 
@@ -98,7 +98,7 @@ Ephemres implements a native zero-dependency HTTP/1.1 client (`app.core.http_cli
 
 ### A. AES-256-GCM Encryption at Rest
 All sensitive configuration attributes stored in PostgreSQL (webhook URLs, SMTP passwords, custom authorization headers) are encrypted at rest using **AES-256-GCM** (Galois/Counter Mode) authenticated encryption:
-* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`ephemres-crypto-v1`).
+* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`ephemres-alert-crypto-salt-v1`, with transparent fallback decryption for legacy `lnmp-alert-crypto-salt-v1` payloads).
 * **Random Initialization Vectors:** Every encrypted value receives a cryptographically secure, unique 12-byte random IV (`os.urandom(12)`).
 * **Cryptographic Tamper Resistance:** Decryption strictly validates the 16-byte GCM authentication tag. Any tampering or bit-flipping in the database raises an immediate authentication failure.
 * **Storage Format:** Ciphertexts are stored with an explicit version envelope: `ENC:v1:<base64-iv>:<base64-ciphertext-and-tag>`.
@@ -185,7 +185,7 @@ Every generated PDF byte stream is hashed prior to transmission:
 ## 9. Operating System & Privilege Hardening
 
 ### A. Non-Root Daemon Execution
-* Both `ephemres-api` and `ephemres-engine` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
+* `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
 * Daemons do not possess `sudo` or root privileges.
 
 ### B. Linux Capability Isolation (`CAP_NET_RAW`)
@@ -197,7 +197,7 @@ Every generated PDF byte stream is hashed prior to transmission:
 * This grants packet crafting rights strictly for network diagnostics without granting file system, memory, or administrative OS rights.
 
 ### C. Systemd Sandboxing Directives
-The production unit files (`deploy/ephemres-api.service` and `deploy/ephemres-engine.service`) enforce system-level isolation:
+The production unit files (`deploy/ephemres-api.service`, `deploy/ephemres-engine.service`, and `deploy/ephemres-flowd.service`) enforce system-level isolation:
 * `ProtectSystem=full`: Mounts `/usr`, `/boot`, and `/etc` read-only for daemon processes.
 * `PrivateTmp=true`: Allocates isolated, private `/tmp` directories inaccessible to other system users.
 * `NoNewPrivileges=true`: Prevents child processes from gaining elevated privileges via setuid binaries.
@@ -229,7 +229,7 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates and HSTS enabled.
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
-- [ ] **Database Network Isolation:** Ensure PostgreSQL (`5432`) and Redis (`6379`) listen strictly on `127.0.0.1`.
+- [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/dev/shm/ephemres_faststore*`) are owned by `ephemres:ephemres` (`0600`).
 - [ ] **Admin Password Changed:** Verify the default administrator password was changed upon initial login.
 - [ ] **Firewall Egress Rules:** Restrict outbound egress from the Ephemres server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).
 
@@ -239,6 +239,6 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 
 If you discover a security vulnerability or potential threat in Ephemres, please disclose it responsibly:
 
-* **Security Contact:** `security@ephemres.internal` or via **GitHub Private Vulnerability Reporting** on the repository (`https://github.com/dc8official/ephemres`).
+* **Security Contact:** `dagera07@gmail.com` or via **[GitHub Private Vulnerability Reporting](https://github.com/dc8official/ephemres/security/advisories/new)** on the repository (`https://github.com/dc8official/ephemres`).
 * **Policy:** Please do not file public GitHub issues for security vulnerabilities.
 * **Response SLA:** The Ephemres security team acknowledges vulnerability reports within **24 hours** and aims to deliver patches within **72 hours** for high or critical severity findings.
