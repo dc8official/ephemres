@@ -25,6 +25,7 @@ import re
 import sys
 import threading
 import types
+import typing
 from typing import (
     Any,
     Callable,
@@ -174,6 +175,11 @@ class _ParamInfo(_FieldInfo):
             extra=kwargs,
         )
         self.include_in_schema = include_in_schema
+
+    def __bool__(self) -> bool:
+        if self.default is None or self.default is ... or self.default is inspect._empty:
+            return False
+        return bool(self.default)
 
 
 class QueryParamInfo(_ParamInfo):
@@ -595,7 +601,7 @@ def _json_serialize(obj: Any) -> Any:
     if obj is None:
         return None
     if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
+        return obj.model_dump(mode="json", by_alias=True)
     if isinstance(obj, (UUID, Enum)):
         return str(obj) if isinstance(obj, UUID) else obj.value
     if isinstance(obj, (datetime, date)):
@@ -961,17 +967,30 @@ async def _resolve_endpoint_kwargs(
                 annotation = Request
             elif annotation == "BackgroundTasks":
                 annotation = BackgroundTasks
+            else:
+                try:
+                    annotation = eval(annotation, fn_globals, localns)
+                except Exception:
+                    pass
         if annotation is inspect._empty:
             annotation = Any
         default = param.default
 
         # 1. Direct Request injection
-        if annotation is Request or param_name in ("request", "http_request"):
+        if annotation is Request or (
+            annotation is Any
+            and default is inspect._empty
+            and param_name in ("request", "http_request")
+        ):
             resolved_kwargs[param_name] = request
             continue
 
         # 2. Direct Response injection
-        if annotation is Response or param_name == "response":
+        if annotation is Response or (
+            annotation is Any
+            and default is inspect._empty
+            and param_name == "response"
+        ):
             resolved_kwargs[param_name] = injected_response
             continue
 
@@ -1436,6 +1455,13 @@ class FastAPI:
     def add_middleware(self, middleware_class: Type[Any], **options: Any) -> None:
         self.middleware_stack.append((middleware_class, options))
         self._compiled_app = None
+
+    @property
+    def user_middleware(self) -> List[Any]:
+        return [
+            types.SimpleNamespace(cls=m_cls, kwargs=opts)
+            for m_cls, opts in self.middleware_stack
+        ]
 
     def add_exception_handler(
         self, exc_class_or_status_code: Union[Type[Exception], int], handler: Callable

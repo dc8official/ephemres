@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import socket
 import ssl
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -239,6 +240,77 @@ async def run_http_probe(
         }
 
 
+def _read_der_element(data: bytes, offset: int) -> tuple[int, bytes, int]:
+    """Reads a single ASN.1 DER TLV element, returning (tag, value_bytes, next_offset)."""
+    if offset >= len(data):
+        raise ValueError("Unexpected EOF in DER stream")
+    tag = data[offset]
+    offset += 1
+    if offset >= len(data):
+        raise ValueError("Unexpected EOF reading DER length")
+    first_len = data[offset]
+    offset += 1
+    if first_len < 0x80:
+        length = first_len
+    else:
+        num_octets = first_len & 0x7F
+        if num_octets == 0 or offset + num_octets > len(data):
+            raise ValueError("Invalid DER long-form length")
+        length = int.from_bytes(data[offset : offset + num_octets], "big")
+        offset += num_octets
+    end = offset + length
+    if end > len(data):
+        raise ValueError("DER element length exceeds buffer")
+    return tag, data[offset:end], end
+
+
+def _parse_der_cert_not_after(der_bytes: bytes) -> Optional[datetime]:
+    """Extracts the X.509 TBSCertificate Validity.notAfter timestamp in pure Python."""
+    # Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    tag, cert_body, _ = _read_der_element(der_bytes, 0)
+    if tag != 0x30:
+        raise ValueError("Invalid X.509 Certificate outer SEQUENCE")
+    # TBSCertificate ::= SEQUENCE
+    tag, tbs_body, _ = _read_der_element(cert_body, 0)
+    if tag != 0x30:
+        raise ValueError("Invalid TBSCertificate SEQUENCE")
+
+    idx = 0
+    # Optional [0] EXPLICIT Version (tag 0xA0)
+    tag, _, next_idx = _read_der_element(tbs_body, idx)
+    if tag == 0xA0:
+        idx = next_idx
+        tag, _, idx = _read_der_element(tbs_body, idx)  # serialNumber
+    else:
+        idx = next_idx  # first element was serialNumber
+
+    # Skip signature (AlgorithmIdentifier SEQUENCE) and issuer (Name SEQUENCE)
+    _, _, idx = _read_der_element(tbs_body, idx)  # signature
+    _, _, idx = _read_der_element(tbs_body, idx)  # issuer
+
+    # Validity ::= SEQUENCE { notBefore Time, notAfter Time }
+    val_tag, validity_body, _ = _read_der_element(tbs_body, idx)
+    if val_tag != 0x30:
+        raise ValueError("Invalid X.509 Validity SEQUENCE")
+
+    # Skip notBefore, read notAfter
+    _, _, val_idx = _read_der_element(validity_body, 0)
+    na_tag, na_bytes, _ = _read_der_element(validity_body, val_idx)
+    na_str = na_bytes.decode("ascii")
+
+    if na_tag == 0x17:  # UTCTime (YYMMDDHHMMSSZ)
+        raw = na_str.rstrip("Z")
+        yr = int(raw[:2])
+        year = (2000 + yr) if yr < 50 else (1900 + yr)
+        return datetime.strptime(f"{year:04d}{raw[2:12]}", "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    if na_tag == 0x18:  # GeneralizedTime (YYYYMMDDHHMMSSZ)
+        raw = na_str.rstrip("Z")[:14]
+        return datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    raise ValueError(f"Unsupported ASN.1 Time tag: 0x{na_tag:02x}")
+
+
 def _sync_ssl_probe(
     host: str,
     port: int = 443,
@@ -314,22 +386,24 @@ def _sync_ssl_probe(
             pass
 
     if expiry_dt is None and bin_cert:
-        try:
-            from cryptography import x509
-
-            x509_cert = x509.load_der_x509_certificate(bin_cert)
-            if hasattr(x509_cert, "not_valid_after_utc"):
-                expiry_dt = x509_cert.not_valid_after_utc
-            else:
-                expiry_dt = x509_cert.not_valid_after.replace(
-                    tzinfo=timezone.utc
+        if "cryptography.x509" in sys.modules:
+            try:
+                mod = sys.modules["cryptography.x509"]
+                fn = getattr(mod, "load_der_x509_certificate", None)
+                if callable(fn):
+                    c = fn(bin_cert)
+                    expiry_dt = getattr(c, "not_valid_after_utc", getattr(c, "not_valid_after", None))
+            except Exception:
+                pass
+        if expiry_dt is None:
+            try:
+                expiry_dt = _parse_der_cert_not_after(bin_cert)
+            except Exception as parse_err:
+                logger.warning(
+                    "Failed to parse DER certificate for %s: %s",
+                    host,
+                    parse_err,
                 )
-        except Exception as parse_err:
-            logger.warning(
-                "Failed to parse DER certificate for %s: %s",
-                host,
-                parse_err,
-            )
 
     latency_val = round(handshake_latency_ms, 2) if handshake_latency_ms is not None else None
     if expiry_dt is None:

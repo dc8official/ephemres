@@ -34,7 +34,7 @@ async def test_alert_dispatcher_send_test_alert_mock_success():
     mock_resp.status_code = 200
     mock_resp.text = "OK"
 
-    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+    with patch("app.services.ssrf_validator.SSRFSafeHttpClient.post", return_value=mock_resp):
         res = await dispatcher.send_test_alert(test_channel)
         assert res["success"] is True
         assert res["status_code"] == 200

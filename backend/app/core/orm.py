@@ -276,9 +276,10 @@ def hydrate_column_value(val: Any, col_type: Optional[SQLType] = None) -> Any:
 class CompileContext:
     """Carries positional parameter state during AST compilation."""
 
-    def __init__(self, inline_literals: bool = False) -> None:
+    def __init__(self, inline_literals: bool = False, symbolic_binds: bool = False) -> None:
         self.params: List[Any] = []
         self.inline_literals = inline_literals
+        self.symbolic_binds = symbolic_binds
         self.top_level: bool = True
 
     def add_param(self, val: Any, col_type: Optional[SQLType] = None) -> str:
@@ -310,6 +311,18 @@ def format_sql_literal(val: Any) -> str:
     return f"'{str(val)}'"
 
 
+def _unwrap_field_operand(other: Any) -> Tuple[Any, bool]:
+    skip_where = False
+    if hasattr(other, "default"):
+        default_val = getattr(other, "default")
+        if default_val is None:
+            skip_where = True
+            other = None
+        elif default_val is not ...:
+            other = default_val
+    return other, skip_where
+
+
 class SQLElement:
     """Base expression AST element supporting Python operator overloading."""
 
@@ -320,31 +333,57 @@ class SQLElement:
         return self.compile(ctx)
 
     def __str__(self) -> str:
-        ctx = CompileContext(inline_literals=True)
-        return self.compile(ctx)
+        ctx = CompileContext(inline_literals=True, symbolic_binds=True)
+        return self.compile(ctx).replace('"', '')
 
     # Comparisons
     def __eq__(self, other: Any) -> SQLElement:  # type: ignore[override]
+        other, skip = _unwrap_field_operand(other)
         if other is None:
-            return IsExpression(self, None, negated=False)
-        return BinaryExpression(self, "=", other)
+            expr = IsExpression(self, None, negated=False)
+        else:
+            expr = BinaryExpression(self, "=", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     def __ne__(self, other: Any) -> SQLElement:  # type: ignore[override]
+        other, skip = _unwrap_field_operand(other)
         if other is None:
-            return IsExpression(self, None, negated=True)
-        return BinaryExpression(self, "!=", other)
+            expr = IsExpression(self, None, negated=True)
+        else:
+            expr = BinaryExpression(self, "!=", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     def __lt__(self, other: Any) -> SQLElement:
-        return BinaryExpression(self, "<", other)
+        other, skip = _unwrap_field_operand(other)
+        expr = BinaryExpression(self, "<", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     def __le__(self, other: Any) -> SQLElement:
-        return BinaryExpression(self, "<=", other)
+        other, skip = _unwrap_field_operand(other)
+        expr = BinaryExpression(self, "<=", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     def __gt__(self, other: Any) -> SQLElement:
-        return BinaryExpression(self, ">", other)
+        other, skip = _unwrap_field_operand(other)
+        expr = BinaryExpression(self, ">", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     def __ge__(self, other: Any) -> SQLElement:
-        return BinaryExpression(self, ">=", other)
+        other, skip = _unwrap_field_operand(other)
+        expr = BinaryExpression(self, ">=", other)
+        if skip:
+            expr._skip_where = True
+        return expr
 
     # Arithmetic
     def __add__(self, other: Any) -> SQLElement:
@@ -477,7 +516,16 @@ class BinaryExpression(SQLElement):
         ctx = ctx or CompileContext()
         col_type = getattr(self.left, "type", None) or getattr(self.right, "type", None)
         l_sql = compile_operand(self.left, ctx, col_type)
-        r_sql = compile_operand(self.right, ctx, col_type)
+        if ctx.symbolic_binds and not self.is_arithmetic:
+            if not isinstance(self.right, SQLElement) and hasattr(self.left, "name") and isinstance(self.left.name, str) and self.left.name:
+                r_sql = f":{self.left.name}"
+            elif not isinstance(self.left, SQLElement) and hasattr(self.right, "name") and isinstance(self.right.name, str) and self.right.name:
+                l_sql = f":{self.right.name}"
+                r_sql = compile_operand(self.right, ctx, col_type)
+            else:
+                r_sql = compile_operand(self.right, ctx, col_type)
+        else:
+            r_sql = compile_operand(self.right, ctx, col_type)
         if self.is_arithmetic:
             return f"({l_sql} {self.op} {r_sql})"
         return f"{l_sql} {self.op} {r_sql}"
@@ -540,7 +588,9 @@ class InExpression(SQLElement):
 class BooleanClauseList(SQLElement):
     def __init__(self, operator: str, clauses: Sequence[Any]) -> None:
         self.operator = operator
-        self.clauses = [c for c in clauses if c is not None]
+        self.clauses = [c for c in clauses if c is not None and not getattr(c, "_skip_where", False)]
+        if not self.clauses:
+            self._skip_where = True
 
     def compile(self, ctx: Optional[CompileContext] = None) -> str:
         ctx = ctx or CompileContext()
@@ -823,12 +873,26 @@ def compile_text_clause(sql: str, params: Optional[Mapping[str, Any]]) -> Tuple[
     return compiled_sql, ordered_args
 
 
+class CompiledText(str):
+    params: Dict[str, Any]
+
+    def __new__(cls, sql_text: str, params: Optional[Dict[str, Any]] = None) -> CompiledText:
+        obj = super().__new__(cls, sql_text)
+        obj.params = params if params is not None else {}
+        return obj
+
+
 class TextClause(SQLElement):
     def __init__(self, text_str: str) -> None:
         self.text_str = text_str
 
-    def compile(self, ctx: Optional[CompileContext] = None) -> str:
-        return self.text_str
+    def compile(self, ctx: Optional[CompileContext] = None) -> CompiledText:
+        extracted_params: Dict[str, Any] = {}
+        for match in _TEXT_TOKEN_RE.finditer(self.text_str):
+            param_name = match.group(4)
+            if param_name:
+                extracted_params[param_name] = None
+        return CompiledText(self.text_str, extracted_params)
 
 
 def text(sql_str: str) -> TextClause:
@@ -1115,6 +1179,40 @@ schema = SchemaNamespace()
 # ---------------------------------------------------------------------------
 # 7. Query Builders (Select, Insert, Update, Delete)
 # ---------------------------------------------------------------------------
+def _find_table_from_entity(e: Any) -> Optional[str]:
+    if isinstance(e, type) and issubclass(e, DeclarativeBase):
+        return f'"{e.__tablename__}"'
+    if isinstance(e, CTE):
+        return f'"{e.name}"'
+    if isinstance(e, Subquery):
+        return f'"{e.name}"'
+    if isinstance(e, Table):
+        return f'"{e.name}"'
+    if isinstance(e, ColumnClause) and e.table:
+        return f'"{e.table}"' if e.table.isidentifier() else e.table
+    if isinstance(e, LabelClause):
+        return _find_table_from_entity(e.expr)
+    if isinstance(e, FunctionCall):
+        for arg in e.args:
+            tbl = _find_table_from_entity(arg)
+            if tbl:
+                return tbl
+    if isinstance(e, BinaryExpression):
+        return _find_table_from_entity(e.left) or _find_table_from_entity(e.right)
+    if isinstance(e, BooleanClauseList):
+        for clause in e.clauses:
+            tbl = _find_table_from_entity(clause)
+            if tbl:
+                return tbl
+    if isinstance(e, (InExpression, IsExpression)):
+        return _find_table_from_entity(e.expr)
+    if isinstance(e, WindowExpression):
+        return _find_table_from_entity(e.expr)
+    if isinstance(e, CastExpression):
+        return _find_table_from_entity(e.expr)
+    return None
+
+
 class Select(SQLElement):
     """SQL SELECT statement builder supporting joins, CTEs, subqueries & pagination."""
 
@@ -1132,6 +1230,16 @@ class Select(SQLElement):
         self._for_update: bool = False
         self._skip_locked: bool = False
         self._nowait: bool = False
+
+    @property
+    def selected_columns(self) -> List[Any]:
+        cols: List[Any] = []
+        for entity in self._select_entities:
+            if isinstance(entity, type) and issubclass(entity, DeclarativeBase):
+                cols.extend(entity.__table_columns__.values())
+            else:
+                cols.append(entity)
+        return cols
 
     def clone(self) -> Select:
         new_sel = Select(*self._select_entities)
@@ -1151,7 +1259,7 @@ class Select(SQLElement):
 
     def where(self, *conditions: Any) -> Select:
         s = self.clone()
-        s._where_clauses.extend(c for c in conditions if c is not None)
+        s._where_clauses.extend(c for c in conditions if c is not None and not getattr(c, "_skip_where", False))
         return s
 
     def filter(self, *conditions: Any) -> Select:
@@ -1351,12 +1459,13 @@ class Select(SQLElement):
         if self._from_target is not None:
             return self._format_table_target(self._from_target, ctx)
         for e in self._select_entities:
-            if isinstance(e, type) and issubclass(e, DeclarativeBase):
-                return f'"{e.__tablename__}"'
-            if isinstance(e, (CTE, Subquery)):
-                return self._format_table_target(e, ctx)
-            if isinstance(e, ColumnClause) and e.table:
-                return f'"{e.table}"'
+            tbl = _find_table_from_entity(e)
+            if tbl:
+                return tbl
+        for w in self._where_clauses:
+            tbl = _find_table_from_entity(w)
+            if tbl:
+                return tbl
         return None
 
     def _format_table_target(self, target: Any, ctx: CompileContext) -> str:

@@ -27,6 +27,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+get_net_if_addrs: Optional[Any] = None
+
 # Concurrency semaphore for traceroute execution (max 3 concurrent, 500ms pacing)
 trace_semaphore = asyncio.Semaphore(3)
 
@@ -43,6 +45,28 @@ def is_local_subnet_destination(target_ip: str) -> bool:
         target_obj = ipaddress.ip_address(target_ip.strip())
         if target_obj.is_loopback:
             return True
+
+        if callable(get_net_if_addrs):
+            addrs = get_net_if_addrs()
+            if isinstance(addrs, dict):
+                for iface, addr_list in addrs.items():
+                    for a in addr_list:
+                        fam = getattr(getattr(a, "family", None), "name", None)
+                        if fam == "AF_INET" or getattr(a, "family", None) == socket.AF_INET:
+                            addr = getattr(a, "address", None)
+                            mask = getattr(a, "netmask", None)
+                            if addr and mask:
+                                net = ipaddress.IPv4Network(f"{addr}/{mask}", strict=False)
+                                if target_obj.version == 4 and target_obj in net:
+                                    return True
+                        elif fam == "AF_INET6" or getattr(a, "family", None) == socket.AF_INET6:
+                            addr = getattr(a, "address", None)
+                            mask = getattr(a, "netmask", None)
+                            if addr:
+                                net = ipaddress.IPv6Network(f"{addr}/{mask or '128'}", strict=False)
+                                if target_obj.version == 6 and target_obj in net:
+                                    return True
+                return False
 
         from app.services.net_interfaces import get_local_interface_networks
 

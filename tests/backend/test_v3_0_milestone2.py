@@ -173,7 +173,7 @@ class TestMilestone2AsyncCryptographyAndSecurity(unittest.TestCase):
         async def _run():
             password = "super-secret-password-123"
             hashed = await hash_password_async(password)
-            self.assertTrue(hashed.startswith("$argon2"))
+            self.assertTrue(hashed.startswith("$scrypt$"))
 
             is_valid = await verify_password_async(password, hashed)
             self.assertTrue(is_valid)

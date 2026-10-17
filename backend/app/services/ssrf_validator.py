@@ -116,9 +116,8 @@ class SSRFSafeBackend:
         self._allow_private = _resolve_allow_private(allow_private)
 
     async def resolve_and_validate(self, host: str, port: int) -> str:
-        loop = asyncio.get_running_loop()
         try:
-            addr_info = await loop.getaddrinfo(
+            addr_info = socket.getaddrinfo(
                 host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
             )
         except socket.gaierror as err:
@@ -142,6 +141,18 @@ class SSRFSafeBackend:
         if not target_ip:
             raise ValueError(f"DNS resolution failure for host '{host}': No valid IP address.")
         return target_ip
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.Any:
+        target_ip = await self.resolve_and_validate(host, port)
+        if self._inner and hasattr(self._inner, "connect_tcp"):
+            return await self._inner.connect_tcp(target_ip, port, *args, **kwargs)
+        return await asyncio.open_connection(target_ip, port, *args, **kwargs)
 
     async def connect_unix_socket(
         self,
@@ -190,6 +201,7 @@ class SSRFSafeHttpClient:
         allow_private: bool | None = None,
     ) -> None:
         self.timeout = float(timeout)
+        self.follow_redirects = False
         self._allow_private = _resolve_allow_private(allow_private)
         self._backend = SSRFSafeBackend(allow_private=self._allow_private)
 
