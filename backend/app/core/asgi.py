@@ -13,6 +13,7 @@ import contextlib
 import copy
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from enum import Enum
 import functools
 import http.cookies
@@ -48,6 +49,7 @@ from uuid import UUID
 
 from app.core.schema import (
     BaseModel,
+    TypeAdapter,
     ValidationError,
     _FieldInfo,
     _coerce_value,
@@ -606,6 +608,8 @@ def _json_serialize(obj: Any) -> Any:
         return str(obj) if isinstance(obj, UUID) else obj.value
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
     if isinstance(obj, (list, tuple, set)):
         return [_json_serialize(item) for item in obj]
     if isinstance(obj, dict):
@@ -754,6 +758,7 @@ class Route:
         name: Optional[str] = None,
         include_in_schema: bool = True,
         tags: Optional[List[str]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
     ) -> None:
         self.path = path.rstrip("/") if path != "/" else "/"
         self.endpoint = endpoint
@@ -763,6 +768,7 @@ class Route:
         self.name = name or getattr(endpoint, "__name__", "endpoint")
         self.include_in_schema = include_in_schema
         self.tags = tags or []
+        self.dependencies = list(dependencies or [])
 
         # Compile path regex for parameter extraction: {param}
         self.param_names: List[str] = []
@@ -825,10 +831,12 @@ class APIRouter:
         name: Optional[str] = None,
         include_in_schema: bool = True,
         tags: Optional[List[str]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
     ) -> None:
         clean_path = path if path.startswith("/") or not path else f"/{path}"
         full_path = f"{self.prefix}{clean_path}" if self.prefix else (clean_path or "/")
         merged_tags = list(self.tags) + (tags or [])
+        merged_deps = list(self.dependencies) + list(dependencies or [])
         route = Route(
             path=full_path,
             endpoint=endpoint,
@@ -838,6 +846,7 @@ class APIRouter:
             name=name,
             include_in_schema=include_in_schema,
             tags=merged_tags,
+            dependencies=merged_deps,
         )
         self.routes.append(route)
 
@@ -893,12 +902,19 @@ class APIRouter:
 
         return decorator
 
-    def include_router(self, router: APIRouter, prefix: str = "", tags: Optional[List[str]] = None) -> None:
+    def include_router(
+        self,
+        router: APIRouter,
+        prefix: str = "",
+        tags: Optional[List[str]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
+    ) -> None:
         pfx = f"{self.prefix}{prefix.rstrip('/')}" if self.prefix else prefix.rstrip('/')
         for route in router.routes:
             sub_path = route.path
             merged_path = f"{pfx}{sub_path}" if pfx else sub_path
             merged_tags = list(self.tags) + (tags or []) + route.tags
+            merged_deps = list(self.dependencies) + list(dependencies or []) + route.dependencies
             self.routes.append(
                 Route(
                     path=merged_path,
@@ -909,6 +925,7 @@ class APIRouter:
                     name=route.name,
                     include_in_schema=route.include_in_schema,
                     tags=merged_tags,
+                    dependencies=merged_deps,
                 )
             )
 
@@ -916,6 +933,72 @@ class APIRouter:
 # ---------------------------------------------------------------------------
 # 6. Dependency & Parameter Resolver
 # ---------------------------------------------------------------------------
+async def _resolve_dependency(
+    dep: Any,
+    request: Request,
+    injected_response: Response,
+    dep_cache: Dict[Any, Any],
+    exit_stack: contextlib.AsyncExitStack,
+    dependency_overrides: Dict[Any, Any],
+    path_params: Dict[str, str],
+    bg_tasks: Optional[BackgroundTasks] = None,
+) -> Any:
+    """Resolves and invokes a Depends marker or callable dependency."""
+    dep_obj = dep if isinstance(dep, Depends) else Depends(dep)
+    dep_fn = dep_obj.dependency
+    if dep_fn is None:
+        return None
+
+    target_fn = dependency_overrides.get(dep_fn, dep_fn)
+    if dep_obj.use_cache and target_fn in dep_cache:
+        return dep_cache[target_fn]
+
+    sub_kwargs = await _resolve_endpoint_kwargs(
+        target_fn,
+        request,
+        injected_response,
+        dep_cache,
+        exit_stack,
+        dependency_overrides,
+        path_params,
+        bg_tasks=bg_tasks,
+    )
+
+    if inspect.isasyncgenfunction(target_fn):
+        cm = contextlib.asynccontextmanager(target_fn)(**sub_kwargs)
+        dep_val = await exit_stack.enter_async_context(cm)
+    elif inspect.isgeneratorfunction(target_fn):
+        cm = contextlib.contextmanager(target_fn)(**sub_kwargs)
+        dep_val = exit_stack.enter_context(cm)
+    elif inspect.iscoroutinefunction(target_fn):
+        dep_val = await target_fn(**sub_kwargs)
+    else:
+        dep_val = target_fn(**sub_kwargs)
+        if inspect.isasyncgen(dep_val):
+            async def _aiter_wrap(gen=dep_val):
+                try:
+                    yield await anext(gen)
+                finally:
+                    await gen.aclose()
+            cm = contextlib.asynccontextmanager(_aiter_wrap)()
+            dep_val = await exit_stack.enter_async_context(cm)
+        elif inspect.isgenerator(dep_val):
+            def _iter_wrap(gen=dep_val):
+                try:
+                    yield next(gen)
+                finally:
+                    gen.close()
+            cm = contextlib.contextmanager(_iter_wrap)()
+            dep_val = exit_stack.enter_context(cm)
+        elif inspect.isawaitable(dep_val):
+            dep_val = await dep_val
+
+    if dep_obj.use_cache:
+        dep_cache[target_fn] = dep_val
+
+    return dep_val
+
+
 async def _resolve_endpoint_kwargs(
     handler: Callable[..., Any],
     request: Request,
@@ -924,6 +1007,7 @@ async def _resolve_endpoint_kwargs(
     exit_stack: contextlib.AsyncExitStack,
     dependency_overrides: Dict[Any, Any],
     path_params: Dict[str, str],
+    bg_tasks: Optional[BackgroundTasks] = None,
 ) -> Dict[str, Any]:
     """Resolves parameters for a route handler or dependency function."""
     sig = inspect.signature(handler)
@@ -995,61 +1079,29 @@ async def _resolve_endpoint_kwargs(
             continue
 
         # 3. Direct BackgroundTasks injection
-        if annotation is BackgroundTasks or (isinstance(default, type) and default is BackgroundTasks):
-            resolved_kwargs[param_name] = BackgroundTasks()
+        is_bg = (
+            annotation is BackgroundTasks
+            or (isinstance(annotation, type) and issubclass(annotation, BackgroundTasks))
+            or BackgroundTasks in get_args(annotation)
+            or isinstance(default, BackgroundTasks)
+            or (isinstance(default, type) and default is BackgroundTasks)
+        )
+        if is_bg:
+            resolved_kwargs[param_name] = bg_tasks if bg_tasks is not None else BackgroundTasks()
             continue
 
         # 4. Depends(...) injection
         if isinstance(default, Depends):
-            dep_fn = default.dependency or annotation
-            target_fn = dependency_overrides.get(dep_fn, dep_fn)
-
-            if default.use_cache and target_fn in dep_cache:
-                resolved_kwargs[param_name] = dep_cache[target_fn]
-                continue
-
-            sub_kwargs = await _resolve_endpoint_kwargs(
-                target_fn,
+            dep_val = await _resolve_dependency(
+                default,
                 request,
                 injected_response,
                 dep_cache,
                 exit_stack,
                 dependency_overrides,
                 path_params,
+                bg_tasks=bg_tasks,
             )
-
-            # Invoke target_fn
-            if inspect.isasyncgenfunction(target_fn):
-                cm = contextlib.asynccontextmanager(target_fn)(**sub_kwargs)
-                dep_val = await exit_stack.enter_async_context(cm)
-            elif inspect.isgeneratorfunction(target_fn):
-                cm = contextlib.contextmanager(target_fn)(**sub_kwargs)
-                dep_val = exit_stack.enter_context(cm)
-            elif inspect.iscoroutinefunction(target_fn):
-                dep_val = await target_fn(**sub_kwargs)
-            else:
-                dep_val = target_fn(**sub_kwargs)
-                if inspect.isasyncgen(dep_val):
-                    async def _aiter_wrap():
-                        try:
-                            yield await anext(dep_val)
-                        finally:
-                            await dep_val.aclose()
-                    cm = contextlib.asynccontextmanager(_aiter_wrap)()
-                    dep_val = await exit_stack.enter_async_context(cm)
-                elif inspect.isgenerator(dep_val):
-                    def _iter_wrap():
-                        try:
-                            yield next(dep_val)
-                        finally:
-                            dep_val.close()
-                    cm = contextlib.contextmanager(_iter_wrap)()
-                    dep_val = exit_stack.enter_context(cm)
-                elif inspect.isawaitable(dep_val):
-                    dep_val = await dep_val
-
-            if default.use_cache:
-                dep_cache[target_fn] = dep_val
             resolved_kwargs[param_name] = dep_val
             continue
 
@@ -1079,45 +1131,7 @@ async def _resolve_endpoint_kwargs(
                     })
             continue
 
-        # 6. Query parameter
-        is_query = isinstance(default, QueryParamInfo) or (
-            default is inspect._empty
-            and annotation in (str, int, float, bool, UUID, Optional[str], Optional[int], Optional[float], Optional[bool], Optional[UUID])
-        )
-        if is_query:
-            q_info = default if isinstance(default, QueryParamInfo) else _FieldInfo(default=default)
-            alias = q_info.alias or param_name
-            origin = get_origin(annotation)
-            if origin in (list, List, Sequence):
-                raw_q = request.query_params.getlist(alias)
-                has_val = bool(raw_q)
-            else:
-                raw_q = request.query_params.get(alias)
-                has_val = raw_q is not None
-
-            if not has_val:
-                if q_info.is_required():
-                    validation_errors.append({
-                        "loc": ("query", alias),
-                        "msg": "Field required",
-                        "type": "missing",
-                    })
-                    continue
-                resolved_kwargs[param_name] = q_info.get_default()
-            else:
-                try:
-                    coerced = _coerce_value(raw_q, annotation, param_name, {})
-                    _validate_constraints(coerced, q_info, param_name)
-                    resolved_kwargs[param_name] = coerced
-                except Exception as exc:
-                    validation_errors.append({
-                        "loc": ("query", alias),
-                        "msg": str(exc),
-                        "type": "value_error",
-                    })
-            continue
-
-        # 7. Header parameter
+        # 6. Header parameter
         if isinstance(default, HeaderParamInfo):
             h_alias = default.alias or param_name.replace("_", "-")
             h_val = request.headers.get(h_alias)
@@ -1143,7 +1157,7 @@ async def _resolve_endpoint_kwargs(
                     })
             continue
 
-        # 8. Cookie parameter
+        # 7. Cookie parameter
         if isinstance(default, CookieParamInfo):
             c_alias = default.alias or param_name
             c_val = request.cookies.get(c_alias)
@@ -1169,86 +1183,116 @@ async def _resolve_endpoint_kwargs(
                     })
             continue
 
-        # 9. Request Body parameter (BaseModel, Dict, List, Body)
-        if not body_parsed:
-            try:
-                body_data = await request.json()
-            except Exception:
-                body_data = None
-            body_parsed = True
-
-        b_info = default if isinstance(default, BodyParamInfo) else _FieldInfo(default=default)
-
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            if body_data is None:
-                if b_info.is_required():
-                    validation_errors.append({
-                        "loc": ("body",),
-                        "msg": "Request body required",
-                        "type": "missing",
-                    })
-                else:
-                    resolved_kwargs[param_name] = b_info.get_default()
-            else:
-                try:
-                    model_inst = annotation.model_validate(body_data)
-                    resolved_kwargs[param_name] = model_inst
-                except ValidationError as v_exc:
-                    for err in v_exc.errors():
-                        validation_errors.append({
-                            "loc": ("body", *err.get("loc", ())),
-                            "msg": err.get("msg", ""),
-                            "type": err.get("type", "value_error"),
-                        })
-                except Exception as exc:
-                    validation_errors.append({
-                        "loc": ("body",),
-                        "msg": str(exc),
-                        "type": "value_error",
-                    })
-            continue
-
-        # Generic dict / list body (e.g. Dict[str, InterfaceConfig])
+        # 8. Request Body parameter (BaseModel, Dict, List, Body)
         origin = get_origin(annotation)
-        if origin in (dict, Dict, list, List) or isinstance(default, BodyParamInfo):
-            if body_data is None:
-                if b_info.is_required():
-                    validation_errors.append({
-                        "loc": ("body",),
-                        "msg": "Request body required",
-                        "type": "missing",
-                    })
-                else:
-                    resolved_kwargs[param_name] = b_info.get_default()
-            else:
+        is_body = (
+            isinstance(default, BodyParamInfo)
+            or (isinstance(annotation, type) and issubclass(annotation, BaseModel))
+            or (origin in (dict, Dict) and not isinstance(default, QueryParamInfo))
+            or (annotation in (dict, Dict) and not isinstance(default, QueryParamInfo))
+        )
+        if is_body:
+            if not body_parsed:
                 try:
-                    coerced = _coerce_value(body_data, annotation, param_name, {})
-                    _validate_constraints(coerced, b_info, param_name)
-                    resolved_kwargs[param_name] = coerced
-                except ValidationError as v_exc:
-                    for err in v_exc.errors():
-                        validation_errors.append({
-                            "loc": ("body", *err.get("loc", ())),
-                            "msg": err.get("msg", ""),
-                            "type": err.get("type", "value_error"),
-                        })
-                except Exception as exc:
-                    validation_errors.append({
-                        "loc": ("body",),
-                        "msg": str(exc),
-                        "type": "value_error",
-                    })
-            continue
+                    body_data = await request.json()
+                except Exception:
+                    body_data = None
+                body_parsed = True
 
-        # Fallback default
-        if default is not inspect._empty:
-            resolved_kwargs[param_name] = default
+            b_info = default if isinstance(default, BodyParamInfo) else _FieldInfo(default=default)
+
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                if body_data is None:
+                    if b_info.is_required():
+                        validation_errors.append({
+                            "loc": ("body",),
+                            "msg": "Request body required",
+                            "type": "missing",
+                        })
+                    else:
+                        resolved_kwargs[param_name] = b_info.get_default()
+                else:
+                    try:
+                        model_inst = annotation.model_validate(body_data)
+                        resolved_kwargs[param_name] = model_inst
+                    except ValidationError as v_exc:
+                        for err in v_exc.errors():
+                            validation_errors.append({
+                                "loc": ("body", *err.get("loc", ())),
+                                "msg": err.get("msg", ""),
+                                "type": err.get("type", "value_error"),
+                            })
+                    except Exception as exc:
+                        validation_errors.append({
+                            "loc": ("body",),
+                            "msg": str(exc),
+                            "type": "value_error",
+                        })
+                continue
+
+            # Generic dict / list body (e.g. Dict[str, InterfaceConfig])
+            if origin in (dict, Dict, list, List) or isinstance(default, BodyParamInfo):
+                if body_data is None:
+                    if b_info.is_required():
+                        validation_errors.append({
+                            "loc": ("body",),
+                            "msg": "Request body required",
+                            "type": "missing",
+                        })
+                    else:
+                        resolved_kwargs[param_name] = b_info.get_default()
+                else:
+                    try:
+                        coerced = _coerce_value(body_data, annotation, param_name, {})
+                        _validate_constraints(coerced, b_info, param_name)
+                        resolved_kwargs[param_name] = coerced
+                    except ValidationError as v_exc:
+                        for err in v_exc.errors():
+                            validation_errors.append({
+                                "loc": ("body", *err.get("loc", ())),
+                                "msg": err.get("msg", ""),
+                                "type": err.get("type", "value_error"),
+                            })
+                    except Exception as exc:
+                        validation_errors.append({
+                            "loc": ("body",),
+                            "msg": str(exc),
+                            "type": "value_error",
+                        })
+                continue
+
+        # 9. Query parameter
+        # Any other parameter is extracted from query params or falls back to default.
+        q_info = default if isinstance(default, QueryParamInfo) else _FieldInfo(default=default)
+        alias = q_info.alias or param_name
+        origin = get_origin(annotation)
+        if origin in (list, List, Sequence):
+            raw_q = request.query_params.getlist(alias)
+            has_val = bool(raw_q)
+        else:
+            raw_q = request.query_params.get(alias)
+            has_val = raw_q is not None
+
+        if has_val:
+            try:
+                coerced = _coerce_value(raw_q, annotation, param_name, {})
+                _validate_constraints(coerced, q_info, param_name)
+                resolved_kwargs[param_name] = coerced
+            except Exception as exc:
+                validation_errors.append({
+                    "loc": ("query", alias),
+                    "msg": str(exc),
+                    "type": "value_error",
+                })
+        elif not q_info.is_required():
+            resolved_kwargs[param_name] = q_info.get_default()
         else:
             validation_errors.append({
-                "loc": (param_name,),
-                "msg": f"Missing required parameter '{param_name}'",
+                "loc": ("query", alias),
+                "msg": f"Field required",
                 "type": "missing",
             })
+        continue
 
     if validation_errors:
         raise ValidationError(validation_errors, title="Request Validation")
@@ -1279,29 +1323,68 @@ class BaseHTTPMiddleware:
         request = Request(scope, receive, send)
 
         async def call_next(req: Request) -> Response:
-            response_started = False
+            start_event = asyncio.Event()
+            body_queue: asyncio.Queue[Union[Tuple[bytes, bool], Exception]] = asyncio.Queue()
             response_status = 200
             response_headers: List[Tuple[bytes, bytes]] = []
-            response_body_chunks: List[bytes] = []
+            app_exc: Optional[Exception] = None
 
-            async def mock_send(message: Dict[str, Any]) -> None:
-                nonlocal response_started, response_status, response_headers, response_body_chunks
+            async def inner_send(message: Dict[str, Any]) -> None:
+                nonlocal response_status, response_headers
                 m_type = message.get("type", "")
                 if m_type == "http.response.start":
-                    response_started = True
                     response_status = message.get("status", 200)
                     response_headers = list(message.get("headers", []))
+                    start_event.set()
                 elif m_type == "http.response.body":
                     chunk = message.get("body", b"")
-                    if chunk:
-                        response_body_chunks.append(chunk)
+                    more_body = message.get("more_body", False)
+                    await body_queue.put((chunk, more_body))
 
-            await self.app(req.scope, req._receive, mock_send)
-            body = b"".join(response_body_chunks)
-            resp = Response(
-                content=body,
+            async def run_app() -> None:
+                nonlocal app_exc
+                try:
+                    await self.app(req.scope, req._receive, inner_send)
+                except Exception as exc:
+                    app_exc = exc
+                    await body_queue.put(exc)
+                    start_event.set()
+
+            inner_task = asyncio.create_task(run_app())
+
+            # Wait for response start or early failure
+            await start_event.wait()
+            if app_exc is not None and not response_headers:
+                raise app_exc
+
+            async def body_stream() -> AsyncIterator[bytes]:
+                try:
+                    while True:
+                        item = await body_queue.get()
+                        if isinstance(item, Exception):
+                            raise item
+                        chunk, more_body = item
+                        if chunk:
+                            yield chunk
+                        if not more_body:
+                            break
+                finally:
+                    if not inner_task.done():
+                        inner_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await inner_task
+
+            # Create StreamingResponse with the received status & headers
+            content_type = None
+            for k, v in response_headers:
+                if k.lower() == b"content-type":
+                    content_type = v.decode("latin-1")
+                    break
+
+            resp = StreamingResponse(
+                content=body_stream(),
                 status_code=response_status,
-                headers=dict(MutableHeaders(raw=response_headers).items()),
+                media_type=content_type,
             )
             resp.headers = MutableHeaders(raw=response_headers)
             return resp
@@ -1478,8 +1561,14 @@ class EphemresApp:
 
         return decorator
 
-    def include_router(self, router: APIRouter, prefix: str = "", tags: Optional[List[str]] = None) -> None:
-        self.router.include_router(router, prefix=prefix, tags=tags)
+    def include_router(
+        self,
+        router: APIRouter,
+        prefix: str = "",
+        tags: Optional[List[str]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
+    ) -> None:
+        self.router.include_router(router, prefix=prefix, tags=tags, dependencies=dependencies)
         self._routes_sorted = False
 
     def add_api_route(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
@@ -1609,9 +1698,23 @@ class EphemresApp:
         request.path_params = matched_params
         injected_response = Response()
         dep_cache: Dict[Any, Any] = {}
+        bg_tasks = BackgroundTasks()
 
         async with contextlib.AsyncExitStack() as exit_stack:
             try:
+                # 0. Execute route-level and router-level dependencies
+                for dep in matched_route.dependencies:
+                    await _resolve_dependency(
+                        dep,
+                        request,
+                        injected_response,
+                        dep_cache,
+                        exit_stack,
+                        self.dependency_overrides,
+                        matched_params,
+                        bg_tasks=bg_tasks,
+                    )
+
                 # 1. Resolve handler arguments & execute
                 kwargs = await _resolve_endpoint_kwargs(
                     matched_route.endpoint,
@@ -1621,6 +1724,7 @@ class EphemresApp:
                     exit_stack,
                     self.dependency_overrides,
                     matched_params,
+                    bg_tasks=bg_tasks,
                 )
 
                 if inspect.iscoroutinefunction(matched_route.endpoint):
@@ -1636,6 +1740,8 @@ class EphemresApp:
                 elif result is None and matched_route.status_code == 204:
                     final_response = Response(status_code=204)
                 else:
+                    if matched_route.response_model is not None:
+                        result = TypeAdapter(matched_route.response_model).validate_python(result)
                     eff_code = (
                         injected_response.status_code
                         if injected_response.status_code != 200
@@ -1650,12 +1756,14 @@ class EphemresApp:
                     elif k.lower() not in final_response.headers:
                         final_response.headers[k] = v
 
-                # Execute background tasks if returned/injected
-                bg_tasks = kwargs.get("background_tasks")
-                if isinstance(bg_tasks, BackgroundTasks):
-                    asyncio.create_task(bg_tasks())
-
                 await final_response(scope, receive, send)
+
+                # Execute background tasks after response return
+                if bg_tasks and bg_tasks.tasks:
+                    try:
+                        await bg_tasks()
+                    except Exception as bg_exc:
+                        logger.error("Background task execution error: %s", bg_exc, exc_info=True)
 
             except HTTPException as http_exc:
                 # Check custom exception handlers
@@ -2024,19 +2132,14 @@ __all__ = [
     "HTMLResponse",
     "PlainTextResponse",
     "StreamingResponse",
-    "FileResponse",
     "RedirectResponse",
     "HTTPException",
     "Depends",
-    "Security",
     "Query",
     "Path",
     "Body",
     "Header",
     "Cookie",
-    "Form",
-    "File",
-    "UploadFile",
     "BackgroundTasks",
     "CORSMiddleware",
     "BaseHTTPMiddleware",

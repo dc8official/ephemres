@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from enum import Enum
 import inspect
 import json
@@ -338,6 +339,15 @@ def _coerce_value(
             return val.encode("utf-8")
         raise ValueError(f"Input should be valid bytes, got '{val}'")
 
+    # 8b. Decimal
+    if target_type is Decimal:
+        if isinstance(val, Decimal):
+            return val
+        try:
+            return Decimal(str(val))
+        except Exception as exc:
+            raise ValueError(f"Input should be a valid Decimal: {exc}")
+
     # 9. UUID
     if target_type is UUID:
         if isinstance(val, UUID):
@@ -348,6 +358,19 @@ def _coerce_value(
             except Exception as exc:
                 raise ValueError(f"Input should be a valid UUID: {exc}")
         raise ValueError(f"Input should be a valid UUID, got '{val}'")
+
+    # 9b. date
+    if target_type is date:
+        if isinstance(val, datetime):
+            return val.date()
+        if isinstance(val, date):
+            return val
+        if isinstance(val, str):
+            try:
+                return date.fromisoformat(val)
+            except Exception as exc:
+                raise ValueError(f"Input should be a valid date: {exc}")
+        raise ValueError(f"Input should be a valid date, got '{val}'")
 
     # 10. datetime
     if target_type is datetime:
@@ -556,7 +579,8 @@ class ModelMetaclass(type):
         val_before: Dict[str, List[Callable]] = {}
         val_after: Dict[str, List[Callable]] = {}
         serializers: Dict[str, List[Callable]] = {}
-        model_vals: List[Callable] = []
+        model_vals_before: List[Callable] = []
+        model_vals_after: List[Callable] = []
 
         for base in bases:
             if hasattr(base, "_field_validators_before"):
@@ -568,8 +592,10 @@ class ModelMetaclass(type):
             if hasattr(base, "_field_serializers"):
                 for k, v in base._field_serializers.items():
                     serializers.setdefault(k, []).extend(v)
+            if hasattr(base, "_model_validators_before"):
+                model_vals_before.extend(base._model_validators_before)
             if hasattr(base, "_model_validators_after"):
-                model_vals.extend(base._model_validators_after)
+                model_vals_after.extend(base._model_validators_after)
 
         for attr_name, attr_val in namespace.items():
             func = attr_val.__func__ if isinstance(attr_val, classmethod) else attr_val
@@ -589,13 +615,17 @@ class ModelMetaclass(type):
                     serializers.setdefault(fn, []).append(attr_val)
 
             m_val_meta = getattr(func, "__model_validator__", None)
-            if m_val_meta and m_val_meta == "after":
-                model_vals.append(attr_val)
+            if m_val_meta:
+                if m_val_meta == "before":
+                    model_vals_before.append(attr_val)
+                else:
+                    model_vals_after.append(attr_val)
 
         cls._field_validators_before = val_before
         cls._field_validators_after = val_after
         cls._field_serializers = serializers
-        cls._model_validators_after = model_vals
+        cls._model_validators_before = model_vals_before
+        cls._model_validators_after = model_vals_after
 
         return cls
 
@@ -629,6 +659,7 @@ class SchemaModel(metaclass=ModelMetaclass):
     _field_validators_before: Dict[str, List[Callable]] = {}
     _field_validators_after: Dict[str, List[Callable]] = {}
     _field_serializers: Dict[str, List[Callable]] = {}
+    _model_validators_before: List[Callable] = []
     _model_validators_after: List[Callable] = []
 
     def __init__(self, **data: Any) -> None:
@@ -639,6 +670,25 @@ class SchemaModel(metaclass=ModelMetaclass):
         alias_gen = cfg.get("alias_generator")
 
         input_data = dict(data)
+
+        # Run model validators (mode="before")
+        for m_val in self._model_validators_before:
+            try:
+                func = m_val.__func__ if isinstance(m_val, classmethod) else m_val
+                sig = inspect.signature(func)
+                params = list(sig.parameters.values())
+                if len(params) >= 2 or (len(params) == 1 and isinstance(m_val, classmethod)):
+                    res = func(self.__class__, input_data)
+                else:
+                    res = func(input_data)
+                if isinstance(res, dict):
+                    input_data = res
+            except Exception as exc:
+                raise ValidationError(
+                    [{"loc": ("__root__",), "msg": str(exc), "type": "value_error"}],
+                    title=self.__class__.__name__,
+                )
+
         generic_map = self._get_generic_map()
 
         for field_name, f_info in self.model_fields.items():
@@ -958,6 +1008,8 @@ class SchemaModel(metaclass=ModelMetaclass):
                 return val.isoformat()
             if isinstance(val, Enum):
                 return val.value
+            if isinstance(val, Decimal):
+                return float(val)
         return val
 
     def model_copy(
@@ -1014,6 +1066,38 @@ class SchemaModel(metaclass=ModelMetaclass):
 
 BaseModel = SchemaModel
 
+
+class TypeAdapter(Generic[T]):
+    """Zero-dependency Pydantic v2 TypeAdapter implementation."""
+
+    def __init__(self, type_: Any) -> None:
+        self.type_ = type_
+
+    def validate_python(self, data: Any) -> Any:
+        if isinstance(self.type_, type) and issubclass(self.type_, BaseModel):
+            if isinstance(data, self.type_):
+                return data
+            if isinstance(data, dict):
+                return self.type_.model_validate(data)
+            return self.type_.model_validate(data)
+        origin = get_origin(self.type_)
+        if origin in (list, List, Sequence):
+            args = get_args(self.type_)
+            item_type = args[0] if args else Any
+            if isinstance(data, (list, tuple)):
+                adapter = TypeAdapter(item_type)
+                return [adapter.validate_python(x) for x in data]
+            return data
+        return data
+
+    def dump_python(self, data: Any, mode: str = "python", by_alias: bool = False) -> Any:
+        if isinstance(data, BaseModel):
+            return data.model_dump(mode=mode, by_alias=by_alias)
+        if isinstance(data, (list, tuple)):
+            return [TypeAdapter(Any).dump_python(x, mode=mode, by_alias=by_alias) for x in data]
+        return data
+
+
 __all__ = [
     "SchemaModel",
     "BaseModel",
@@ -1026,6 +1110,7 @@ __all__ = [
     "model_validator",
     "to_camel",
     "alias_generators",
+    "TypeAdapter",
     "_FieldInfo",
     "_coerce_value",
     "_validate_constraints",
