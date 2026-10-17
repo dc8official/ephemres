@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 from app.routers.auth import get_current_user
 from app.services.auth_service import (
     _failed_attempts,

@@ -5,7 +5,7 @@ import secrets
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, Optional
 
-from sqlalchemy import text
+from app.core.orm import text
 from app.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -114,30 +114,34 @@ class PostgresEventBroker(EventBroker):
                         pass
 
 
-class RedisEventBroker(EventBroker):
+class FastStoreEventBroker(EventBroker):
     """
-    Redis Pub/Sub broker using redis.asyncio channels.
+    FastStore Pub/Sub broker using FastStoreClient channels and streams.
     """
 
-    def __init__(self, redis_client: Any) -> None:
-        self.redis = redis_client
+    def __init__(self, store_client: Any = None, redis_client: Any = None) -> None:
+        self.store = store_client if store_client is not None else redis_client
+
+    @property
+    def redis(self) -> Any:
+        return self.store
 
     async def publish(self, channel: str, event_data: Dict[str, Any]) -> None:
         payload = json.dumps(event_data)
         try:
             # 1. Pub/Sub for active SSE listeners
-            await self.redis.publish(channel, payload)
-            # 2. Redis Streams for persistent replay / worker fanout (STAB-06 / ARCH-01)
+            await self.store.publish(channel, payload)
+            # 2. FastStore Streams for persistent replay / worker fanout (STAB-06 / ARCH-01)
             stream_key = f"stream:{channel}"
-            await self.redis.xadd(
+            await self.store.xadd(
                 stream_key, {"payload": payload}, maxlen=10000, approximate=True
             )
         except Exception as e:
-            logger.error("RedisEventBroker.publish error: %s", e)
+            logger.error("FastStoreEventBroker.publish error: %s", e)
             raise
 
     async def subscribe(self, channel: str) -> AsyncGenerator[Dict[str, Any], None]:
-        pubsub = self.redis.pubsub()
+        pubsub = self.store.pubsub()
         await pubsub.subscribe(channel)
         try:
             async for message in pubsub.listen():
@@ -159,21 +163,21 @@ class RedisEventBroker(EventBroker):
         self, channel: str, group: str = "ephemres-workers", consumer: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Subscribes to durable Redis Streams with consumer group checkpointing and ACK semantics.
+        Subscribes to durable FastStore Streams with consumer group checkpointing and ACK semantics.
         """
         stream_key = f"stream:{channel}"
         consumer_name = consumer or f"consumer-{secrets.token_hex(4)}"
 
         # Ensure group exists
         try:
-            await self.redis.xgroup_create(stream_key, group, id="0", mkstream=True)
+            await self.store.xgroup_create(stream_key, group, id="0", mkstream=True)
         except Exception:
             # Group likely already exists
             pass
 
         try:
             while True:
-                entries = await self.redis.xreadgroup(
+                entries = await self.store.xreadgroup(
                     groupname=group,
                     consumername=consumer_name,
                     streams={stream_key: ">"},
@@ -194,8 +198,11 @@ class RedisEventBroker(EventBroker):
                             yield parsed
                         finally:
                             try:
-                                await self.redis.xack(stream_key, group, msg_id)
+                                await self.store.xack(stream_key, group, msg_id)
                             except Exception:
                                 pass
         except (asyncio.CancelledError, GeneratorExit):
             pass
+
+
+RedisEventBroker = FastStoreEventBroker

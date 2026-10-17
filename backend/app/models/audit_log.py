@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from app.core.orm import DateTime, ForeignKey, String, func
+from app.core.orm import JSONB, UUID as PG_UUID
+from app.core.orm import Mapped, mapped_column
 
 from app.database import Base
 

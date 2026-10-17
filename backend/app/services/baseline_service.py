@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 
 logger = logging.getLogger(__name__)
 

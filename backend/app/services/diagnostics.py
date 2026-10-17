@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 try:
-    from sqlalchemy import delete, select
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from app.core.orm import delete, select
+    from app.core.orm import AsyncSession
 
     from app.models.audit_log import AuditLog
     from app.models.diagnostic_trace import EndpointDiagnosticTrace
@@ -68,7 +68,7 @@ def is_local_subnet_destination(target_ip: str) -> bool:
                                     return True
                 return False
 
-        from app.services.net_interfaces import get_local_interface_networks
+        from app.core.netlink import get_local_interface_networks
 
         for local_net in get_local_interface_networks():
             if target_obj.version == local_net.version and target_obj in local_net:

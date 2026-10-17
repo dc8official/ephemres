@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import sys
+import types
 from typing import (
     Any,
     AsyncGenerator,
@@ -45,7 +46,7 @@ from typing import (
     TypeVar,
     Union,
 )
-from uuid import UUID, uuid4
+from uuid import UUID as PyUUID, uuid4
 
 try:
     import asyncpg
@@ -255,7 +256,7 @@ def hydrate_column_value(val: Any, col_type: Optional[SQLType] = None) -> Any:
     if isinstance(col_type, UUIDType) and col_type.as_uuid:
         if isinstance(val, str):
             try:
-                return UUID(val)
+                return PyUUID(val)
             except Exception:
                 return val
         return val
@@ -306,7 +307,7 @@ def format_sql_literal(val: Any) -> str:
         return f"'{escaped}'::jsonb"
     if isinstance(val, (datetime,)):
         return f"'{val.isoformat()}'"
-    if isinstance(val, UUID):
+    if isinstance(val, PyUUID):
         return f"'{str(val)}'::uuid"
     return f"'{str(val)}'"
 
@@ -2127,16 +2128,47 @@ class AsyncEngine:
         self.max_overflow = kwargs.get("max_overflow", 10)
         self.echo = kwargs.get("echo", False)
         self._pool: Optional[Any] = None
-        self._lock = asyncio.Lock()
+        self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+
+    def _get_lock(self) -> asyncio.Lock:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.Lock()
+        for l in list(self._loop_locks.keys()):
+            if l.is_closed():
+                del self._loop_locks[l]
+        if loop not in self._loop_locks:
+            self._loop_locks[loop] = asyncio.Lock()
+        return self._loop_locks[loop]
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        return self._get_lock()
 
     def _normalize_url(self, url: str) -> str:
         # asyncpg requires postgresql:// rather than postgresql+asyncpg://
         return url.replace("postgresql+asyncpg://", "postgresql://").replace("postgresql+psycopg2://", "postgresql://")
 
     async def _get_pool(self) -> Any:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
         if self._pool is not None:
-            return self._pool
-        async with self._lock:
+            pool_loop = getattr(self._pool, "_loop", None)
+            if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                self._pool = None
+            else:
+                return self._pool
+        lock = self._get_lock()
+        async with lock:
+            if self._pool is not None:
+                pool_loop = getattr(self._pool, "_loop", None)
+                if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                    self._pool = None
+                else:
+                    return self._pool
             if self._pool is None:
                 if asyncpg is None:
                     raise OperationalError("asyncpg is not installed. Please install asyncpg.")
@@ -2146,6 +2178,8 @@ class AsyncEngine:
                     self.url,
                     min_size=min_size,
                     max_size=max_size,
+                    timeout=5.0,
+                    command_timeout=10.0,
                 )
         return self._pool
 
@@ -2157,8 +2191,12 @@ class AsyncEngine:
 
     async def dispose(self) -> None:
         if self._pool is not None:
-            await self._pool.close()
+            try:
+                await self._pool.close()
+            except Exception:
+                pass
             self._pool = None
+        self._loop_locks.clear()
 
 
 class _AsyncEngineConnectContext:
@@ -2609,5 +2647,36 @@ class async_sessionmaker(sessionmaker):
     pass
 
 
-# Alias Session for imports
+# Alias Session and UUID for imports
 Session = AsyncSession
+UUID = UUIDType
+
+
+def _pg_dialect() -> PostgreSQLDialect:
+    return postgresql_dialect
+
+
+postgresql = types.SimpleNamespace(
+    UUID=UUIDType,
+    INET=INET,
+    JSONB=JSONB,
+    ARRAY=ARRAY,
+    insert=insert,
+    Insert=Insert,
+    dialect=_pg_dialect,
+    PostgreSQLDialect=PostgreSQLDialect,
+    PostgreSQLDDLCompiler=PostgreSQLDDLCompiler,
+)
+dialects = types.SimpleNamespace(postgresql=postgresql)
+ext = types.SimpleNamespace(
+    asyncio=types.SimpleNamespace(
+        AsyncSession=AsyncSession,
+        async_sessionmaker=async_sessionmaker,
+    )
+)
+
+sys.modules["app.core.orm.postgresql"] = postgresql
+sys.modules["app.core.orm.dialects"] = dialects
+sys.modules["app.core.orm.dialects.postgresql"] = postgresql
+sys.modules["app.core.orm.ext"] = ext
+sys.modules["app.core.orm.ext.asyncio"] = ext.asyncio

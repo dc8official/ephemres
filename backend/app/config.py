@@ -183,7 +183,7 @@ class LoggingSettings:
 
 
 @dataclass
-class RedisSettings:
+class FastStoreSettings:
     host: str = "127.0.0.1"
     port: int = 6379
     db: int = 0
@@ -193,8 +193,8 @@ class RedisSettings:
 
     def __post_init__(self) -> None:
         self.host = str(self.host)
-        self.port = _coerce_int(self.port, "redis.port", ge=1, le=65535)
-        self.db = _coerce_int(self.db, "redis.db", ge=0, le=15)
+        self.port = _coerce_int(self.port, "faststore.port", ge=1, le=65535)
+        self.db = _coerce_int(self.db, "faststore.db", ge=0, le=15)
         if self.password is not None:
             self.password = str(self.password)
         self.enabled = _coerce_bool(self.enabled)
@@ -202,6 +202,9 @@ class RedisSettings:
 
     def model_dump(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+RedisSettings = FastStoreSettings
 
 
 @dataclass
@@ -301,17 +304,23 @@ def _load_merged_env() -> Dict[str, str]:
 
 def _build_section(cls: type, toml_data: Dict[str, Any], section_name: str, env_map: Dict[str, str]) -> Any:
     raw_section = dict(toml_data.get(section_name, {})) if isinstance(toml_data.get(section_name), dict) else {}
+    if not raw_section and section_name == "faststore" and "redis" in toml_data:
+        raw_section = dict(toml_data.get("redis", {})) if isinstance(toml_data.get("redis"), dict) else {}
     valid_fields = set(cls.__dataclass_fields__.keys())  # type: ignore[attr-defined]
     kwargs: Dict[str, Any] = {k: v for k, v in raw_section.items() if k in valid_fields}
 
     # Apply nested delimiter overrides: EPHEMRES_<SECTION>__<FIELD> and NETMON_<SECTION>__<FIELD>
-    for prefix in ("EPHEMRES_", "NETMON_"):
-        sec_prefix = f"{prefix}{section_name.upper()}__"
-        for env_k, env_v in env_map.items():
-            if env_k.upper().startswith(sec_prefix):
-                field_name = env_k[len(sec_prefix):].lower()
-                if field_name in valid_fields:
-                    kwargs[field_name] = env_v
+    sections_to_check = [section_name]
+    if section_name in ("faststore", "redis"):
+        sections_to_check = ["faststore", "redis"]
+    for s_name in sections_to_check:
+        for prefix in ("EPHEMRES_", "NETMON_"):
+            sec_prefix = f"{prefix}{s_name.upper()}__"
+            for env_k, env_v in env_map.items():
+                if env_k.upper().startswith(sec_prefix):
+                    field_name = env_k[len(sec_prefix):].lower()
+                    if field_name in valid_fields:
+                        kwargs[field_name] = env_v
 
     return cls(**kwargs)
 
@@ -327,7 +336,8 @@ class Settings:
         api: Optional[ApiSettings] = None,
         security: Optional[SecuritySettings] = None,
         logging: Optional[LoggingSettings] = None,
-        redis: Optional[RedisSettings] = None,
+        faststore: Optional[FastStoreSettings] = None,
+        redis: Optional[FastStoreSettings] = None,
         flow: Optional[FlowSettings] = None,
         _toml_file: Optional[Path] = None,
     ) -> None:
@@ -360,7 +370,12 @@ class Settings:
         self.api: ApiSettings = api or _build_section(ApiSettings, toml_data, "api", env_map)
         self.security: SecuritySettings = security or _build_section(SecuritySettings, toml_data, "security", env_map)
         self.logging: LoggingSettings = logging or _build_section(LoggingSettings, toml_data, "logging", env_map)
-        self.redis: RedisSettings = redis or _build_section(RedisSettings, toml_data, "redis", env_map)
+        fs_section = "faststore" if "faststore" in toml_data else "redis"
+        self.faststore: FastStoreSettings = (
+            faststore
+            or redis
+            or _build_section(FastStoreSettings, toml_data, fs_section, env_map)
+        )
         self.flow: FlowSettings = flow or _build_section(FlowSettings, toml_data, "flow", env_map)
 
         _apply_env_overrides_and_validate(self, env_map)
@@ -399,6 +414,14 @@ class Settings:
     def fallback_crypto_keys(self) -> List[str]:
         return self.security.fallback_crypto_keys
 
+    @property
+    def redis(self) -> FastStoreSettings:
+        return self.faststore
+
+    @redis.setter
+    def redis(self, val: FastStoreSettings) -> None:
+        self.faststore = val
+
     def model_dump(self) -> Dict[str, Any]:
         return {
             "environment": self.environment,
@@ -407,6 +430,7 @@ class Settings:
             "api": self.api.model_dump(),
             "security": self.security.model_dump(),
             "logging": self.logging.model_dump(),
+            "faststore": self.faststore.model_dump(),
             "redis": self.redis.model_dump(),
             "flow": self.flow.model_dump(),
         }

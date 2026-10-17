@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Set, Tuple
 from uuid import UUID
 
 try:
-    from sqlalchemy import select
+    from app.core.orm import select
 except ModuleNotFoundError:  # pragma: no cover
     select = None  # type: ignore[assignment]
 
@@ -24,9 +24,9 @@ class FlowCorrelator:
     Tracks unmatched exporters in Redis ('flow:unmatched:<ip>') with a 15-minute TTL.
     """
 
-    def __init__(self, db_session_factory: Any, redis_client: Any = None):
+    def __init__(self, db_session_factory: Any, store_client: Any = None, *, redis_client: Any = None):
         self.db_factory = db_session_factory
-        self.redis = redis_client
+        self.store = store_client if store_client is not None else redis_client
 
         # IP -> Endpoint UUID
         self._exporter_map: Dict[str, UUID] = {}
@@ -37,6 +37,14 @@ class FlowCorrelator:
         self._running = False
         self._sync_task: Optional[asyncio.Task] = None
         self._pubsub_task: Optional[asyncio.Task] = None
+
+    @property
+    def redis(self) -> Any:
+        return self.store
+
+    @redis.setter
+    def redis(self, val: Any) -> None:
+        self.store = val
 
     def correlate(
         self, exporter_ip: str, src_ip: str, dst_ip: str
@@ -61,26 +69,26 @@ class FlowCorrelator:
     def _record_unmatched_exporter(self, ip: str) -> None:
         now = time.time()
         last_recorded = self._unmatched_local.get(ip, 0.0)
-        # Rate-limit Redis updates to once every 10 seconds per unmatched IP
+        # Rate-limit FastStore updates to once every 10 seconds per unmatched IP
         if now - last_recorded > 10.0:
             self._unmatched_local[ip] = now
-            if self.redis:
+            if self.store:
                 asyncio.create_task(self._async_record_redis_unmatched(ip, now))
 
     async def _async_record_redis_unmatched(self, ip: str, timestamp: float) -> None:
         try:
             key = f"flow:unmatched:{ip}"
-            await self.redis.set(key, str(timestamp), ex=900)
-            await self.redis.sadd("flow:unmatched:set", ip)
-            # Track in Redis ZSET with sliding-window 24h prune (Defect D4 / D12)
-            await self.redis.zadd("flow:unmatched:zset", {ip: timestamp})
+            await self.store.set(key, str(timestamp), ex=900)
+            await self.store.sadd("flow:unmatched:set", ip)
+            # Track in FastStore ZSET with sliding-window 24h prune (Defect D4 / D12)
+            await self.store.zadd("flow:unmatched:zset", {ip: timestamp})
             cutoff = timestamp - 86400.0
-            await self.redis.zremrangebyscore("flow:unmatched:zset", "-inf", cutoff)
-            card = await self.redis.zcard("flow:unmatched:zset")
+            await self.store.zremrangebyscore("flow:unmatched:zset", "-inf", cutoff)
+            card = await self.store.zcard("flow:unmatched:zset")
             if card > 1000:
-                await self.redis.zremrangebyrank("flow:unmatched:zset", 0, card - 1001)
+                await self.store.zremrangebyrank("flow:unmatched:zset", 0, card - 1001)
         except Exception as e:
-            logger.debug("Failed to record unmatched exporter in Redis: %s", e)
+            logger.debug("Failed to record unmatched exporter in FastStore: %s", e)
 
     async def refresh_from_db(self) -> None:
         """Loads all active endpoints, their primary IPs, and flow_exporter_ips aliases."""
@@ -130,12 +138,12 @@ class FlowCorrelator:
                 logger.error("FlowCorrelator DB refresh failed: %s", e)
 
     async def _pubsub_listener(self) -> None:
-        if not self.redis:
+        if not self.store:
             return
 
         while self._running:
             try:
-                pubsub = self.redis.pubsub()
+                pubsub = self.store.pubsub()
                 await pubsub.subscribe("channel:registry_sync")
                 async for msg in pubsub.listen():
                     if not self._running:
@@ -156,7 +164,7 @@ class FlowCorrelator:
         self._running = True
         await self.refresh_from_db()
         self._sync_task = asyncio.create_task(self._poll_loop())
-        if self.redis:
+        if self.store:
             self._pubsub_task = asyncio.create_task(self._pubsub_listener())
         logger.info("FlowCorrelator initialized with O(1) routing table.")
 

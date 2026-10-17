@@ -4,10 +4,10 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, String, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.orm import Boolean, DateTime, String, Text, func, text
+from app.core.orm import JSONB
+from app.core.orm import UUID as PG_UUID
+from app.core.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 

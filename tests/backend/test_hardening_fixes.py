@@ -11,7 +11,7 @@ from app.services.auth_service import (
     create_access_token,
     _active_user_sessions,
 )
-from app.services.ssrf_validator import validate_outbound_url
+from app.core.http_client import validate_outbound_url
 from app.database import check_database_connection
 
 

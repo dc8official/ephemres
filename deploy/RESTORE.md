@@ -71,12 +71,11 @@ PGPASSWORD="${DB_PASS}" psql \
   -f "${RESTORE_FILE}"
 ```
 
-### Step 3: Run Forward Alembic Migrations
+### Step 3: Run Forward Migrations
 Ensure all schema tables, views, and continuous aggregates are up to date:
 ```bash
 cd /opt/ephemres/backend
-PYTHONPATH=/opt/ephemres:/opt/ephemres/backend /opt/ephemres/venv/bin/python3 -m alembic -c alembic.ini upgrade head
-# (or if standalone binary exists: /opt/ephemres/venv/bin/alembic -c alembic.ini upgrade head)
+PYTHONPATH=/opt/ephemres:/opt/ephemres/backend /opt/ephemres/venv/bin/python3 -m app.core.migrator upgrade head
 ```
 
 ### Step 4: Flush Redis Session Cache (If Redis Acceleration is Active)

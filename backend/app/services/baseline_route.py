@@ -11,12 +11,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.services.diagnostics import run_throttled_traceroute
-from app.services.net_interfaces import get_local_interface_networks
+from app.core.netlink import get_local_interface_networks
 from app.services.timezone_utils import get_local_timezone
 
 logger = logging.getLogger(__name__)

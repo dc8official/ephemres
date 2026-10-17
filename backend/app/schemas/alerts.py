@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
 import ipaddress
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 ChannelType = Literal["TEAMS", "DISCORD", "SLACK", "EMAIL_SMTP", "GENERIC_WEBHOOK"]
 

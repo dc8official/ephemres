@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 
 from app.database import get_db
 from app.main import app

@@ -4,11 +4,11 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.asgi import EphemresApp, FastAPI, Request, status
+from app.core.asgi import CORSMiddleware
+from app.core.asgi import JSONResponse
+from app.core.orm import text
+from app.core.asgi import BaseHTTPMiddleware
 
 from app.config import settings
 from app.database import AsyncSessionLocal, check_database_connection
@@ -34,7 +34,7 @@ from app.services.diagnostics import (
     start_discovery_worker,
 )
 from app.services.driver_manager import driver_manager
-from app.services.systemd_watchdog import start_systemd_watchdog
+from app.core.watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.topology import topology_manager
 
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     logger.info("Ephemres v3.3.1n platform shutting down cleanly.")
 
 
-app = FastAPI(
+app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
     version="3.3.1n",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal, Optional
-from pydantic import BaseModel, ConfigDict, model_validator, field_serializer
+from app.core.schema import BaseModel, ConfigDict, model_validator, field_serializer
 
 
 class MonitoringStatus(BaseModel):

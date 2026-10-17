@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from fastapi import HTTPException
-from pydantic import ValidationError
+from app.core.asgi import HTTPException
+from app.core.schema import ValidationError
 
 from app.routers.reports import parse_datetime_param
 from app.routers.users import reset_password

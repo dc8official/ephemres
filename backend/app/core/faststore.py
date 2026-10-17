@@ -11,19 +11,22 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Tupl
 from urllib.parse import urlparse
 
 
-class RedisError(Exception):
+class FastStoreError(Exception):
     pass
 
 
-class ConnectionError(RedisError):
+RedisError = FastStoreError
+
+
+class ConnectionError(FastStoreError):
     pass
 
 
-class TimeoutError(RedisError):
+class TimeoutError(FastStoreError):
     pass
 
 
-class ResponseError(RedisError):
+class ResponseError(FastStoreError):
     pass
 
 
@@ -172,7 +175,7 @@ def _parse_score_bound(val: Union[str, float, int], is_min: bool) -> Tuple[float
 
 
 class PubSub:
-    def __init__(self, client: "Redis") -> None:
+    def __init__(self, client: "FastStoreClient") -> None:
         self._client = client
         self._channels: Set[str] = set()
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -272,7 +275,7 @@ class PubSub:
 
 
 class Pipeline:
-    def __init__(self, client: "Redis", transaction: bool = True) -> None:
+    def __init__(self, client: "FastStoreClient", transaction: bool = True) -> None:
         self._client = client
         self._transaction = transaction
         self._ops: List[Tuple[str, tuple, dict]] = []
@@ -326,7 +329,7 @@ class Pipeline:
         return results
 
 
-class Redis:
+class FastStoreClient:
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -346,7 +349,7 @@ class Redis:
         self._store = _SharedSQLiteStore.get(self.db)
 
     @classmethod
-    def from_url(cls, url: str, **kwargs: Any) -> "Redis":
+    def from_url(cls, url: str, **kwargs: Any) -> "FastStoreClient":
         parsed = urlparse(url)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or 6379
@@ -363,7 +366,7 @@ class Redis:
             merged_kwargs["password"] = parsed.password
         return cls(host=host, port=port, db=db, **merged_kwargs)
 
-    async def __aenter__(self) -> "Redis":
+    async def __aenter__(self) -> "FastStoreClient":
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -1246,5 +1249,9 @@ class Redis:
         return max(recipients, 1)
 
 
-def from_url(url: str, **kwargs: Any) -> Redis:
-    return Redis.from_url(url, **kwargs)
+def from_url(url: str, **kwargs: Any) -> FastStoreClient:
+    return FastStoreClient.from_url(url, **kwargs)
+
+
+connect_faststore = from_url
+Redis = FastStoreClient

@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from sqlalchemy import text
+from app.core.orm import text
 from app.database import AsyncSessionLocal
 from app.services.auth_service import hash_password
 

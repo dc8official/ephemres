@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from app.core.schema import ValidationError
 
 from app.config import ConfigurationError, Settings, load_settings
 from app.models import (

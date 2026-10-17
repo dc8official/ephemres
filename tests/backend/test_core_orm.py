@@ -228,7 +228,7 @@ async def test_session_flush_insert_update_delete():
 # Invariant 3: PostgreSQL insert().on_conflict_do_update & .excluded
 # ---------------------------------------------------------------------------
 def test_postgres_insert_on_conflict_do_update_and_excluded():
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.core.orm import insert as pg_insert
 
     stmt = (
         pg_insert(DummyMetric)
@@ -471,18 +471,18 @@ def test_atomic_shim_cutover_and_requirements():
     assert any("uvicorn" in line for line in lines)
     assert any("asyncpg" in line for line in lines)
 
-    # Verify all in-tree shim imports
-    import sqlalchemy as sa
-    import sqlalchemy.dialects.postgresql as pg
-    import sqlalchemy.exc as sa_exc
-    import sqlalchemy.ext.asyncio as sa_async
-    import sqlalchemy.orm as sa_orm
-    import sqlalchemy.types as sa_types
+    # Verify that shims are removed
+    assert (backend_path / "sqlalchemy").exists() is False
+    assert (backend_path / "alembic").exists() is False
+
+    # Verify native core imports
+    import app.core.orm as sa
+    from app.core.orm import postgresql as pg
 
     assert hasattr(sa, "select")
     assert hasattr(sa, "Table")
-    assert hasattr(sa_orm, "DeclarativeBase")
-    assert hasattr(sa_async, "AsyncSession")
+    assert hasattr(sa, "DeclarativeBase")
+    assert hasattr(sa, "AsyncSession")
     assert hasattr(pg, "insert")
-    assert hasattr(sa_types, "NULLTYPE")
-    assert hasattr(sa_exc, "SQLAlchemyError")
+    assert hasattr(sa, "NULLTYPE")
+    assert hasattr(sa, "SQLAlchemyError")

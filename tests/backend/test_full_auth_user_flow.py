@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 from app.routers.auth import login, change_password, get_current_user, LoginRequest, ChangePasswordRequest
 from app.routers.users import create_user, reset_password, update_user, delete_user, CreateUserRequest, ResetPasswordRequest, UpdateUserRequest
 from app.services.auth_service import hash_password, verify_password, clear_failed_attempts, _failed_attempts
@@ -24,6 +24,11 @@ class TestFullAuthUserFlow(unittest.TestCase):
 
     def tearDown(self) -> None:
         _failed_attempts.clear()
+        pending = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         self.loop.close()
 
     def test_login_success_path(self) -> None:

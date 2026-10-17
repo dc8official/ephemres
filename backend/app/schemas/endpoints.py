@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from app.core.schema import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 
 class InterfaceConfig(BaseModel):

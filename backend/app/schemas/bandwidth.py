@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 
 class BandwidthOverview(BaseModel):

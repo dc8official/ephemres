@@ -11,7 +11,7 @@ import ssl
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import select, text
+from app.core.orm import select, text
 
 from app.config import settings
 from app.database import AsyncSessionLocal, async_engine
@@ -26,9 +26,9 @@ from app.services.alert_formatters import (
     build_polyglot_payload,
     build_slack_payload,
 )
-from app.services.crypto_service import decrypt_secret
+from app.core.crypto import decrypt_secret
 from app.services.driver_manager import driver_manager
-from app.services.ssrf_validator import (
+from app.core.http_client import (
     HttpRequestError,
     HttpTimeoutError,
     create_ssrf_safe_client,

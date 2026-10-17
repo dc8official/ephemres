@@ -367,17 +367,6 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
 
     # Database Schema Migrations
     cd "${INSTALL_DIR}/backend"
-    ALEMBIC_BIN=""
-    if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/alembic" ]]; then
-        ALEMBIC_BIN="${VENV_PATH}/bin/alembic"
-    elif [[ -f "/opt/ephemres/venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="/opt/ephemres/venv/bin/alembic"
-    elif [[ -f "/opt/netmon/venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="/opt/netmon/venv/bin/alembic"
-    elif [[ -f "${PROJECT_ROOT}/.venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="${PROJECT_ROOT}/.venv/bin/alembic"
-    fi
-
     PYTHON_BIN=""
     if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/python3" ]]; then
         PYTHON_BIN="${VENV_PATH}/bin/python3"
@@ -389,18 +378,16 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
     fi
 
-    ALEMBIC_CMD=()
-    if [[ -n "${ALEMBIC_BIN}" && -x "${ALEMBIC_BIN}" ]]; then
-        ALEMBIC_CMD=("${ALEMBIC_BIN}")
-    elif [[ -n "${PYTHON_BIN}" && -x "${PYTHON_BIN}" ]]; then
-        ALEMBIC_CMD=("${PYTHON_BIN}" "-m" "alembic")
+    MIGRATOR_CMD=()
+    if [[ -n "${PYTHON_BIN}" && -x "${PYTHON_BIN}" ]]; then
+        MIGRATOR_CMD=("${PYTHON_BIN}" "-m" "app.core.migrator")
     fi
 
-    if [[ -d "${INSTALL_DIR}/backend/migrations" && ${#ALEMBIC_CMD[@]} -gt 0 ]]; then
-        echo -e "${GREEN}[INFO] Running Alembic schema migration (alembic upgrade head)...${NC}"
+    if [[ -d "${INSTALL_DIR}/backend/migrations" && ${#MIGRATOR_CMD[@]} -gt 0 ]]; then
+        echo -e "${GREEN}[INFO] Running native schema migration (app.core.migrator upgrade head)...${NC}"
         export EPHEMRES_DB_PASSWORD="${DB_PASS}"
         export NETMON_DB_PASSWORD="${DB_PASS}"
-        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${ALEMBIC_CMD[@]}" -c "${INSTALL_DIR}/backend/alembic.ini" upgrade head
+        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${MIGRATOR_CMD[@]}" upgrade head
         
         if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
@@ -432,7 +419,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         fi
     fi
 else
-    echo -e "[DRY-RUN] Would upgrade pip dependencies, compile Vue 3 assets, execute alembic upgrade head, and apply TimescaleDB decompression tuning"
+    echo -e "[DRY-RUN] Would upgrade pip dependencies, compile Vue 3 assets, execute app.core.migrator upgrade head, and apply TimescaleDB decompression tuning"
 fi
 
 # 9. Service Unit Refresh, Auto-Start Enablement & Restart

@@ -363,10 +363,14 @@ def test_atomic_shim_cutover():
     assert "fastapi" not in content, "fastapi must be eliminated from backend/requirements.txt"
     assert "pydantic" not in content, "pydantic must be eliminated from backend/requirements.txt"
 
-    # Verify that in-tree shims are importable
-    import pydantic
-    import fastapi
-    import starlette
+    # Verify that in-tree shims are deleted
+    assert (backend_reqs.parent / "fastapi").exists() is False
+    assert (backend_reqs.parent / "starlette").exists() is False
+    assert (backend_reqs.parent / "pydantic").exists() is False
+
+    from app.core import schema as pydantic
+    from app.core import asgi as fastapi
+    from app.core import asgi as starlette
 
     assert hasattr(pydantic, "BaseModel")
     assert hasattr(fastapi, "FastAPI")

@@ -136,6 +136,11 @@ class _FieldInfo:
         return ...
 
 
+FieldInfo = _FieldInfo
+alias_generators = types.SimpleNamespace(to_camel=to_camel)
+sys.modules["app.core.schema.alias_generators"] = alias_generators
+
+
 def Field(
     default: Any = ...,
     *,
@@ -472,7 +477,7 @@ class ModelMetaclass(type):
     ) -> type:
         cls = super().__new__(mcls, name, bases, namespace, **kw)
 
-        if name == "BaseModel" and not any(isinstance(b, ModelMetaclass) for b in bases):
+        if name in ("BaseModel", "SchemaModel") and not any(isinstance(b, ModelMetaclass) for b in bases):
             cls.model_fields = {}
             cls.model_config = {}
             cls._field_types = {}
@@ -615,7 +620,7 @@ class ModelMetaclass(type):
         return subclass
 
 
-class BaseModel(metaclass=ModelMetaclass):
+class SchemaModel(metaclass=ModelMetaclass):
     """High-performance zero-dependency schema validation and serialization base class."""
 
     model_config: Dict[str, Any] = {}
@@ -1005,3 +1010,23 @@ class BaseModel(metaclass=ModelMetaclass):
 
     def __len__(self) -> int:
         return len(self.model_fields)
+
+
+BaseModel = SchemaModel
+
+__all__ = [
+    "SchemaModel",
+    "BaseModel",
+    "ConfigDict",
+    "Field",
+    "FieldInfo",
+    "ValidationError",
+    "field_serializer",
+    "field_validator",
+    "model_validator",
+    "to_camel",
+    "alias_generators",
+    "_FieldInfo",
+    "_coerce_value",
+    "_validate_constraints",
+]

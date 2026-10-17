@@ -6,8 +6,8 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.services.baseline_route import refresh_baseline_route

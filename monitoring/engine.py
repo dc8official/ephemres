@@ -7,7 +7,7 @@ import random
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from app.core.orm import select
 from app.database import AsyncSessionLocal
 from app.models.endpoint import Endpoint
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task

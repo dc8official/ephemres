@@ -214,7 +214,7 @@ async def run_http_probe(
         }
 
     try:
-        from app.services.ssrf_validator import create_ssrf_safe_client
+        from app.core.http_client import create_ssrf_safe_client
         start_time = time.perf_counter()
         async with create_ssrf_safe_client(timeout=timeout, allow_private=True) as client:
             resp = await client.get(

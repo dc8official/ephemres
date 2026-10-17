@@ -1389,8 +1389,10 @@ class CORSMiddleware:
 # ---------------------------------------------------------------------------
 # 8. FastAPI Application Core
 # ---------------------------------------------------------------------------
-class FastAPI:
+class EphemresApp:
     """ASGI 3.0 Web Application with dependency injection, lifespan, and routing."""
+
+    __test__ = False
 
     def __init__(
         self,
@@ -1400,12 +1402,13 @@ class FastAPI:
         docs_url: Optional[str] = "/docs",
         redoc_url: Optional[str] = "/redoc",
         openapi_url: Optional[str] = "/openapi.json",
-        lifespan: Optional[Callable[[FastAPI], Any]] = None,
+        lifespan: Optional[Callable[[EphemresApp], Any]] = None,
     ) -> None:
         self.title = title
         self.description = description
         self.version = version
         self.docs_url = docs_url
+        self.__test__ = False
         self.redoc_url = redoc_url
         self.openapi_url = openapi_url
         self.lifespan = lifespan
@@ -1692,6 +1695,9 @@ class FastAPI:
                     status_code=500,
                 )
                 await err_resp(scope, receive, send)
+
+
+FastAPI = EphemresApp
 
 
 # ---------------------------------------------------------------------------
@@ -2006,3 +2012,36 @@ class TestClient:
 def _json_serialize_bytes(obj: Any) -> bytes:
     serialized = _json_serialize(obj)
     return json.dumps(serialized, default=str).encode("utf-8")
+
+
+__all__ = [
+    "EphemresApp",
+    "FastAPI",
+    "APIRouter",
+    "Request",
+    "Response",
+    "JSONResponse",
+    "HTMLResponse",
+    "PlainTextResponse",
+    "StreamingResponse",
+    "FileResponse",
+    "RedirectResponse",
+    "HTTPException",
+    "Depends",
+    "Security",
+    "Query",
+    "Path",
+    "Body",
+    "Header",
+    "Cookie",
+    "Form",
+    "File",
+    "UploadFile",
+    "BackgroundTasks",
+    "CORSMiddleware",
+    "BaseHTTPMiddleware",
+    "status",
+    "TestClient",
+    "HTTPAuthorizationCredentials",
+    "HTTPBearer",
+]

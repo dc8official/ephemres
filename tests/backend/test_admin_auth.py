@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 from app.services.auth_service import (
     hash_password,
     verify_password,

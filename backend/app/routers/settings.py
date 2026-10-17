@@ -2,11 +2,11 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException
+from app.core.schema import BaseModel, ConfigDict, Field
+from app.core.schema import to_camel
+from app.core.orm import select
+from app.core.orm import AsyncSession
 
 from app.config import settings as app_cfg
 from app.database import get_db
@@ -481,14 +481,15 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
             port_conflicts.append(p)
     udp_ports_ok = len(port_conflicts) == 0
 
-    r_host = getattr(app_cfg.redis, "host", "127.0.0.1")
-    r_port = getattr(app_cfg.redis, "port", 6379)
-    r_db = getattr(app_cfg.redis, "db", 0)
+    fs_cfg = getattr(app_cfg, "faststore", getattr(app_cfg, "redis", None))
+    r_host = getattr(fs_cfg, "host", "127.0.0.1") if fs_cfg else "127.0.0.1"
+    r_port = getattr(fs_cfg, "port", 6379) if fs_cfg else 6379
+    r_db = getattr(fs_cfg, "db", 0) if fs_cfg else 0
 
     try:
-        import redis.asyncio as aioredis
+        from app.core.faststore import Redis
 
-        client = aioredis.Redis(
+        client = Redis(
             host=r_host,
             port=r_port,
             db=r_db,

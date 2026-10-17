@@ -3,15 +3,23 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from sqlalchemy import select
+from app.core.orm import select
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.system_setting import SystemSetting
-from app.services.event_broker import EventBroker, PostgresEventBroker, RedisEventBroker
+from app.services.event_broker import (
+    EventBroker,
+    FastStoreEventBroker,
+    PostgresEventBroker,
+    RedisEventBroker,
+)
 from app.services.session_store import (
+    FastStoreSessionStore,
     PostgresSessionStore,
     RedisSessionStore,
     SessionStore,
+    migrate_sessions_faststore_to_pg,
+    migrate_sessions_pg_to_faststore,
     migrate_sessions_pg_to_redis,
     migrate_sessions_redis_to_pg,
 )
@@ -22,18 +30,18 @@ logger = logging.getLogger(__name__)
 class StorageDriverManager:
     """
     Manages dual-driver storage and event pub/sub brokers.
-    Dynamically routes between PostgreSQL-Native and Redis-Accelerated drivers
+    Dynamically routes between PostgreSQL-Native and FastStore-Accelerated drivers
     with automated health-checking and graceful fallback.
     """
 
     def __init__(self) -> None:
         self._session_store: Optional[SessionStore] = None
         self._event_broker: Optional[EventBroker] = None
-        self._redis_client = None
+        self._store_client = None
         self._driver_mode: str = "postgres"  # "postgres" | "redis"
 
     async def initialize(self) -> None:
-        """Initializes drivers based on system settings and Redis connectivity."""
+        """Initializes drivers based on system settings and FastStore connectivity."""
         redis_enabled = False
         redis_host = "127.0.0.1"
         redis_port = 6379
@@ -72,13 +80,13 @@ class StorageDriverManager:
             redis_db = getattr(settings.redis, "db", 0)
 
         previous_mode = self._driver_mode
-        previous_redis = self._redis_client
+        previous_store = self._store_client
 
         if redis_enabled:
             try:
-                import redis.asyncio as aioredis
+                from app.core.faststore import FastStoreClient
 
-                client = aioredis.Redis(
+                client = FastStoreClient(
                     host=redis_host,
                     port=redis_port,
                     db=redis_db,
@@ -86,26 +94,26 @@ class StorageDriverManager:
                 )
                 await client.ping()
 
-                # If switching from PostgreSQL to Redis, perform warm session migration
+                # If switching from PostgreSQL to FastStore, perform warm session migration
                 if previous_mode == "postgres":
                     try:
-                        await migrate_sessions_pg_to_redis(AsyncSessionLocal, client)
+                        await migrate_sessions_pg_to_faststore(AsyncSessionLocal, client)
                     except Exception as mig_err:
-                        logger.warning("Warm session migration to Redis encountered error: %s", mig_err)
+                        logger.warning("Warm session migration to FastStore encountered error: %s", mig_err)
 
                 # Clean up previous client if it differed
-                if previous_redis is not None and previous_redis != client:
+                if previous_store is not None and previous_store != client:
                     try:
-                        await previous_redis.aclose()
+                        await previous_store.aclose()
                     except Exception:
                         pass
 
-                self._redis_client = client
-                self._session_store = RedisSessionStore(client)
-                self._event_broker = RedisEventBroker(client)
+                self._store_client = client
+                self._session_store = FastStoreSessionStore(client)
+                self._event_broker = FastStoreEventBroker(client)
                 self._driver_mode = "redis"
                 logger.info(
-                    "StorageDriverManager: Redis-Accelerated driver initialized successfully at %s:%d/%d",
+                    "StorageDriverManager: FastStore-Accelerated driver initialized successfully at %s:%d/%d",
                     redis_host,
                     redis_port,
                     redis_db,
@@ -113,23 +121,23 @@ class StorageDriverManager:
                 return
             except Exception as e:
                 logger.warning(
-                    "StorageDriverManager: Redis unreachable (%s). Falling back gracefully to PostgreSQL-Native driver.",
+                    "StorageDriverManager: FastStore unreachable (%s). Falling back gracefully to PostgreSQL-Native driver.",
                     e,
                 )
 
-        # If switching from Redis to PostgreSQL, perform warm session migration
-        if previous_mode == "redis" and previous_redis is not None:
+        # If switching from FastStore to PostgreSQL, perform warm session migration
+        if previous_mode == "redis" and previous_store is not None:
             try:
-                await migrate_sessions_redis_to_pg(previous_redis, AsyncSessionLocal)
+                await migrate_sessions_faststore_to_pg(previous_store, AsyncSessionLocal)
             except Exception as mig_err:
                 logger.warning("Warm session migration to PostgreSQL encountered error: %s", mig_err)
 
-        if self._redis_client is not None:
+        if self._store_client is not None:
             try:
-                await self._redis_client.aclose()
+                await self._store_client.aclose()
             except Exception:
                 pass
-            self._redis_client = None
+            self._store_client = None
 
         # Fallback to PostgreSQL-Native driver
         self._session_store = PostgresSessionStore(AsyncSessionLocal)
@@ -151,8 +159,23 @@ class StorageDriverManager:
     def driver_mode(self) -> str:
         return self._driver_mode
 
+    @property
+    def _redis_client(self):
+        return self._store_client
+
+    @_redis_client.setter
+    def _redis_client(self, val) -> None:
+        self._store_client = val
+
+    @_redis_client.deleter
+    def _redis_client(self) -> None:
+        self._store_client = None
+
+    def get_store_client(self):
+        return self._store_client
+
     def get_redis_client(self):
-        return self._redis_client
+        return self.get_store_client()
 
 
 # Global storage driver manager singleton

@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
+from app.core.schema import ValidationError
 
 from app.models.alert_channel import AlertChannel
 from app.schemas.alerts import AlertChannelCreate, AlertChannelUpdate
 from app.services.alert_dispatcher import AlertDispatcher
 from app.services.event_broker import PostgresEventBroker
-from app.services.ssrf_validator import SSRFSafeBackend
+from app.core.http_client import SSRFSafeBackend
 
 
 @pytest.mark.anyio

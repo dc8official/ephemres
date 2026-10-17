@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException, Request, Response
+from app.core.orm import AsyncSession
 
 from app.config import settings
 from app.database import AsyncSessionLocal, get_db

@@ -450,11 +450,7 @@ run "Running Alembic migrations" \
         export NETMON_SECRET_KEY='$SECRET_KEY' &&
         export PYTHONPATH='$INSTALL_DIR/backend:$INSTALL_DIR' &&
         cd '$INSTALL_DIR/backend' &&
-        if [ -x "$VENV_DIR/bin/alembic" ]; then
-            "$VENV_DIR/bin/alembic" upgrade head
-        else
-            "$VENV_DIR/bin/python3" -m alembic upgrade head
-        fi
+        "$VENV_DIR/bin/python3" -m app.core.migrator upgrade head
     "
 
 # ============================================================

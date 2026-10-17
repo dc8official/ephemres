@@ -5,7 +5,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from app.services.systemd_watchdog import notify_systemd, start_systemd_watchdog
+from app.core.watchdog import notify_systemd, start_systemd_watchdog
 
 
 class TestSystemdWatchdog(unittest.IsolatedAsyncioTestCase):

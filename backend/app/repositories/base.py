@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Generic, Optional, Sequence, Type, TypeVar
-from sqlalchemy import select, update as sa_update, delete as sa_delete
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import select, update as sa_update, delete as sa_delete
+from app.core.orm import AsyncSession
 from app.database import Base
 
 T = TypeVar("T", bound=Base)

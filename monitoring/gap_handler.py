@@ -3,8 +3,8 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from uuid import UUID
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 
 logger = logging.getLogger(__name__)
 

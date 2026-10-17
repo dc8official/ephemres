@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import and_, desc, func, or_, select
+from app.core.orm import AsyncSession
 
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent

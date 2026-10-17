@@ -10,9 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.types import NULLTYPE
+from app.core import orm as sa
+from app.core.orm import NULLTYPE, postgresql
 
 try:
     import asyncpg
@@ -160,8 +159,29 @@ class OperationsProxy:
         self.statements.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT IF EXISTS "{name}";')
 
 
-# Module-level default operations proxy
-op = OperationsProxy()
+_active_proxy: Optional[OperationsProxy] = None
+
+
+def set_current_proxy(proxy: Optional[OperationsProxy]) -> None:
+    global _active_proxy
+    _active_proxy = proxy
+
+
+def get_current_proxy() -> Optional[OperationsProxy]:
+    return _active_proxy
+
+
+class _DynamicOpProxy:
+    """Routes op.<method>(...) calls to the active migration's OperationsProxy."""
+
+    def __getattr__(self, name: str) -> Any:
+        target = _active_proxy
+        if target is None:
+            raise RuntimeError(f"op.{name}() called outside an active migration context")
+        return getattr(target, name)
+
+
+op = _DynamicOpProxy()
 
 
 # ---------------------------------------------------------------------------
@@ -180,27 +200,23 @@ class MigrationRevision:
     def get_upgrade_statements(self) -> List[str]:
         if self.upgrade_fn is None:
             return []
-        import alembic.op as alembic_op
-
         proxy = OperationsProxy()
-        alembic_op.set_current_proxy(proxy)
+        set_current_proxy(proxy)
         try:
             self.upgrade_fn()
         finally:
-            alembic_op.set_current_proxy(None)
+            set_current_proxy(None)
         return proxy.statements
 
     def get_downgrade_statements(self) -> List[str]:
         if self.downgrade_fn is None:
             return []
-        import alembic.op as alembic_op
-
         proxy = OperationsProxy()
-        alembic_op.set_current_proxy(proxy)
+        set_current_proxy(proxy)
         try:
             self.downgrade_fn()
         finally:
-            alembic_op.set_current_proxy(None)
+            set_current_proxy(None)
         return proxy.statements
 
 

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 try:
-    from sqlalchemy import text
+    from app.core.orm import text
 except ModuleNotFoundError:  # pragma: no cover
     text = None  # type: ignore[assignment]
 
@@ -40,12 +40,14 @@ class FlowAggregator:
 
     def __init__(
         self,
-        redis_client: Any,
-        correlator: Any,
-        db_session_factory: Any,
+        store_client: Any = None,
+        correlator: Any = None,
+        db_session_factory: Any = None,
         flush_interval_seconds: float = 10.0,
+        *,
+        redis_client: Any = None,
     ):
-        self.redis = redis_client
+        self.store = store_client if store_client is not None else redis_client
         self.correlator = correlator
         self.db_factory = db_session_factory
         self.flush_interval = flush_interval_seconds
@@ -71,11 +73,19 @@ class FlowAggregator:
         self._flush_task: Optional[asyncio.Task] = None
         self._trim_task: Optional[asyncio.Task] = None
 
+    @property
+    def redis(self) -> Any:
+        return self.store
+
+    @redis.setter
+    def redis(self, val: Any) -> None:
+        self.store = val
+
     async def _setup_consumer_group(self) -> None:
-        if not self.redis:
+        if not self.store:
             return
         try:
-            await self.redis.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
+            await self.store.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
             logger.info("Created consumer group '%s' on '%s'.", GROUP_NAME, STREAM_KEY)
         except Exception as e:
             if "BUSYGROUP" not in str(e):
@@ -83,15 +93,15 @@ class FlowAggregator:
 
     async def _check_circuit_breaker(self) -> bool:
         """Returns True if memory usage is within safe bounds (<85%), False if tripped."""
-        if not self.redis:
+        if not self.store:
             return True
         try:
-            info = await self.redis.info("memory")
+            info = await self.store.info("memory")
             used = int(info.get("used_memory", 0))
             maxmem = int(info.get("maxmemory", 0))
             if maxmem > 0 and (used / maxmem) > 0.85:
                 logger.error(
-                    "Circuit Breaker TRIPPED: Redis memory utilization at %.1f%% (>85%%). Dropping buffer.",
+                    "Circuit Breaker TRIPPED: FastStore memory utilization at %.1f%% (>85%%). Dropping buffer.",
                     (used / maxmem) * 100.0,
                 )
                 return False
@@ -371,34 +381,34 @@ class FlowAggregator:
                             if self._interface_accumulator[k][4] <= 0:
                                 del self._interface_accumulator[k]
 
-                # Flush active interfaces to Redis with TTL
-                if self.redis and active_if_snapshot:
+                # Flush active interfaces to FastStore with TTL
+                if self.store and active_if_snapshot:
                     try:
-                        pipe = self.redis.pipeline()
+                        pipe = self.store.pipeline()
                         for exp_id, if_idx in active_if_snapshot:
                             pipe.sadd(f"flow:exporter:{exp_id}:interfaces", if_idx)
                             pipe.expire(f"flow:exporter:{exp_id}:interfaces", 7200)
                         await pipe.execute()
                         self._active_interfaces_set.difference_update(active_if_snapshot)
-                    except Exception as redis_err:
-                        logger.warning("Failed to record active interfaces in Redis: %s", redis_err)
+                    except Exception as store_err:
+                        logger.warning("Failed to record active interfaces in FastStore: %s", store_err)
 
-            # Acknowledge stream messages in Redis only after successful DB persistence
-            if pending_ack and self.redis:
+            # Acknowledge stream messages in FastStore only after successful DB persistence
+            if pending_ack and self.store:
                 try:
                     batch_ack = 500
                     for i in range(0, len(pending_ack), batch_ack):
                         ack_chunk = pending_ack[i : i + batch_ack]
-                        await self.redis.xack(STREAM_KEY, GROUP_NAME, *ack_chunk)
+                        await self.store.xack(STREAM_KEY, GROUP_NAME, *ack_chunk)
                     self._pending_msg_ids = self._pending_msg_ids[len(pending_ack):]
                 except Exception as ack_err:
-                    logger.warning("Failed to xack stream messages in Redis: %s", ack_err)
+                    logger.warning("Failed to xack stream messages in FastStore: %s", ack_err)
 
     async def _consume_stream(self) -> None:
         await self._setup_consumer_group()
 
         while self._running:
-            if not self.redis:
+            if not self.store:
                 await asyncio.sleep(1.0)
                 continue
 
@@ -409,7 +419,7 @@ class FlowAggregator:
 
             try:
                 # Read up to 2000 messages with 1s timeout
-                entries = await self.redis.xreadgroup(
+                entries = await self.store.xreadgroup(
                     GROUP_NAME,
                     CONSUMER_NAME,
                     {STREAM_KEY: ">"},
@@ -481,14 +491,14 @@ class FlowAggregator:
                 logger.error("Aggregator flush loop error: %s", e)
 
     async def _stream_trim_loop(self) -> None:
-        """Prunes Redis Stream entries older than 2 hours every 5 minutes."""
+        """Prunes FastStore Stream entries older than 2 hours every 5 minutes."""
         while self._running:
             try:
                 await asyncio.sleep(300.0)
-                if self.redis:
+                if self.store:
                     # 2 hours ago in ms
                     cutoff_ms = int((time.time() - 7200.0) * 1000)
-                    await self.redis.xtrim(STREAM_KEY, minid=str(cutoff_ms), approximate=True)
+                    await self.store.xtrim(STREAM_KEY, minid=str(cutoff_ms), approximate=True)
                     logger.debug("Trimmed stream '%s' older than 2 hours (minid=%d).", STREAM_KEY, cutoff_ms)
             except asyncio.CancelledError:
                 break

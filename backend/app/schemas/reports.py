@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, field_validator, field_serializer
+from app.core.schema import BaseModel, ConfigDict, field_validator, field_serializer
 
 
 class UptimeReport(BaseModel):

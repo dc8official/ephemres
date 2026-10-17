@@ -1,5 +1,5 @@
 import pytest
-from app.services.crypto_service import (
+from app.core.crypto import (
     decrypt_secret,
     encrypt_secret,
     mask_secret,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Optional, Tuple
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 from app.services.timezone_utils import get_local_timezone
 
 

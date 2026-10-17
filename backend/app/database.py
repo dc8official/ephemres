@@ -5,13 +5,13 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
+from app.core.orm import text
+from app.core.orm import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from app.core.orm import DeclarativeBase
 
 from app.config import settings
 

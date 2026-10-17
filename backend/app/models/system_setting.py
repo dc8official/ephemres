@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from app.core.orm import DateTime, String, Text, func
+from app.core.orm import UUID as PG_UUID
+from app.core.orm import Mapped, mapped_column
 
 from app.database import Base
 

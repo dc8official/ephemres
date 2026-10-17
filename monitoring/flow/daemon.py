@@ -31,15 +31,16 @@ async def run_flow_daemon() -> None:
     # Verify database connection
     await check_database_connection()
 
-    # Initialize Redis client
-    redis_client = None
+    # Initialize FastStore client
+    store_client = None
     try:
-        import redis.asyncio as aioredis
+        from app.core.faststore import FastStoreClient
 
-        r_host = getattr(settings.redis, "host", "127.0.0.1")
-        r_port = getattr(settings.redis, "port", 6379)
-        r_db = getattr(settings.redis, "db", 0)
-        client = aioredis.Redis(
+        fs_cfg = getattr(settings, "faststore", getattr(settings, "redis", None))
+        r_host = getattr(fs_cfg, "host", "127.0.0.1") if fs_cfg else "127.0.0.1"
+        r_port = getattr(fs_cfg, "port", 6379) if fs_cfg else 6379
+        r_db = getattr(fs_cfg, "db", 0) if fs_cfg else 0
+        client = FastStoreClient(
             host=r_host,
             port=r_port,
             db=r_db,
@@ -47,11 +48,12 @@ async def run_flow_daemon() -> None:
             decode_responses=True,
         )
         await client.ping()
-        redis_client = client
-        logger.info("ephemres-flowd: Connected to Redis at %s:%d/%d", r_host, r_port, r_db)
+        store_client = client
+        redis_client = store_client
+        logger.info("ephemres-flowd: Connected to FastStore at %s:%d/%d", r_host, r_port, r_db)
     except Exception as e:
         logger.error(
-            "ephemres-flowd: Redis is required for flow ingestion buffer but could not connect: %s",
+            "ephemres-flowd: FastStore is required for flow ingestion buffer but could not connect: %s",
             e,
         )
         sys.exit(1)
@@ -60,9 +62,9 @@ async def run_flow_daemon() -> None:
     netflow_port = getattr(flow_cfg, "netflow_port", 2055) if flow_cfg else 2055
     ipfix_port = getattr(flow_cfg, "ipfix_port", 4739) if flow_cfg else 4739
 
-    correlator = FlowCorrelator(AsyncSessionLocal, redis_client=redis_client)
-    collector = FlowCollector(redis_client=redis_client, netflow_port=netflow_port, ipfix_port=ipfix_port)
-    aggregator = FlowAggregator(redis_client=redis_client, correlator=correlator, db_session_factory=AsyncSessionLocal)
+    correlator = FlowCorrelator(AsyncSessionLocal, store_client=store_client)
+    collector = FlowCollector(store_client=store_client, netflow_port=netflow_port, ipfix_port=ipfix_port)
+    aggregator = FlowAggregator(store_client=store_client, correlator=correlator, db_session_factory=AsyncSessionLocal)
 
     await correlator.start()
     await collector.start()
@@ -89,8 +91,8 @@ async def run_flow_daemon() -> None:
     await collector.stop()
     await aggregator.stop()
     await correlator.stop()
-    if redis_client:
-        await redis_client.aclose()
+    if store_client:
+        await store_client.aclose()
     logger.info("ephemres-flowd shutdown complete.")
 
 

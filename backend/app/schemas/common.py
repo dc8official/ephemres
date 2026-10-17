@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Generic, Literal, Optional, TypeVar
-from pydantic import BaseModel, ConfigDict, Field
+from app.core.schema import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
 

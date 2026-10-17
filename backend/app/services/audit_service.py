@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import AsyncSession
 
 from app.repositories.auth_repo import AuthRepository
 

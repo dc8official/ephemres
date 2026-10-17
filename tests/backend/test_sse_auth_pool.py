@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 
 from app.routers.auth import get_current_user_sse
 from app.routers.events import stream_events
@@ -88,7 +88,7 @@ class TestSSEAuthPoolDecoupling(unittest.TestCase):
         Verify that stream_events depends on get_current_user_sse rather than standard get_current_user.
         """
         import inspect
-        from fastapi.params import Depends
+        from app.core.asgi import Depends
 
         sig = inspect.signature(stream_events)
         param = sig.parameters.get("current_user")
@@ -105,7 +105,7 @@ class TestSSEAuthPoolDecoupling(unittest.TestCase):
         Verify that batch_export_telemetry depends on get_current_user_sse to avoid pool lock during CSV stream.
         """
         import inspect
-        from fastapi.params import Depends
+        from app.core.asgi import Depends
 
         sig = inspect.signature(batch_export_telemetry)
         param = sig.parameters.get("current_user")
