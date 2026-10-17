@@ -16,7 +16,15 @@ class ApiClient {
       const searchParams = new URLSearchParams()
       for (const [key, value] of Object.entries(config.params)) {
         if (value !== null && value !== undefined) {
-          searchParams.append(key, value)
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              if (item !== null && item !== undefined) {
+                searchParams.append(key, item)
+              }
+            }
+          } else {
+            searchParams.append(key, value)
+          }
         }
       }
       const qs = searchParams.toString()
@@ -37,11 +45,14 @@ class ApiClient {
       }
     }
 
+    const signal = config.signal || (config.timeout ? AbortSignal.timeout(config.timeout) : undefined)
+
     const fetchOptions = {
       method: method.toUpperCase(),
       headers,
       body,
       credentials: 'include',
+      ...(signal ? { signal } : {}),
     }
 
     try {
@@ -52,8 +63,9 @@ class ApiClient {
         headerObj[k.toLowerCase()] = v
       })
 
+      const contentType = response.headers.get('content-type') || ''
       let resData
-      if (config.responseType === 'blob') {
+      if (config.responseType === 'blob' && (response.ok || !contentType.includes('application/json'))) {
         resData = await response.blob()
       } else {
         const text = await response.text()
@@ -90,12 +102,6 @@ class ApiClient {
         headers: headerObj,
       }
     } catch (err) {
-      if (err.response && err.response.status === 401) {
-        clearUserState()
-        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-          window.location.href = '/login'
-        }
-      }
       throw err
     }
   }

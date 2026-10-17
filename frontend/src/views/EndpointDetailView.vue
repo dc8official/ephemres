@@ -1526,14 +1526,19 @@ onMounted(() => {
     }
   }, 60000)
 
-  unsubscribeSSE = subscribe((event) => {
-    if (event?.type === 'NODE_STATE_CHANGE' && event?.data?.endpoint_id === endpointId) {
-      if (endpoint.value && event.data.avg_rtt_ms != null) {
-        endpoint.value.avg_rtt_ms = event.data.avg_rtt_ms
+  unsubscribeSSE = subscribe((rawEvent) => {
+    try {
+      const event = typeof rawEvent?.data === 'string' ? JSON.parse(rawEvent.data) : rawEvent
+      if (event?.type === 'NODE_STATE_CHANGE' && event?.data?.endpoint_id === endpointId) {
+        if (endpoint.value && event.data.avg_rtt_ms != null) {
+          endpoint.value.avg_rtt_ms = event.data.avg_rtt_ms
+        }
+        if (activePerspective.value === 'flow') {
+          loadFlowTelemetry()
+        }
       }
-      if (activePerspective.value === 'flow') {
-        loadFlowTelemetry()
-      }
+    } catch (e) {
+      // Ignore malformed SSE heartbeats
     }
   })
 })
