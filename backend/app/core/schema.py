@@ -318,9 +318,12 @@ def _coerce_value(
     if target_type is str:
         if isinstance(val, str):
             return val
-        if isinstance(val, (int, float, bool, UUID)):
+        if isinstance(val, UUID):
             return str(val)
-        return str(val)
+        import ipaddress
+        if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address, ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            return str(val)
+        raise ValueError(f"Input should be a valid string, got {type(val).__name__}")
 
     # 8. Primitive bytes
     if target_type is bytes:
@@ -636,15 +639,15 @@ class BaseModel(metaclass=ModelMetaclass):
         for field_name, f_info in self.model_fields.items():
             alias = f_info.alias or (alias_gen(field_name) if alias_gen else None)
 
-            # Match provided value by alias or field_name
+            # Match provided value by field_name or alias
             key_found = None
             raw_val = None
-            if alias and alias in input_data:
-                key_found = alias
-                raw_val = input_data[alias]
-            elif field_name in input_data:
+            if field_name in input_data:
                 key_found = field_name
                 raw_val = input_data[field_name]
+            elif alias and alias in input_data and (f_info.alias is not None or alias not in self.model_fields):
+                key_found = alias
+                raw_val = input_data[alias]
 
             if key_found is not None:
                 self.model_fields_set.add(field_name)

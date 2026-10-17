@@ -33,27 +33,18 @@ Eliminate external Python library dependencies from `backend/requirements.txt` a
 7. **Stage 5B-1 Complete (Zero-Dependency Schema Engine — `backend/app/core/schema.py`):**
    - Built `backend/app/core/schema.py` implementing a 100% Python stdlib drop-in replacement for Pydantic v2 (`BaseModel`, `Field`, `ConfigDict`, `ValidationError`, `field_validator`, `field_serializer`, `model_validator`, `to_camel`, `Generic[T]` parameterization, `from_attributes=True`, `alias_generator=to_camel`, `populate_by_name=True`, `model_dump`, `model_validate`, `UUID`/`datetime`/`Literal`/`Enum` coercion).
 
+8. **Stage 5B-2 Complete (Zero-Dependency ASGI Framework — `backend/app/core/asgi.py` & Shims):**
+   - Built `backend/app/core/asgi.py` implementing a 100% Python stdlib ASGI3 framework (`FastAPI`, `APIRouter`, per-request DI cache with `dependency_overrides` and async generator teardown, `Response` parameter merging, multi-header `Set-Cookie`, static-before-dynamic route matching, path/`Query` coercion + HTTP 422 validation, `StreamingResponse` + `request.is_disconnected()`, `BaseHTTPMiddleware`, `CORSMiddleware`, and loop-safe in-process `TestClient`).
+   - Added in-tree compatibility shims `backend/pydantic/`, `backend/fastapi/`, and `backend/starlette/`, and removed `fastapi` and `pydantic` from `backend/requirements.txt`.
+
 ---
 
 ## Remaining Roadmap (`v3.3.2v`)
 
-### Stage 5B-2: Zero-Dependency ASGI Framework (`backend/app/core/asgi.py`) & Atomic Cutover — **CURRENT STAGE**
-- Build `backend/app/core/asgi.py` implementing:
-  - `FastAPI` (ASGI3 `async def __call__(scope, receive, send)`, `lifespan` context manager, middleware stack, exception handlers, `dependency_overrides`, `include_router`, route decorators `.get`, `.post`, `.put`, `.patch`, `.delete`).
-  - `APIRouter` (`prefix`, `tags`, `include_router`, path parameter regex compilation `{id}`, multiple decorator stacking on a single handler).
-  - Recursive async/sync Dependency Injection (`Depends`, async/sync generator cleanup for `get_db`, `app.dependency_overrides` for tests).
-  - Automatic request JSON body parsing & validation into `BaseModel` parameters or `Dict[K, BaseModel]` (e.g., `Dict[str, InterfaceConfig]` in `PUT /bandwidth/endpoints/{id}/interfaces`), returning HTTP 422 on `ValidationError`.
-  - `Query`, `Path`, `Header`, `Cookie`, `Body` extraction with type coercion (`UUID`, `int`, `float`, `bool`, `str`, `Optional`) and constraint validation (`ge`, `le`, `gt`, `lt`, `min_length`, `max_length`) returning HTTP 422 on invalid parameters.
-  - `Request` (`.headers`, `.cookies`, `.query_params`, `.path_params`, `.url.path`, `.url.scheme`, `.client.host`, `.method`, `await request.json()`, `await request.body()`, `await request.is_disconnected()`), `Response` (`.set_cookie()`, `.delete_cookie()`, `.headers`, `.status_code`), `JSONResponse`, `StreamingResponse` (supporting async and sync generators as well as `io.BytesIO` for PDF/CSV/SSE).
-  - `HTTPException`, `status` constants, `CORSMiddleware`, `BaseHTTPMiddleware`.
-  - In-process ASGI `TestClient` (supporting `.get`, `.post`, `.put`, `.patch`, `.delete`, `.cookies`, `.headers`, `json=...`, `params=...`, `content=...`, `.stream(...)`, `follow_redirects=...`) compatible with `tests/`.
-- Create in-tree compatibility packages:
-  - `backend/pydantic/` (`__init__.py`, `alias_generators.py`) re-exporting `app.core.schema`.
-  - `backend/fastapi/` (`__init__.py`, `responses.py`, `middleware/cors.py`, `testclient.py`, `security.py`) re-exporting `app.core.asgi`.
-  - `backend/starlette/` (`__init__.py`, `middleware/base.py`, `requests.py`, `responses.py`, `status.py`, `testclient.py`) re-exporting `app.core.asgi`.
-- Remove `fastapi>=0.115.0` and `pydantic>=2.7.0` from `backend/requirements.txt` and verify all router & schema tests pass.
+### Stage 5C: Zero-Dependency SQL Compiler & `asyncpg` ORM Engine (`backend/app/core/orm.py` + `backend/sqlalchemy/`) — **CURRENT & FINAL STAGE**
+- **Stage 5C-1 (Core SQL AST, Expressions, Declarative Models, PostgreSQL Upserts & DDL Compiler):**
+  - Build `backend/app/core/orm.py` containing the complete SQL expression AST (`ColumnClause`, `BinaryExpression`, `BooleanClauseList`, `UnaryExpression`, `FunctionCall`, `WindowClause`, `CaseExpression`, `CastExpression`, `Subquery`, `CTE`, `TableClause`), DML/Query builders (`Select`, `Insert` with PostgreSQL `on_conflict_do_update` / `on_conflict_do_nothing` & `.excluded`, `Update`, `Delete`), Declarative ORM metaclass (`DeclarativeBase`, `Mapped`, `mapped_column`, `Column`, `relationship`, `joinedload`, `selectinload`), and PostgreSQL DDL compiler (`MetaData`, `Table`, `Index`, `ForeignKey`, constraints, `CreateTable`, `CreateIndex`, `dialect().ddl_compiler(...)` for `migrator.py`).
+- **Stage 5C-2 (`AsyncEngine`, `AsyncSession`, `:param` Text Compiler, Hybrid `Result`/`Row` Hydration & `backend/sqlalchemy/` Cutover):**
+  - Complete `backend/app/core/orm.py` with `AsyncEngine` (wrapping `asyncpg` connection pool), `AsyncConnection`, `AsyncSession` (per-session identity map, dirty attribute tracking, `db.add` + `flush()`/`commit()` `INSERT ... RETURNING *` hydration, `db.delete`, `db.get`, `db.refresh`, automatic `lazy="joined"`/`joinedload` relationship loading for `User.role` and `UserSession.user`, `:param` -> `$1` regex compiler ignoring `::type` casts and string literals, `executemany` support for `list[dict]`, and `JSONB`/`UUID`/`INET` type marshaling), and hybrid `Result`/`Row` unpacking.
+  - Create the `backend/sqlalchemy/` shim package (`__init__.py`, `orm/__init__.py`, `ext/asyncio/__init__.py`, `dialects/postgresql/__init__.py`, `types.py`, `exc.py`), remove `sqlalchemy[asyncio]>=2.0.0` from `backend/requirements.txt` (leaving ONLY `uvicorn[standard]>=0.30.0` and `asyncpg>=0.29.0`), and verify the unit/integration test suites.
 
-### Stage 5C: Zero-Dependency SQL Compiler & `asyncpg` ORM Session Adapter (`backend/app/core/orm.py` + `backend/sqlalchemy/`)
-- Inspect all SQLAlchemy ORM models (`backend/app/models/`) and query patterns (`select`, `insert`, `update`, `delete`, `func`, `text`, `case`, `or_`, `and_`, `desc`, `asc`, `on_conflict_do_update`, `AsyncSession`, `async_engine`).
-- Build an in-tree `backend/sqlalchemy/` lightweight SQL compiler + `asyncpg` session adapter (or direct `asyncpg` layer), removing `sqlalchemy[asyncio]>=2.0.0` from `backend/requirements.txt`.
-- Final `backend/requirements.txt` contains ONLY `uvicorn[standard]>=0.30.0` and `asyncpg>=0.29.0`.
