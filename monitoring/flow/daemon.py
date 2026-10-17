@@ -26,7 +26,7 @@ logger = setup_logging(
 
 
 async def run_flow_daemon() -> None:
-    logger.info("Starting ephemres-flowd Network Flow Telemetry Daemon (v3.3.1n)...")
+    logger.info("Starting ephemres-flowd Network Flow Telemetry Daemon (v3.3.2.v)...")
 
     # Verify database connection
     await check_database_connection()

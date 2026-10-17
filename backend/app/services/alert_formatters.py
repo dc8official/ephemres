@@ -204,7 +204,7 @@ def build_discord_payload(
                 "url": url,
                 "color": color,
                 "fields": fields,
-                "footer": {"text": "Ephemres Enterprise Observability Engine v3.3.1n"},
+                "footer": {"text": "Ephemres Enterprise Observability Engine v3.3.2.v"},
             }
         ],
     }
@@ -256,7 +256,7 @@ def build_slack_payload(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Timestamp (UTC): *{ts_str}* | Ephemres Observability Platform v3.3.1n",
+                    "text": f"Timestamp (UTC): *{ts_str}* | Ephemres Observability Platform v3.3.2.v",
                 }
             ],
         },
@@ -322,7 +322,7 @@ Timestamp:  {ts_str}
 
 Console:    {url}
 --------------------------------------------
-Sent by Ephemres Enterprise Platform v3.3.1n
+Sent by Ephemres Enterprise Platform v3.3.2.v
 """.strip()
 
     html_body = f"""
@@ -347,7 +347,7 @@ Sent by Ephemres Enterprise Platform v3.3.1n
       </div>
     </div>
     <div style="background-color: #121215; padding: 12px 20px; text-align: center; font-size: 12px; color: #71717a;">
-      Ephemres Enterprise Observability Engine v3.3.1n • Autonomous Network Reliability
+      Ephemres Enterprise Observability Engine v3.3.2.v • Autonomous Network Reliability
     </div>
   </div>
 </body>

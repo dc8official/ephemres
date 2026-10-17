@@ -3,7 +3,7 @@
     <div class="login-container">
       <div class="login-card">
         <div class="brand-header">
-          <h1 class="brand-title">Ephemres v3.3.1n</h1>
+          <h1 class="brand-title">Ephemres v3.3.2.v</h1>
           <p class="brand-subtitle">Network Uptime Monitoring Platform</p>
         </div>
 

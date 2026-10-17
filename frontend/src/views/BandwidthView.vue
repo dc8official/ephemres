@@ -6,7 +6,7 @@
         <h1 class="page-title">Network Bandwidth & Flow Telemetry</h1>
         <div class="toolbar-sub-row">
           <span class="page-sub">
-            v3.3.0 Flow Engine
+            v3.3.2.v Flow Engine
             <span class="separator">·</span>
             NetFlow v5, NetFlow v9 & IPFIX
           </span>
