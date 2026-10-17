@@ -102,6 +102,8 @@ def _eval_ast_node(node: ast.AST, context: Dict[str, Any]) -> Any:
             return None
         return context.get(node.id, "")
     if isinstance(node, ast.Attribute):
+        if node.attr.startswith("_"):
+            return ""
         base = _eval_ast_node(node.value, context)
         if base is None:
             return ""
@@ -151,6 +153,10 @@ def _eval_ast_node(node: ast.AST, context: Dict[str, Any]) -> Any:
         if isinstance(node.op, ast.Sub):
             return (left or 0) - (right or 0)
         if isinstance(node.op, ast.Mult):
+            if isinstance(left, (str, list, tuple)) and isinstance(right, int):
+                right = max(0, min(10000, right))
+            elif isinstance(right, (str, list, tuple)) and isinstance(left, int):
+                left = max(0, min(10000, left))
             return (left or 0) * (right or 0)
         if isinstance(node.op, ast.Div):
             return (left or 0) / (right or 1)
@@ -425,7 +431,7 @@ class TemplateEnvironment:
 
     def _read_template_file(self, name: str) -> str:
         candidate = (self.search_path / name).resolve()
-        if not str(candidate).startswith(str(self.search_path)) or not candidate.is_file():
+        if not candidate.is_relative_to(self.search_path.resolve()) or not candidate.is_file():
             raise FileNotFoundError(f"Template '{name}' not found in {self.search_path}")
         return candidate.read_text(encoding="utf-8")
 
@@ -460,3 +466,6 @@ class TemplateEnvironment:
     def from_string(self, source: str) -> CompiledTemplate:
         resolved = self._resolve_inheritance(source)
         return CompiledTemplate(resolved, autoescape=self.autoescape)
+
+
+Template = CompiledTemplate

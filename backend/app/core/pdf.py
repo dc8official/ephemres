@@ -5,14 +5,17 @@ import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import html
 from html.parser import HTMLParser
 import io
 import logging
 import mimetypes
 import os
+from pathlib import Path
 import re
 import secrets
 import struct
+import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote_to_bytes, urlparse
 import zlib
@@ -101,7 +104,10 @@ def secure_url_fetcher(url: str, timeout: int = 10, ssl_context: Any = None) -> 
     local_path = parsed.path if scheme == "file" else url
     abs_path = os.path.abspath(local_path)
 
-    is_allowed = any(abs_path.startswith(allowed_dir) for allowed_dir in ALLOWED_ASSET_DIRS)
+    is_allowed = any(
+        Path(abs_path).resolve().is_relative_to(Path(allowed_dir).resolve())
+        for allowed_dir in ALLOWED_ASSET_DIRS
+    )
     if not is_allowed or not os.path.isfile(abs_path):
         logger.warning("LFI blocked: attempted access to unauthorized local path '%s'", abs_path)
         raise PermissionError(f"Access to file path '{local_path}' is denied: not within authorized asset roots.")
@@ -221,6 +227,8 @@ class _ParsedReportDocument:
     scope_title: str = ""
     scope_desc: str = ""
     scope_badge: str = ""
+    logo_bytes: Optional[bytes] = None
+    logo_mime: str = ""
     kpis: List[Tuple[str, str, str]] = field(default_factory=list)
     blocks: List[Tuple[str, Any]] = field(default_factory=list)
     # blocks contains ("heading", text), ("paragraph", text), ("table", (headers, rows))
@@ -263,7 +271,13 @@ class _ReportHTMLParser(HTMLParser):
         if t == "img":
             src = attr_map.get("src", "").strip()
             if src:
-                secure_url_fetcher(src)
+                try:
+                    res = secure_url_fetcher(src)
+                    self.doc.logo_bytes = res.raw_bytes
+                    self.doc.logo_mime = res.content_type
+                except Exception:
+                    if getattr(secure_url_fetcher, "_fail_on_errors", True):
+                        raise
 
         self._tag_stack.append(t)
         self._class_stack.append(cls)
@@ -327,7 +341,7 @@ class _ReportHTMLParser(HTMLParser):
             self._text_buf.clear()
             m_footer = re.search(r'@bottom-left\s*\{[^}]*content:\s*"([^"]+)"', style_str)
             if m_footer:
-                self.doc.footer_text = m_footer.group(1).strip()
+                self.doc.footer_text = html.unescape(m_footer.group(1).strip())
             return
 
         if t == "title":
@@ -442,7 +456,158 @@ def _pdf_escape_text(text: str) -> str:
     return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
+def _extract_pdf_image_info(raw_bytes: bytes, mime: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Zero-dependency pure-Python raster image parser supporting JPEG and PNG.
+    Extracts dimensions, colorspace, and bit depth, and formats raw streams for PDF /Image XObjects.
+    """
+    if not raw_bytes or len(raw_bytes) < 8:
+        return None
+
+    # 1. JPEG: \xff\xd8
+    if raw_bytes[:2] == b"\xff\xd8":
+        try:
+            idx = 2
+            length = len(raw_bytes)
+            while idx < length - 1:
+                if raw_bytes[idx] != 0xFF:
+                    idx += 1
+                    continue
+                marker = raw_bytes[idx + 1]
+                idx += 2
+                if marker in (0xD8, 0xD9, 0x00):
+                    continue
+                if idx + 2 > length:
+                    break
+                seg_len = struct.unpack(">H", raw_bytes[idx : idx + 2])[0]
+                if marker in (0xC0, 0xC1, 0xC2):
+                    if idx + seg_len > length:
+                        break
+                    bits, height, width, components = struct.unpack(">BHHB", raw_bytes[idx + 2 : idx + 8])
+                    colorspace = "/ColorSpace /DeviceRGB" if components == 3 else "/ColorSpace /DeviceGray"
+                    return {
+                        "width": width,
+                        "height": height,
+                        "filter": "/Filter /DCTDecode",
+                        "colorspace": colorspace,
+                        "bits": bits,
+                        "data": raw_bytes,
+                    }
+                idx += seg_len
+        except Exception as exc:
+            logger.debug("Failed to decode JPEG image: %s", exc)
+            return None
+
+    # 2. PNG: \x89PNG\r\n\x1a\n
+    if raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        try:
+            if len(raw_bytes) < 33 or raw_bytes[12:16] != b"IHDR":
+                return None
+            width, height, bit_depth, color_type = struct.unpack(">IIBB", raw_bytes[16:26])
+
+            idx = 33
+            idat_chunks: List[bytes] = []
+            while idx < len(raw_bytes) - 8:
+                chunk_len = struct.unpack(">I", raw_bytes[idx : idx + 4])[0]
+                chunk_type = raw_bytes[idx + 4 : idx + 8]
+                chunk_data = raw_bytes[idx + 8 : idx + 8 + chunk_len]
+                if chunk_type == b"IDAT":
+                    idat_chunks.append(chunk_data)
+                elif chunk_type == b"IEND":
+                    break
+                idx += 12 + chunk_len
+
+            if not idat_chunks:
+                return None
+
+            decompressed = zlib.decompress(b"".join(idat_chunks))
+
+            channel_map = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+            channels = channel_map.get(color_type, 3)
+            bpp = max(1, (channels * bit_depth) // 8)
+            stride = 1 + width * bpp
+
+            raw_rgb = bytearray()
+            prior_row = bytearray(width * bpp)
+
+            for row_idx in range(height):
+                row_start = row_idx * stride
+                if row_start >= len(decompressed):
+                    break
+                filter_type = decompressed[row_start]
+                row_raw = decompressed[row_start + 1 : row_start + stride]
+                unfiltered = bytearray(width * bpp)
+
+                for col in range(len(row_raw)):
+                    raw_val = row_raw[col]
+                    a = unfiltered[col - bpp] if col >= bpp else 0
+                    b = prior_row[col]
+                    c = prior_row[col - bpp] if col >= bpp else 0
+
+                    if filter_type == 0:
+                        val = raw_val
+                    elif filter_type == 1:
+                        val = (raw_val + a) & 0xFF
+                    elif filter_type == 2:
+                        val = (raw_val + b) & 0xFF
+                    elif filter_type == 3:
+                        val = (raw_val + ((a + b) // 2)) & 0xFF
+                    elif filter_type == 4:
+                        p = a + b - c
+                        pa = abs(p - a)
+                        pb = abs(p - b)
+                        pc = abs(p - c)
+                        pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                        val = (raw_val + pr) & 0xFF
+                    else:
+                        val = raw_val
+                    unfiltered[col] = val
+
+                prior_row = unfiltered
+
+                if color_type == 6:  # RGBA
+                    for px in range(0, len(unfiltered), 4):
+                        r, g, b, a = unfiltered[px : px + 4]
+                        alpha = a / 255.0
+                        out_r = int(r * alpha + 255 * (1.0 - alpha))
+                        out_g = int(g * alpha + 255 * (1.0 - alpha))
+                        out_b = int(b * alpha + 255 * (1.0 - alpha))
+                        raw_rgb.extend([out_r, out_g, out_b])
+                elif color_type == 2:  # RGB
+                    raw_rgb.extend(unfiltered)
+                elif color_type == 0:  # Grayscale
+                    for px in range(len(unfiltered)):
+                        g = unfiltered[px]
+                        raw_rgb.extend([g, g, g])
+                elif color_type == 4:  # Gray + Alpha
+                    for px in range(0, len(unfiltered), 2):
+                        g, a = unfiltered[px : px + 2]
+                        alpha = a / 255.0
+                        out_g = int(g * alpha + 255 * (1.0 - alpha))
+                        raw_rgb.extend([out_g, out_g, out_g])
+                else:
+                    raw_rgb.extend(unfiltered)
+
+            compressed_rgb = zlib.compress(bytes(raw_rgb))
+            return {
+                "width": width,
+                "height": height,
+                "filter": "/Filter /FlateDecode",
+                "colorspace": "/ColorSpace /DeviceRGB",
+                "bits": 8,
+                "data": compressed_rgb,
+            }
+        except Exception as exc:
+            logger.debug("Failed to decode PNG image: %s", exc)
+            return None
+
+    return None
+
+
+def _typeset_document_pages(
+    doc: _ParsedReportDocument,
+    logo_info: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     """
     Typesets a parsed report document into one or more A4 Portrait (595.28 x 841.89 pt)
     PDF content streams using native vector drawing and Type1 fonts (/F1, /F2, /F3).
@@ -464,15 +629,31 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
         cur_ops = []
         y = page_h - 38.0
 
+        draw_w = 0.0
+        draw_h = 0.0
+        header_text_x = margin_x
+        if logo_info:
+            orig_w = max(1, logo_info.get("width", 100))
+            orig_h = max(1, logo_info.get("height", 100))
+            max_w = 95.0
+            max_h = 30.0
+            scale = min(max_w / orig_w, max_h / orig_h, 1.0)
+            draw_w = orig_w * scale
+            draw_h = orig_h * scale
+            header_text_x = margin_x + draw_w + 10.0
+            cur_ops.append(
+                f"q {draw_w:.2f} 0 0 {draw_h:.2f} {margin_x:.2f} {y - draw_h + 10:.2f} cm /ImLogo Do Q"
+            )
+
         # Corporate Header Banner
         cur_ops.append("0.06 0.09 0.16 rg")
-        cur_ops.append(f"BT /F2 13 Tf {margin_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.company_name)}) Tj ET")
+        cur_ops.append(f"BT /F2 13 Tf {header_text_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.company_name)}) Tj ET")
         cur_ops.append(f"BT /F2 11 Tf {page_w - margin_x - 110:.2f} {y:.2f} Td (ephemres v3.3.2v) Tj ET")
         y -= 13.0
 
         if doc.department or doc.period_label:
             cur_ops.append("0.39 0.45 0.55 rg")
-            cur_ops.append(f"BT /F1 8 Tf {margin_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.department)}) Tj ET")
+            cur_ops.append(f"BT /F1 8 Tf {header_text_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.department)}) Tj ET")
             if doc.period_label:
                 cur_ops.append(
                     f"BT /F3 7.5 Tf {page_w - margin_x - 180:.2f} {y:.2f} Td ({_pdf_escape_text(doc.period_label)}) Tj ET"
@@ -482,7 +663,7 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
         if doc.report_type_label or doc.generated_at_label:
             cur_ops.append("0.15 0.39 0.92 rg")
             cur_ops.append(
-                f"BT /F2 8.5 Tf {margin_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.report_type_label.upper())}) Tj ET"
+                f"BT /F2 8.5 Tf {header_text_x:.2f} {y:.2f} Td ({_pdf_escape_text(doc.report_type_label.upper())}) Tj ET"
             )
             if doc.generated_at_label:
                 cur_ops.append("0.39 0.45 0.55 rg")
@@ -554,18 +735,37 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
             y -= 12.0
 
         elif blk_type == "paragraph":
-            if y < bottom_margin + 24.0:
-                _start_new_page(is_first=False)
-            cur_ops.append("0.20 0.25 0.33 rg")
-            cur_ops.append(f"BT /F1 8.5 Tf {margin_x:.2f} {y:.2f} Td ({_pdf_escape_text(payload[:115])}) Tj ET")
-            y -= 14.0
+            wrapped_lines = textwrap.wrap(payload, width=105) or [payload]
+            for pline in wrapped_lines:
+                if y < bottom_margin + 16.0:
+                    _start_new_page(is_first=False)
+                cur_ops.append("0.20 0.25 0.33 rg")
+                cur_ops.append(f"BT /F1 8.5 Tf {margin_x:.2f} {y:.2f} Td ({_pdf_escape_text(pline)}) Tj ET")
+                y -= 12.0
+            y -= 2.0
 
         elif blk_type == "table":
             headers, rows = payload
             num_cols = max(len(headers), max((len(r) for r in rows), default=1), 1)
-            col_w = content_w / num_cols
-            max_chars = max(8, int(col_w / 4.3))
-            row_h = 15.0
+
+            col_max_lens = [len(str(h)) for h in headers]
+            while len(col_max_lens) < num_cols:
+                col_max_lens.append(5)
+            for row in rows:
+                for idx, cell in enumerate(row):
+                    if idx < num_cols:
+                        col_max_lens[idx] = max(col_max_lens[idx], len(str(cell)))
+                    else:
+                        col_max_lens.append(len(str(cell)))
+
+            total_lens = sum(max(l, 3) for l in col_max_lens[:num_cols])
+            col_widths = [(max(l, 3) / total_lens) * content_w for l in col_max_lens[:num_cols]]
+
+            is_wide_table = num_cols >= 7
+            font_size = 6.2 if is_wide_table else 7.2
+            header_font_size = 6.0 if is_wide_table else 6.8
+            row_h = 13.0 if is_wide_table else 15.0
+            col_max_chars = [max(20, int(w / 3.1)) for w in col_widths]
 
             def _draw_table_header() -> None:
                 nonlocal y
@@ -574,11 +774,14 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
                 cur_ops.append("0.95 0.96 0.98 rg 0.80 0.84 0.88 RG 0.6 w")
                 cur_ops.append(f"{margin_x:.2f} {y - row_h + 4:.2f} {content_w:.2f} {row_h:.2f} re B")
                 cur_ops.append("0.28 0.33 0.41 rg")
-                for c_idx, h_text in enumerate(headers):
-                    tx = margin_x + c_idx * col_w + 4.0
+                tx = margin_x
+                for c_idx, h_text in enumerate(headers[:num_cols]):
+                    cw = col_widths[c_idx]
+                    mc = col_max_chars[c_idx]
                     cur_ops.append(
-                        f"BT /F2 6.8 Tf {tx:.2f} {y - 6:.2f} Td ({_pdf_escape_text(h_text[:max_chars].upper())}) Tj ET"
+                        f"BT /F2 {header_font_size:.1f} Tf {tx + 3.0:.2f} {y - (row_h / 2.0) - 1.0:.2f} Td ({_pdf_escape_text(h_text[:mc].upper())}) Tj ET"
                     )
+                    tx += cw
                 y -= row_h
 
             if y < bottom_margin + row_h * 2:
@@ -598,12 +801,15 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
                 cur_ops.append(f"{margin_x:.2f} {y - row_h + 4:.2f} {content_w:.2f} {row_h:.2f} re B")
 
                 cur_ops.append("0.20 0.25 0.33 rg")
-                for c_idx, cell_val in enumerate(row_cells):
-                    tx = margin_x + c_idx * col_w + 4.0
+                tx = margin_x
+                for c_idx, cell_val in enumerate(row_cells[:num_cols]):
+                    cw = col_widths[c_idx]
+                    mc = col_max_chars[c_idx]
                     font_ref = "/F2" if c_idx == 0 else "/F1"
                     cur_ops.append(
-                        f"BT {font_ref} 7.2 Tf {tx:.2f} {y - 6:.2f} Td ({_pdf_escape_text(cell_val[:max_chars])}) Tj ET"
+                        f"BT {font_ref} {font_size:.1f} Tf {tx + 3.0:.2f} {y - (row_h / 2.0) - 1.0:.2f} Td ({_pdf_escape_text(str(cell_val)[:mc])}) Tj ET"
                     )
+                    tx += cw
                 y -= row_h
 
             y -= 8.0
@@ -634,20 +840,24 @@ def _typeset_document_pages(doc: _ParsedReportDocument) -> List[str]:
 def _compile_encrypted_pdf_1_4(
     page_streams: List[str],
     title: str,
+    logo_info: Optional[Dict[str, Any]] = None,
+    encrypted: bool = True,
     user_password: str = "",
     owner_password: Optional[str] = None,
     permissions: int = PDF_READONLY_PERMISSIONS,
 ) -> bytes:
     """
-    Assembles a complete ISO 32000-1 PDF 1.4 document with FlateDecode-compressed
-    page streams, /Info metadata, and Standard Security Handler (V=2, R=3, 128-bit RC4).
+    Assembles a complete ISO 32000-1 PDF 1.4 document with page streams, /Info metadata,
+    and optional Standard Security Handler (V=2, R=3, 128-bit RC4).
     """
-    owner_pwd = owner_password or secrets.token_hex(32)
     file_id = hashlib.md5(f"{title}-{secrets.token_hex(8)}".encode("utf-8")).digest()
-
-    owner_val = _compute_owner_value_r3(user_password, owner_pwd)
-    enc_key = _compute_encryption_key_r3(user_password, owner_val, permissions, file_id)
-    user_val = _compute_user_value_r3(enc_key, file_id)
+    if encrypted:
+        owner_pwd = owner_password or secrets.token_hex(32)
+        owner_val = _compute_owner_value_r3(user_password, owner_pwd)
+        enc_key = _compute_encryption_key_r3(user_password, owner_val, permissions, file_id)
+        user_val = _compute_user_value_r3(enc_key, file_id)
+    else:
+        enc_key = None
 
     objects: List[Tuple[int, bytes]] = []
 
@@ -658,9 +868,14 @@ def _compile_encrypted_pdf_1_4(
     # 4: Font /F2 (Helvetica-Bold)
     # 5: Font /F3 (Courier)
     # 6: /Info metadata dictionary
-    # 7: /Encrypt Standard Security Handler dictionary
-    # 8+: Pairs of (Page object, Content stream object)
+    # 7: /Encrypt Standard Security Handler dictionary (if encrypted)
     next_obj_id = 8
+
+    logo_obj_id: Optional[int] = None
+    if logo_info:
+        logo_obj_id = next_obj_id
+        next_obj_id += 1
+
     page_obj_ids: List[int] = []
 
     for stream_text in page_streams:
@@ -669,22 +884,45 @@ def _compile_encrypted_pdf_1_4(
         next_obj_id += 2
         page_obj_ids.append(page_id)
 
-        compressed = zlib.compress(stream_text.encode("latin-1", errors="replace"))
-        encrypted_stream = _encrypt_pdf_object_bytes(enc_key, content_id, 0, compressed)
-
+        res_xobject = f" /XObject << /ImLogo {logo_obj_id} 0 R >>" if logo_obj_id else ""
         page_dict = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] "
-            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> "
+            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>{res_xobject} >> "
             f"/Contents {content_id} 0 R >>"
         ).encode("ascii")
         objects.append((page_id, page_dict))
 
-        content_obj = (
-            f"<< /Length {len(encrypted_stream)} /Filter /FlateDecode >>\nstream\n".encode("ascii")
-            + encrypted_stream
+        if encrypted and enc_key is not None:
+            compressed = zlib.compress(stream_text.encode("latin-1", errors="replace"))
+            encrypted_stream = _encrypt_pdf_object_bytes(enc_key, content_id, 0, compressed)
+            content_obj = (
+                f"<< /Length {len(encrypted_stream)} /Filter /FlateDecode >>\nstream\n".encode("ascii")
+                + encrypted_stream
+                + b"\nendstream"
+            )
+        else:
+            raw_stream = stream_text.encode("latin-1", errors="replace")
+            content_obj = (
+                f"<< /Length {len(raw_stream)} >>\nstream\n".encode("ascii")
+                + raw_stream
+                + b"\nendstream"
+            )
+        objects.append((content_id, content_obj))
+
+    if logo_obj_id and logo_info:
+        img_data = logo_info["data"]
+        if encrypted and enc_key is not None:
+            enc_img = _encrypt_pdf_object_bytes(enc_key, logo_obj_id, 0, img_data)
+        else:
+            enc_img = img_data
+        img_dict = (
+            f"<< /Type /XObject /Subtype /Image /Width {logo_info['width']} /Height {logo_info['height']} "
+            f"{logo_info['colorspace']} /BitsPerComponent {logo_info['bits']} "
+            f"{logo_info['filter']} /Length {len(enc_img)} >>\nstream\n".encode("ascii")
+            + enc_img
             + b"\nendstream"
         )
-        objects.append((content_id, content_obj))
+        objects.append((logo_obj_id, img_dict))
 
     kids_refs = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
     objects.append((1, b"<< /Type /Catalog /Pages 2 0 R >>"))
@@ -693,28 +931,33 @@ def _compile_encrypted_pdf_1_4(
     objects.append((4, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"))
     objects.append((5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>"))
 
-    # Object 6: /Info dictionary (strings encrypted under object 6, generation 0)
     now_str = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
-    info_fields = {
-        "/Title": title,
-        "/Author": "Ephemres Enterprise Platform",
-        "/Producer": "Ephemres Reporting Engine v3.3.2v",
-        "/CreationDate": now_str,
-        "/ModDate": now_str,
-    }
-    info_entries: List[str] = []
-    for k, v in info_fields.items():
-        enc_val = _encrypt_pdf_object_bytes(enc_key, 6, 0, v.encode("latin-1", errors="replace"))
-        info_entries.append(f"{k} <{enc_val.hex()}>")
-    info_dict = f"<< {' '.join(info_entries)} >>".encode("ascii")
-    objects.append((6, info_dict))
+    if encrypted and enc_key is not None:
+        info_fields = {
+            "/Title": title,
+            "/Author": "Ephemres Enterprise Platform",
+            "/Producer": "Ephemres Reporting Engine v3.3.2v",
+            "/CreationDate": now_str,
+            "/ModDate": now_str,
+        }
+        info_entries: List[str] = []
+        for k, v in info_fields.items():
+            enc_val = _encrypt_pdf_object_bytes(enc_key, 6, 0, v.encode("latin-1", errors="replace"))
+            info_entries.append(f"{k} <{enc_val.hex()}>")
+        info_dict = f"<< {' '.join(info_entries)} >>".encode("ascii")
+        objects.append((6, info_dict))
 
-    # Object 7: /Encrypt dictionary (unencrypted per ISO 32000-1)
-    encrypt_dict = (
-        f"<< /Filter /Standard /V 2 /R 3 /Length 128 /P {permissions} "
-        f"/O <{owner_val.hex()}> /U <{user_val.hex()}> >>"
-    ).encode("ascii")
-    objects.append((7, encrypt_dict))
+        encrypt_dict = (
+            f"<< /Filter /Standard /V 2 /R 3 /Length 128 /P {permissions} "
+            f"/O <{owner_val.hex()}> /U <{user_val.hex()}> >>"
+        ).encode("ascii")
+        objects.append((7, encrypt_dict))
+    else:
+        info_dict = (
+            f"<< /Title ({_pdf_escape_text(title)}) /Author (Ephemres Enterprise Platform) "
+            f"/Producer (Ephemres Reporting Engine v3.3.2v) /CreationDate ({now_str}) /ModDate ({now_str}) >>"
+        ).encode("ascii")
+        objects.append((6, info_dict))
 
     objects.sort(key=lambda item: item[0])
 
@@ -734,8 +977,9 @@ def _compile_encrypted_pdf_1_4(
         buf.extend(f"{offsets[obj_id]:010d} 00000 n \n".encode("ascii"))
 
     id_hex = file_id.hex()
+    encrypt_ref = "/Encrypt 7 0 R " if (encrypted and enc_key is not None) else ""
     trailer = (
-        f"trailer\n<< /Size {total_objs} /Root 1 0 R /Info 6 0 R /Encrypt 7 0 R "
+        f"trailer\n<< /Size {total_objs} /Root 1 0 R /Info 6 0 R {encrypt_ref}"
         f"/ID [<{id_hex}> <{id_hex}>] >>\nstartxref\n{xref_offset}\n%%EOF\n"
     ).encode("ascii")
     buf.extend(trailer)
@@ -880,7 +1124,7 @@ class NativePdfReader:
         return extracted_pages
 
 
-def _render_pdf_sync(html_content: str, title: str) -> bytes:
+def _render_pdf_sync(html_content: str, title: str, encrypted: bool = True) -> bytes:
     """
     Synchronous Zero-Dependency Native PDF 1.4 pipeline:
     1. Parses rendered HTML report and validates any embedded asset URIs via secure_url_fetcher.
@@ -894,10 +1138,16 @@ def _render_pdf_sync(html_content: str, title: str) -> bytes:
     if title:
         doc.title = title
 
-    page_streams = _typeset_document_pages(doc)
+    logo_info: Optional[Dict[str, Any]] = None
+    if doc.logo_bytes:
+        logo_info = _extract_pdf_image_info(doc.logo_bytes, doc.logo_mime)
+
+    page_streams = _typeset_document_pages(doc, logo_info=logo_info)
     return _compile_encrypted_pdf_1_4(
         page_streams=page_streams,
         title=doc.title,
+        logo_info=logo_info,
+        encrypted=encrypted,
         user_password="",
         owner_password=secrets.token_hex(32),
         permissions=PDF_READONLY_PERMISSIONS,
@@ -912,9 +1162,39 @@ async def render_pdf_async(html_content: str, title: str = "Ephemres Network Tel
     """
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_render_pdf_sync, html_content, title),
+            asyncio.to_thread(_render_pdf_sync, html_content, title, True),
             timeout=60.0,
         )
     except asyncio.TimeoutError:
         logger.error("PDF generation timed out after 60 seconds")
         raise TimeoutError("PDF report rendering exceeded maximum execution threshold (60s).")
+
+
+class HTML:
+    """Drop-in Weasyprint-compatible interface for native PDF generation."""
+    def __init__(
+        self,
+        string: Optional[str] = None,
+        filename: Optional[str] = None,
+        url_fetcher: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        if string is not None:
+            self.html_content = string
+        elif filename is not None:
+            with open(filename, "r", encoding="utf-8") as f:
+                self.html_content = f.read()
+        else:
+            self.html_content = ""
+        self.url_fetcher = url_fetcher
+
+    def write_pdf(self, target: Any = None, stylesheets: Any = None, encrypted: bool = False, **kwargs: Any) -> bytes:
+        pdf_bytes = _render_pdf_sync(self.html_content, title="Ephemres Network Telemetry Report", encrypted=encrypted)
+        if target is not None:
+            if hasattr(target, "write"):
+                target.write(pdf_bytes)
+            else:
+                with open(target, "wb") as f:
+                    f.write(pdf_bytes)
+        return pdf_bytes
+
