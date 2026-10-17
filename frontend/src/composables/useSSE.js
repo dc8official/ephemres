@@ -93,6 +93,48 @@ export function useSSE() {
     }
   }
 
+  function subscribeBatched(batchCallback) {
+    let queue = []
+    let rafId = null
+
+    const flush = () => {
+      rafId = null
+      if (queue.length === 0) return
+      const batch = queue
+      queue = []
+      try {
+        batchCallback(batch)
+      } catch (err) {
+        console.error('Error in batched SSE listener:', err)
+      }
+    }
+
+    const unsub = subscribe((event) => {
+      if (!event?.data) return
+      try {
+        const parsed = JSON.parse(event.data)
+        queue.push(parsed)
+        if (rafId === null) {
+          rafId = typeof requestAnimationFrame !== 'undefined'
+            ? requestAnimationFrame(flush)
+            : setTimeout(flush, 16)
+        }
+      } catch (e) {
+        // Ignore non-JSON heartbeat comments
+      }
+    })
+
+    return () => {
+      unsub()
+      if (rafId !== null) {
+        if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId)
+        else clearTimeout(rafId)
+        rafId = null
+      }
+      queue = []
+    }
+  }
+
   function onReconnect(callback) {
     reconnectCallbacks.add(callback)
     return () => {
@@ -103,6 +145,7 @@ export function useSSE() {
   return {
     sseConnected,
     subscribe,
+    subscribeBatched,
     onReconnect,
     closeConnection,
     resetConnection,

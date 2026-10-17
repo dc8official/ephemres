@@ -20,6 +20,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    target: 'es2022',
+    cssCodeSplit: true,
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -29,7 +31,10 @@ export default defineConfig({
           if (id.includes('node_modules/chart.js') || id.includes('node_modules/vue-chartjs')) {
             return 'vendor-charts'
           }
-          if (id.includes('node_modules/vue/') || id.includes('node_modules/vue-router')) {
+          if (id.includes('node_modules/primevue') || id.includes('node_modules/@primevue') || id.includes('node_modules/@primeuix')) {
+            return 'vendor-primevue'
+          }
+          if (id.includes('node_modules/vue/') || id.includes('node_modules/@vue/') || id.includes('node_modules/vue-router')) {
             return 'vendor-core'
           }
         }

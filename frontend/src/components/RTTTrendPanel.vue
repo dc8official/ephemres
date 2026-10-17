@@ -84,9 +84,10 @@ const formatTime = (isoString) => {
 const chartData = computed(() => {
   if (!hasData.value) return null
 
+  const nowMs = Date.now()
   const processed = validEvents.value.map(ev => {
-    const start = new Date(ev.start_time).getTime()
-    const end = ev.end_time ? new Date(ev.end_time).getTime() : new Date().getTime()
+    const start = Date.parse(ev.start_time) || 0
+    const end = ev.end_time ? (Date.parse(ev.end_time) || nowMs) : nowMs
     const midpoint = start + ((end - start) / 2)
     return {
       ...ev,
@@ -139,6 +140,8 @@ const chartOptions = computed(() => {
   return {
     responsive: true,
     maintainAspectRatio: false,
+    animation: false,
+    normalized: true,
     plugins: {
       legend: {
         position: 'top',
