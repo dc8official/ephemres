@@ -1,6 +1,6 @@
-# Ephemres v3.3.1n — Installation & Deployment Quick Start
+# Ephemres v3.3.2.v — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.1n**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.2.v**.
 
 ---
 

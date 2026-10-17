@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# Ephemres Network Monitoring Platform v3.3.1n - Production Installer
+# Ephemres Network Monitoring Platform v3.3.2.v - Production Installer
 # Supports: Debian 12+, Ubuntu 22.04+
 # Usage: sudo bash deploy/install.sh [--dry-run]
 # ============================================================
@@ -140,9 +140,8 @@ fi
 print_header "Step 4: Installing system packages"
 
 PACKAGES="postgresql-16 postgresql-client-16 \
-timescaledb-2-postgresql-16 timescaledb-tools redis-server \
+timescaledb-2-postgresql-16 timescaledb-tools \
 python3-venv python3-pip traceroute iputils-tracepath iputils-ping libcap2-bin \
-libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0 \
 nodejs nginx certbot python3-certbot-nginx"
 
 MISSING=""
@@ -442,7 +441,7 @@ fi
 # ============================================================
 print_header "Step 13: Running database migrations"
 
-run "Running Alembic migrations" \
+run "Running native database migrations" \
     sudo -H -u ephemres bash -c "
         export EPHEMRES_DB_PASSWORD='$DB_PASS' &&
         export NETMON_DB_PASSWORD='$DB_PASS' &&
@@ -484,7 +483,6 @@ for service in ephemres-engine ephemres-api ephemres-flowd; do
 done
 
 run "Reloading systemd daemon" systemctl daemon-reload
-run "Enabling Redis service" bash -c "systemctl enable redis-server 2>/dev/null || systemctl enable redis 2>/dev/null || true"
 run "Enabling ephemres-engine" systemctl enable ephemres-engine
 run "Enabling ephemres-api" systemctl enable ephemres-api
 run "Enabling ephemres-flowd" systemctl enable ephemres-flowd
@@ -552,7 +550,6 @@ fi
 # ============================================================
 print_header "Step 18: Starting services"
 
-run "Starting Redis service" bash -c "systemctl start redis-server 2>/dev/null || systemctl start redis 2>/dev/null || true"
 run "Starting ephemres-api" systemctl start ephemres-api
 run "Starting ephemres-engine" systemctl start ephemres-engine
 run "Starting ephemres-flowd" systemctl start ephemres-flowd
@@ -564,7 +561,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "DRY RUN complete. No changes were made."
 else
     echo ""
-    echo "Ephemres v3.3.1n is now running."
+    echo "Ephemres v3.3.2.v is now running."
     echo ""
     echo "  Dashboard:  https://$DOMAIN_NAME"
     echo "  API docs:   https://$DOMAIN_NAME/api/docs"

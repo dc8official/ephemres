@@ -1,6 +1,6 @@
-# Ephemres v3.3.1n — Disaster Recovery & Database Restoration Runbook
+# Ephemres v3.3.2.v — Disaster Recovery & Database Restoration Runbook
 
-This runbook describes the standard operating procedures for restoring the Ephemres v3.3.1n database and application environment from timestamped backups (including legacy v3.3.0 backups).
+This runbook describes the standard operating procedures for restoring the Ephemres v3.3.2.v database and application environment from timestamped backups (including legacy v3.3.1n and v3.3.0 backups).
 
 ---
 
@@ -78,15 +78,14 @@ cd /opt/ephemres/backend
 PYTHONPATH=/opt/ephemres:/opt/ephemres/backend /opt/ephemres/venv/bin/python3 -m app.core.migrator upgrade head
 ```
 
-### Step 4: Flush Redis Session Cache (If Redis Acceleration is Active)
-If using the Redis storage driver, flush stale session keys:
+### Step 4: Clear FastStore In-RAM Session Cache (If Active)
+If FastStore In-RAM storage was active, remove any persisted WAL file in `/dev/shm`:
 ```bash
-redis-cli flushdb
+rm -f /dev/shm/ephemres_faststore.db*
 ```
 
 ### Step 5: Restart Ephemres Daemons
 ```bash
-sudo systemctl restart redis-server || sudo systemctl restart redis || true
 sudo systemctl restart ephemres-api ephemres-engine nginx
 sudo systemctl is-enabled ephemres-flowd &>/dev/null && sudo systemctl restart ephemres-flowd || true
 ```
@@ -100,6 +99,6 @@ Expected response:
 ```json
 {
   "status": "ok",
-  "version": "3.3.1n"
+  "version": "3.3.2.v"
 }
 ```
