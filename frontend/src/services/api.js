@@ -1,26 +1,127 @@
-import axios from 'axios'
 import { clearUserState } from './auth.js'
 
-const api = axios.create({
-  baseURL: '/api/v1',
-  withCredentials: true,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-})
+/**
+ * Native Zero-Dependency Fetch Client (Vertical Integration Architecture).
+ * Replaces axios with pure browser fetch, supporting credentials, JSON serialization,
+ * query parameter formatting, Blob responses, and automatic 401 session eviction.
+ */
+class ApiClient {
+  constructor(baseURL = '/api/v1') {
+    this.baseURL = baseURL
+  }
 
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response && error.response.status === 401) {
-      clearUserState()
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
+  async request(method, url, data = null, config = {}) {
+    let fullUrl = url.startsWith('/') ? `${this.baseURL}${url}` : `${this.baseURL}/${url}`
+    if (config.params) {
+      const searchParams = new URLSearchParams()
+      for (const [key, value] of Object.entries(config.params)) {
+        if (value !== null && value !== undefined) {
+          searchParams.append(key, value)
+        }
+      }
+      const qs = searchParams.toString()
+      if (qs) {
+        fullUrl += (fullUrl.includes('?') ? '&' : '?') + qs
       }
     }
-    return Promise.reject(error)
+
+    const headers = { ...(config.headers || {}) }
+    let body = undefined
+
+    if (data !== null && data !== undefined) {
+      if (data instanceof FormData || data instanceof Blob || typeof data === 'string') {
+        body = data
+      } else {
+        headers['Content-Type'] = headers['Content-Type'] || 'application/json'
+        body = JSON.stringify(data)
+      }
+    }
+
+    const fetchOptions = {
+      method: method.toUpperCase(),
+      headers,
+      body,
+      credentials: 'include',
+    }
+
+    try {
+      const response = await fetch(fullUrl, fetchOptions)
+
+      const headerObj = {}
+      response.headers.forEach((v, k) => {
+        headerObj[k.toLowerCase()] = v
+      })
+
+      let resData
+      if (config.responseType === 'blob') {
+        resData = await response.blob()
+      } else {
+        const text = await response.text()
+        try {
+          resData = text ? JSON.parse(text) : null
+        } catch {
+          resData = text
+        }
+      }
+
+      if (!response.ok) {
+        const error = new Error(`Request failed with status ${response.status}`)
+        error.response = {
+          status: response.status,
+          statusText: response.statusText,
+          data: resData,
+          headers: headerObj,
+        }
+
+        if (response.status === 401) {
+          clearUserState()
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.href = '/login'
+          }
+        }
+
+        throw error
+      }
+
+      return {
+        data: resData,
+        status: response.status,
+        statusText: response.statusText,
+        headers: headerObj,
+      }
+    } catch (err) {
+      if (err.response && err.response.status === 401) {
+        clearUserState()
+        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+          window.location.href = '/login'
+        }
+      }
+      throw err
+    }
   }
-)
+
+  get(url, config = {}) {
+    return this.request('GET', url, null, config)
+  }
+
+  post(url, data = null, config = {}) {
+    return this.request('POST', url, data, config)
+  }
+
+  put(url, data = null, config = {}) {
+    return this.request('PUT', url, data, config)
+  }
+
+  patch(url, data = null, config = {}) {
+    return this.request('PATCH', url, data, config)
+  }
+
+  delete(url, config = {}) {
+    return this.request('DELETE', url, null, config)
+  }
+}
+
+const api = new ApiClient('/api/v1')
 
 export default api
 

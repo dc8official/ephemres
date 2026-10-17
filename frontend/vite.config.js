@@ -29,7 +29,7 @@ export default defineConfig({
           if (id.includes('node_modules/chart.js') || id.includes('node_modules/vue-chartjs')) {
             return 'vendor-charts'
           }
-          if (id.includes('node_modules/vue/') || id.includes('node_modules/vue-router') || id.includes('node_modules/axios')) {
+          if (id.includes('node_modules/vue/') || id.includes('node_modules/vue-router')) {
             return 'vendor-core'
           }
         }
