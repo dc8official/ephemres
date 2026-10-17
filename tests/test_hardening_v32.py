@@ -833,3 +833,27 @@ def test_deep_health_checks_liveness_and_readiness():
             assert data["database"]["status"] == "ok"
 
 
+def test_health_readiness_masks_sensitive_exception_details():
+    """
+    CWE-209: Verifies that database or redis exceptions do not expose raw stack traces
+    or credential details in /health/readiness response.
+    """
+    from app.main import app
+    client = TestClient(app)
+    with patch("app.main.AsyncSessionLocal") as mock_session_local:
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = Exception("password authentication failed for user ephemres_super: secret123")
+        mock_session_local.return_value.__aenter__.return_value = mock_session
+        mock_session_local.return_value.__aexit__.return_value = None
+
+        resp = client.get("/health/readiness")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["ready"] is False
+        assert body["database"]["status"] == "error"
+        assert body["database"]["error"] == "Database connection failed"
+        assert "secret123" not in resp.text
+        assert "password" not in resp.text
+
+
