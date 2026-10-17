@@ -378,14 +378,31 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         ALEMBIC_BIN="${PROJECT_ROOT}/.venv/bin/alembic"
     fi
 
-    if [[ -d "${INSTALL_DIR}/backend/migrations" && -n "${ALEMBIC_BIN}" ]]; then
+    PYTHON_BIN=""
+    if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/python3" ]]; then
+        PYTHON_BIN="${VENV_PATH}/bin/python3"
+    elif [[ -f "/opt/ephemres/venv/bin/python3" ]]; then
+        PYTHON_BIN="/opt/ephemres/venv/bin/python3"
+    elif [[ -f "/opt/netmon/venv/bin/python3" ]]; then
+        PYTHON_BIN="/opt/netmon/venv/bin/python3"
+    elif [[ -f "${PROJECT_ROOT}/.venv/bin/python3" ]]; then
+        PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
+    fi
+
+    ALEMBIC_CMD=()
+    if [[ -n "${ALEMBIC_BIN}" && -x "${ALEMBIC_BIN}" ]]; then
+        ALEMBIC_CMD=("${ALEMBIC_BIN}")
+    elif [[ -n "${PYTHON_BIN}" && -x "${PYTHON_BIN}" ]]; then
+        ALEMBIC_CMD=("${PYTHON_BIN}" "-m" "alembic")
+    fi
+
+    if [[ -d "${INSTALL_DIR}/backend/migrations" && ${#ALEMBIC_CMD[@]} -gt 0 ]]; then
         echo -e "${GREEN}[INFO] Running Alembic schema migration (alembic upgrade head)...${NC}"
         export EPHEMRES_DB_PASSWORD="${DB_PASS}"
         export NETMON_DB_PASSWORD="${DB_PASS}"
-        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${ALEMBIC_BIN}" -c "${INSTALL_DIR}/backend/alembic.ini" upgrade head
+        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${ALEMBIC_CMD[@]}" -c "${INSTALL_DIR}/backend/alembic.ini" upgrade head
         
-        PYTHON_BIN="$(dirname "${ALEMBIC_BIN}")/python"
-        if [[ -f "${PYTHON_BIN}" ]]; then
+        if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
             PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin || true
         fi

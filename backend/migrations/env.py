@@ -17,7 +17,8 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = sync_engine.url
+    from app.config import settings
+    url = sync_engine.url if sync_engine is not None else settings.sync_db_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -29,13 +30,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    with sync_engine.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+    if sync_engine is not None:
+        with sync_engine.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    else:
+        # In Stage 5A, migrations are executed via app.core.migrator
+        pass
 
 
 if context.is_offline_mode():

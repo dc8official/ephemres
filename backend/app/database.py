@@ -5,7 +5,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -30,13 +30,11 @@ async_engine = create_async_engine(
 )
 
 # ---------------------------------------------------------------------------
-# Sync engine – intended exclusively for Alembic migrations.
-# Do NOT use this engine anywhere else in the application.
+# Sync engine – previously used for Alembic migrations.
+# Deprecated & removed in Vertical Integration Stage 5A (eliminated psycopg2).
+# Kept as None for backward compatibility.
 # ---------------------------------------------------------------------------
-sync_engine = create_engine(
-    settings.sync_db_url,
-    echo=False,
-)
+sync_engine = None
 
 # ---------------------------------------------------------------------------
 # Async session factory
