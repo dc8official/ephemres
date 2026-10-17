@@ -1,3 +1,10 @@
+"""Ephemres Network Monitoring Platform — Endpoint API Schemas.
+
+This module defines request and response validation models for endpoint
+management, fleet summaries, detailed diagnostic configurations, interface aliases,
+and operational status serialization.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,13 +14,17 @@ from app.core.schema import BaseModel, ConfigDict, Field, field_serializer, fiel
 
 
 class InterfaceConfig(BaseModel):
-    name: str = Field(..., max_length=64, pattern=r"^[a-zA-Z0-9_\-\./ :]{1,64}$")
-    speed_mbps: int = Field(default=1000, gt=0, le=10000000)
+    """Network router interface configuration attributes."""
+
+    name: str = Field(..., max_length=64, pattern=r"^[a-zA-Z0-9_\-\./ :]{1,64}$", description="Interface name label")
+    speed_mbps: int = Field(default=1000, gt=0, le=10000000, description="Interface link capacity speed in Mbps")
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class EndpointSummary(BaseModel):
+    """Compact summary schema for fleet table listing and status cards."""
+
     id: UUID
     hostname: str
     ip_address: str
@@ -43,6 +54,8 @@ class EndpointSummary(BaseModel):
 
 
 class EndpointDetail(EndpointSummary):
+    """Detailed endpoint model including configuration toggles, flow aliases, and audit timestamps."""
+
     description: Optional[str] = None
     monitoring_enabled: bool
     allow_incident_trace: bool = True

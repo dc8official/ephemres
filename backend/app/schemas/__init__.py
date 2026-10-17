@@ -1,3 +1,9 @@
+"""Ephemres Network Monitoring Platform — Schemas Package.
+
+This package exports all typed request validation and response serialization models
+inheriting from app.core.schema.SchemaModel (BaseModel).
+"""
+
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,

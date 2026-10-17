@@ -15,7 +15,7 @@ async def seed_admin(password: str = "admin"):
         )
         role_row = role_res.fetchone()
         if not role_row:
-            logger.error("Role 'ADMIN' does not exist in database. Ensure Alembic migrations have run.")
+            logger.error("Role 'ADMIN' does not exist in database. Ensure native database migrations (app.core.migrator) have run.")
             return False
 
         role_id = role_row.id

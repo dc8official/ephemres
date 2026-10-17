@@ -56,10 +56,10 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
-# FastAPI dependency
+# ASGI route session dependency (app.core.asgi.Depends)
 # ---------------------------------------------------------------------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Yield a managed async database session for use in FastAPI routes.
+    """Yield a managed async database session for use in ASGI route handlers.
 
     Commits on clean exit if an active transaction remains uncommitted,
     rolls back on exception if a transaction is active, and always closes

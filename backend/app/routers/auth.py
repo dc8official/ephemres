@@ -259,9 +259,9 @@ async def get_current_user(
 async def get_current_user_sse(request: Request) -> dict:
     """Dedicated authentication dependency for long-lived Server-Sent Events (SSE) connections.
 
-    Standard FastAPI dependencies holding an AsyncSession via Depends(get_db) do not close
+    Standard ASGI route dependencies holding an AsyncSession via Depends(get_db) do not close
     their database connection until the response generator completes. For long-lived or
-    infinite streams like SSE, this monopolizes a connection from the SQLAlchemy connection
+    infinite streams like SSE, this monopolizes a connection from the native asyncpg connection
     pool indefinitely, causing database pool starvation for concurrent HTTP requests.
 
     This function uses a short-lived AsyncSessionLocal() context manager strictly for the

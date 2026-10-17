@@ -1,3 +1,9 @@
+"""Ephemres Network Monitoring Platform — Base Async Repository.
+
+This module provides the generic asynchronous BaseRepository abstraction over
+app.core.orm.AsyncSession, offering typed CRUD primitives and parameterized queries.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Generic, Optional, Sequence, Type, TypeVar
@@ -9,9 +15,7 @@ T = TypeVar("T", bound=Base)
 
 
 class BaseRepository(Generic[T]):
-    """
-    Abstract generic async base repository providing standard CRUD operations.
-    """
+    """Abstract generic async base repository providing standard CRUD operations."""
 
     def __init__(self, model: Type[T], session: AsyncSession) -> None:
         self.model = model
