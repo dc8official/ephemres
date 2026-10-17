@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from app.core.asgi import FastAPI
+from app.core.asgi import TestClient
 
 from app.database import get_db
 from app.routers.auth import get_current_user, require_admin

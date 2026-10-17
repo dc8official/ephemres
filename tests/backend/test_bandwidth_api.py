@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from app.core.asgi import FastAPI
+from app.core.asgi import TestClient
 
 from app.routers.bandwidth import router as bandwidth_router
 from app.routers.settings import router as settings_router
@@ -160,7 +160,7 @@ def test_bandwidth_map_exporter(client):
     assert mock_session.commit.awaited
 
 
-@patch("redis.asyncio.Redis")
+@patch("app.core.faststore.Redis")
 def test_flow_preflight_success(mock_redis_cls, client):
     test_client, _ = client
 

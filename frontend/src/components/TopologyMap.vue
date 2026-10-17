@@ -200,7 +200,7 @@ const error = ref(null)
 const networkInitialized = ref(false)
 const stabilized = ref(false)
 const layoutDirection = ref('UD')
-const { sseConnected, subscribe } = useSSE()
+const { sseConnected, subscribe, subscribeBatched } = useSSE()
 let unsubscribeSSE = null
 
 const selectedNode = ref(null)
@@ -305,15 +305,39 @@ function formatNodeType(type) {
 function updateLegendCounts() {
   if (!nodesDataSet) return
   const allNodes = nodesDataSet.get()
-  legendCounts.root = allNodes.filter(n => (n.rawNode?.type === 'root' || n.shape === 'square')).length
-  legendCounts.up = allNodes.filter(n => (n.rawNode?.type === 'monitored' || n.shape === 'dot') && (n.rawNode?.status === 'UP' || n.rawNode?.state === 'UP')).length
-  legendCounts.unstable = allNodes.filter(n => (n.rawNode?.status === 'UP-UNSTABLE' || n.rawNode?.status === 'DOWN-UNSTABLE' || n.rawNode?.state === 'UP-UNSTABLE' || n.rawNode?.state === 'DOWN-UNSTABLE')).length
-  legendCounts.down = allNodes.filter(n => (n.rawNode?.type === 'monitored' || n.shape === 'dot') && (n.rawNode?.status === 'DOWN' || n.rawNode?.state === 'DOWN')).length
-  legendCounts.transit = allNodes.filter(n => (n.rawNode?.type === 'transit' || n.shape === 'hexagon') && n.rawNode?.status !== 'FAILURE_POINT' && n.rawNode?.status !== 'INFERRED_DOWN').length
-  legendCounts.failurePoint = allNodes.filter(n => n.rawNode?.status === 'FAILURE_POINT' || n.rawNode?.state === 'FAILURE_POINT').length
-  legendCounts.inferredDown = allNodes.filter(n => n.rawNode?.status === 'INFERRED_DOWN' || n.rawNode?.state === 'INFERRED_DOWN').length
-  legendCounts.l2 = allNodes.filter(n => n.rawNode?.is_l2_segment).length
-  legendCounts.subnet = allNodes.filter(n => (n.rawNode?.type === 'subnet_hub' || n.rawNode?.node_type === 'subnet_hub' || n.shape === 'box')).length
+  let root = 0, up = 0, unstable = 0, down = 0, transit = 0, failurePoint = 0, inferredDown = 0, l2 = 0, subnet = 0
+
+  for (const n of allNodes) {
+    const raw = n.rawNode || {}
+    const type = raw.type || raw.node_type
+    const status = raw.status || raw.state
+
+    if (type === 'root' || n.shape === 'square') root++
+    if (type === 'subnet_hub' || n.shape === 'box') subnet++
+    if (raw.is_l2_segment) l2++
+
+    if (status === 'UP-UNSTABLE' || status === 'DOWN-UNSTABLE') unstable++
+    if (status === 'FAILURE_POINT') failurePoint++
+    if (status === 'INFERRED_DOWN') inferredDown++
+
+    if (type === 'monitored' || n.shape === 'dot') {
+      if (status === 'UP') up++
+      else if (status === 'DOWN') down++
+    }
+    if ((type === 'transit' || n.shape === 'hexagon') && status !== 'FAILURE_POINT' && status !== 'INFERRED_DOWN') {
+      transit++
+    }
+  }
+
+  legendCounts.root = root
+  legendCounts.up = up
+  legendCounts.unstable = unstable
+  legendCounts.down = down
+  legendCounts.transit = transit
+  legendCounts.failurePoint = failurePoint
+  legendCounts.inferredDown = inferredDown
+  legendCounts.l2 = l2
+  legendCounts.subnet = subnet
 }
 
 // Visual Node Styling & Categorization
@@ -712,17 +736,18 @@ function resetView() {
 }
 
 function initSSE() {
-  unsubscribeSSE = subscribe((event) => {
-    if (!event.data) return
-    try {
-      const payload = JSON.parse(event.data)
-      if (payload.type === 'TOPOLOGY_UPDATED') {
-        isDiscoveringAll.value = false
-        fetchTopology()
-        return
+  unsubscribeSSE = subscribeBatched((batch) => {
+    let needsFetch = false
+    const updates = []
+    let updatedAny = false
+
+    for (const payload of batch) {
+      if (payload?.type === 'TOPOLOGY_UPDATED') {
+        needsFetch = true
+        continue
       }
-      const isNodeStateChange = payload.type === 'NODE_STATE_CHANGE'
-      const isStateTransition = payload.type === 'STATE_TRANSITION'
+      const isNodeStateChange = payload?.type === 'NODE_STATE_CHANGE'
+      const isStateTransition = payload?.type === 'STATE_TRANSITION'
       if ((isNodeStateChange || isStateTransition) && payload.endpoint_id && nodesDataSet) {
         const nodeId = payload.endpoint_id
         const newState = isNodeStateChange
@@ -732,7 +757,7 @@ function initSSE() {
         if (existing && newState) {
           const nodeType = existing.rawNode?.node_type || existing.rawNode?.type || 'monitored'
           const colors = getNodeColors(newState, nodeType)
-          nodesDataSet.update({
+          updates.push({
             id: nodeId,
             color: colors,
             rawNode: {
@@ -746,11 +771,22 @@ function initSSE() {
             selectedNode.value.status = newState
             selectedNode.value.state = newState
           }
-          updateLegendCounts()
+          updatedAny = true
         }
       }
-    } catch (e) {
-      // Heartbeat or malformed payload
+    }
+
+    if (needsFetch) {
+      isDiscoveringAll.value = false
+      fetchTopology()
+      return
+    }
+
+    if (updates.length > 0 && nodesDataSet) {
+      nodesDataSet.update(updates)
+    }
+    if (updatedAny) {
+      updateLegendCounts()
     }
   })
 }

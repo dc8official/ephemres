@@ -7,9 +7,9 @@ from math import ceil
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException, Query, status
+from app.core.orm import func, select
+from app.core.orm import AsyncSession
 
 from app.database import get_db
 from app.models.alert_channel import AlertChannel
@@ -24,8 +24,8 @@ from app.schemas.alerts import (
     AlertTestRequest,
 )
 from app.services.alert_dispatcher import alert_dispatcher
-from app.services.crypto_service import decrypt_secret, encrypt_secret, mask_secret
-from app.services.ssrf_validator import validate_outbound_url
+from app.core.crypto import decrypt_secret, encrypt_secret, mask_secret
+from app.core.http_client import validate_outbound_url
 
 logger = logging.getLogger(__name__)
 

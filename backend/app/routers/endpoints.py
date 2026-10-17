@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException, Query
+from app.core.schema import BaseModel, ConfigDict, field_validator
+from app.core.orm import AsyncSession
 
 from app.database import get_db
 from app.repositories.auth_repo import AuthRepository

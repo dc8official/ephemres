@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import delete, func, select
+from app.core.orm import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.user_session import UserSession
@@ -209,13 +209,17 @@ class PostgresSessionStore(SessionStore):
         sync_clear(client_ip, username)
 
 
-class RedisSessionStore(SessionStore):
+class FastStoreSessionStore(SessionStore):
     """
-    Redis-accelerated session driver using redis.asyncio with key TTL auto-expiration.
+    FastStore-accelerated session driver using FastStoreClient with key TTL auto-expiration.
     """
 
-    def __init__(self, redis_client: Any) -> None:
-        self.redis = redis_client
+    def __init__(self, store_client: Any = None, redis_client: Any = None) -> None:
+        self.store = store_client if store_client is not None else redis_client
+
+    @property
+    def redis(self) -> Any:
+        return self.store
 
     def _get_key(self, user_id: str) -> str:
         return f"user_sessions:{user_id}"
@@ -229,14 +233,14 @@ class RedisSessionStore(SessionStore):
     ) -> None:
         key = self._get_key(user_id)
         try:
-            raw = await self.redis.get(key)
+            raw = await self.store.get(key)
             sessions: List[str] = json.loads(raw) if raw else []
             sessions.append(jti)
             if len(sessions) > max_sessions:
                 sessions = sessions[-max_sessions:]
-            await self.redis.set(key, json.dumps(sessions), ex=ttl_seconds)
+            await self.store.set(key, json.dumps(sessions), ex=ttl_seconds)
         except Exception as e:
-            logger.error("RedisSessionStore.register_session error: %s", e)
+            logger.error("FastStoreSessionStore.register_session error: %s", e)
             raise
 
     async def is_session_active(self, user_id: str, jti: Optional[str]) -> bool:
@@ -244,13 +248,13 @@ class RedisSessionStore(SessionStore):
             return False
         key = self._get_key(user_id)
         try:
-            raw = await self.redis.get(key)
+            raw = await self.store.get(key)
             if not raw:
                 return False
             sessions: List[str] = json.loads(raw)
             return jti in sessions
         except Exception as e:
-            logger.error("RedisSessionStore.is_session_active error: %s", e)
+            logger.error("FastStoreSessionStore.is_session_active error: %s", e)
             return False
 
     async def invalidate_session(self, user_id: str, jti: Optional[str]) -> None:
@@ -258,25 +262,25 @@ class RedisSessionStore(SessionStore):
             return
         key = self._get_key(user_id)
         try:
-            raw = await self.redis.get(key)
+            raw = await self.store.get(key)
             if raw:
                 sessions: List[str] = [s for s in json.loads(raw) if s != jti]
                 if sessions:
-                    ttl = await self.redis.ttl(key)
+                    ttl = await self.store.ttl(key)
                     ex = max(ttl, 60) if ttl > 0 else 86400
-                    await self.redis.set(key, json.dumps(sessions), ex=ex)
+                    await self.store.set(key, json.dumps(sessions), ex=ex)
                 else:
-                    await self.redis.delete(key)
+                    await self.store.delete(key)
         except Exception as e:
-            logger.error("RedisSessionStore.invalidate_session error: %s", e)
+            logger.error("FastStoreSessionStore.invalidate_session error: %s", e)
             raise
 
     async def invalidate_all_user_sessions(self, user_id: str) -> None:
         key = self._get_key(user_id)
         try:
-            await self.redis.delete(key)
+            await self.store.delete(key)
         except Exception as e:
-            logger.error("RedisSessionStore.invalidate_all_user_sessions error: %s", e)
+            logger.error("FastStoreSessionStore.invalidate_all_user_sessions error: %s", e)
             raise
 
     def _get_lockout_keys(self, client_ip: str, username: str) -> tuple[str, str]:
@@ -289,34 +293,37 @@ class RedisSessionStore(SessionStore):
     ) -> None:
         failed_key, locked_key = self._get_lockout_keys(client_ip, username)
         try:
-            count = await self.redis.incr(failed_key)
+            count = await self.store.incr(failed_key)
             if count == 1:
-                await self.redis.expire(failed_key, 1800)
+                await self.store.expire(failed_key, 1800)
             if count >= max_attempts:
-                await self.redis.set(locked_key, "1", ex=lockout_seconds)
+                await self.store.set(locked_key, "1", ex=lockout_seconds)
         except Exception as e:
-            logger.error("RedisSessionStore.record_failed_attempt error: %s", e)
+            logger.error("FastStoreSessionStore.record_failed_attempt error: %s", e)
 
     async def is_account_locked(self, client_ip: str, username: str) -> bool:
         _, locked_key = self._get_lockout_keys(client_ip, username)
         try:
-            res = await self.redis.exists(locked_key)
+            res = await self.store.exists(locked_key)
             return bool(res)
         except Exception as e:
-            logger.error("RedisSessionStore.is_account_locked error: %s", e)
+            logger.error("FastStoreSessionStore.is_account_locked error: %s", e)
             return False
 
     async def clear_failed_attempts(self, client_ip: str, username: str) -> None:
         failed_key, locked_key = self._get_lockout_keys(client_ip, username)
         try:
-            await self.redis.delete(failed_key, locked_key)
+            await self.store.delete(failed_key, locked_key)
         except Exception as e:
-            logger.error("RedisSessionStore.clear_failed_attempts error: %s", e)
+            logger.error("FastStoreSessionStore.clear_failed_attempts error: %s", e)
 
 
-async def migrate_sessions_pg_to_redis(session_factory, redis_client) -> int:
+RedisSessionStore = FastStoreSessionStore
+
+
+async def migrate_sessions_pg_to_faststore(session_factory, store_client) -> int:
     """
-    Warm-migrates active unexpired user sessions from PostgreSQL to Redis.
+    Warm-migrates active unexpired user sessions from PostgreSQL to FastStore.
     Preserves existing session lifetimes so active users remain authenticated across driver switches.
     """
     now = datetime.now(timezone.utc)
@@ -344,30 +351,30 @@ async def migrate_sessions_pg_to_redis(session_factory, redis_client) -> int:
                 max_exp = max(s.expires_at for s in sess_list)
                 ttl = int((max_exp - now).total_seconds())
                 if ttl > 0:
-                    await redis_client.set(key, json.dumps(jtis), ex=ttl)
+                    await store_client.set(key, json.dumps(jtis), ex=ttl)
                     count += len(jtis)
         logger.info(
-            "Warm session migration: Migrated %d active session(s) from PostgreSQL to Redis.",
+            "Warm session migration: Migrated %d active session(s) from PostgreSQL to FastStore.",
             count,
         )
     except Exception as exc:
         logger.warning(
-            "Warm session migration (PostgreSQL -> Redis) encountered an error: %s",
+            "Warm session migration (PostgreSQL -> FastStore) encountered an error: %s",
             exc,
         )
     return count
 
 
-async def migrate_sessions_redis_to_pg(redis_client, session_factory) -> int:
+async def migrate_sessions_faststore_to_pg(store_client, session_factory) -> int:
     """
-    Warm-migrates active user sessions from Redis into PostgreSQL user_sessions.
-    Ensures active sessions remain valid during Redis-to-PostgreSQL fallback or driver switch.
+    Warm-migrates active user sessions from FastStore into PostgreSQL user_sessions.
+    Ensures active sessions remain valid during FastStore-to-PostgreSQL fallback or driver switch.
     """
     now = datetime.now(timezone.utc)
     count = 0
     try:
         async with session_factory() as db:
-            async for key in redis_client.scan_iter(match="user_sessions:*"):
+            async for key in store_client.scan_iter(match="user_sessions:*"):
                 key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
                 parts = key_str.split(":", 1)
                 if len(parts) != 2:
@@ -378,14 +385,14 @@ async def migrate_sessions_redis_to_pg(redis_client, session_factory) -> int:
                 except (ValueError, TypeError):
                     continue
 
-                raw = await redis_client.get(key)
+                raw = await store_client.get(key)
                 if not raw:
                     continue
                 jtis = json.loads(raw)
                 if not isinstance(jtis, list):
                     continue
 
-                ttl = await redis_client.ttl(key)
+                ttl = await store_client.ttl(key)
                 ttl_sec = ttl if ttl > 0 else 86400
                 exp = now + timedelta(seconds=ttl_sec)
 
@@ -409,13 +416,17 @@ async def migrate_sessions_redis_to_pg(redis_client, session_factory) -> int:
                         count += 1
             await db.commit()
         logger.info(
-            "Warm session migration: Migrated %d active session(s) from Redis to PostgreSQL.",
+            "Warm session migration: Migrated %d active session(s) from FastStore to PostgreSQL.",
             count,
         )
     except Exception as exc:
         logger.warning(
-            "Warm session migration (Redis -> PostgreSQL) encountered an error: %s",
+            "Warm session migration (FastStore -> PostgreSQL) encountered an error: %s",
             exc,
         )
     return count
+
+
+migrate_sessions_pg_to_redis = migrate_sessions_pg_to_faststore
+migrate_sessions_redis_to_pg = migrate_sessions_faststore_to_pg
 

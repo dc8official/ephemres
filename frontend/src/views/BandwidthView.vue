@@ -6,7 +6,7 @@
         <h1 class="page-title">Network Bandwidth & Flow Telemetry</h1>
         <div class="toolbar-sub-row">
           <span class="page-sub">
-            v3.3.0 Flow Engine
+            v3.3.2.v Flow Engine
             <span class="separator">·</span>
             NetFlow v5, NetFlow v9 & IPFIX
           </span>
@@ -656,7 +656,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Line as LineChart, Doughnut as DoughnutChart } from 'vue-chartjs'
 import {
@@ -723,8 +723,8 @@ function handleAutoRefreshChange() {
 const route = useRoute()
 const router = useRouter()
 const selectedExporterId = ref(route.query.exporter_id || '')
-const flowExporters = ref([])
-const interfaceList = ref([])
+const flowExporters = shallowRef([])
+const interfaceList = shallowRef([])
 const selectedInterfaceIdx = ref(null)
 
 // Exporter Scope Filtering & Unmatched Detection State
@@ -784,12 +784,12 @@ const overview = ref({
 })
 
 const totalEndpointsCount = ref(0)
-const availableEndpoints = ref([])
-const unmatchedExporters = ref([])
+const availableEndpoints = shallowRef([])
+const unmatchedExporters = shallowRef([])
 
-const topEndpoints = ref([])
-const topConversations = ref([])
-const applicationStats = ref([])
+const topEndpoints = shallowRef([])
+const topConversations = shallowRef([])
+const applicationStats = shallowRef([])
 
 // Top conversations search filter (UI-09)
 const conversationFilter = ref('')
@@ -995,7 +995,7 @@ async function saveInterfaces() {
 }
 
 // Chart Data
-const seriesPoints = ref([])
+const seriesPoints = shallowRef([])
 
 const chartData = computed(() => {
   const labels = seriesPoints.value.map((p) => {
@@ -1031,6 +1031,7 @@ const chartData = computed(() => {
         borderWidth: 2,
         fill: true,
         tension: 0.3,
+        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
       },
       {
         label: outLabel,
@@ -1040,6 +1041,7 @@ const chartData = computed(() => {
         borderWidth: 2,
         fill: true,
         tension: 0.3,
+        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
       },
     ],
   }
@@ -1055,6 +1057,8 @@ const chartOptions = computed(() => {
   return {
     responsive: true,
     maintainAspectRatio: false,
+    animation: false,
+    normalized: true,
     scales: {
       x: {
         grid: { display: false },

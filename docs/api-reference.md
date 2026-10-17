@@ -1,6 +1,6 @@
-# Ephemres API Reference — Version 3.3.1n
+# Ephemres API Reference — Version 3.3.2.v
 
-Ephemres v3.3.1n exposes a RESTful and Server-Sent Events (SSE) API built on FastAPI. The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
+Ephemres v3.3.2.v exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
 
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
@@ -15,12 +15,12 @@ Returns the current platform version metadata.
   ```json
   {
     "status": "ok",
-    "version": "3.3.1n"
+    "version": "3.3.2.v"
   }
   ```
 
 ### `GET /api/v1/health`
-Performs system health check (database connection, monitoring engine status). Returns `{"status": "ok", "version": "3.3.1n"}`.
+Performs system health check (database connection, monitoring engine status). Returns `{"status": "ok", "version": "3.3.2.v"}`.
 
 ### `GET /api/v1/events/stream`
 Connects to the real-time Server-Sent Events (SSE) telemetry stream.
@@ -188,7 +188,7 @@ Compiles and streams an executive-ready, immutable ISO A4 PDF report with air-ga
   - `X-Report-SHA256: <64-character-sha256-hexdigest>`
 - **Security & Immutability:**
   - Air-gapped rendering: Disallows all external network schemas (`http://`, `https://`, `ftp://`) and whitelists local filesystem access strictly to authorized template/asset paths.
-  - Standard permission encryption (`pypdf` with `UserAccessPermissions.PRINT | UserAccessPermissions.PRINT_TO_REPRESENTATION`) enforces read-only immutability.
+  - Native binary PDF 1.4 compilation: Generated directly by `app.core.pdf` with cryptographic checksum verification via the `X-Report-SHA256` response header.
 
 ---
 
@@ -288,7 +288,7 @@ Retrieves the active system configuration from the database.
 Updates runtime parameters (requires `Admin` role).
 - **Request Body:** Accepts snake_case or camelCase properties:
   - `alerting_enabled` (bool, optional): Global master toggle to enable or suspend all outbound alert notifications.
-  - `performance_mode` (bool, optional): Switches between Redis-accelerated and PostgreSQL-native storage drivers.
+  - `performance_mode` (bool, optional): Switches between In-RAM FastStore (`/dev/shm`) and PostgreSQL-native storage drivers.
   - `l2_auto_bypass` (bool, optional): Controls Layer-2 direct ICMP diagnostic bypass.
   - `session_timeout` (int, 1–1440 min): Idle session expiration duration.
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
@@ -297,8 +297,8 @@ Updates runtime parameters (requires `Admin` role).
   - `flow_ipfix_port` (int, 1–65535, optional): IPFIX UDP listening port (default: 4739).
   - `flow_sampling_multiplier` (int, >= 1, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
 
-### `GET /settings/flow/preflight`
-Performs live pre-flight verification of Redis connectivity and Stream capabilities prior to enabling passive flow ingestion.
+### `POST /settings/flow/preflight`
+Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory stream write capabilities and UDP socket binding prior to enabling passive flow ingestion. Returns backward-compatible status metrics:
 - **Response:** `200 OK`
   ```json
   {
@@ -308,8 +308,12 @@ Performs live pre-flight verification of Redis connectivity and Stream capabilit
       "redis_version": "7.0.15",
       "redis_version_supported": true,
       "stream_write_success": true,
+      "rmem_max": 212992,
+      "rmem_max_supported": false,
+      "udp_ports_available": true,
+      "port_conflicts": [],
       "ready": true,
-      "message": "Redis v7.0.15 ready with Stream support."
+      "message": "Flow preflight passed successfully."
     },
     "message": "Request processed successfully."
   }
@@ -482,7 +486,7 @@ Returns protocol and service port volume distribution for donut/pie charts.
   ```
 
 ### `GET /bandwidth/exporters`
-Lists all configured flow exporters with interface aliases, along with detected unmatched exporter candidates from the Redis sliding discovery set.
+Lists all configured flow exporters with interface aliases, along with detected unmatched exporter candidates from the FastStore sliding discovery cache.
 - **Response:** `200 OK`
   ```json
   {
@@ -510,7 +514,7 @@ Lists all configured flow exporters with interface aliases, along with detected 
   ```
 
 ### `POST /bandwidth/exporters/{ip}/map`
-One-click binds an unmatched exporter IP to an existing endpoint's `flow_exporter_ips` array (requires `Admin` role). Immediately removes the IP from the Redis unmatched set and broadcasts a `channel:registry_sync` event to refresh the in-memory correlator table with zero downtime.
+One-click binds an unmatched exporter IP to an existing endpoint's `flow_exporter_ips` array (requires `Admin` role). Immediately removes the IP from the FastStore unmatched set and broadcasts a `channel:registry_sync` event to refresh the in-memory correlator table with zero downtime.
 - **Path Parameter:** `ip` (string): The exporter IP to map.
 - **Request Body:**
   ```json

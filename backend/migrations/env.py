@@ -5,19 +5,22 @@ from logging.config import fileConfig
 # Ensure backend directory is in sys.path so 'app' module can be imported
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from alembic import context
+context = None  # alembic.context replaced by app.core.migrator
 from app.database import Base, sync_engine
 
-config = context.config
-
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-target_metadata = Base.metadata
+if context is not None:
+    config = context.config
+    if config.config_file_name is not None:
+        fileConfig(config.config_file_name)
+    target_metadata = getattr(Base, "metadata", None)
+else:
+    config = None
+    target_metadata = getattr(Base, "metadata", None)
 
 
 def run_migrations_offline() -> None:
-    url = sync_engine.url
+    from app.config import settings
+    url = sync_engine.url if sync_engine is not None else settings.sync_db_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -29,13 +32,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    with sync_engine.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+    if sync_engine is not None:
+        with sync_engine.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    else:
+        # In Stage 5A, migrations are executed via app.core.migrator
+        pass
 
 
 if context.is_offline_mode():

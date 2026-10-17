@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from app.core.asgi import FastAPI
+from app.core.asgi import TestClient
 
 from app.database import get_db
 from app.models.flow_rollup import (
@@ -94,7 +94,7 @@ def test_flow_aggregator_insert_sql_bindparams():
     """
     import inspect
     import re
-    from sqlalchemy import text
+    from app.core.orm import text
     from monitoring.flow import aggregator
 
     # Extract insert_sql definition from source
@@ -196,7 +196,7 @@ async def test_get_flow_redis_decoupled_from_driver_manager():
     when driver_manager._redis_client is None.
     """
     with patch("app.services.driver_manager.driver_manager._redis_client", None):
-        with patch("redis.asyncio.Redis") as mock_aioredis:
+        with patch("app.core.faststore.Redis") as mock_aioredis:
             mock_inst = MagicMock()
             mock_aioredis.return_value = mock_inst
             # Reset global pool for testing
@@ -254,7 +254,7 @@ async def test_ssrf_validator_pins_resolved_ip():
     Verifies that SSRFSafeBackend resolves the host and invokes connect_tcp
     with the resolved target_ip rather than the host string, eliminating TOCTOU DNS rebinding.
     """
-    from app.services.ssrf_validator import SSRFSafeBackend
+    from app.core.http_client import SSRFSafeBackend
 
     mock_inner = AsyncMock()
     mock_inner.connect_tcp = AsyncMock(return_value="mock_stream")
@@ -417,7 +417,7 @@ def test_alert_channel_type_enum_validation():
     Verifies that AlertChannelCreate / AlertChannelUpdate validates channel_type against allowed types.
     """
     from app.schemas.alerts import AlertChannelCreate, AlertChannelUpdate
-    from pydantic import ValidationError
+    from app.core.schema import ValidationError
 
     # Valid channel types
     for ct in ["TEAMS", "DISCORD", "SLACK", "EMAIL_SMTP", "GENERIC_WEBHOOK"]:
@@ -665,7 +665,7 @@ async def test_decoupled_secret_keys_and_rotation():
     and seamless decrypt fallback for key rotation in crypto_service.
     """
     from app.config import SecuritySettings
-    from app.services.crypto_service import encrypt_secret, decrypt_secret
+    from app.core.crypto import encrypt_secret, decrypt_secret
     from unittest.mock import patch
 
     sec = SecuritySettings(

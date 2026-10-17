@@ -1,6 +1,6 @@
-# Ephemres Database & TimescaleDB Architecture — Version 3.3.1n
+# Ephemres Database & TimescaleDB Architecture — Version 3.3.2.v
 
-This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.1n.
+This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.2.v.
 
 ---
 
@@ -13,6 +13,7 @@ erDiagram
     endpoints ||--o{ endpoint_diagnostic_traces : "stores ephemeral JSONB traces"
     endpoints ||--o{ endpoint_rca_incidents : "tracks root cause outages"
     endpoints ||--o{ flow_minute_rollups : "attributes traffic (Hypertable)"
+    endpoints ||--o{ flow_interface_minute_rollups : "attributes interface traffic (Hypertable)"
     alert_channels ||--o{ alert_delivery_logs : "records dispatch audit"
     users ||--o{ user_sessions : "maintains active sessions"
     users ||--o{ audit_logs : "records admin actions"
@@ -27,10 +28,17 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `id` (`UUID`, Primary Key)
 * `hostname` (`VARCHAR(255)`, Not Null)
 * `ip_address` (`INET`, Unique, Not Null)
-* `device_type` (`VARCHAR(50)`: `ENDPOINT`, `TRANSIT_ROUTER`, `L2_SEGMENT`, `FIREWALL`, `SWITCH`)
+* `device_type` (`VARCHAR(100)`, Not Null: `ROUTER`, `SWITCH`, `SERVER`, `GATEWAY`, `ENDPOINT`, etc.)
+* `device_role` (`VARCHAR(30)`, Default: `'ACTIVE_HOST'`, Not Null) — Hierarchical role within topology DAG (`ROOT_GATEWAY`, `AGGREGATION`, `ACCESS`, `ACTIVE_HOST`).
 * `location` / `site` (`VARCHAR(255)`)
-* `allow_incident_trace` (`BOOLEAN`, Default: `true`)
-* `allow_topology_discovery` (`BOOLEAN`, Default: `true`)
+* `description` (`TEXT`, Nullable)
+* `monitoring_enabled` (`BOOLEAN`, Default: `true`, Not Null)
+* `endpoint_status` (`VARCHAR(20)`, Default: `'ACTIVE'`, Not Null)
+* `allow_incident_trace` (`BOOLEAN`, Default: `true`, Not Null)
+* `allow_topology_discovery` (`BOOLEAN`, Default: `true`, Not Null)
+* `enable_rca` (`BOOLEAN`, Default: `true`, Not Null)
+* `enable_scheduled_discovery` (`BOOLEAN`, Default: `true`, Not Null)
+* `is_l2_segment` (`BOOLEAN`, Default: `false`, Not Null)
 * `manual_parent_id` (`UUID`, Foreign Key to `endpoints.id`, Nullable)
 * `flow_exporter_ips` (`INET[]`, Default: `'{}'::inet[]`, Not Null) — Secondary exporter IP addresses aliased to this endpoint. Indexed via GIN index `idx_endpoints_flow_exporter_ips` for high-speed array containment queries (`flow_exporter_ips @> ARRAY['192.168.1.1'::inet]`).
 * `flow_interface_aliases` (`JSONB`, Default: `'{}'::jsonb`, Not Null) — Key-value dictionary mapping SNMP interface indexes (`ifIndex`) to human-readable labels and operational speeds (e.g. `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`).
@@ -64,19 +72,33 @@ Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow
   - `idx_flow_minute_src_dst_endpoint` (`bucket`, `src_endpoint_id`, `dst_endpoint_id`)
   - `idx_flow_minute_exporter_bucket` (`exporter_id`, `bucket`)
 
+### `flow_interface_minute_rollups` (TimescaleDB Hypertable)
+Stores 1-minute directional ingress and egress interface-level traffic metrics indexed by SNMP interface index (`ifIndex`).
+* `bucket` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null) — 1-minute time bucket boundary (UTC).
+* `exporter_id` (`UUID`, Primary Key, Not Null) — Associated exporter endpoint UUID.
+* `interface_idx` (`INTEGER`, Primary Key, Not Null) — SNMP interface index (`ifIndex`).
+* `in_bytes` (`BIGINT`, Default: 0, Not Null) — Directional ingress byte counter.
+* `in_packets` (`BIGINT`, Default: 0, Not Null) — Directional ingress packet counter.
+* `out_bytes` (`BIGINT`, Default: 0, Not Null) — Directional egress byte counter.
+* `out_packets` (`BIGINT`, Default: 0, Not Null) — Directional egress packet counter.
+* `flow_count` (`INTEGER`, Default: 0, Not Null) — Number of discrete flow records evaluated for this interface.
+* *Indexes & Policies*:
+  - Primary key: `(bucket, exporter_id, interface_idx)`
+  - Daily chunk interval with 7-day retention policy.
+  - Columnar compression segmented by `exporter_id, interface_idx` and ordered by `bucket DESC`.
+
 ### `alert_channels`
 Stores notification destinations and credentials with AES-256-GCM encryption.
 * `id` (`UUID`, Primary Key)
 * `name` (`VARCHAR(100)`, Not Null)
 * `channel_type` (`VARCHAR(50)`: `TEAMS`, `DISCORD`, `SLACK`, `EMAIL`, `WEBHOOK`)
-* `destination` (`VARCHAR(1024)`, Not Null) — Target URL or email address.
-* `is_enabled` (`BOOLEAN`, Default: `true`)
-* `target_scope` (`VARCHAR(20)`: `all`, `custom`)
-* `endpoint_ids` (`UUID[]`, Default: `'{}'`)
-* `severities` (`VARCHAR(20)[]`, Default: `'{DOWN,DOWN-UNSTABLE}'`)
-* `encrypted_secret` (`TEXT`, Nullable) — AES-256-GCM encrypted webhook token or SMTP credentials.
-* `created_at` (`TIMESTAMPTZ`, Default: `now()`)
-* `updated_at` (`TIMESTAMPTZ`, Default: `now()`)
+* `is_enabled` (`BOOLEAN`, Default: `true`, Not Null)
+* `config` (`TEXT`, Not Null) — AES-256-GCM encrypted JSON payload containing webhook URLs, SMTP passwords, tokens, etc.
+* `endpoint_ids` (`JSONB`, Default: `'[]'::jsonb`, Not Null) — Target endpoint UUID filtering (empty list indicates all fleet endpoints).
+* `subnet_filters` (`JSONB`, Default: `'[]'::jsonb`, Not Null) — Subnet CIDR filtering (e.g. `["10.0.0.0/24"]`).
+* `severity_filters` (`JSONB`, Default: `'["DOWN", "RECOVERED"]'::jsonb`, Not Null) — Severity states triggering alert dispatch.
+* `created_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null)
+* `updated_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null)
 
 ### `alert_delivery_logs`
 Audit log of all outbound dispatch attempts.
@@ -98,8 +120,8 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 
 | Tier | Storage Engine | Retention | Granularity | Compression / Aggregation | Use Case |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1** | Redis Stream (`stream:netflow:raw`) | 2 Hours | Flow Record | Sliding `MAXLEN ~100000`, in-memory buffer | Real-time forensic packet/flow inspection, live anomaly triage. |
-| **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups`) | 7 Days | 1 Minute | Uncompressed for 24h, native columnar compression after 1 day (85%+ disk savings) | Short-term forensic queries, detailed talker attribution, conversation drill-downs. |
+| **Tier 1** | FastStore Shared-Memory Stream (`stream:netflow:raw` in `/dev/shm`) | 2 Hours | Flow Record | Sliding in-memory buffer (`MAXLEN ~100000`) | Real-time forensic packet/flow inspection, live anomaly triage. |
+| **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 7 Days | 1 Minute | Uncompressed for 24h, native columnar compression after 1 day (85%+ disk savings) | Short-term forensic queries, detailed talker attribution, interface throughput. |
 | **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`) | 30 Days | 1 Hour | Materialized View with auto-refresh policy (`start_offset: 3d`, `end_offset: 1h`) | Weekly / monthly capacity trends, application mix shifts, bandwidth forecasting. |
 | **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View with auto-refresh policy (`start_offset: 7d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
 

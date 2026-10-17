@@ -7,9 +7,9 @@ import time
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, or_, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException, Query, status
+from app.core.orm import case, func, or_, select, text
+from app.core.orm import AsyncSession
 
 from app.config import settings
 from app.database import get_db
@@ -51,35 +51,44 @@ router = APIRouter(prefix="/bandwidth", tags=["bandwidth"])
 _flow_redis_pool: Optional[Any] = None
 
 
-async def get_flow_redis() -> Optional[Any]:
+async def _init_flow_store_pool() -> Optional[Any]:
     """
-    Returns an async Redis client for flow telemetry operations.
+    Returns an async FastStore client for flow telemetry operations.
     Reuses driver_manager's client if available; otherwise initializes an independent pool.
     """
     global _flow_redis_pool
-    dm_client = getattr(driver_manager, "_redis_client", None)
+    dm_client = getattr(driver_manager, "store_client", getattr(driver_manager, "_store_client", getattr(driver_manager, "_redis_client", None)))
     if dm_client is not None:
         return dm_client
 
-    if not getattr(settings.redis, "enabled", True):
+    faststore_cfg = getattr(settings, "faststore", getattr(settings, "redis", None))
+    if faststore_cfg is not None and not getattr(faststore_cfg, "enabled", True):
         return None
 
     if _flow_redis_pool is None:
         try:
-            import redis.asyncio as aioredis
-            _flow_redis_pool = aioredis.Redis(
-                host=settings.redis.host,
-                port=settings.redis.port,
-                db=settings.redis.db,
-                password=settings.redis.password or None,
+            from app.core.faststore import Redis
+            _flow_redis_pool = Redis(
+                host=faststore_cfg.host if faststore_cfg else "localhost",
+                port=faststore_cfg.port if faststore_cfg else 6379,
+                db=faststore_cfg.db if faststore_cfg else 0,
+                password=(faststore_cfg.password or None) if faststore_cfg else None,
                 decode_responses=True,
                 socket_timeout=1.0,
                 socket_connect_timeout=1.0,
             )
         except Exception as e:
-            logger.debug("Failed to initialize standalone Redis client for flow: %s", e)
+            logger.debug("Failed to initialize standalone FastStore client for flow: %s", e)
             return None
     return _flow_redis_pool
+
+
+async def get_flow_store() -> Optional[Any]:
+    return await get_flow_redis()
+
+
+async def get_flow_redis() -> Optional[Any]:
+    return await _init_flow_store_pool()
 
 
 PROTOCOL_MAP = {
@@ -216,12 +225,12 @@ async def get_bandwidth_overview(
     ingress_bps = (float(ingress_bytes) * 8.0) / 300.0 if ingress_bytes > 0 else 0.0
     egress_bps = (float(egress_bytes) * 8.0) / 300.0 if egress_bytes > 0 else 0.0
 
-    # Fetch unmatched count from Redis
+    # Fetch unmatched count from FastStore
     unmatched_count = 0
-    redis_client = await get_flow_redis()
-    if redis_client:
+    store_client = await get_flow_store()
+    if store_client:
         try:
-            unmatched_count = await redis_client.scard("flow:unmatched:set")
+            unmatched_count = await store_client.scard("flow:unmatched:set")
         except Exception:
             pass
 
@@ -635,14 +644,14 @@ async def list_flow_exporters(
         )
 
     unmatched_list: List[UnmatchedExporterItem] = []
-    redis_client = await get_flow_redis()
-    if redis_client:
+    store_client = await get_flow_store()
+    if store_client:
         try:
             now_ts = time.time()
             cutoff_ts = now_ts - 86400.0
-            # 1. Prune and query Redis ZSET flow:unmatched:zset (sliding 24h window)
-            await redis_client.zremrangebyscore("flow:unmatched:zset", "-inf", cutoff_ts)
-            zset_members = await redis_client.zrevrangebyscore(
+            # 1. Prune and query FastStore ZSET flow:unmatched:zset (sliding 24h window)
+            await store_client.zremrangebyscore("flow:unmatched:zset", "-inf", cutoff_ts)
+            zset_members = await store_client.zrevrangebyscore(
                 "flow:unmatched:zset", "+inf", "-inf", withscores=True, start=0, num=100
             )
             seen_ips = set()
@@ -666,12 +675,12 @@ async def list_flow_exporters(
                         pass
 
             # 2. Complement with legacy set if any exists not in zset
-            unmatched_ips = await redis_client.smembers("flow:unmatched:set")
+            unmatched_ips = await store_client.smembers("flow:unmatched:set")
             for ip in unmatched_ips:
                 ip_clean = ip.decode("utf-8") if isinstance(ip, bytes) else str(ip)
                 if ip_clean in seen_ips:
                     continue
-                ts_str = await redis_client.get(f"flow:unmatched:{ip_clean}")
+                ts_str = await store_client.get(f"flow:unmatched:{ip_clean}")
                 if ts_str:
                     try:
                         ts_val = float(ts_str)
@@ -685,9 +694,9 @@ async def list_flow_exporters(
                     except ValueError:
                         pass
                 else:
-                    await redis_client.srem("flow:unmatched:set", ip)
+                    await store_client.srem("flow:unmatched:set", ip)
         except Exception as e:
-            logger.debug("Failed to retrieve unmatched exporters from Redis: %s", e)
+            logger.debug("Failed to retrieve unmatched exporters from FastStore: %s", e)
 
     return APIResponse.success(
         data=ExportersResponse(exporters=exporters, unmatched=unmatched_list)
@@ -747,19 +756,19 @@ async def enroll_flow_exporter(
     await db.commit()
     await db.refresh(endpoint)
 
-    # Clean up from Redis unmatched tracking
-    redis_client = await get_flow_redis()
-    if redis_client:
+    # Clean up from FastStore unmatched tracking
+    store_client = await get_flow_store()
+    if store_client:
         try:
-            await redis_client.delete(f"flow:unmatched:{clean_ip}")
-            await redis_client.srem("flow:unmatched:set", clean_ip)
-            await redis_client.zrem("flow:unmatched:zset", clean_ip)
-            await redis_client.publish(
+            await store_client.delete(f"flow:unmatched:{clean_ip}")
+            await store_client.srem("flow:unmatched:set", clean_ip)
+            await store_client.zrem("flow:unmatched:zset", clean_ip)
+            await store_client.publish(
                 "channel:registry_sync",
                 f'{{"event": "EXPORTER_ENROLLED", "endpoint_id": "{endpoint.id}", "ip": "{clean_ip}"}}',
             )
         except Exception as e:
-            logger.warning("Failed to clear Redis unmatched state for %s: %s", clean_ip, e)
+            logger.warning("Failed to clear FastStore unmatched state for %s: %s", clean_ip, e)
 
     return APIResponse.success(
         data={
@@ -810,19 +819,19 @@ async def map_unmatched_exporter(
         endpoint.flow_exporter_ips = existing_ips
         await db.commit()
 
-    # Clear from Redis unmatched tracking (both ZSET and legacy SET)
-    redis_client = await get_flow_redis()
-    if redis_client:
+    # Clear from FastStore unmatched tracking (both ZSET and legacy SET)
+    store_client = await get_flow_store()
+    if store_client:
         try:
-            await redis_client.delete(f"flow:unmatched:{clean_ip}")
-            await redis_client.srem("flow:unmatched:set", clean_ip)
-            await redis_client.zrem("flow:unmatched:zset", clean_ip)
-            await redis_client.publish(
+            await store_client.delete(f"flow:unmatched:{clean_ip}")
+            await store_client.srem("flow:unmatched:set", clean_ip)
+            await store_client.zrem("flow:unmatched:zset", clean_ip)
+            await store_client.publish(
                 "channel:registry_sync",
                 f'{{"event": "EXPORTER_MAPPED", "endpoint_id": "{payload.endpoint_id}", "ip": "{clean_ip}"}}',
             )
         except Exception as e:
-            logger.warning("Failed to publish registry sync message to Redis: %s", e)
+            logger.warning("Failed to publish registry sync message to FastStore: %s", e)
 
     return APIResponse.success(
         data={"message": f"Successfully mapped exporter IP {clean_ip} to {endpoint.hostname}."}
@@ -874,19 +883,20 @@ async def get_interfaces_telemetry(
     res = await db.execute(stmt)
     rows = res.all()
 
-    # Active interfaces from Redis if available
-    active_redis_indices: set[int] = set()
-    redis_client = await get_flow_redis()
-    if redis_client:
+    # Active interfaces from FastStore if available
+    active_store_indices: set[int] = set()
+    active_redis_indices = active_store_indices
+    store_client = await get_flow_store()
+    if store_client:
         try:
-            members = await redis_client.smembers(f"flow:exporter:{exporter_id}:interfaces")
+            members = await store_client.smembers(f"flow:exporter:{exporter_id}:interfaces")
             for m in members:
                 try:
-                    active_redis_indices.add(int(m))
+                    active_store_indices.add(int(m))
                 except ValueError:
                     pass
         except Exception as e:
-            logger.debug("Failed to read active interfaces from Redis: %s", e)
+            logger.debug("Failed to read active interfaces from FastStore: %s", e)
 
     # Collect known interface indexes from rollups and configured aliases
     all_if_indices: dict[int, dict[str, Any]] = {}
@@ -939,7 +949,7 @@ async def get_interfaces_telemetry(
         capacity_bps = speed_mbps * 1_000_000.0
         peak_bps = max(in_bps, out_bps)
         utilization = round(min(100.0, (peak_bps / capacity_bps) * 100.0), 2)
-        is_active = (if_idx in active_redis_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
+        is_active = (if_idx in active_store_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
 
         interfaces.append(
             InterfaceTelemetryItem(

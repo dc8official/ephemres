@@ -6,7 +6,7 @@
       <div class="header-inner">
         <div class="brand">
           <span class="brand-name">Ephemres</span>
-          <span class="brand-version">{{ appVersion || 'v3.3.1n' }}</span>
+          <span class="brand-version">{{ appVersion || 'v3.3.2.v' }}</span>
         </div>
         <nav class="header-nav" aria-label="Main Navigation">
           <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
@@ -122,7 +122,7 @@ const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 const isDark = ref(true)
-const appVersion = ref('v3.3.0')
+const appVersion = ref('v3.3.2.v')
 const liveAnnouncement = ref('')
 const { subscribe } = useSSE()
 let unsubscribeSSE = null
@@ -160,7 +160,7 @@ onMounted(async () => {
       appVersion.value = `v${res.data.data.version.replace(/^v/, '')}`
     }
   } catch (err) {
-    appVersion.value = 'v3.3.0'
+    appVersion.value = 'v3.3.2.v'
   }
 
   // Global SSE listener for accessibility screen reader announcements

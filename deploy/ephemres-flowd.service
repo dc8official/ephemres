@@ -1,11 +1,12 @@
 [Unit]
 Description=Ephemres Network Flow Telemetry Collector Daemon (NetFlow/IPFIX)
-After=network.target postgresql.service redis-server.service
-Requires=redis-server.service
+After=network.target postgresql.service
 Wants=postgresql.service
 
 [Service]
-Type=simple
+Type=notify
+WatchdogSec=45
+NotifyAccess=all
 User=ephemres
 Group=ephemres
 AmbientCapabilities=CAP_NET_BIND_SERVICE

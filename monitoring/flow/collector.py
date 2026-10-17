@@ -46,13 +46,15 @@ class FlowCollector:
 
     def __init__(
         self,
-        redis_client: Any,
+        store_client: Any = None,
         netflow_port: int = 2055,
         ipfix_port: int = 4739,
         batch_size: int = 1000,
         flush_interval_seconds: float = 0.1,
+        *,
+        redis_client: Any = None,
     ):
-        self.redis = redis_client
+        self.store = store_client if store_client is not None else redis_client
         self.netflow_port = netflow_port
         self.ipfix_port = ipfix_port
         self.batch_size = batch_size
@@ -66,6 +68,14 @@ class FlowCollector:
         self._running = False
         self._flush_task: Optional[asyncio.Task] = None
         self._transports: List[asyncio.DatagramTransport] = []
+
+    @property
+    def redis(self) -> Any:
+        return self.store
+
+    @redis.setter
+    def redis(self, val: Any) -> None:
+        self.store = val
 
     def handle_packet(self, data: bytes, addr: tuple[str, int], listen_port: int) -> None:
         exporter_ip = addr[0]
@@ -126,13 +136,13 @@ class FlowCollector:
             to_flush = self._queue
             self._queue = []
 
-        if not self.redis:
+        if not self.store:
             return
 
         try:
-            pipe = self.redis.pipeline()
+            pipe = self.store.pipeline()
             for f in to_flush:
-                # Encode dict values as strings for Redis Stream
+                # Encode dict values as strings for FastStore Stream
                 stream_entry = {
                     "v": str(f.get("version", 0)),
                     "exp": str(f.get("exporter_ip", "")),
@@ -152,7 +162,7 @@ class FlowCollector:
                 pipe.xadd(STREAM_NETFLOW_RAW, stream_entry, maxlen=100000, approximate=True)
             await pipe.execute()
         except Exception as e:
-            logger.error("Failed to push batch of %d flows to Redis: %s", len(to_flush), e)
+            logger.error("Failed to push batch of %d flows to FastStore: %s", len(to_flush), e)
 
     async def _flush_loop(self) -> None:
         while self._running:

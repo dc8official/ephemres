@@ -5,13 +5,13 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import (
+from app.core.orm import text
+from app.core.orm import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from app.core.orm import DeclarativeBase
 
 from app.config import settings
 
@@ -30,13 +30,11 @@ async_engine = create_async_engine(
 )
 
 # ---------------------------------------------------------------------------
-# Sync engine – intended exclusively for Alembic migrations.
-# Do NOT use this engine anywhere else in the application.
+# Sync engine – previously used for Alembic migrations.
+# Deprecated & removed in Vertical Integration Stage 5A (eliminated psycopg2).
+# Kept as None for backward compatibility.
 # ---------------------------------------------------------------------------
-sync_engine = create_engine(
-    settings.sync_db_url,
-    echo=False,
-)
+sync_engine = None
 
 # ---------------------------------------------------------------------------
 # Async session factory
@@ -58,10 +56,10 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
-# FastAPI dependency
+# ASGI route session dependency (app.core.asgi.Depends)
 # ---------------------------------------------------------------------------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Yield a managed async database session for use in FastAPI routes.
+    """Yield a managed async database session for use in ASGI route handlers.
 
     Commits on clean exit if an active transaction remains uncommitted,
     rolls back on exception if a transaction is active, and always closes

@@ -1,5 +1,5 @@
 import pytest
-from app.services.ssrf_validator import (
+from app.core.http_client import (
     SSRFSafeBackend,
     create_ssrf_safe_client,
     validate_outbound_url,

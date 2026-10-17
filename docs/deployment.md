@@ -1,6 +1,6 @@
-# Ephemres Deployment & Operations Guide — Version 3.3.1n
+# Ephemres Deployment & Operations Guide — Version 3.3.2.v
 
-This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.1n on a production Linux server.
+This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.2.v on a production Linux server under the **Vertical Integration Architecture**.
 
 ---
 
@@ -8,7 +8,14 @@ This guide details the procedures for installing, maintaining, and upgrading the
 
 - **OS:** Ubuntu 22.04 LTS or 24.04 LTS (Debian 12+ also supported)
 - **Hardware (Minimum for Production):** 2 vCPUs, 2 GB RAM, 10–25 GB SSD (edge); 4+ vCPUs, 8 GB RAM, 50 GB+ NVMe (large scale).
-- **Dependencies:** PostgreSQL 14+ with TimescaleDB, Redis 6+ (for Memory Acceleration & Flow Stream buffer), Node.js 18+, Python 3.10+, Nginx.
+- **Core Dependencies:**
+  - **PostgreSQL 14+ with TimescaleDB**
+  - **Python 3.10+** (with virtual environment)
+  - **Node.js 18+ & npm** (for frontend asset compilation)
+  - **Nginx** (reverse proxy & TLS termination)
+  - **Linux `/dev/shm`** (standard in-RAM POSIX shared memory for FastStore SQLite WAL)
+- **Zero External Daemons:** `redis-server` is **NOT** required. FastStore runs entirely in-process in `/dev/shm`.
+- **Zero Heavy C-Libraries:** `libpango-1.0-0`, `libcairo2`, and `pypdf` are **NOT** required. PDF reports are emitted directly by `app.core.pdf`.
 - **Time Synchronization & Timezone:** Accurate system clock via NTP (`systemd-timesyncd` or `chrony`) and server timezone configured to match the operational region. Critical for TimescaleDB telemetry partitioning, RTT graph rendering, flow rollup boundaries, and SLA calculations.
 - **Network Permissions:** The `ephemres-engine` daemon requires `CAP_NET_RAW` capability to send raw ICMP packets. `ephemres-flowd` binds UDP 2055 and UDP 4739.
 
@@ -38,28 +45,29 @@ The initial installation is fully automated via `install.sh`:
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/ephemres.git
+git clone -b v3.3.2v https://github.com/dc8official/ephemres.git
 cd ephemres/deploy
 ./install.sh
 ```
 
 **What the installer executes:**
-1. Installs system packages: `python3-pip`, `postgresql`, `timescaledb`, `redis-server`, `nginx`, `traceroute`, `libcap2-bin`.
-2. Creates dedicated system user `ephemres` and virtual environment at `/opt/ephemres/venv`.
+1. Installs minimal system packages: `python3-pip`, `postgresql-16`, `timescaledb-2-postgresql-16`, `nginx`, `traceroute`, `libcap2-bin`, `nodejs`.
+2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
-4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.1n defaults (including `[flow]` telemetry configuration).
-5. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
-6. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `redis-server`, `nginx`).
+4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
+5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`).
+6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
+7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
 ---
 
-## 3. Upgrading to Version 3.3.1n (Zero Historical Data Loss)
+## 3. Upgrading to Version 3.3.2.v (Zero Historical Data Loss)
 
-To perform an in-place upgrade to v3.3.1n:
+To perform an in-place upgrade to v3.3.2.v:
 
 ```bash
 cd ~/ephemres
-git pull origin v3.3.1n
+git pull origin v3.3.2v
 sudo ./deploy/upgrade.sh
 ```
 
@@ -67,51 +75,81 @@ sudo ./deploy/upgrade.sh
 
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
-2. **System Dependencies & Redis**: Installs missing packages (`redis-server`, `traceroute`, `libcap2-bin`, verifies Python package `httpx>=0.27.0`) and ensures Redis is enabled and started (`systemctl enable --now redis-server`).
+2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
 3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
-4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, `[redis]`, `[alerting]`, and `[flow]` sections).
+4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.2.v defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
-6. **Code & Dependency Sync**: Pulls latest codebase, updates Python dependencies, and compiles frontend assets.
-7. **Forward Alembic Migrations**: Runs `alembic upgrade head` to apply all database migrations while preserving all historical TimescaleDB chunks.
-8. **Unit Refresh & Daemon Restart**: Refreshes `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `ephemres-api`, `ephemres-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `ephemres-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
+6. **Code & Dependency Sync**: Pulls latest codebase, cleans obsolete dependencies from the virtual environment, installs minimal requirements (`uvicorn`, `asyncpg`), and compiles frontend assets.
+7. **Native Async Migrations**: Runs `python3 -m app.core.migrator upgrade head` to apply all database revisions while preserving all historical TimescaleDB hypertable data.
+8. **Unit Refresh & Daemon Restart**: Refreshes `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `ephemres-api`, `ephemres-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `ephemres-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
 9. **Health Verification**: Verifies API health and version endpoints (`/api/v1/version`).
 
 ---
 
-## 4. Disaster Recovery & Backup Restoration
+## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` $\rightarrow$ `v3.3.2v+`)
 
-For complete database restoration procedures from timestamped backups, refer to the **[Disaster Recovery & Database Restoration Runbook](deploy/RESTORE.md)**.
+Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s`, `v3.3.0`, `v3.3.1n`, or `v3.3.2v+`:
 
-Quick restore summary:
 ```bash
-sudo systemctl stop ephemres-flowd ephemres-engine ephemres-api
-set -a && source /etc/ephemres/ephemres.env && set +a
-PGPASSWORD="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD}}" psql -h 127.0.0.1 -U netmon_user -d netmon -f /var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql
-cd /opt/ephemres/backend && /opt/ephemres/venv/bin/alembic upgrade head
-sudo systemctl restart redis-server ephemres-api ephemres-engine ephemres-flowd nginx
+# Interactive restore (prompts for a new Admin password if legacy $argon2id$ hashes are detected)
+sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz
+
+# Non-interactive / automated restore with explicit admin password reset
+sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz \
+  --admin-password 'NewSecureAdminPassword123!'
 ```
+
+See [`deploy/RESTORE.md`](../deploy/RESTORE.md) for full details on cross-version column reconciliation, TimescaleDB chunk remapping, and `SECRET_KEY` migration.
 
 ---
 
 ## 5. Storage Driver & Flow Configuration
 
-In `/etc/ephemres/config.toml`:
+Ephemres configuration is declared in `/etc/ephemres/config.toml`:
 
 ```toml
+[database]
+host = "localhost"
+port = 5432
+name = "netmon"
+user = "netmon_user"
+
+[monitoring]
+interval_seconds = 60
+ping_count = 5
+ping_interval_seconds = 8
+state_confirmation_cycles = 3
+retention_days = 730
+
+[api]
+host = "127.0.0.1"
+port = 8000
+allowed_origins = ["https://monitor.yourdomain.com"]
+
+[security]
+session_timeout_minutes = 120
+max_active_sessions_per_user = 2
+hsts_enabled = true
+
 [redis]
+# FastStore shared-memory configuration (in-RAM /dev/shm)
 host = "127.0.0.1"
 port = 6379
 db = 0
 enabled = true
-performance_mode = false  # Set to true for Redis in-memory acceleration
+performance_mode = false
 
 [flow]
-enabled = true
+enabled = false
 netflow_port = 2055
 ipfix_port = 4739
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
 ```
+
+> [!NOTE]
+> **Performance Mode Toggling**:
+> **Performance Mode** (switching between Standard PostgreSQL Mode and high-velocity FastStore `/dev/shm` shared-memory streaming) is managed live from the **Admin Settings UI $\rightarrow$ Performance & Telemetry** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
 
 ---
 
@@ -119,7 +157,7 @@ buffer_memory_limit_mb = 512
 
 ```bash
 # Check service status across all daemons
-sudo systemctl status ephemres-api ephemres-engine ephemres-flowd redis-server
+sudo systemctl status ephemres-api ephemres-engine ephemres-flowd nginx
 
 # Live stream API server logs
 sudo journalctl -u ephemres-api -f
@@ -180,11 +218,11 @@ source /opt/ephemres/venv/bin/activate
 export PYTHONPATH=/opt/ephemres:/opt/ephemres/backend
 
 # Inspect pending migrations
-alembic current
-alembic heads
+python3 -m app.core.migrator current
+python3 -m app.core.migrator heads
 
 # Apply pending migrations
-alembic upgrade head
+python3 -m app.core.migrator upgrade head
 
 # Verify table and hypertable creation in PostgreSQL
 sudo -u postgres psql -d netmon -c "\dt flow*"

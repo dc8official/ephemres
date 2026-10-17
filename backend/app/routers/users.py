@@ -4,8 +4,8 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.asgi import APIRouter, Depends, HTTPException
+from app.core.orm import AsyncSession
 
 from app.database import get_db
 from app.repositories.auth_repo import AuthRepository

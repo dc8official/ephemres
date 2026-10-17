@@ -370,7 +370,7 @@
         </div> <!-- End Tab 1: ICMP -->
 
         <!-- Tab 2: Bandwidth & Flow Telemetry Panel -->
-        <div v-show="activePerspective === 'flow'" id="panel-flow" role="tabpanel" aria-labelledby="tab-flow" class="flow-panel-container">
+        <div v-if="activePerspective === 'flow'" id="panel-flow" role="tabpanel" aria-labelledby="tab-flow" class="flow-panel-container">
           <!-- Flow Telemetry Header & Mode Switcher -->
           <div class="toolbar-card">
             <div class="toolbar-left">
@@ -798,7 +798,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getTopTalkers, getInterfaceTelemetry, updateEndpointInterfaces } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
@@ -847,10 +847,10 @@ const activePerspective = ref('icmp')
 const flowMode = ref('exporter')
 const flowWindow = ref('1h')
 const loadingFlow = ref(false)
-const flowSeriesPoints = ref([])
-const nodeConversations = ref([])
+const flowSeriesPoints = shallowRef([])
+const nodeConversations = shallowRef([])
 
-const interfaceTelemetry = ref([])
+const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
 const showInterfaceModal = ref(false)
 const savingInterfaces = ref(false)
@@ -935,6 +935,8 @@ const flowChartData = computed(() => {
 const flowChartOptions = {
   responsive: true,
   maintainAspectRatio: false,
+  animation: false,
+  normalized: true,
   scales: {
     x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
     y: {
@@ -1088,49 +1090,75 @@ async function saveInterfaces() {
   }
 }
 
+const events = shallowRef([])
+
+const indexedEvents = computed(() => {
+  const nowMs = Date.now()
+  return events.value.map((ev) => ({
+    raw: ev,
+    startMs: Date.parse(ev.start_time) || 0,
+    endMs: ev.end_time ? (Date.parse(ev.end_time) || nowMs) : nowMs,
+  }))
+})
+
+const chartEvents = computed(() => {
+  return [...indexedEvents.value]
+    .sort((a, b) => a.startMs - b.startMs)
+    .map((item) => item.raw)
+})
+
+const sortedEvents = computed(() => {
+  return [...indexedEvents.value]
+    .sort((a, b) => b.startMs - a.startMs)
+    .map((item) => item.raw)
+})
+
 const correlatedChartData = computed(() => {
-  const labels = flowSeriesPoints.value.map((p) => {
-    const d = new Date(p.timestamp)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  })
+  const points = flowSeriesPoints.value
+  const labels = new Array(points.length)
+  const inData = new Array(points.length)
+  const outData = new Array(points.length)
+  const rttData = new Array(points.length)
 
-  const rttData = flowSeriesPoints.value.map((p) => {
-    const pTime = new Date(p.timestamp).getTime()
+  // Pre-sorted RTT intervals: O(M log M) once per computation
+  const rttIntervals = indexedEvents.value
+    .filter((item) => item.raw.avg_rtt_ms != null)
+    .sort((a, b) => a.startMs - b.startMs)
+
+  const fallbackRtt = endpoint.value?.avg_rtt_ms != null ? Number(endpoint.value.avg_rtt_ms) : 0
+  const mLen = rttIntervals.length
+  let cursor = 0
+
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]
+    const pTime = Date.parse(p.timestamp) || 0
+    const d = new Date(pTime)
+    labels[i] = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    inData[i] = p.ingress_bps
+    outData[i] = p.egress_bps
+
     let closestRtt = null
-
-    if (chartEvents.value && chartEvents.value.length > 0) {
-      // 1. Check if bucket timestamp falls inside an active incident event interval
-      const containing = chartEvents.value.find((ev) => {
-        const evStart = new Date(ev.start_time).getTime()
-        const evEnd = ev.end_time ? new Date(ev.end_time).getTime() : Date.now()
-        return pTime >= evStart && pTime <= evEnd && ev.avg_rtt_ms != null
-      })
-      if (containing) {
-        closestRtt = containing.avg_rtt_ms
+    if (mLen > 0) {
+      while (cursor + 1 < mLen && rttIntervals[cursor].endMs < pTime) {
+        cursor++
+      }
+      const cur = rttIntervals[cursor]
+      if (pTime >= cur.startMs && pTime <= cur.endMs) {
+        closestRtt = cur.raw.avg_rtt_ms
       } else {
-        // 2. Nearest event with recorded latency
-        let minDiff = Infinity
-        for (const ev of chartEvents.value) {
-          if (ev.avg_rtt_ms != null) {
-            const evStart = new Date(ev.start_time).getTime()
-            const evEnd = ev.end_time ? new Date(ev.end_time).getTime() : Date.now()
-            const diff = pTime < evStart ? evStart - pTime : (pTime > evEnd ? pTime - evEnd : 0)
-            if (diff < minDiff) {
-              minDiff = diff
-              closestRtt = ev.avg_rtt_ms
-            }
-          }
+        const distCur = pTime < cur.startMs ? cur.startMs - pTime : pTime - cur.endMs
+        if (cursor > 0) {
+          const prev = rttIntervals[cursor - 1]
+          const distPrev = pTime < prev.startMs ? prev.startMs - pTime : pTime - prev.endMs
+          closestRtt = distPrev <= distCur ? prev.raw.avg_rtt_ms : cur.raw.avg_rtt_ms
+        } else {
+          closestRtt = cur.raw.avg_rtt_ms
         }
       }
     }
-
-    // 3. Fall back to current endpoint average latency so the graph never drops to a dead flat 0
-    if (closestRtt == null && endpoint.value?.avg_rtt_ms != null) {
-      closestRtt = endpoint.value.avg_rtt_ms
-    }
-
-    return closestRtt !== null ? Number(Number(closestRtt).toFixed(1)) : 0
-  })
+    const resolved = closestRtt ?? fallbackRtt
+    rttData[i] = Number(Number(resolved).toFixed(1))
+  }
 
   const matched = selectedCorrelatedInterfaceIdx.value !== null
     ? interfaceTelemetry.value?.find(i => i.interface_idx === selectedCorrelatedInterfaceIdx.value)
@@ -1151,11 +1179,11 @@ const correlatedChartData = computed(() => {
         borderWidth: 2,
         yAxisID: 'y_rtt',
         tension: 0.2,
-        pointRadius: 2,
+        pointRadius: points.length > 100 ? 0 : 2,
       },
       {
         label: inLabel,
-        data: flowSeriesPoints.value.map((p) => p.ingress_bps),
+        data: inData,
         borderColor: '#10b981',
         backgroundColor: 'rgba(16, 185, 129, 0.15)',
         borderWidth: 2,
@@ -1166,7 +1194,7 @@ const correlatedChartData = computed(() => {
       },
       {
         label: outLabel,
-        data: flowSeriesPoints.value.map((p) => p.egress_bps),
+        data: outData,
         borderColor: '#0ea5e9',
         backgroundColor: 'rgba(14, 165, 233, 0.15)',
         borderWidth: 2,
@@ -1182,6 +1210,8 @@ const correlatedChartData = computed(() => {
 const correlatedChartOptions = {
   responsive: true,
   maintainAspectRatio: false,
+  animation: false,
+  normalized: true,
   scales: {
     x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
     y_rtt: {
@@ -1310,8 +1340,6 @@ async function triggerDiscovery() {
 }
 const endpoint = ref(null)
 const uptimeReport = ref(null)
-const events = ref([])
-const chartEvents = computed(() => [...events.value].sort((a, b) => new Date(a.start_time) - new Date(b.start_time)))
 const loading = ref(true)
 const error = ref(null)
 
@@ -1349,10 +1377,6 @@ const customEndDate = ref(getLocalISOString(new Date()))
 // Detailed date strings for timeline component
 const periodStartStr = ref('')
 const periodEndStr = ref('')
-
-const sortedEvents = computed(() => {
-  return [...events.value].sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
-})
 
 const setRange = (range) => {
   filterRange.value = range
@@ -1526,14 +1550,19 @@ onMounted(() => {
     }
   }, 60000)
 
-  unsubscribeSSE = subscribe((event) => {
-    if (event?.type === 'NODE_STATE_CHANGE' && event?.data?.endpoint_id === endpointId) {
-      if (endpoint.value && event.data.avg_rtt_ms != null) {
-        endpoint.value.avg_rtt_ms = event.data.avg_rtt_ms
+  unsubscribeSSE = subscribe((rawEvent) => {
+    try {
+      const event = typeof rawEvent?.data === 'string' ? JSON.parse(rawEvent.data) : rawEvent
+      if (event?.type === 'NODE_STATE_CHANGE' && event?.data?.endpoint_id === endpointId) {
+        if (endpoint.value && event.data.avg_rtt_ms != null) {
+          endpoint.value.avg_rtt_ms = event.data.avg_rtt_ms
+        }
+        if (activePerspective.value === 'flow') {
+          loadFlowTelemetry()
+        }
       }
-      if (activePerspective.value === 'flow') {
-        loadFlowTelemetry()
-      }
+    } catch (e) {
+      // Ignore malformed SSE heartbeats
     }
   })
 })

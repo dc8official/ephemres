@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import case, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import case, func, or_, select
+from app.core.orm import AsyncSession
 
 from app.models.endpoint_event import EndpointEvent
 from app.schemas.reports import IncidentRecord

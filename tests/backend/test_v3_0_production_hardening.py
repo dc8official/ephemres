@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import HTTPException
+from app.core.asgi import HTTPException
 
 from app.database import get_db
 from app.main import app
@@ -347,7 +347,7 @@ class TestPhase5SettingsAPI(unittest.TestCase):
         mock_addr.address = "10.10.0.1"
         mock_addr.netmask = "255.255.0.0"
 
-        with patch("psutil.net_if_addrs", return_value={"eth0": [mock_addr]}):
+        with patch("app.services.diagnostics.get_net_if_addrs", return_value={"eth0": [mock_addr]}):
             # Same /16 subnet
             self.assertTrue(is_local_subnet_destination("10.10.5.25"))
             # Outside /16 subnet

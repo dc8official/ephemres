@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Ephemres Network Monitoring Platform v3.3.1n - Automated Upgrade Utility
+# Ephemres Network Monitoring Platform v3.3.2.v - Automated Upgrade Utility
 # ==============================================================================
 
 set -euo pipefail
@@ -30,7 +30,7 @@ if [[ ${EUID} -ne 0 && ${DRY_RUN} -eq 0 ]]; then
 fi
 
 echo -e "${BLUE}========================================================================${NC}"
-echo -e "${BLUE}    Ephemres Network Monitoring Platform v3.3.1n - Upgrade Utility      ${NC}"
+echo -e "${BLUE}    Ephemres Network Monitoring Platform v3.3.2.v - Upgrade Utility      ${NC}"
 echo -e "${BLUE}========================================================================${NC}"
 
 # Resolve Script and Project Root Directory
@@ -38,9 +38,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INSTALL_DIR="/opt/ephemres"
 REPO_URL="${EPHEMRES_REPO_URL:-https://github.com/dc8official/ephemres.git}"
-# Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.1n)
+# Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.2v)
 CURRENT_GIT_BRANCH="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.1n}}"
+UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.2v}}"
 
 # 3. Read Configuration Values
 ENV_FILE=""
@@ -158,18 +158,18 @@ if [[ ${DRY_RUN} -eq 0 && -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]]; then
         echo -e "${GREEN}[INFO] Added max_active_sessions_per_user = 2 to [security].${NC}"
     fi
 
-    # Add [redis] section if missing
-    if ! grep -q "\[redis\]" "${CONFIG_FILE}"; then
+    # Add [faststore] section if missing
+    if ! grep -q "\[faststore\]" "${CONFIG_FILE}" && ! grep -q "\[redis\]" "${CONFIG_FILE}"; then
         cat << 'EOF' >> "${CONFIG_FILE}"
 
-[redis]
+[faststore]
 host = "127.0.0.1"
 port = 6379
 db = 0
 enabled = true
 performance_mode = false
 EOF
-        echo -e "${GREEN}[INFO] Appended [redis] storage driver section to ${CONFIG_FILE}.${NC}"
+        echo -e "${GREEN}[INFO] Appended [faststore] storage driver section to ${CONFIG_FILE}.${NC}"
     fi
 
     # Add [flow] section if missing (Network Flow Telemetry)
@@ -236,9 +236,9 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         useradd -r -s /usr/sbin/nologin ephemres || true
     fi
 
-    # Ensure system dependencies (git, redis-server, traceroute, libcap2-bin)
+    # Ensure system dependencies (git, traceroute, libcap2-bin, rsync)
     if command -v apt-get &>/dev/null; then
-        PACKAGES_TO_CHECK="git redis-server traceroute libcap2-bin rsync libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0"
+        PACKAGES_TO_CHECK="git traceroute libcap2-bin rsync"
         MISSING_PKGS=""
         for pkg in ${PACKAGES_TO_CHECK}; do
             if ! dpkg -l "${pkg}" 2>/dev/null | grep -q "^ii"; then
@@ -250,9 +250,6 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
             echo -e "${GREEN}[INFO] Installing missing system packages:${MISSING_PKGS}...${NC}"
             apt-get update -qq && apt-get install -y ${MISSING_PKGS} || true
         fi
-
-        # Enable and start Redis
-        systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis 2>/dev/null || true
 
         # Set network capabilities for raw ICMP traceroute
         TRACEROUTE_BIN=$(command -v traceroute || true)
@@ -267,16 +264,16 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         cd "${PROJECT_ROOT}"
         git config --global --add safe.directory "${PROJECT_ROOT}" 2>/dev/null || true
         git fetch --all --tags --prune || true
-        git checkout "${UPGRADE_BRANCH}" 2>/dev/null || git checkout v3.3.1n 2>/dev/null || git checkout v3.3.0 2>/dev/null || true
-        git pull origin "${UPGRADE_BRANCH}" 2>/dev/null || git pull origin v3.3.1n 2>/dev/null || git pull origin v3.3.0 2>/dev/null || git pull || echo -e "${YELLOW}[WARN] Git pull finished with non-zero exit code. Proceeding with existing files.${NC}"
+        git checkout "${UPGRADE_BRANCH}" 2>/dev/null || git checkout v3.3.2v 2>/dev/null || git checkout v3.3.1n 2>/dev/null || true
+        git pull origin "${UPGRADE_BRANCH}" 2>/dev/null || git pull origin v3.3.2v 2>/dev/null || git pull origin v3.3.1n 2>/dev/null || git pull || echo -e "${YELLOW}[WARN] Git pull finished with non-zero exit code. Proceeding with existing files.${NC}"
         SOURCE_DIR="${PROJECT_ROOT}"
     # Case B: Running from /opt/ephemres or non-git directory -> clone directly from remote
     else
         echo -e "${GREEN}[INFO] Staging fresh release from ${REPO_URL} (branch: ${UPGRADE_BRANCH})...${NC}"
         rm -rf "${STAGE_DIR}"
         if git clone --depth 1 --branch "${UPGRADE_BRANCH}" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
+           git clone --depth 1 --branch "v3.3.2v" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
            git clone --depth 1 --branch "v3.3.1n" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 --branch "v3.3.0" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
            git clone --depth 1 "${REPO_URL}" "${STAGE_DIR}"; then
             echo -e "${GREEN}[SUCCESS] Downloaded latest codebase into staging directory.${NC}"
             SOURCE_DIR="${STAGE_DIR}"
@@ -303,7 +300,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         fi
     fi
 else
-    echo -e "[DRY-RUN] Would fetch latest code from ${REPO_URL} (${UPGRADE_BRANCH}), build Vue 3 frontend, and ensure system packages (redis-server, traceroute, libcap2-bin)"
+    echo -e "[DRY-RUN] Would fetch latest code from ${REPO_URL} (${UPGRADE_BRANCH}), build Vue 3 frontend, and ensure system packages (traceroute, libcap2-bin)"
 fi
 
 # 7. Synchronize Production Files to Target Directory
@@ -367,25 +364,29 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
 
     # Database Schema Migrations
     cd "${INSTALL_DIR}/backend"
-    ALEMBIC_BIN=""
-    if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/alembic" ]]; then
-        ALEMBIC_BIN="${VENV_PATH}/bin/alembic"
-    elif [[ -f "/opt/ephemres/venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="/opt/ephemres/venv/bin/alembic"
-    elif [[ -f "/opt/netmon/venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="/opt/netmon/venv/bin/alembic"
-    elif [[ -f "${PROJECT_ROOT}/.venv/bin/alembic" ]]; then
-        ALEMBIC_BIN="${PROJECT_ROOT}/.venv/bin/alembic"
+    PYTHON_BIN=""
+    if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/python3" ]]; then
+        PYTHON_BIN="${VENV_PATH}/bin/python3"
+    elif [[ -f "/opt/ephemres/venv/bin/python3" ]]; then
+        PYTHON_BIN="/opt/ephemres/venv/bin/python3"
+    elif [[ -f "/opt/netmon/venv/bin/python3" ]]; then
+        PYTHON_BIN="/opt/netmon/venv/bin/python3"
+    elif [[ -f "${PROJECT_ROOT}/.venv/bin/python3" ]]; then
+        PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python3"
     fi
 
-    if [[ -d "${INSTALL_DIR}/backend/migrations" && -n "${ALEMBIC_BIN}" ]]; then
-        echo -e "${GREEN}[INFO] Running Alembic schema migration (alembic upgrade head)...${NC}"
+    MIGRATOR_CMD=()
+    if [[ -n "${PYTHON_BIN}" && -x "${PYTHON_BIN}" ]]; then
+        MIGRATOR_CMD=("${PYTHON_BIN}" "-m" "app.core.migrator")
+    fi
+
+    if [[ -d "${INSTALL_DIR}/backend/migrations" && ${#MIGRATOR_CMD[@]} -gt 0 ]]; then
+        echo -e "${GREEN}[INFO] Running native schema migration (app.core.migrator upgrade head)...${NC}"
         export EPHEMRES_DB_PASSWORD="${DB_PASS}"
         export NETMON_DB_PASSWORD="${DB_PASS}"
-        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${ALEMBIC_BIN}" -c "${INSTALL_DIR}/backend/alembic.ini" upgrade head
+        PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${MIGRATOR_CMD[@]}" upgrade head
         
-        PYTHON_BIN="$(dirname "${ALEMBIC_BIN}")/python"
-        if [[ -f "${PYTHON_BIN}" ]]; then
+        if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
             PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin || true
         fi
@@ -415,7 +416,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         fi
     fi
 else
-    echo -e "[DRY-RUN] Would upgrade pip dependencies, compile Vue 3 assets, execute alembic upgrade head, and apply TimescaleDB decompression tuning"
+    echo -e "[DRY-RUN] Would upgrade pip dependencies, compile Vue 3 assets, execute app.core.migrator upgrade head, and apply TimescaleDB decompression tuning"
 fi
 
 # 9. Service Unit Refresh, Auto-Start Enablement & Restart
@@ -444,7 +445,6 @@ EOF
 
     echo -e "${GREEN}[INFO] Reloading systemd daemons and enabling auto-start on boot...${NC}"
     systemctl daemon-reload
-    systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis 2>/dev/null || true
     systemctl enable ephemres-api ephemres-engine || true
     systemctl restart ephemres-api ephemres-engine
     systemctl restart nginx || true
@@ -483,10 +483,10 @@ EOF
         echo -e "${YELLOW}[WARN] Check service status via: systemctl status ephemres-api ephemres-engine${NC}"
     fi
 else
-    echo -e "[DRY-RUN] Would run: systemctl enable & restart redis-server ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
+    echo -e "[DRY-RUN] Would run: systemctl enable & restart ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"
-echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.1n Platform upgraded successfully!   ${NC}"
+echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.2.v Platform upgraded successfully!   ${NC}"
 echo -e "${GREEN}   Pre-Upgrade Database Backup Saved At: ${BACKUP_FILE}${NC}"
 echo -e "${GREEN}========================================================================${NC}"

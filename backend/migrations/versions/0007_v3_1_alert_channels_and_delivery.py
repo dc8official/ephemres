@@ -6,9 +6,9 @@ Create Date: 2026-09-09 00:00:00.000000
 
 """
 from typing import Sequence, Union
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+from app.core.migrator import op
+from app.core import orm as sa
+from app.core.orm import postgresql
 
 revision: str = "0007"
 down_revision: Union[str, None] = "0006"

@@ -6,9 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from pypdf import PdfReader
+from app.core.asgi import FastAPI
+from app.core.asgi import TestClient
 
 from app.database import get_db
 from app.models.endpoint import Endpoint
@@ -17,7 +16,7 @@ from app.models.system_setting import AppSetting
 from app.routers.auth import get_current_user, require_admin, require_operator_or_admin
 from app.routers.reports import router as reports_router
 from app.routers.settings import router as settings_router
-from app.services.pdf_engine import render_pdf_async, secure_url_fetcher
+from app.core.pdf import NativePdfReader as PdfReader, render_pdf_async, secure_url_fetcher
 from app.services.report_compiler import (
     compile_availability_report_data,
     compile_bandwidth_report_data,
@@ -330,7 +329,7 @@ def test_reports_pdf_rbac_viewer_rejected():
         yield mock_session
 
     async def override_require_operator_or_admin():
-        from fastapi import HTTPException
+        from app.core.asgi import HTTPException
         if mock_viewer["role"].upper() not in ("ADMIN", "OPERATOR"):
             raise HTTPException(status_code=403, detail="Operator or Administrator role required.")
         return mock_viewer

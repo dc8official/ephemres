@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Any, Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select, update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from app.core.orm import func, select, update as sa_update
+from app.core.orm import AsyncSession
+from app.core.orm import joinedload
 
 from app.models.audit_log import AuditLog
 from app.models.user import Role, User

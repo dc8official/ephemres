@@ -1,3 +1,9 @@
+"""Ephemres Network Monitoring Platform — Domain Models Package.
+
+This package exports all Native Declarative ORM Models (app.core.orm.DeclarativeBase)
+representing the platform's relational and TimescaleDB hypertable schemas.
+"""
+
 from app.models.alert_channel import AlertChannel
 from app.models.alert_delivery_log import AlertDeliveryLog
 from app.models.audit_log import AuditLog

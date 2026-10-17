@@ -8,7 +8,7 @@ import pytest
 
 from app.config import ApiSettings, Settings, load_settings
 from app.services.auth_service import generate_readable_password
-from app.services.crypto_service import (
+from app.core.crypto import (
     DecryptionError,
     decrypt_secret,
     encrypt_secret,

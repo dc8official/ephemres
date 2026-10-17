@@ -5,8 +5,8 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from app.core.asgi import APIRouter, Depends, Request
+from app.core.asgi import StreamingResponse
 
 from app.routers.auth import get_current_user_sse
 from app.services.driver_manager import driver_manager
@@ -44,7 +44,7 @@ async def sse_event_generator(request: Request) -> AsyncGenerator[str, None]:
 
     try:
         # Initial greeting event
-        init_payload = json.dumps({"type": "CONNECTED", "message": "Ephemres v3.3.1n SSE stream established."})
+        init_payload = json.dumps({"type": "CONNECTED", "message": "Ephemres v3.3.2.v SSE stream established."})
         yield f"data: {init_payload}\n\n"
 
         while True:

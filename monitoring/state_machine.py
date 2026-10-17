@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import text
+from app.core.orm import AsyncSession
 
 from monitoring.ping import PingResult, classify_ping_result
 

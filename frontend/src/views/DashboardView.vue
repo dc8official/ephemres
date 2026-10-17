@@ -143,7 +143,7 @@
           :key="ep.id"
           :endpoint="ep"
           :isAdmin="isAdmin"
-          :selected="selectedIds.includes(ep.id)"
+          :selected="selectedIdSet.has(ep.id)"
           @select="navigateTo"
           @toggle-select="toggleEndpointSelect"
           @inspect="openInspector"
@@ -198,13 +198,13 @@
                 v-for="ep in sortedEndpoints" 
                 :key="ep.id"
                 class="clickable-row"
-                :class="{ 'row-selected': selectedIds.includes(ep.id) }"
+                :class="{ 'row-selected': selectedIdSet.has(ep.id) }"
                 @click="navigateTo(ep.id)"
               >
                 <td @click.stop>
                   <input 
                     type="checkbox" 
-                    :checked="selectedIds.includes(ep.id)" 
+                    :checked="selectedIdSet.has(ep.id)" 
                     @change="toggleEndpointSelect(ep.id)"
                     aria-label="Select endpoint" 
                   />
@@ -383,9 +383,17 @@ const endpoints = ref([])
 const loading = ref(false)
 const error = ref(null)
 const lastRefreshed = ref(null)
-const { sseConnected, subscribe, onReconnect } = useSSE()
+const { sseConnected, subscribeBatched, onReconnect } = useSSE()
 let unsubscribeSSE = null
 let unsubscribeReconnect = null
+
+const endpointMap = computed(() => {
+  const map = new Map()
+  for (const ep of endpoints.value) {
+    map.set(ep.id, ep)
+  }
+  return map
+})
 
 const inspectorVisible = ref(false)
 const inspectedEndpoint = ref(null)
@@ -432,6 +440,7 @@ const sortKey = ref('hostname')
 const sortAsc = ref(true)
 
 const selectedIds = ref([])
+const selectedIdSet = computed(() => new Set(selectedIds.value))
 const exporting = ref(false)
 
 // Form states
@@ -490,37 +499,38 @@ const filteredEndpoints = computed(() => {
 })
 
 const sortedEndpoints = computed(() => {
-  const list = [...filteredEndpoints.value]
-  list.sort((a, b) => {
-    let valA = a[sortKey.value]
-    let valB = b[sortKey.value]
-
-    if (sortKey.value === 'detailed_state') {
-      valA = a.current_detailed_state || a.current_operational_state || a.endpoint_status || ''
-      valB = b.current_detailed_state || b.current_operational_state || b.endpoint_status || ''
-    } else if (sortKey.value === 'avg_rtt_ms') {
-      valA = a.avg_rtt_ms ?? (a.current_state?.avg_rtt_ms ?? 99999)
-      valB = b.avg_rtt_ms ?? (b.current_state?.avg_rtt_ms ?? 99999)
-    } else if (sortKey.value === 'packet_loss_pct') {
-      valA = a.failed_count ?? (a.current_state?.failed_count ?? 0)
-      valB = b.failed_count ?? (b.current_state?.failed_count ?? 0)
-    } else if (sortKey.value === 'uptime_pct') {
-      valA = parseFloat(a.uptime_percentage_24h) || 100
-      valB = parseFloat(b.uptime_percentage_24h) || 100
-    } else if (sortKey.value === 'last_seen') {
-      valA = a.last_seen ? new Date(a.last_seen).getTime() : 0
-      valB = b.last_seen ? new Date(b.last_seen).getTime() : 0
+  const key = sortKey.value
+  const asc = sortAsc.value ? 1 : -1
+  const decorated = filteredEndpoints.value.map((ep) => {
+    let sortVal
+    if (key === 'detailed_state') {
+      sortVal = ep.current_detailed_state || ep.current_operational_state || ep.endpoint_status || ''
+    } else if (key === 'avg_rtt_ms') {
+      sortVal = ep.avg_rtt_ms ?? (ep.current_state?.avg_rtt_ms ?? 99999)
+    } else if (key === 'packet_loss_pct') {
+      sortVal = ep.failed_count ?? (ep.current_state?.failed_count ?? 0)
+    } else if (key === 'uptime_pct') {
+      sortVal = parseFloat(ep.uptime_percentage_24h) || 100
+    } else if (key === 'last_seen') {
+      sortVal = ep.last_seen ? (Date.parse(ep.last_seen) || 0) : 0
+    } else {
+      sortVal = ep[key] ?? ''
     }
+    return { ep, sortVal }
+  })
 
-    if (valA < valB) return sortAsc.value ? -1 : 1
-    if (valA > valB) return sortAsc.value ? 1 : -1
+  decorated.sort((a, b) => {
+    if (a.sortVal < b.sortVal) return -1 * asc
+    if (a.sortVal > b.sortVal) return 1 * asc
     return 0
   })
-  return list
+
+  return decorated.map((d) => d.ep)
 })
 
 const isAllSelected = computed(() => {
-  return filteredEndpoints.value.length > 0 && filteredEndpoints.value.every(ep => selectedIds.value.includes(ep.id))
+  const set = selectedIdSet.value
+  return filteredEndpoints.value.length > 0 && filteredEndpoints.value.every(ep => set.has(ep.id))
 })
 
 const toggleSelectAll = () => {
@@ -727,28 +737,31 @@ const executeDeleteEndpoint = async () => {
 }
 
 function initSSE() {
-  unsubscribeSSE = subscribe((event) => {
-    if (!event.data) return
-    try {
-      const payload = JSON.parse(event.data)
-      if (payload.type === 'STATE_TRANSITION' && payload.endpoint_id) {
-        const ep = endpoints.value.find(e => e.id === payload.endpoint_id)
-        if (ep) {
-          ep.current_operational_state = payload.operational_state
-          ep.current_detailed_state = payload.detailed_state
-          ep.avg_rtt_ms = payload.avg_rtt_ms
-          ep.current_health_score = payload.health_score
-          ep.current_state = {
-            ...ep.current_state,
-            operational_state: payload.operational_state,
-            detailed_state: payload.detailed_state,
-            avg_rtt_ms: payload.avg_rtt_ms,
-            health_score: payload.health_score,
-          }
+  unsubscribeSSE = subscribeBatched((batch) => {
+    const latestByEndpoint = new Map()
+    for (const payload of batch) {
+      if (payload?.type === 'STATE_TRANSITION' && payload.endpoint_id) {
+        latestByEndpoint.set(payload.endpoint_id, payload)
+      }
+    }
+    if (latestByEndpoint.size === 0) return
+
+    const map = endpointMap.value
+    for (const [epId, payload] of latestByEndpoint.entries()) {
+      const ep = map.get(epId)
+      if (ep) {
+        ep.current_operational_state = payload.operational_state
+        ep.current_detailed_state = payload.detailed_state
+        ep.avg_rtt_ms = payload.avg_rtt_ms
+        ep.current_health_score = payload.health_score
+        ep.current_state = {
+          ...ep.current_state,
+          operational_state: payload.operational_state,
+          detailed_state: payload.detailed_state,
+          avg_rtt_ms: payload.avg_rtt_ms,
+          health_score: payload.health_score,
         }
       }
-    } catch (e) {
-      // Heartbeat or non-json comment
     }
   })
 
@@ -1008,6 +1021,11 @@ onUnmounted(() => {
 .font-mono { font-family: var(--font-mono); }
 .font-bold { font-weight: 600; }
 .text-right { text-align: right; }
+
+.clickable-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 44px;
+}
 
 .table-actions {
   display: flex;

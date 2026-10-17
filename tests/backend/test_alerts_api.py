@@ -1,7 +1,7 @@
 import pytest
 from app.routers.alerts import _mask_channel_config, _decrypt_config_dict
 from app.schemas.alerts import AlertChannelCreate, AlertChannelResponse
-from app.services.crypto_service import encrypt_secret
+from app.core.crypto import encrypt_secret
 import json
 
 

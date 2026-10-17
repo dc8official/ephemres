@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from sqlalchemy import text
+from app.core.orm import text
 from app.database import AsyncSessionLocal
 from app.services.auth_service import hash_password
 
@@ -15,36 +15,64 @@ async def seed_admin(password: str = "admin"):
         )
         role_row = role_res.fetchone()
         if not role_row:
-            logger.error("Role 'ADMIN' does not exist in database. Ensure Alembic migrations have run.")
+            logger.error("Role 'ADMIN' does not exist in database. Ensure native database migrations (app.core.migrator) have run.")
             return False
 
         role_id = role_row.id
         hashed = hash_password(password)
 
         existing = await db.execute(
-            text("SELECT id, must_change_password FROM users WHERE username = 'admin' LIMIT 1")
+            text("SELECT id, password_hash, must_change_password FROM users WHERE username = 'admin' LIMIT 1")
         )
-        user_row = existing.fetchone()
+        existing_admin = existing.fetchone()
 
         force_reset = os.environ.get("FORCE_RESET_ADMIN", "").lower() in ("true", "1")
 
-        if user_row:
-            if not user_row.must_change_password and not force_reset:
-                logger.info("Admin user has already set a custom password (must_change_password=FALSE). Preserving user password across upgrade.")
-                return True
+        if existing_admin is not None:
+            pwd_hash = getattr(existing_admin, "password_hash", None)
+            if pwd_hash is None and hasattr(existing_admin, "__getitem__"):
+                pwd_hash = existing_admin["password_hash"]
 
-            await db.execute(
-                text("""
-                    UPDATE users
-                    SET password_hash = :p,
-                        must_change_password = TRUE,
-                        is_active = TRUE,
-                        updated_at = NOW()
-                    WHERE username = 'admin'
-                """),
-                {"p": hashed}
-            )
-            logger.info("Successfully updated initial admin user account (must_change_password=TRUE).")
+            if not str(pwd_hash or "").startswith("$scrypt$"):
+                await db.execute(
+                    text("""
+                        UPDATE users
+                        SET password_hash = :p,
+                            must_change_password = TRUE,
+                            is_active = TRUE,
+                            updated_at = NOW()
+                        WHERE username = 'admin'
+                    """),
+                    {"p": hashed}
+                )
+                await db.commit()
+                print(
+                    "[seed] Upgraded legacy password hash for admin 'admin' "
+                    "to $scrypt$ (must_change_password=True)."
+                )
+                return True
+            else:
+                mcp = getattr(existing_admin, "must_change_password", False)
+                if mcp is None and hasattr(existing_admin, "__getitem__"):
+                    mcp = existing_admin["must_change_password"]
+
+                if force_reset or mcp:
+                    await db.execute(
+                        text("""
+                            UPDATE users
+                            SET password_hash = :p,
+                                must_change_password = TRUE,
+                                is_active = TRUE,
+                                updated_at = NOW()
+                            WHERE username = 'admin'
+                        """),
+                        {"p": hashed}
+                    )
+                    await db.commit()
+                    logger.info("Successfully updated initial admin user account (must_change_password=TRUE).")
+                else:
+                    print("[seed] Admin user 'admin' already exists — skipping.")
+                return True
         else:
             await db.execute(
                 text("""

@@ -4,11 +4,11 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.asgi import EphemresApp, FastAPI, Request, status
+from app.core.asgi import CORSMiddleware
+from app.core.asgi import JSONResponse
+from app.core.orm import text
+from app.core.asgi import BaseHTTPMiddleware
 
 from app.config import settings
 from app.database import AsyncSessionLocal, check_database_connection
@@ -34,7 +34,7 @@ from app.services.diagnostics import (
     start_discovery_worker,
 )
 from app.services.driver_manager import driver_manager
-from app.services.systemd_watchdog import start_systemd_watchdog
+from app.core.watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.topology import topology_manager
 
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     )
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     logger.info(
-        "Ephemres v3.3.1n started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
+        "Ephemres v3.3.2.v started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
     )
     yield
     watchdog_task.cancel()
@@ -90,13 +90,13 @@ async def lifespan(app: FastAPI):
     discovery_task.cancel()
     midnight_task.cancel()
     cleanup_task.cancel()
-    logger.info("Ephemres v3.3.1n platform shutting down cleanly.")
+    logger.info("Ephemres v3.3.2.v platform shutting down cleanly.")
 
 
-app = FastAPI(
+app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
-    version="3.3.1n",
+    version="3.3.2.v",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -213,19 +213,19 @@ app.include_router(telemetry_router)
 @app.get("/api/v1/version", tags=["system"])
 async def get_version():
     return APIResponse.success(
-        data={"version": "3.3.1n", "platform": "Ephemres v3.3.1n"}
+        data={"version": "3.3.2.v", "platform": "Ephemres v3.3.2.v"}
     )
 
 
 @app.get("/api/v1/health", tags=["system"])
 async def health_check():
-    return APIResponse.success(data={"status": "ok", "version": "3.3.1n"})
+    return APIResponse.success(data={"status": "ok", "version": "3.3.2.v"})
 
 
 @app.get("/health/liveness", tags=["system"])
 @app.get("/api/v1/health/liveness", tags=["system"])
 async def health_liveness():
-    return {"status": "ok", "process": "healthy", "version": "3.3.1n"}
+    return {"status": "ok", "process": "healthy", "version": "3.3.2.v"}
 
 
 @app.get("/health/readiness", tags=["system"])
@@ -270,6 +270,6 @@ async def health_readiness():
                 "enabled": settings.redis.enabled,
                 "error": redis_err,
             },
-            "version": "3.3.1n",
+            "version": "3.3.2.v",
         },
     )

@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Any, Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import case, func, or_, select, update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import case, func, or_, select, update as sa_update
+from app.core.orm import AsyncSession
 
 from app.models.diagnostic_trace import EndpointDiagnosticTrace
 from app.models.endpoint import Endpoint

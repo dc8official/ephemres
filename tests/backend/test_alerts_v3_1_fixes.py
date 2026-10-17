@@ -383,7 +383,7 @@ def test_console_url_resolution():
 async def test_create_alert_channel_smtp_ssrf_rejected():
     from app.routers.alerts import create_alert_channel
     from app.schemas.alerts import AlertChannelCreate
-    from fastapi import HTTPException
+    from app.core.asgi import HTTPException
 
     payload = AlertChannelCreate(
         name="Metadata SMTP Exfiltration",
@@ -408,7 +408,7 @@ async def test_update_alert_channel_preserves_masked_header():
     from app.routers.alerts import update_alert_channel, _decrypt_config_dict
     from app.schemas.alerts import AlertChannelUpdate
     from app.models.alert_channel import AlertChannel
-    from app.services.crypto_service import encrypt_secret
+    from app.core.crypto import encrypt_secret
     import json
 
     existing_config = {
@@ -517,7 +517,7 @@ async def test_alert_dispatcher_metadata_enrichment_enables_subnet_filtering():
 def test_pydantic_subnet_filter_validation():
     """Verify that AlertChannelCreate rejects invalid CIDRs and strips valid CIDRs."""
     from app.schemas.alerts import AlertChannelCreate, AlertChannelUpdate
-    from pydantic import ValidationError
+    from app.core.schema import ValidationError
 
     # Invalid CIDR format
     with pytest.raises(ValidationError) as exc_info:
@@ -614,7 +614,7 @@ async def test_test_alert_channel_preserves_masked_header():
     from app.routers.alerts import test_alert_channel
     from app.schemas.alerts import AlertTestRequest
     from app.models.alert_channel import AlertChannel
-    from app.services.crypto_service import encrypt_secret
+    from app.core.crypto import encrypt_secret
     import json
 
     existing_config = {

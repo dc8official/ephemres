@@ -1,12 +1,12 @@
-# Ephemres User & Operator Guide — Version 3.3.1n
+# Ephemres User & Operator Guide — Version 3.3.2.v
 
-Welcome to the Ephemres Network Monitoring Platform v3.3.1n user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet bandwidth telemetry, configure multi-channel enterprise alert notifications, use the CSV report customizer, interpret multi-protocol probes, and manage system settings.
+Welcome to the Ephemres Network Monitoring Platform v3.3.2.v user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet bandwidth telemetry, configure multi-channel enterprise alert notifications, use the CSV report customizer, interpret multi-protocol probes, and manage system settings.
 
 ---
 
 ## 1. Authentication & Session Security
 
-Ephemres v3.3.1n provides enterprise-grade session protection:
+Ephemres v3.3.2.v provides enterprise-grade session protection:
 * **Browser Password Autofill:** The login page supports native browser credential managers (Chrome, Edge, Safari, Firefox, Bitwarden, 1Password) for 1-click authentication.
 * **Sliding 2-Hour Inactivity Timeout:** Sessions slide forward on active requests. If idle for 120 minutes, sessions expire automatically.
 * **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions (managed via FIFO rotation).
@@ -17,7 +17,7 @@ Ephemres v3.3.1n provides enterprise-grade session protection:
 
 ## 2. Real-Time Dashboard Overview (`/`)
 
-The v3.3.0 dashboard provides instantaneous fleet telemetry:
+The v3.3.2.v dashboard provides instantaneous fleet telemetry:
 
 ### Global Network Health KPI Strip
 * **Summary Ribbon:** Displays total monitored devices, count of `🟢 UP`, `🟡 UNSTABLE`, `🔴 DOWN` devices, and the aggregate **Fleet SLA %**.
@@ -62,17 +62,17 @@ Clicking any endpoint opens its detailed forensic view with an accessible perspe
 ## 5. Admin Settings Console (`/settings`)
 
 Administrators can configure platform behavior across five dedicated tabs:
-1. **🔔 Alert Channels:** Master alerting engine on/off switch, alert channel inventory, live diagnostic test triggers, and historical delivery audit logs.
-2. **⚡ Performance & Telemetry:** Storage driver selector (PostgreSQL-Native vs. Redis Acceleration) and dynamic concurrency metrics.
-3. **🌊 Flow Telemetry:** Master NetFlow/IPFIX collection toggle, listening ports (2055, 4739), packet sampling multiplier, and live **Redis Pre-Flight Check** validation.
-4. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session timeouts, and IP lockout thresholds.
-5. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), and credential reset actions.
+1. **🔔 Alert Channels:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
+2. **⚡ Performance & Telemetry:** In-RAM FastStore acceleration toggle (`performance_mode` via `/dev/shm`), live FastStore preflight check, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), sampling rate, and live queue metrics.
+3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session inactivity timeout (minutes), and IP-scoped brute-force lockout threshold.
+4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation.
+5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG, JPEG, SVG up to 2 MB) for branded PDF report generation.
 
 ---
 
 ## 6. Configuring Enterprise Alert Channels
 
-Ephemres v3.3.1n includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
+Ephemres v3.3.2.v includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
 
 ### Microsoft Teams Workflows Setup
 Microsoft Teams supports two integration patterns:
@@ -110,7 +110,7 @@ Always verify channel reachability before saving:
 
 ## 7. Reports, Auditing & Compliance Documentation
 
-Ephemres v3.3.1n provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
+Ephemres v3.3.2.v provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
 
 ### 7.1 CSV Telemetry Export Stream
 Operators and Administrators can export raw or customized time-series telemetry to CSV:
@@ -132,7 +132,7 @@ Generate print-perfect, air-gapped ISO A4 PDF audit documents signed with crypto
 4. **Select Time Window:** Choose from quick presets (**24 Hours**, **7 Days**, **30 Days**) or configure a **Custom Date Range** with UTC start and end bounds.
 5. **Root Cause Analysis (RCA):** Toggle the **Include Root Cause Analysis (RCA)** checkbox to embed diagnostic summaries directly into the outage incident ledger.
 6. Click **Generate PDF Report** to render and download the document.
-   - **Immutability:** The output PDF is compiled with standard permission encryption (`pypdf`), making it read-only and preventing post-export editing.
+   - **Immutability:** The output PDF is compiled directly by the native PDF engine (`app.core.pdf`) with vector formatting, preventing post-export editing.
    - **Integrity Verification:** The server provides a SHA-256 hash in the `X-Report-SHA256` HTTP header for verification without cluttering printed pages.
 
 ### 7.3 Organization Profile & Corporate Report Branding
@@ -149,7 +149,7 @@ Administrators can customize corporate identity settings to brand all compiled P
 
 ## 8. Fleet Bandwidth Monitoring & Flow Analytics (`/bandwidth`)
 
-Ephemres v3.3.1n introduces passive network flow ingestion supporting NetFlow v5, NetFlow v9, and IPFIX along with per-interface telemetry and link utilization tracking. The dedicated `/bandwidth` dashboard provides complete visibility into network traffic volumes, protocol usage, router interfaces, and top communicating entities.
+Ephemres v3.3.2.v introduces passive network flow ingestion supporting NetFlow v5, NetFlow v9, and IPFIX along with per-interface telemetry and link utilization tracking. The dedicated `/bandwidth` dashboard provides complete visibility into network traffic volumes, protocol usage, router interfaces, and top communicating entities.
 
 ### Accessing the Bandwidth Dashboard
 Click the **🌊 Bandwidth** item in the main navigation header or navigate directly to `/bandwidth`.

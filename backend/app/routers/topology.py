@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from app.core.asgi import APIRouter, Depends
 
 from app.database import get_db
 from app.routers.auth import get_current_user, require_admin
@@ -8,7 +8,7 @@ from app.routers.events import broadcast_sse_event
 from app.schemas import APIResponse
 from app.services.baseline_route import enqueue_scheduled_discovery
 from app.services.topology import topology_manager
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import AsyncSession
 
 router = APIRouter(prefix="/topology", tags=["topology"])
 

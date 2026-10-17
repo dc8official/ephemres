@@ -1,6 +1,6 @@
 # Ephemres Security Model, Threat Architecture & Defense Specification
 
-**Document Version:** 3.3.1n  
+**Document Version:** 3.3.2.v  
 **Last Updated:** October 2026  
 **Classification:** Public Security Specification & Threat Model  
 
@@ -22,11 +22,12 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.1n** | Migration & Rebranding Release | **Active / Current Standard** | Production standard with Ephemres rebrand and flattened `/opt/ephemres` tree. |
-| **v3.3.0** | Feature & Ingestion Release | **Frozen Legacy Snapshot** | Frozen snapshot with Flow Exporter & Interface Telemetry. |
-| **v3.1.35s** | Maintenance Release | **Frozen Legacy Snapshot** | Frozen long-term maintenance track. |
-| **<= v3.2.0** | Legacy Release | **Superseded** | Upgrade to v3.3.1n recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to v3.3.1n immediately. |
+| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 13 zero-dependency engines. |
+| **v3.3.0** | Feature & Ingestion Release | **Supported (Frozen Snapshot)** | Supported frozen production snapshot with Flow Exporter & Interface Telemetry. |
+| **v3.1.35s** | Enterprise LTS Release | **Supported (Frozen Snapshot)** | Supported frozen long-term maintenance track. |
+| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.2.v`. |
+| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.2.v` recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.2.v` immediately. |
 
 ---
 
@@ -45,7 +46,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
                        │ (Port 8000)            │ (UDP 2055 / 4739)      │
                        ▼                        ▼                        ▼
               ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-              │   FastAPI Core   │    │ Flow Collector   │    │  Traceroute/ICMP │
+              │ Native ASGI Core │    │ Flow Collector   │    │  Traceroute/ICMP │
               │  (ephemres-api)  │    │ (ephemres-flowd) │    │(ephemres-engine) │
               └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
                        │                       │                       │
@@ -53,20 +54,20 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
                                                │
                                                ▼
                               ┌──────────────────────────────────┐
-                              │  Internal Loopback Services      │
-                              │  PostgreSQL (5432) / Redis (6379)│
+                              │  Internal Loopback & FastStore   │
+                              │  PostgreSQL (5432) / FastStore   │
                               └──────────────────────────────────┘
 ```
 
 | Service Component | Port(s) | Binding Scope | Security Hardening Controls |
 | :--- | :--- | :--- | :--- |
 | **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Enforces TLS 1.2+, HSTS, Content Security Policy, and proxies internal API traffic. |
-| **FastAPI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
+| **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
 | **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
-| **Redis Cache / Broker (Optional)** | `6379` | `127.0.0.1` (Loopback Only) | Internal session, stream buffer & pub/sub broker. Bound to loopback with `protected-mode yes`. |
+| **FastStore IPC** | `/dev/shm/ephemres_faststore_*.sqlite3` | UNIX Filesystem | Shared-memory WAL state store & NetFlow stream buffer (`0600 ephemres:ephemres`, no TCP port exposed). |
 | **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
-| **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `SSRFSafeBackend`. |
+| **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `AsyncHttpClient` SSRF guard. |
 
 ---
 
@@ -78,7 +79,7 @@ Ephemres incorporates **Zero-Trust Socket-Level SSRF Protection** (`SSRFSafeBack
 In standard application architectures, validating a URL before making an HTTP request leaves an exploitable window: an attacker configures a domain with a 0-second TTL that returns a public IP during pre-flight validation, but rebinds to `169.254.169.254` (cloud metadata) or `127.0.0.1` when the HTTP client establishes its TCP connection.
 
 ### B. The Defense: Millisecond-Level Socket Interception & Socket DNS Pinning
-Ephemres's `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` engine, while `monitoring/synthetic.py` implements direct socket DNS pinning:
+Ephemres implements a native zero-dependency HTTP/1.1 client (`app.core.http_client.AsyncHttpClient`) paired with pre-connect DNS resolution and IP validation (`validate_outbound_url` / `is_ip_safe`) that intercepts all outbound webhook and OIDC requests at the socket layer **before** `asyncio.open_connection()` is invoked:
 
 1. **Connection-Time Resolution & Pinning:** Performs an asynchronous DNS resolution immediately prior to opening sockets, and pins physical connections directly to the resolved IP.
 2. **Strict IP Enforcement:** Evaluates all returned addresses against the global routable IP specification:
@@ -97,7 +98,7 @@ Ephemres's `SSRFSafeBackend` wraps the low-level `httpcore.AsyncNetworkBackend` 
 
 ### A. AES-256-GCM Encryption at Rest
 All sensitive configuration attributes stored in PostgreSQL (webhook URLs, SMTP passwords, custom authorization headers) are encrypted at rest using **AES-256-GCM** (Galois/Counter Mode) authenticated encryption:
-* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`ephemres-crypto-v1`).
+* **Key Derivation:** Master keys are derived using **HKDF-SHA256** (RFC 5869) with a domain-separated salt (`ephemres-alert-crypto-salt-v1`, with transparent fallback decryption for legacy `lnmp-alert-crypto-salt-v1` payloads).
 * **Random Initialization Vectors:** Every encrypted value receives a cryptographically secure, unique 12-byte random IV (`os.urandom(12)`).
 * **Cryptographic Tamper Resistance:** Decryption strictly validates the 16-byte GCM authentication tag. Any tampering or bit-flipping in the database raises an immediate authentication failure.
 * **Storage Format:** Ciphertexts are stored with an explicit version envelope: `ENC:v1:<base64-iv>:<base64-ciphertext-and-tag>`.
@@ -126,13 +127,13 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### B. Distributed Multi-Worker Session Governance
 In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
-* **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `RedisSessionStore` rather than volatile single-worker process memory.
+* **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`) rather than volatile single-worker process memory.
 * **Concurrent Device Quota (Max 2 Sessions):** Accounts are restricted to 2 concurrent active devices. A third login automatically evicts the oldest session via FIFO retirement.
 * **Instantaneous Session Revocation:** Changing an account password or clicking "Sign Out Everywhere" immediately deletes active session records from the datastore, revoking access across all workers in real time.
 * **Forced Initial Password Reset:** Newly provisioned user accounts (`ADMIN` or `VIEWER`) must change their temporary password upon first login before accessing system telemetry.
 
 ### C. Password Hashing
-* Passwords are hashed using **Argon2id** (memory-hard, resistant to GPU/ASIC cracking) with fallback support for **bcrypt** (cost factor 12).
+* **Password Hashing**: Passwords are hashed using Python's native OpenSSL-backed **`hashlib.scrypt`** (`$scrypt$n=16384,r=8,p=1$`, 16-byte cryptographic salt, 64-byte derived key) verified in constant time via `hmac.compare_digest`. Legacy `$argon2id$` hashes from pre-`v3.3.2v` backups are automatically invalidated and flagged for password reset during cross-version restore.
 * Plaintext passwords are never logged or stored.
 
 ---
@@ -157,7 +158,7 @@ When determining the client's real IP address for audit logs and security polici
 ## 8. Input Sanitization & Attack Mitigations
 
 ### A. SQL Injection Neutralization
-* 100% of database interactions execute through **SQLAlchemy Core / ORM parameterized queries** (`:endpoint_id`, `:ip_address`) or explicit type-casted bindings (`CAST(:id AS uuid)`).
+* 100% of database interactions execute through **app.core.orm parameterized queries ($1, $2 positional asyncpg bindings)** or explicit type-casted bindings (`CAST($1 AS uuid)`).
 * Raw string concatenation into SQL statements is strictly prohibited.
 
 ### B. CSV Formula Injection Defense (Spreadsheet Execution)
@@ -170,24 +171,21 @@ When determining the client's real IP address for audit logs and security polici
 * **Discord Mention Storms:** Discord webhooks enforce `"allowed_mentions": {"parse": []}`, preventing malicious hostnames (e.g. `@everyone` or `@here`) from triggering server-wide notification storms.
 * **Slack MRKDWN Escaping:** Dynamic strings in Slack Block Kit payloads escape special formatting characters (`<`, `>`, `&`).
 
-### D. Air-Gapped PDF Generation & SSRF/LFI Defense
-* **Risk Model:** PDF rendering engines that support HTML/CSS are historically susceptible to Server-Side Request Forgery (SSRF) and Local File Inclusion (LFI) through tags like `<img src="...">`, `<link>`, or `@import`.
-* **Air-Gapped URL Fetcher:** In `backend/app/services/pdf_engine.py`, the `secure_url_fetcher` intercepts all resource loading attempts:
-  * **External Schemas Blocked:** All network URI schemes (`http://`, `https://`, `ftp://`) raise an immediate `PermissionError`, preventing remote requests or credential exfiltration.
-  * **Filesystem Whitelisting:** Local `file://` URIs are verified to reside strictly within authorized static asset roots (`backend/app/templates/reports/` and `frontend/src/assets/`). Traversal attempts outside these paths (e.g., `/etc/passwd`) are blocked with a `PermissionError`.
-  * **Safe Data URIs:** Permits inline Base64 data URIs (`data:image/png;base64,...`) for corporate branding logos.
+### D. Zero-Dependency Binary PDF Emitter (`app.core.pdf`)
+Ephemres eliminates external HTML-to-PDF rendering engines (`WeasyPrint`, `wkhtmltopdf`, headless browsers) and their associated Local File Inclusion (LFI) / SSRF attack surface.
+* Executive SLA reports are compiled directly into raw **PDF 1.4 binary streams** in memory using `app.core.pdf`.
+* Organization logos are validated strictly in-memory as binary PNG or JPEG byte headers and embedded directly as native PDF `/Subtype /Image` XObjects—no external URLs, stylesheets, or filesystem paths are ever fetched during report generation.
 
-### E. Cryptographic Document Immutability & Permission Encryption
-* **Read-Only Permission Encryption:** In `backend/app/services/pdf_engine.py`, rendered PDFs are processed through `pypdf.PdfWriter` applying standard permission encryption with an empty user password and randomized 256-bit owner password.
-* **Tamper Prevention:** Permissions are locked strictly to `UserAccessPermissions.PRINT | UserAccessPermissions.PRINT_TO_REPRESENTATION`. Annotation editing, form filling, text modifications, and content extraction are prohibited by standard PDF viewers.
-* **Out-of-Band Integrity Checksum:** The cryptographic SHA-256 hash of the generated document is transmitted via the `X-Report-SHA256` HTTP header, allowing verification against audit logs without cluttering the printed visual page.
+### E. Cryptographic Integrity Verification (`X-Report-SHA256`)
+Every generated PDF byte stream is hashed prior to transmission:
+* **SHA-256 Digest Header**: The HTTP response attaches an `X-Report-SHA256` header containing the hex-encoded SHA-256 digest of the exact PDF payload so auditors can verify document authenticity and detect post-export tampering.
 
 ---
 
 ## 9. Operating System & Privilege Hardening
 
 ### A. Non-Root Daemon Execution
-* Both `ephemres-api` and `ephemres-engine` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
+* `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
 * Daemons do not possess `sudo` or root privileges.
 
 ### B. Linux Capability Isolation (`CAP_NET_RAW`)
@@ -199,7 +197,7 @@ When determining the client's real IP address for audit logs and security polici
 * This grants packet crafting rights strictly for network diagnostics without granting file system, memory, or administrative OS rights.
 
 ### C. Systemd Sandboxing Directives
-The production unit files (`deploy/ephemres-api.service` and `deploy/ephemres-engine.service`) enforce system-level isolation:
+The production unit files (`deploy/ephemres-api.service`, `deploy/ephemres-engine.service`, and `deploy/ephemres-flowd.service`) enforce system-level isolation:
 * `ProtectSystem=full`: Mounts `/usr`, `/boot`, and `/etc` read-only for daemon processes.
 * `PrivateTmp=true`: Allocates isolated, private `/tmp` directories inaccessible to other system users.
 * `NoNewPrivileges=true`: Prevents child processes from gaining elevated privileges via setuid binaries.
@@ -231,7 +229,7 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates and HSTS enabled.
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
-- [ ] **Database Network Isolation:** Ensure PostgreSQL (`5432`) and Redis (`6379`) listen strictly on `127.0.0.1`.
+- [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/dev/shm/ephemres_faststore*`) are owned by `ephemres:ephemres` (`0600`).
 - [ ] **Admin Password Changed:** Verify the default administrator password was changed upon initial login.
 - [ ] **Firewall Egress Rules:** Restrict outbound egress from the Ephemres server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).
 
@@ -241,6 +239,6 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 
 If you discover a security vulnerability or potential threat in Ephemres, please disclose it responsibly:
 
-* **Security Contact:** `security@ephemres.internal` or via **GitHub Private Vulnerability Reporting** on the repository (`https://github.com/dc8official/ephemres`).
+* **Security Contact:** `dagera07@gmail.com` or via **[GitHub Private Vulnerability Reporting](https://github.com/dc8official/ephemres/security/advisories/new)** on the repository (`https://github.com/dc8official/ephemres`).
 * **Policy:** Please do not file public GitHub issues for security vulnerabilities.
 * **Response SLA:** The Ephemres security team acknowledges vulnerability reports within **24 hours** and aims to deliver patches within **72 hours** for high or critical severity findings.

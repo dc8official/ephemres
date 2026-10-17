@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Ephemres Network Monitoring Platform v3.3.1n - Decommission / Uninstall Utility
+# Ephemres Network Monitoring Platform v3.3.2.v - Decommission / Uninstall Utility
 # ==============================================================================
 
 set -euo pipefail
@@ -19,7 +19,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 echo -e "${RED}========================================================================${NC}"
-echo -e "${RED}  Ephemres Network Monitoring Platform v3.3.1n - Decommission / Uninstall ${NC}"
+echo -e "${RED}  Ephemres Network Monitoring Platform v3.3.2.v - Decommission / Uninstall ${NC}"
 echo -e "${RED}========================================================================${NC}"
 echo -e "${YELLOW}WARNING: This utility will stop and remove all Ephemres system services,${NC}"
 echo -e "${YELLOW}disable background monitoring daemons, and remove web server routes.${NC}"
@@ -101,6 +101,6 @@ if [[ "${REMOVE_FILES,,}" == "y" || "${REMOVE_FILES,,}" == "yes" ]]; then
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"
-echo -e "${GREEN}   [UNINSTALL COMPLETE] Ephemres v3.3.1n platform decommissioned.        ${NC}"
+echo -e "${GREEN}   [UNINSTALL COMPLETE] Ephemres v3.3.2.v platform decommissioned.        ${NC}"
 echo -e "${GREEN}   Safety Database Backup Retained At: ${FINAL_BACKUP}${NC}"
 echo -e "${GREEN}========================================================================${NC}"

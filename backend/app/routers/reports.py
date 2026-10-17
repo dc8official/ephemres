@@ -8,15 +8,14 @@ from math import ceil
 from typing import Any, List, Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, or_, select, text
+from app.core.asgi import APIRouter, Depends, HTTPException, Query
+from app.core.asgi import StreamingResponse
+from app.core.schema import BaseModel, ConfigDict, Field
+from app.core.orm import and_, or_, select, text
 import hashlib
 import os
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.orm import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.models.endpoint import Endpoint
@@ -32,13 +31,14 @@ from app.schemas import (
     PaginationMeta,
     UptimeReport,
 )
-from app.services.pdf_engine import render_pdf_async
+from app.core.pdf import render_pdf_async
 from app.services.report_compiler import (
     compile_availability_report_data,
     compile_bandwidth_report_data,
     compile_master_report_data,
     get_organization_branding,
 )
+from app.core.template import TemplateEnvironment
 from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
@@ -50,9 +50,9 @@ logger = logging.getLogger(__name__)
 REPORTS_TEMPLATES_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "templates", "reports")
 )
-jinja_env = Environment(
-    loader=FileSystemLoader(REPORTS_TEMPLATES_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
+jinja_env = TemplateEnvironment(
+    search_path=REPORTS_TEMPLATES_DIR,
+    autoescape=True,
 )
 
 router = APIRouter(prefix="/reports", tags=["reports"])

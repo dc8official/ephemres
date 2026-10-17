@@ -1,4 +1,4 @@
-# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.1n
+# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.2.v
 
 This guide provides systematic diagnostic steps, platform logging architecture specifications, log triage procedures, and solutions for operational issues encountered when running Ephemres in production.
 
@@ -12,12 +12,12 @@ Ephemres incorporates a dual-logging architecture: all standard console output i
 
 | Log Stream | Destination / Location | Description & Contents | Default Retention / Rotation |
 | :--- | :--- | :--- | :--- |
-| **API Server Daemon** | `journalctl -u ephemres-api`<br>`/var/log/ephemres/ephemres-api.log` | FastAPI REST request logs, authentication events, session validation, route handling, settings updates, and background workers. | 10 MB per file, 5 rotated backups (max 60 MB total). |
+| **API Server Daemon** | `journalctl -u ephemres-api`<br>`/var/log/ephemres/ephemres-api.log` | Native ASGI REST request logs, authentication events, session validation, route handling, settings updates, and background workers. | 10 MB per file, 5 rotated backups (max 60 MB total). |
 | **Monitoring Engine** | `journalctl -u ephemres-engine`<br>`/var/log/ephemres/ephemres-engine.log` | 32-second ICMP sweep cycles, synthetic HTTP/TCP/SSL probes, route traceroutes, RCA analysis, gap detection, and state transitions. | 10 MB per file, 5 rotated backups (max 60 MB total). |
-| **Flow Collector Daemon** *(v3.2.0+)* | `journalctl -u ephemres-flowd`<br>`/var/log/ephemres/ephemres-flowd.log` | Passive NetFlow v5/v9 and IPFIX UDP packet decoding, template caching, and Redis Stream buffering. | 10 MB per file, 5 rotated backups (max 60 MB total). |
+| **Flow Collector Daemon** *(v3.2.0+)* | `journalctl -u ephemres-flowd`<br>`/var/log/ephemres/ephemres-flowd.log` | Passive NetFlow v5/v9 and IPFIX UDP packet decoding, template caching, and FastStore shared-memory stream buffering (`/dev/shm`). | 10 MB per file, 5 rotated backups (max 60 MB total). |
 | **Platform Error Aggregator** | `/var/log/ephemres/error.log` | Unified platform-wide sink capturing all `ERROR` and `CRITICAL` log records across all Ephemres Python components. | 10 MB per file, 3 rotated backups (max 30 MB total). |
 | **Reverse Proxy (Nginx)** | `/var/log/nginx/access.log`<br>`/var/log/nginx/error.log` | Inbound client HTTP requests, TLS termination, SSE long-polling connection lifecycle, and upstream proxy dispatch. | Managed by system `logrotate` (daily / weekly compression). |
-| **Database & Cache Services** | `journalctl -u postgresql`<br>`/var/log/redis/redis-server.log` | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and Redis in-memory broker state. | Managed by system `logrotate`. |
+| **Database & Cache Services** | `journalctl -u postgresql`<br>`/dev/shm/ephemres_faststore_*.sqlite3` | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and FastStore In-RAM IPC WAL engine state. | Managed by PostgreSQL engine and FastStore RAM lifecycle. |
 
 > [!NOTE]
 > **Total Log Footprint Ceiling**: Application file logging in `/var/log/ephemres/` is bounded to a maximum ceiling of **$\sim$150 MB** across all services combined, preventing disk exhaustion on lean edge or VPS instances.
@@ -79,7 +79,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **Browser shows "Unable to connect" / HTTP 502** | `/var/log/nginx/error.log`<br>`journalctl -u ephemres-api` | `connect() failed (111: Connection refused)`, `Uvicorn running` | Verify Uvicorn socket listening on `127.0.0.1:8000`. |
 | **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Re-apply `setcap cap_net_raw+ep` (Section 2.A). |
 | **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait for 15m window or run `reset-admin-password.sh` (Section 2.B). |
-| **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `EventBroker` | Verify PostgreSQL `LISTEN` / Redis connectivity. |
+| **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore `/dev/shm` IPC state. |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
 
 ---
@@ -87,11 +87,18 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 ## 2. Common Issues & Solutions
 
 ### A. ICMP Polling Fails with "Operation Not Permitted" / Raw Socket Permission Denied
-* **Cause**: The `ephemres-engine` daemon requires raw socket capability (`CAP_NET_RAW`) to craft ICMP packets without running as `root`.
+* **Cause**: The `ephemres-engine` daemon requires raw socket capability (`CAP_NET_RAW`) to craft ICMP packets without running as `root`. If Python runs under a virtualenv, the capability must be placed on the real, resolved Python binary target (not a symlink) as well as the traceroute binary.
 * **Fix**:
   ```bash
-  # Ensure traceroute and python have raw network capabilities
+  # Resolve symlinked python binary in virtual environment and grant raw socket access
+  PYTHON_BIN=$(readlink -f /opt/ephemres/venv/bin/python3)
+  sudo setcap cap_net_raw+ep "${PYTHON_BIN}"
+  
+  # Ensure traceroute also retains raw network capabilities
   sudo setcap cap_net_raw+ep $(command -v traceroute)
+  
+  # Verify capabilities
+  getcap "${PYTHON_BIN}" $(command -v traceroute)
   
   # Restart monitoring engine
   sudo systemctl restart ephemres-engine
@@ -131,7 +138,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 
 ### E. Frontend Shows "Unable to connect to Ephemres Server" (HTTP 502 / Connection Refused)
 * **Diagnosis**:
-  1. Check if the Uvicorn FastAPI daemon is running locally:
+  1. Check if the Uvicorn Native ASGI daemon is running locally:
      ```bash
      curl -I http://127.0.0.1:8000/api/v1/health
      ```
@@ -190,8 +197,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   - `systemctl status ephemres-engine` shows repeated crash loops with exit status `1/FAILURE` upon daemon restart.
   - `journalctl -u ephemres-engine` displays:
     ```text
-    sqlalchemy.exc.DBAPIError: (asyncpg.exceptions.InternalServerError)
-    DETAIL: current limit: 100000, tuples decompressed: 317367
+    asyncpg.exceptions.InternalServerError: current limit: 100000, tuples decompressed: 317367
     HINT: Consider increasing timescaledb.max_tuples_decompressed_per_dml_transaction or setting it to 0.
     [SQL: UPDATE endpoint_events SET end_time = ... WHERE end_time IS NULL]
     ```
@@ -226,15 +232,15 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 
 ### I. Admin Repeatedly Logged Out After Switching Storage Driver (Multi-Worker Session Store Desynchronization)
 * **Symptoms**:
-  - The administrator toggles **Performance Mode** (Redis) in the Admin Settings console.
+  - The administrator toggles **Performance Mode** (FastStore In-RAM IPC) in the Admin Settings console.
   - The administrator is immediately logged out back to the login page.
   - Upon logging back in, navigating to the **Admin Settings** tab immediately kicks the administrator back to `/login` on every attempt.
   - The issue persists until the API daemon is restarted.
 * **Cause**:
   - In production, `ephemres-api` operates under Uvicorn with multiple worker processes (`--workers 2`).
   - Worker processes have isolated memory spaces. In legacy releases prior to v3.1.3s, updating `performance_mode` via `PATCH /api/v1/settings` re-initialized the storage driver only in the worker process that handled the HTTP request.
-  - The other worker remained connected to PostgreSQL, creating an in-memory split-brain state where Worker 1 validated sessions against Redis while Worker 2 validated sessions against PostgreSQL.
-  - Navigating to Admin Settings triggers 5 concurrent HTTP requests. Any request routed to the desynchronized worker returned `HTTP 401 Unauthorized`, causing the frontend router interceptor to clear credentials and redirect to `/login`.
+  - The other worker remained connected to PostgreSQL, creating an in-memory split-brain state where Worker 1 validated sessions against FastStore while Worker 2 validated sessions against PostgreSQL.
+  - Navigating to Admin Settings triggers concurrent HTTP requests. Any request routed to the desynchronized worker returned `HTTP 401 Unauthorized`, causing the frontend router interceptor to clear credentials and redirect to `/login`.
 * **Fix**:
   1. **Immediate Service Realignment**:
      Restart the API daemon to synchronize all Uvicorn worker processes from the persisted database settings:
@@ -244,9 +250,59 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   2. **Permanent Resolution**:
      Ephemres incorporates cluster-wide PostgreSQL `LISTEN`/`NOTIFY` synchronization (`SYSTEM_SETTINGS_SYNC`) and bidirectional warm session migration, eliminating worker split-brain states automatically without service restarts.
 
+### J. PostgreSQL Connection Pool Exhaustion (`TooManyConnectionsError`)
+* **Symptoms**:
+  - `ephemres-api` or `ephemres-engine` logs display:
+    ```text
+    asyncpg.exceptions.TooManyConnectionsError: sorry, too many clients already
+    ```
+  - Incoming HTTP requests receive `HTTP 500 Internal Server Error`.
+* **Cause**:
+  - The total number of pooled connections requested across all Uvicorn workers and engine background tasks exceeds PostgreSQL's configured `max_connections` ceiling.
+* **Fix**:
+  1. Inspect PostgreSQL's active connection count and states:
+     ```bash
+     sudo -u postgres psql -c "SELECT count(*), state FROM pg_stat_activity GROUP BY state;"
+     ```
+  2. Increase `max_connections` in PostgreSQL configuration (`/etc/postgresql/<version>/main/postgresql.conf`), setting it to 150 or higher:
+     ```text
+     max_connections = 150
+     ```
+  3. Reload PostgreSQL:
+     ```bash
+     sudo systemctl reload postgresql
+     ```
+
+### K. FastStore Shared-Memory IPC Inspection & Diagnostics (`/dev/shm`)
+* **Symptoms**:
+  - NetFlow telemetry not reaching rollup tables, or real-time event broadcasts stalling when Performance Mode is active.
+* **Diagnosis**:
+  1. Inspect FastStore shared-memory database file existence, permissions, and size:
+     ```bash
+     ls -lh /dev/shm/ephemres_faststore*
+     ```
+  2. Query FastStore internal tables and stream backlog using the standard `sqlite3` CLI:
+     ```bash
+     FASTSTORE_DB=$(ls /dev/shm/ephemres_faststore_*.sqlite3 2>/dev/null | head -n 1)
+
+     # Inspect queued NetFlow stream batches
+     sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream;"
+
+     # Inspect active cached sessions
+     sqlite3 "${FASTSTORE_DB}" "SELECT count(*) FROM kv_store WHERE k LIKE 'session:%' AND (expires_at IS NULL OR expires_at > unixepoch());"
+     ```
+  3. If the database file is corrupted or locked by an orphaned process:
+     ```bash
+     sudo systemctl stop ephemres-api ephemres-engine ephemres-flowd
+     rm -f /dev/shm/ephemres_faststore*
+     sudo systemctl start ephemres-api ephemres-engine ephemres-flowd
+     ```
+
 ---
 
 ## 3. Database Disaster Recovery
+
+For complete details on cross-version restorations (including TimescaleDB internal chunk remapping, schema drift reconciliation, and `$argon2id$` to `$scrypt$` credential migrations), refer to the comprehensive [Disaster Recovery Runbook](file:///opt/ephemres/deploy/RESTORE.md).
 
 ### Creating an Immediate Manual Backup
 ```bash
@@ -254,18 +310,27 @@ mkdir -p /var/backups/ephemres
 sudo PGPASSWORD="netmon_secure_password" pg_dump -h 127.0.0.1 -U netmon_user -d netmon -F p -f /var/backups/ephemres/manual_backup_$(date +%Y%m%d_%H%M%S).sql
 ```
 
-### Restoring from a Backup File
+### Restoring from a Backup File (Automated Cross-Version Engine)
 ```bash
-# 1. Stop platform daemons
-sudo systemctl stop ephemres-api ephemres-engine
+# Execute the automated cross-version restoration utility
+sudo bash /opt/ephemres/deploy/restore.sh \
+  --backup-file /var/backups/ephemres/<backup_file_name>.sql \
+  --admin-password "<temporary_admin_password>"
+```
 
-# 2. Restore database from SQL dump
-sudo PGPASSWORD="netmon_secure_password" psql -h 127.0.0.1 -U netmon_user -d netmon -f /var/backups/ephemres/<backup_file_name>.sql
+### Emergency Platform Verification Checklist
+Following any restoration or major incident, verify platform health across all layers:
+```bash
+# 1. Daemon service health
+sudo systemctl status ephemres-api ephemres-engine ephemres-flowd nginx
 
-# 3. Run latest schema migrations
-cd /opt/ephemres/backend
-sudo /opt/ephemres/venv/bin/alembic upgrade head
+# 2. REST API & schema version response
+curl -s http://127.0.0.1:8000/api/v1/health | jq .
+curl -s http://127.0.0.1:8000/api/v1/version | jq .
 
-# 4. Restart services
-sudo systemctl start ephemres-api ephemres-engine
+# 3. ICMP raw socket capability check
+getcap $(readlink -f /opt/ephemres/venv/bin/python3) $(command -v traceroute)
+
+# 4. FastStore IPC shared memory check
+ls -l /dev/shm/ephemres_faststore*
 ```

@@ -11,8 +11,7 @@ import ssl
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-import httpx
-from sqlalchemy import select, text
+from app.core.orm import select, text
 
 from app.config import settings
 from app.database import AsyncSessionLocal, async_engine
@@ -27,9 +26,14 @@ from app.services.alert_formatters import (
     build_polyglot_payload,
     build_slack_payload,
 )
-from app.services.crypto_service import decrypt_secret
+from app.core.crypto import decrypt_secret
 from app.services.driver_manager import driver_manager
-from app.services.ssrf_validator import create_ssrf_safe_client, validate_outbound_url
+from app.core.http_client import (
+    HttpRequestError,
+    HttpTimeoutError,
+    create_ssrf_safe_client,
+    validate_outbound_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -712,7 +716,7 @@ class AlertDispatcher:
                         # For 5xx status codes, retry with exponential backoff
                         if attempt < 2:
                             await asyncio.sleep(2 ** attempt)
-                    except (httpx.RequestError, httpx.TimeoutException) as exc:
+                    except (HttpRequestError, HttpTimeoutError, asyncio.TimeoutError, OSError) as exc:
                         last_exc = exc
                         if attempt < 2:
                             await asyncio.sleep(2 ** attempt)

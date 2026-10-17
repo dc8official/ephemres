@@ -138,6 +138,8 @@ const timeAgo = computed(() => {
   flex-direction: column;
   gap: 12px;
   position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 148px;
 }
 
 .endpoint-card:hover {
