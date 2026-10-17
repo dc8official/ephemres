@@ -13,9 +13,11 @@ erDiagram
     endpoints ||--o{ endpoint_diagnostic_traces : "stores ephemeral JSONB traces"
     endpoints ||--o{ endpoint_rca_incidents : "tracks root cause outages"
     endpoints ||--o{ flow_minute_rollups : "attributes traffic (Hypertable)"
+    endpoints ||--o{ flow_interface_minute_rollups : "records per-interface traffic (Hypertable)"
     alert_channels ||--o{ alert_delivery_logs : "records dispatch audit"
     users ||--o{ user_sessions : "maintains active sessions"
     users ||--o{ audit_logs : "records admin actions"
+    organizations
 ```
 
 ---
@@ -28,6 +30,7 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `hostname` (`VARCHAR(255)`, Not Null)
 * `ip_address` (`INET`, Unique, Not Null)
 * `device_type` (`VARCHAR(50)`: `ENDPOINT`, `TRANSIT_ROUTER`, `L2_SEGMENT`, `FIREWALL`, `SWITCH`)
+* `device_role` (`VARCHAR(30)`, Default: `'STANDARD'`, Not Null) — Operational role classification (`STANDARD`, `FLOW_EXPORTER`, `EDGE_ROUTER`, `CORE_SWITCH`) enforced by check constraint `ck_endpoints_device_role`. Endpoints with `device_role = 'FLOW_EXPORTER'` are isolated from active ICMP polling and fleet SLA denominators unless synthetic monitoring is explicitly enabled.
 * `location` / `site` (`VARCHAR(255)`)
 * `allow_incident_trace` (`BOOLEAN`, Default: `true`)
 * `allow_topology_discovery` (`BOOLEAN`, Default: `true`)
@@ -63,6 +66,19 @@ Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow
 * *Indexes*:
   - `idx_flow_minute_src_dst_endpoint` (`bucket`, `src_endpoint_id`, `dst_endpoint_id`)
   - `idx_flow_minute_exporter_bucket` (`exporter_id`, `bucket`)
+
+### `flow_interface_minute_rollups` (TimescaleDB Hypertable)
+Stores 1-minute directional per-interface throughput metrics (ingress vs. egress bytes and packets) indexed by SNMP `ifIndex` (introduced in migration `0012_v3_3_flow_interface_telemetry.py`).
+* `bucket` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null) — 1-minute time boundary.
+* `exporter_id` (`UUID`, Primary Key, Not Null) — Associated endpoint UUID.
+* `interface_idx` (`INTEGER`, Primary Key, Not Null) — SNMP interface index (`input_snmp` / `output_snmp`).
+* `in_bytes` (`BIGINT`, Default: 0, Not Null) — Total ingress bytes traversing this interface during the 1-minute bucket.
+* `out_bytes` (`BIGINT`, Default: 0, Not Null) — Total egress bytes traversing this interface during the 1-minute bucket.
+* `in_packets` (`BIGINT`, Default: 0, Not Null) — Total ingress packets.
+* `out_packets` (`BIGINT`, Default: 0, Not Null) — Total egress packets.
+* *Indexes & Policies*:
+  - Composite Index: `idx_flow_if_rollups_exp_if_bucket` (`exporter_id`, `interface_idx`, `bucket DESC`)
+  - Retention Policy: 7-day automated chunk retention (`add_retention_policy('flow_interface_minute_rollups', INTERVAL '7 days')`).
 
 ### `alert_channels`
 Stores notification destinations and credentials with AES-256-GCM encryption.

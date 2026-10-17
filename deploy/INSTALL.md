@@ -1,6 +1,6 @@
-# LNMP Version 2.0 (Beta) — Installation & Deployment Quick Start
+# LNMP Version 3.3.0 — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **LNMP Network Monitoring Platform v2.0 (Beta)**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **LNMP Network Monitoring Platform v3.3.0**.
 
 ---
 
@@ -27,7 +27,7 @@ chmod +x *.sh
 **Post-Install Verification:**
 ```bash
 # Verify systemd services are active and enabled on boot
-systemctl status netmon-api netmon-engine
+systemctl status netmon-api netmon-engine netmon-flowd
 
 # Verify API health
 curl -s http://127.0.0.1:8000/api/v1/health

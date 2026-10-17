@@ -63,10 +63,10 @@ Clicking any endpoint opens its detailed forensic view with an accessible perspe
 
 Administrators can configure platform behavior across five dedicated tabs:
 1. **🔔 Alert Channels:** Master alerting engine on/off switch, alert channel inventory, live diagnostic test triggers, and historical delivery audit logs.
-2. **⚡ Performance & Telemetry:** Storage driver selector (PostgreSQL-Native vs. Redis Acceleration) and dynamic concurrency metrics.
-3. **🌊 Flow Telemetry:** Master NetFlow/IPFIX collection toggle, listening ports (2055, 4739), packet sampling multiplier, and live **Redis Pre-Flight Check** validation.
-4. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session timeouts, and IP lockout thresholds.
-5. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), and credential reset actions.
+2. **⚡ Performance & Telemetry:** Storage driver selector (PostgreSQL-Native vs. Redis Acceleration), NetFlow/IPFIX collection toggle, listening ports (2055, 4739), packet sampling multiplier, and live **Redis Pre-Flight Check** validation.
+3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session timeouts, and IP lockout thresholds.
+4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), and credential reset actions.
+5. **🏢 Organization Profile:** Corporate name, report branding subtitle, and custom PNG/JPEG logo upload for executive SLA PDF reports.
 
 ---
 

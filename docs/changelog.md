@@ -45,16 +45,15 @@ The versioning format follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Version 3.1.3s] — TimescaleDB Hypertable Pruning & Multi-Worker Storage Driver Cluster Sync
-### ⚡ Startup Stability, Multi-Worker Resilience & Session Preservation
+## [Version 3.1.35s] — Enterprise Long-Term Support (LTS) Consolidation
+### 🛡️ SLA Boundary Clamping, SSRF Socket Hardening, SSE Token Stripping & TimescaleDB Safety
 
-| Upgrade Domain | Technical Implementation | Operational & Reliability Benefit |
+| Upgrade Domain | Technical Implementation | Operational & Security Benefit |
 | :--- | :--- | :--- |
-| **TimescaleDB Hypertable Chunk Pruning** | Enforced 7-day query window boundary (`start_time >= gap_start - 7 days`) during `resolve_startup_state()` and `open_monitoring_gap()` in `monitoring/gap_handler.py`. | Restricts startup state reconciliation to uncompressed chunks, completely eliminating the fatal decompression limit crash (`asyncpg.exceptions.InternalServerError: current limit: 100000, tuples decompressed: 317367`). |
-| **Dual GUC Safety Net & Historical Sanitization** | Applied `ALTER DATABASE netmon SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;` at database level (`deploy/install.sh`, `deploy/upgrade.sh`) and local transaction level, accompanied by automated historical open event sanitization (`SET end_time = start_time, duration_seconds = 0` for open events older than 7 days). | Eliminates decompression bottlenecks across database restarts and sanitizes trapped dangling historical events without data loss. |
-| **Cluster-Wide Multi-Worker Settings Sync** | Implemented `backend/app/services/settings_sync.py` utilizing PostgreSQL `LISTEN` / `NOTIFY` on channel `SYSTEM_SETTINGS_SYNC`. When any worker updates `performance_mode` via `PATCH /api/v1/settings`, all Uvicorn worker processes automatically re-initialize their local `StorageDriverManager` in sub-millisecond time. | Resolves the multi-worker memory split-brain where Worker 1 checked Redis while Worker 2 checked PostgreSQL, completely preventing the infinite 401 logout loop when navigating to Admin Settings. |
-| **Warm Session State Migration** | Added bidirectional session migration (`migrate_sessions_pg_to_redis` and `migrate_sessions_redis_to_pg`) in `backend/app/services/session_store.py` triggered during driver mode transitions. | Transparently transfers active user sessions between PostgreSQL and Redis with preserved TTLs, ensuring active operators are never abruptly logged out when switching storage drivers. |
-| **Comprehensive Log Architecture & Runbook** | Added end-to-end documentation in `docs/troubleshooting.md` outlining the platform's 6 log streams, auto-rotating 150MB log bounding, triage command cheat sheet, and symptom-to-log decision matrix. | Empowers operators and NOC engineers to independently inspect, triage, and diagnose platform and multi-worker incidents. |
+| **Window-Clamped SLA Uptime Math (`BUG-01` & `BUG-01b`)** | Updated `EndpointRepository` and `ReportRepository` to query boundary-overlapping intervals (`start_time <= end_dt AND (end_time IS NULL OR end_time >= start_dt)`) with SQL `GREATEST`/`LEAST` window clamping. | Eliminates false `0.00%` or `0.07%` SLA readings on multi-day continuous `UP` events and guarantees 100% mathematical parity between Dashboard KPI cards and Detailed Endpoint reports. |
+| **Zero-Trust SSRF Socket Validation** | Enforced pre-connect DNS resolution and private/loopback/link-local IP rejection inside `SafeConnectBackend` with `follow_redirects=False`. | Blocks DNS rebinding and HTTP 301/302 redirect-based Server-Side Request Forgery (SSRF) across synthetic HTTP probes and outbound webhook dispatchers. |
+| **TimescaleDB Decompression Guard** | Set database-level `timescaledb.max_tuples_decompressed_per_dml_transaction = 0` during installation and migrations. | Prevents background retention pruning and continuous aggregate refreshes from failing when updating or deleting compressed historical hypertable chunks. |
+| **Enterprise LTS Baseline Lock** | Unified version identifier `3.1.35s` across API `/version`, frontend footer, deployment scripts, and disaster recovery runbooks. | Establishes a deterministic, zero-churn Long-Term Support (LTS) baseline for production network monitoring fleets. |
 
 ---
 

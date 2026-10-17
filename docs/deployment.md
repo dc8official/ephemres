@@ -59,7 +59,7 @@ To perform an in-place upgrade to v3.3.0:
 
 ```bash
 cd ~/lnmp
-git pull origin v3.1.28s
+git pull origin v3.3.0
 sudo ./deploy/upgrade.sh
 ```
 
@@ -69,10 +69,10 @@ sudo ./deploy/upgrade.sh
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/netmon/netmon_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies & Redis**: Installs missing packages (`redis-server`, `traceroute`, `libcap2-bin`, verifies Python package `httpx>=0.27.0`) and ensures Redis is enabled and started (`systemctl enable --now redis-server`).
 3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on `traceroute` for unprivileged ICMP discovery.
-4. **Smart Config Migration**: Patches `/etc/netmon/config.toml` with v3.2 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, `[redis]`, `[alerting]`, and `[flow]` sections).
+4. **Smart Config Migration**: Patches `/etc/netmon/config.toml` with v3.3.0 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, `[redis]`, `[alerting]`, and `[flow]` sections).
 5. **Daemon Pause**: Gracefully stops `netmon-flowd`, `netmon-engine`, and `netmon-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, updates Python dependencies, and compiles frontend assets.
-7. **Forward Alembic Migrations**: Runs `alembic upgrade head` applying migration `0008_v3_2_network_flow_ingestion.py` to create `flow_exporter_ips`, `flow_interface_aliases`, `flow_minute_rollups` hypertable (with 1-day compression and 7-day retention), and continuous aggregate views while preserving all historical TimescaleDB chunks.
+7. **Forward Alembic Migrations**: Runs `alembic upgrade head` applying migrations through `0012_v3_3_flow_interface_telemetry.py` to create `flow_exporter_ips`, `flow_interface_aliases`, `flow_minute_rollups`, `flow_interface_minute_rollups`, and `endpoints.device_role`, and continuous aggregate views while preserving all historical TimescaleDB chunks.
 8. **Unit Refresh & Daemon Restart**: Installs `netmon-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `redis-server`, `netmon-api`, `netmon-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `netmon-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
 9. **Health Verification**: Verifies API health and version endpoints (`/api/v1/version`).
 
@@ -168,7 +168,7 @@ LNMP dispatches outbound incident notifications directly to external endpoints:
 
 ---
 
-## 8. Database Migration 0008 Execution Procedure
+## 8. Database Migration Execution Procedure (Through 0012)
 
 If executing migrations manually outside of `upgrade.sh`:
 
@@ -183,7 +183,7 @@ export PYTHONPATH=/opt/netmon/noop:/opt/netmon/noop/backend
 alembic current
 alembic heads
 
-# Apply migration 0008 (creates flow rollups hypertable, continuous aggregates, and multi-IP columns)
+# Apply all pending migrations through 0012_v3_3_flow_interface_telemetry
 alembic upgrade head
 
 # Verify table and hypertable creation in PostgreSQL

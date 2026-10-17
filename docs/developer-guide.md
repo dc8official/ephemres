@@ -1,27 +1,34 @@
 # LNMP Developer & Contributor Guide
 
-This guide details how to set up a local development environment for the Network Monitoring Platform (LNMP) v1.5 and outlines standard contribution procedures.
+This guide details how to set up a local development environment for the Network Monitoring Platform (LNMP) v3.3.0 and outlines standard contribution procedures.
 
 ## 1. Project Structure
 
 The project is split into two primary domains:
-- `/backend`: Python 3.10+, FastAPI, SQLAlchemy, Alembic.
+- `/backend`: Python 3.10+, FastAPI, SQLAlchemy 2.0 (Async), Pydantic Settings, Alembic, Redis 6+ (Streams & Pub/Sub), WeasyPrint + pypdf (Executive PDF Engine), and netmon-flowd (NetFlow v5/v9 & IPFIX collector).
 - `/frontend`: Node.js, Vue 3 (Composition API), Vite, PrimeVue.
 
 ## 2. Local Environment Setup
 
-### Database Requirement
-You must have an instance of PostgreSQL 14+ running locally with the **TimescaleDB** extension installed.
-```sql
--- Connect to your local postgres instance and create the database
-CREATE DATABASE netmon;
-\c netmon
-CREATE EXTENSION IF NOT EXISTS timescaledb;
-```
+### Database & Redis Requirements
+1. **PostgreSQL 14+ with TimescaleDB:**
+   Connect to your local postgres instance and create the database with the TimescaleDB extension:
+   ```sql
+   CREATE DATABASE netmon;
+   \c netmon
+   CREATE EXTENSION IF NOT EXISTS timescaledb;
+   ```
+
+2. **Redis 6+ Server:**
+   Ensure `redis-server` is active locally for in-memory caching, multi-worker pub/sub, and NetFlow stream buffering:
+   ```bash
+   sudo systemctl start redis-server
+   # Or run directly: redis-server
+   ```
 
 ### Backend (Python/FastAPI)
 
-1. **Virtual Environment:**
+1. **Virtual Environment & Dependencies:**
    Navigate to the `backend/` directory, create a virtual environment, and install dependencies.
    ```bash
    cd backend
@@ -34,20 +41,25 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    Copy `.env.example` to `.env` and configure your local database credentials.
    ```bash
    cp .env.example .env
-   # Edit .env to match your local postgres setup
+   # Edit .env to match your local postgres and redis setup
    ```
 
 3. **Database Migrations:**
-   Apply the Alembic schema migrations to build the tables and TimescaleDB hypertables.
+   Apply Alembic schema migrations through `0012` to build tables, hypertables, and continuous aggregates.
    ```bash
    alembic upgrade head
    ```
-   *Note: Ensure the `alembic.ini` file or your `.env` is correctly pointing to your local database.*
 
-4. **Run the Development Server:**
+4. **Run the Development API Server:**
    Start the FastAPI app with Uvicorn (hot-reloading enabled).
    ```bash
    uvicorn app.main:app --reload
+   ```
+
+5. **Run the Flow Collector Daemon (Optional):**
+   If testing NetFlow v5/v9 or IPFIX ingestion locally:
+   ```bash
+   python -m app.flow.collector
    ```
 
 ### Frontend (Vue 3/Vite)
