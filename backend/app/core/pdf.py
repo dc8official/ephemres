@@ -147,20 +147,20 @@ def _rc4_crypt(key: bytes, data: bytes) -> bytes:
     return bytes(out)
 
 
-def _pad_password(password: str) -> bytes:
-    raw = password.encode("latin-1", errors="ignore")[:32]
+def _pad_pdf_key(key_material: str) -> bytes:
+    raw = key_material.encode("latin-1", errors="ignore")[:32]
     return raw + _PDF_PADDING[: 32 - len(raw)]
 
 
-def _compute_owner_value_r3(user_pwd: str, owner_pwd: str) -> bytes:
-    """ISO 32000-1 Algorithm 3: Computing the encryption dictionary's O (owner password) value."""
-    padded_owner = _pad_password(owner_pwd if owner_pwd else user_pwd)
-    digest = hashlib.md5(padded_owner).digest()
+def _compute_owner_value_r3(user_key: str, owner_key: str) -> bytes:
+    """ISO 32000-1 Algorithm 3: Computing the encryption dictionary's O (owner key) value."""
+    padded_owner = _pad_pdf_key(owner_key if owner_key else user_key)
+    digest = hashlib.md5(padded_owner, usedforsecurity=False).digest()
     for _ in range(50):
-        digest = hashlib.md5(digest).digest()
+        digest = hashlib.md5(digest, usedforsecurity=False).digest()
     rc4_key = digest[:16]
 
-    data = _pad_password(user_pwd)
+    data = _pad_pdf_key(user_key)
     for i in range(20):
         iter_key = bytes(b ^ i for b in rc4_key)
         data = _rc4_crypt(iter_key, data)
@@ -168,27 +168,27 @@ def _compute_owner_value_r3(user_pwd: str, owner_pwd: str) -> bytes:
 
 
 def _compute_encryption_key_r3(
-    user_pwd: str,
+    user_key: str,
     owner_val: bytes,
     permissions: int,
     file_id: bytes,
 ) -> bytes:
     """ISO 32000-1 Algorithm 2: Computing an encryption key (128-bit, R=3)."""
-    padded_user = _pad_password(user_pwd)
-    m = hashlib.md5()
+    padded_user = _pad_pdf_key(user_key)
+    m = hashlib.md5(usedforsecurity=False)
     m.update(padded_user)
     m.update(owner_val)
     m.update(struct.pack("<i", permissions))
     m.update(file_id)
     digest = m.digest()
     for _ in range(50):
-        digest = hashlib.md5(digest[:16]).digest()
+        digest = hashlib.md5(digest[:16], usedforsecurity=False).digest()
     return digest[:16]
 
 
 def _compute_user_value_r3(encryption_key: bytes, file_id: bytes) -> bytes:
-    """ISO 32000-1 Algorithm 5: Computing the encryption dictionary's U (user password) value (R=3)."""
-    digest = hashlib.md5(_PDF_PADDING + file_id).digest()
+    """ISO 32000-1 Algorithm 5: Computing the encryption dictionary's U (user key) value (R=3)."""
+    digest = hashlib.md5(_PDF_PADDING + file_id, usedforsecurity=False).digest()
     data = _rc4_crypt(encryption_key, digest)
     for i in range(1, 20):
         iter_key = bytes(b ^ i for b in encryption_key)
@@ -208,7 +208,7 @@ def _encrypt_pdf_object_bytes(
         + struct.pack("<I", obj_num)[:3]
         + struct.pack("<H", gen_num)[:2]
     )
-    obj_rc4_key = hashlib.md5(obj_key_input).digest()[:16]
+    obj_rc4_key = hashlib.md5(obj_key_input, usedforsecurity=False).digest()[:16]
     return _rc4_crypt(obj_rc4_key, data)
 
 
@@ -850,7 +850,7 @@ def _compile_encrypted_pdf_1_4(
     Assembles a complete ISO 32000-1 PDF 1.4 document with page streams, /Info metadata,
     and optional Standard Security Handler (V=2, R=3, 128-bit RC4).
     """
-    file_id = hashlib.md5(f"{title}-{secrets.token_hex(8)}".encode("utf-8")).digest()
+    file_id = hashlib.md5(f"{title}-{secrets.token_hex(8)}".encode("utf-8"), usedforsecurity=False).digest()
     if encrypted:
         owner_pwd = owner_password or secrets.token_hex(32)
         owner_val = _compute_owner_value_r3(user_password, owner_pwd)
