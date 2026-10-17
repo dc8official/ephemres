@@ -115,6 +115,9 @@ def build_icmp_echo_packet(
     return buf
 
 
+_pack_icmp_echo = build_icmp_echo_packet
+
+
 def parse_icmp_echo_reply(
     buf: bytes | bytearray | memoryview,
     nbytes: int,
@@ -130,12 +133,15 @@ def parse_icmp_echo_reply(
     mv = memoryview(buf)[:nbytes]
     offset = 0
     if not is_ipv6 and not is_dgram:
-        if nbytes < 28:
+        if nbytes >= 28 and (mv[0] >> 4) == 4:
+            ihl = (mv[0] & 0x0F) * 4
+            if ihl < 20 or nbytes < ihl + 8:
+                return None
+            offset = ihl
+        elif nbytes >= 8 and mv[0] == 0:
+            offset = 0
+        else:
             return None
-        ihl = (mv[0] & 0x0F) * 4
-        if ihl < 20 or nbytes < ihl + 8:
-            return None
-        offset = ihl
     else:
         if nbytes < 8:
             return None
@@ -159,48 +165,90 @@ class _RawICMPMultiplexer:
     and a pre-allocated 1500-byte receive buffer for zero-jitter RTT measurement.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, is_ipv6: bool = False) -> None:
+    def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None, is_ipv6: bool = False) -> None:
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
         self.loop = loop
         self.is_ipv6 = is_ipv6
         self._recv_buf = bytearray(1500)
-        self._pending: Dict[Tuple[int, int], Tuple[int, asyncio.Future[float]]] = {}
+        self._pending: Dict[Tuple[int, int], Tuple[asyncio.Future[float], str, int]] = {}
         self._closed = False
+        self.sock: Optional[socket.socket] = None
 
-        if is_ipv6:
-            self.sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
-        else:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        try:
+            if is_ipv6:
+                self.sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+            else:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+            self.sock.setblocking(False)
+            self.loop.add_reader(self.sock.fileno(), self._on_readable)
+        except (PermissionError, OSError):
+            self.sock = None
 
-        self.sock.setblocking(False)
-        self.loop.add_reader(self.sock.fileno(), self._on_readable)
+    def _handle_incoming_packet(
+        self,
+        raw_bytes: bytes | bytearray | memoryview,
+        responder_ip: str,
+        recv_ns: Optional[int] = None,
+    ) -> None:
+        parsed = parse_icmp_echo_reply(
+            raw_bytes,
+            len(raw_bytes),
+            is_ipv6=self.is_ipv6,
+            is_dgram=False,
+        )
+        if parsed is None:
+            return
+
+        r_ident, r_seq, _embedded_ns = parsed
+        key = (r_ident, r_seq)
+        entry = self._pending.get(key)
+        if entry is None:
+            return
+
+        fut, expected_ip, send_ns = entry
+
+        # Verify source IP matches expected IP
+        if responder_ip:
+            try:
+                if ipaddress.ip_address(responder_ip) != ipaddress.ip_address(expected_ip):
+                    return
+            except ValueError:
+                if responder_ip != expected_ip:
+                    return
+
+        # Verify embedded send timestamp if available
+        if _embedded_ns is not None and _embedded_ns != 0 and _embedded_ns != send_ns:
+            return
+
+        self._pending.pop(key, None)
+        if not fut.done():
+            if recv_ns is None:
+                recv_ns = time.monotonic_ns()
+            rtt_ms = max(0.0, (recv_ns - send_ns) / 1_000_000.0)
+            fut.set_result(rtt_ms)
 
     def _on_readable(self) -> None:
+        if self.sock is None:
+            return
         while not self._closed:
             try:
-                nbytes, _addr = self.sock.recvfrom_into(self._recv_buf)
+                nbytes, addr = self.sock.recvfrom_into(self._recv_buf)
                 recv_ns = time.monotonic_ns()
             except (BlockingIOError, InterruptedError):
                 break
             except OSError:
                 break
 
-            parsed = parse_icmp_echo_reply(
-                self._recv_buf,
-                nbytes,
-                is_ipv6=self.is_ipv6,
-                is_dgram=False,
+            responder_ip = addr[0] if (isinstance(addr, tuple) and addr) else ""
+            self._handle_incoming_packet(
+                self._recv_buf[:nbytes],
+                responder_ip,
+                recv_ns=recv_ns,
             )
-            if parsed is None:
-                continue
-
-            r_ident, r_seq, _embedded_ns = parsed
-            key = (r_ident, r_seq)
-            entry = self._pending.pop(key, None)
-            if entry is not None:
-                send_ns, fut = entry
-                if not fut.done():
-                    rtt_ms = max(0.0, (recv_ns - send_ns) / 1_000_000.0)
-                    fut.set_result(rtt_ms)
 
     async def send_probe(
         self,
@@ -213,11 +261,12 @@ class _RawICMPMultiplexer:
         fut: asyncio.Future[float] = self.loop.create_future()
         send_ns = time.monotonic_ns()
         pkt = build_icmp_echo_packet(ident, seq, send_ns=send_ns, is_ipv6=self.is_ipv6)
-        self._pending[key] = (send_ns, fut)
+        self._pending[key] = (fut, target_ip, send_ns)
 
         try:
             dest = (target_ip, 0, 0, 0) if self.is_ipv6 else (target_ip, 0)
-            self.sock.sendto(pkt, dest)
+            if self.sock is not None:
+                self.sock.sendto(pkt, dest)
             return await asyncio.wait_for(fut, timeout=timeout)
         except (asyncio.TimeoutError, OSError):
             return None
@@ -228,14 +277,16 @@ class _RawICMPMultiplexer:
         if self._closed:
             return
         self._closed = True
-        try:
-            self.loop.remove_reader(self.sock.fileno())
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
+        if self.sock is not None:
+            try:
+                self.loop.remove_reader(self.sock.fileno())
+            except Exception:
+                pass
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
 
 
 _raw_multiplexers_v4: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _RawICMPMultiplexer] = (
@@ -357,7 +408,7 @@ async def _run_dgram_socket_ping_cycle(
                         pass
                 rtt = await asyncio.wait_for(fut, timeout=timeout)
                 rtts.append(rtt)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, OSError):
                 pass
             finally:
                 pending_seqs.pop(seq, None)
@@ -410,7 +461,18 @@ async def run_system_ping_fallback(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=timeout * count + 5.0,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                raise
         stdout_str = stdout.decode("utf-8", errors="ignore")
 
         transmitted = 0

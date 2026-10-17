@@ -5,9 +5,13 @@ import ipaddress
 import os
 import socket
 import struct
+import time
 
 SIOCGIFADDR = 0x8915
 SIOCGIFNETMASK = 0x891B
+
+_cached_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
+_cache_timestamp: float = 0.0
 
 
 def get_local_interface_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -15,8 +19,13 @@ def get_local_interface_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv
     Enumerates all local directly-connected IPv4 and IPv6 interface subnets
     using Linux kernel procfs (/proc/net/route, /proc/net/if_inet6) and
     ioctl (SIOCGIFADDR / SIOCGIFNETMASK) over /sys/class/net/*.
-    Zero external dependencies.
+    Cached with a 30-second monotonic TTL. Zero external dependencies.
     """
+    global _cached_networks, _cache_timestamp
+    now = time.monotonic()
+    if _cached_networks is not None and (now - _cache_timestamp) < 30.0:
+        return list(_cached_networks)
+
     networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     seen: set[ipaddress.IPv4Network | ipaddress.IPv6Network] = set()
 
@@ -66,7 +75,7 @@ def get_local_interface_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv
                             res_mask = fcntl.ioctl(fd, SIOCGIFNETMASK, ifreq)
                             mask_str = socket.inet_ntoa(res_mask[20:24])
                         except Exception:
-                            mask_str = "255.0.0.0" if ip_str.startswith("127.") else "255.255.255.0"
+                            mask_str = "255.0.0.0" if ip_str.startswith("127.") else "255.255.255.255"
                         net = ipaddress.ip_network(f"{ip_str}/{mask_str}", strict=False)
                         _add_net(net)
                     except Exception:
@@ -94,7 +103,12 @@ def get_local_interface_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv
     except Exception:
         pass
 
+    _cached_networks = list(networks)
+    _cache_timestamp = now
     return networks
+
+
+get_local_interfaces_and_subnets = get_local_interface_networks
 
 
 def is_local_subnet_destination(target_ip: str) -> bool:

@@ -133,12 +133,28 @@ def sanitize_traceroute_hops(
     return collapsed_hops
 
 
-def _parse_trace_output(stdout_str: str) -> List[Dict[str, Any]]:
+class TraceHop(dict):
+    """Traceroute hop dict supporting attribute and item access."""
+    @property
+    def hop(self) -> int:
+        return self.get("hop")
+
+    @property
+    def ip(self) -> Optional[str]:
+        return self.get("ip")
+
+    @property
+    def rtt_ms(self) -> Optional[float]:
+        return self.get("rtt_ms")
+
+
+def _parse_trace_output(stdout_str: str, target_ip: Optional[str] = None) -> List[TraceHop]:
     """
     Parses stdout from traceroute or tracepath into structured hops.
     Supports multi-probe (-q 2) outputs by calculating average latency across probes.
+    Supports both IPv4 and IPv6 addresses.
     """
-    hops: List[Dict[str, Any]] = []
+    hops: List[TraceHop] = []
     seen_hops = set()
 
     for line in stdout_str.splitlines():
@@ -167,11 +183,33 @@ def _parse_trace_output(stdout_str: str) -> List[Dict[str, Any]]:
             or remainder == "* *"
             or remainder == "* * *"
         ):
-            hops.append({"hop": hop_num, "ip": None, "rtt_ms": None})
+            hops.append(TraceHop({"hop": hop_num, "ip": None, "rtt_ms": None}))
             continue
 
-        ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", remainder)
-        hop_ip = ip_match.group(1) if ip_match else None
+        # Look for IP in parentheses e.g. (2001:db8::1) or (192.168.1.1), or standalone IP token
+        hop_ip: Optional[str] = None
+        # First check parenthesized tokens
+        paren_matches = re.findall(r"\(([^\)]+)\)", remainder)
+        for cand in paren_matches:
+            cand = cand.strip()
+            try:
+                ipaddress.ip_address(cand)
+                hop_ip = cand
+                break
+            except ValueError:
+                continue
+
+        # Next check space-separated tokens
+        if hop_ip is None:
+            tokens = remainder.split()
+            for tok in tokens:
+                tok = tok.strip("(),;[]")
+                try:
+                    ipaddress.ip_address(tok)
+                    hop_ip = tok
+                    break
+                except ValueError:
+                    continue
 
         # Extract all RTT values (multi-probe -q 2)
         rtt_matches = re.findall(r"([\d\.]+)\s*ms", remainder)
@@ -180,11 +218,11 @@ def _parse_trace_output(stdout_str: str) -> List[Dict[str, Any]]:
             rtt_values = [float(val) for val in rtt_matches]
             rtt_ms = round(sum(rtt_values) / len(rtt_values), 3)
 
-        hops.append({
+        hops.append(TraceHop({
             "hop": hop_num,
             "ip": hop_ip,
             "rtt_ms": rtt_ms,
-        })
+        }))
 
     return hops
 
@@ -440,9 +478,17 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-        if proc.returncode == 0:
-            stdout_str = stdout.decode("utf-8", errors="ignore")
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            if proc.returncode == 0:
+                stdout_str = stdout.decode("utf-8", errors="ignore")
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            raise
     except Exception:
         stdout_str = ""
 
@@ -463,9 +509,17 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-            if proc.returncode == 0:
-                stdout_str = stdout.decode("utf-8", errors="ignore")
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+                if proc.returncode == 0:
+                    stdout_str = stdout.decode("utf-8", errors="ignore")
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                raise
         except Exception:
             stdout_str = ""
 
@@ -482,8 +536,16 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-            stdout_str = stdout.decode("utf-8", errors="ignore")
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+                stdout_str = stdout.decode("utf-8", errors="ignore")
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                raise
         except Exception as e:
             logger.warning(
                 "Route discovery execution failed for target %s: %s: %s",
