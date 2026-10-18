@@ -5,12 +5,15 @@ import ctypes
 import ctypes.util
 import hashlib
 import hmac
+import logging
 import os
 import re
 from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from app.config import settings
+
+logger = logging.getLogger("ephemres.crypto")
 
 _SALT = b"ephemres-alert-crypto-salt-v1"
 _INFO = b"ephemres-aes-256-gcm-key-derivation"
@@ -264,7 +267,8 @@ def decrypt_secret(ciphertext: str) -> str:
         nonce = base64.b64decode(parts[2], validate=True)
         raw_ct = base64.b64decode(parts[3], validate=True)
     except Exception as exc:
-        raise DecryptionError(f"Malformed base64 in encrypted secret: {exc}") from exc
+        logger.debug("Malformed base64 in encrypted secret: %s", exc)
+        raise DecryptionError("Malformed base64 in encrypted secret.") from exc
 
     # Candidate keys for decryption (effective key first, then fallback keys)
     candidate_keys = [settings.security.effective_crypto_key]
@@ -283,7 +287,8 @@ def decrypt_secret(ciphertext: str) -> str:
                 last_exc = exc
                 continue
 
-    raise DecryptionError(f"Failed to decrypt secret payload: {last_exc}") from last_exc
+    logger.debug("Failed to decrypt secret payload: %s", last_exc)
+    raise DecryptionError("Failed to decrypt secret payload.") from last_exc
 
 
 def mask_secret(secret: str) -> str:
