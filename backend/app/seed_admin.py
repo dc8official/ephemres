@@ -1,14 +1,22 @@
 import os
+import sys
 import asyncio
 import logging
+from typing import Optional
 from app.core.orm import text
 from app.database import AsyncSessionLocal
-from app.services.auth_service import hash_password
+from app.services.auth_service import hash_password, generate_readable_password
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("seed_admin")
 
-async def seed_admin(password: str = "admin"):
+async def seed_admin(password: Optional[str] = None):
+    if not password:
+        password = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
+    if not password:
+        password = generate_readable_password()
+        print(f"[seed] Initial admin password generated: {password}")
+
     async with AsyncSessionLocal() as db:
         role_res = await db.execute(
             text("SELECT id FROM roles WHERE role_name = 'ADMIN' LIMIT 1")
@@ -90,5 +98,7 @@ async def seed_admin(password: str = "admin"):
         return True
 
 if __name__ == "__main__":
-    target_pass = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD", "admin")
-    asyncio.run(seed_admin(target_pass))
+    target_pass = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
+    success = asyncio.run(seed_admin(target_pass))
+    if not success:
+        sys.exit(1)
