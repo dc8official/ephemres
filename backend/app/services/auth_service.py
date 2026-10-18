@@ -52,6 +52,9 @@ class ScryptPasswordHasher:
     def verify(self, hashed: str, plain: str) -> bool:
         if not hashed or not isinstance(hashed, str) or not isinstance(plain, str):
             return False
+        if hashed.startswith("$argon2"):
+            logger.warning("Legacy argon2 hash for login attempt; run app.reset_legacy_passwords")
+            return False
         parts = hashed.split("$")
         if len(parts) != 5 or parts[1] != "scrypt":
             return False
@@ -258,6 +261,31 @@ def verify_password(plain: str, hashed: str) -> bool:
 async def verify_password_async(plain: str, hashed: str) -> bool:
     """Non-blocking OpenSSL scrypt password verification delegated to asyncio worker thread."""
     return await asyncio.to_thread(verify_password, plain, hashed)
+
+
+def needs_rehash(hashed: str) -> bool:
+    """Returns True if the password hash is not an OpenSSL scrypt hash matching current cost parameters."""
+    if not hashed or not isinstance(hashed, str):
+        return True
+    if not hashed.startswith("$scrypt$"):
+        return True
+    parts = hashed.split("$")
+    if len(parts) != 5 or parts[1] != "scrypt":
+        return True
+    try:
+        params: Dict[str, int] = {}
+        for item in parts[2].split(","):
+            k, v = item.split("=", 1)
+            params[k.strip()] = int(v.strip())
+        if (
+            params.get("n") != ScryptPasswordHasher.N
+            or params.get("r") != ScryptPasswordHasher.R
+            or params.get("p") != ScryptPasswordHasher.P
+        ):
+            return True
+        return False
+    except Exception:
+        return True
 
 
 # ---------------------------------------------------------------------------

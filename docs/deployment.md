@@ -228,3 +228,24 @@ python3 -m app.core.migrator upgrade head
 sudo -u postgres psql -d netmon -c "\dt flow*"
 sudo -u postgres psql -d netmon -c "SELECT hypertable_name FROM timescaledb_information.hypertables;"
 ```
+
+---
+
+## 9. Upgrading from ≤ v3.3.1 (Legacy Password Hashes)
+
+In `v3.3.2v`, external dependency `argon2-cffi` is eliminated in favor of Python's standard library OpenSSL `hashlib.scrypt` password hashing.
+
+Because legacy `$argon2id$` hashes cannot be validated without external C libraries, upgrading from `v3.3.1n` or earlier requires resetting legacy password hashes to secure temporary scrypt passwords:
+
+1. When running `deploy/upgrade.sh`, the utility automatically executes:
+   ```bash
+   python3 -m app.reset_legacy_passwords
+   ```
+2. Any user account possessing a legacy non-scrypt password hash is assigned a random temporary password, converted to an `$scrypt$` hash, and flagged with `must_change_password = TRUE`.
+3. The generated credentials are saved with root-only read permissions (`0o600`) to:
+   ```
+   /opt/ephemres/legacy_password_resets.txt
+   ```
+   (Format: `username<TAB>temporary_password`).
+4. Administrators must securely distribute these temporary credentials to affected users and delete `/opt/ephemres/legacy_password_resets.txt`.
+5. Upon first login with their temporary password, users are required to set a new password.

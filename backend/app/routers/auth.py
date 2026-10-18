@@ -30,6 +30,7 @@ from app.services.auth_service import (
     invalidate_session,
     is_account_locked,
     is_session_active,
+    needs_rehash,
     record_failed_attempt,
     register_session,
     verify_password,
@@ -100,6 +101,10 @@ async def login(
         await store.clear_failed_attempts(client_ip, payload.username)
     except Exception:
         pass
+
+    if needs_rehash(password_hash):
+        user.password_hash = await hash_password_async(payload.password)
+        await db.commit()
 
     user_id = getattr(user, "id", None)
     username = getattr(user, "username", payload.username)

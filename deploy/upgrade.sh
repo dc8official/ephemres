@@ -389,6 +389,17 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
             PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin || true
+
+            echo -e "${GREEN}[INFO] Checking and resetting legacy password hashes...${NC}"
+            RESET_REPORT="/opt/ephemres/legacy_password_resets.txt"
+            PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.reset_legacy_passwords
+            if [[ -s "${RESET_REPORT}" ]]; then
+                RESET_COUNT=$(wc -l < "${RESET_REPORT}")
+                echo -e "${YELLOW}========================================================================${NC}"
+                echo -e "${YELLOW}[NOTICE] ${RESET_COUNT} users had legacy password hashes and were assigned temporary passwords.${NC}"
+                echo -e "${YELLOW}See ${RESET_REPORT} (root-only). Distribute and delete it.${NC}"
+                echo -e "${YELLOW}========================================================================${NC}"
+            fi
         fi
 
         # TimescaleDB Hypertable Decompression Safety & Legacy Row Sanitization
