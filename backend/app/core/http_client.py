@@ -29,6 +29,9 @@ class HttpTimeoutError(HttpRequestError, TimeoutError):
     pass
 
 
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+
+
 @dataclass
 class HttpResponse:
     """Lightweight HTTP response container matching the httpx.Response interface subset."""
@@ -338,92 +341,111 @@ class SSRFSafeHttpClient:
 
         writer: asyncio.StreamWriter | None = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
+            async with asyncio.timeout(eff_timeout):
+                reader, writer = await asyncio.open_connection(
                     host=validated_ip,
                     port=port,
                     ssl=ssl_ctx,
                     server_hostname=hostname if is_https else None,
-                ),
-                timeout=eff_timeout,
-            )
+                )
 
-            writer.write(raw_head + body_bytes)
-            await asyncio.wait_for(writer.drain(), timeout=eff_timeout)
+                writer.write(raw_head + body_bytes)
+                await writer.drain()
 
-            status_line_bytes = await asyncio.wait_for(reader.readline(), timeout=eff_timeout)
-            if not status_line_bytes:
-                raise HttpRequestError("Remote server closed connection before sending status line.")
+                status_line_bytes = await reader.readline()
+                if not status_line_bytes:
+                    raise HttpRequestError("Remote server closed connection before sending status line.")
 
-            status_line = status_line_bytes.decode("latin-1", errors="replace").strip()
-            parts = status_line.split(" ", 2)
-            if len(parts) < 2 or not parts[0].startswith("HTTP/"):
-                raise HttpRequestError(f"Malformed HTTP status line: {status_line!r}")
-            try:
-                status_code = int(parts[1])
-            except ValueError as exc:
-                raise HttpRequestError(f"Invalid HTTP status code in line: {status_line!r}") from exc
-
-            resp_headers: dict[str, str] = {}
-            while True:
-                hdr_line = await asyncio.wait_for(reader.readline(), timeout=eff_timeout)
-                if not hdr_line or hdr_line in (b"\r\n", b"\n"):
-                    break
-                decoded_hdr = hdr_line.decode("latin-1", errors="replace").strip()
-                if ":" in decoded_hdr:
-                    hk, hv = decoded_hdr.split(":", 1)
-                    resp_headers[hk.strip().lower()] = hv.strip()
-
-            body_chunks = bytearray()
-            cl_hdr = resp_headers.get("content-length")
-            is_chunked = resp_headers.get("transfer-encoding", "").lower() == "chunked"
-
-            if cl_hdr is not None:
+                status_line = status_line_bytes.decode("latin-1", errors="replace").strip()
+                parts = status_line.split(" ", 2)
+                if len(parts) < 2 or not parts[0].startswith("HTTP/"):
+                    raise HttpRequestError(f"Malformed HTTP status line: {status_line!r}")
                 try:
-                    content_len = int(cl_hdr)
-                except ValueError:
-                    content_len = None
-            else:
-                content_len = None
+                    status_code = int(parts[1])
+                except ValueError as exc:
+                    raise HttpRequestError(f"Invalid HTTP status code in line: {status_line!r}") from exc
 
-            if content_len is not None:
-                while len(body_chunks) < content_len:
-                    chunk = await asyncio.wait_for(
-                        reader.read(min(65536, content_len - len(body_chunks))),
-                        timeout=eff_timeout,
-                    )
-                    if not chunk:
-                        break
-                    body_chunks.extend(chunk)
-            elif is_chunked:
+                resp_headers: dict[str, str] = {}
                 while True:
-                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
-                    if not chunk:
+                    hdr_line = await reader.readline()
+                    if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                         break
-                    body_chunks.extend(chunk)
-                    if b"0\r\n\r\n" in body_chunks:
-                        break
-            else:
-                while True:
-                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
-                    if not chunk:
-                        break
-                    body_chunks.extend(chunk)
-                    if len(body_chunks) > 10 * 1024 * 1024:
-                        break
+                    decoded_hdr = hdr_line.decode("latin-1", errors="replace").strip()
+                    if ":" in decoded_hdr:
+                        hk, hv = decoded_hdr.split(":", 1)
+                        resp_headers[hk.strip().lower()] = hv.strip()
 
-            raw_resp_body = bytes(body_chunks)
-            if is_chunked:
-                raw_resp_body = _decode_chunked_body(raw_resp_body)
+                body_chunks = bytearray()
+                cl_hdr = resp_headers.get("content-length")
+                is_chunked = "chunked" in resp_headers.get("transfer-encoding", "").lower()
 
-            resp_text = raw_resp_body.decode("utf-8", errors="replace")
-            return HttpResponse(
-                status_code=status_code,
-                text=resp_text,
-                headers=resp_headers,
-                content=raw_resp_body,
-            )
-        except asyncio.TimeoutError as exc:
+                if is_chunked:
+                    while True:
+                        line = await reader.readline()
+                        if not line:
+                            raise HttpRequestError("Connection closed prematurely during chunked read.")
+                        size_str = line.split(b";")[0].strip()
+                        try:
+                            chunk_size = int(size_str, 16)
+                        except ValueError as exc:
+                            raise HttpRequestError(f"Invalid chunk size: {line!r}") from exc
+
+                        if chunk_size < 0:
+                            raise HttpRequestError(f"Negative chunk size: {chunk_size}")
+
+                        if chunk_size == 0:
+                            while True:
+                                trailer = await reader.readline()
+                                if not trailer or trailer in (b"\r\n", b"\n"):
+                                    break
+                            break
+
+                        if len(body_chunks) + chunk_size > MAX_RESPONSE_BYTES:
+                            raise HttpRequestError("Response too large")
+
+                        chunk_data = await reader.readexactly(chunk_size)
+                        body_chunks.extend(chunk_data)
+
+                        crlf = await reader.readline()
+                        if crlf not in (b"\r\n", b"\n"):
+                            raise HttpRequestError("Malformed chunk: missing trailing CRLF")
+
+                elif cl_hdr is not None:
+                    try:
+                        content_len = int(cl_hdr)
+                    except ValueError as exc:
+                        raise HttpRequestError(f"Invalid Content-Length: {cl_hdr!r}") from exc
+
+                    if content_len < 0:
+                        raise HttpRequestError(f"Negative Content-Length: {content_len}")
+                    if content_len > MAX_RESPONSE_BYTES:
+                        raise HttpRequestError("Response too large")
+
+                    while len(body_chunks) < content_len:
+                        needed = min(65536, content_len - len(body_chunks))
+                        chunk = await reader.read(needed)
+                        if not chunk:
+                            break
+                        body_chunks.extend(chunk)
+
+                else:
+                    while True:
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            break
+                        if len(body_chunks) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise HttpRequestError("Response too large")
+                        body_chunks.extend(chunk)
+
+                raw_resp_body = bytes(body_chunks)
+                resp_text = raw_resp_body.decode("utf-8", errors="replace")
+                return HttpResponse(
+                    status_code=status_code,
+                    text=resp_text,
+                    headers=resp_headers,
+                    content=raw_resp_body,
+                )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             raise HttpTimeoutError(f"HTTP request to '{url}' timed out after {eff_timeout}s.") from exc
         except (ValueError, HttpRequestError):
             raise
