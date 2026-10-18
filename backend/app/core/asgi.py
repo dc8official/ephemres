@@ -1138,7 +1138,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("path", param_name),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1164,7 +1164,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("header", h_alias),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1190,7 +1190,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("cookie", c_alias),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1250,7 +1250,7 @@ async def _resolve_endpoint_kwargs(
                     except Exception as exc:
                         validation_errors.append({
                             "loc": ("body",),
-                            "msg": str(exc),
+                            "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                             "type": "value_error",
                         })
                 continue
@@ -1281,7 +1281,7 @@ async def _resolve_endpoint_kwargs(
                     except Exception as exc:
                         validation_errors.append({
                             "loc": ("body",),
-                            "msg": str(exc),
+                            "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                             "type": "value_error",
                         })
                 continue
@@ -1306,7 +1306,7 @@ async def _resolve_endpoint_kwargs(
             except Exception as exc:
                 validation_errors.append({
                     "loc": ("query", alias),
-                    "msg": str(exc),
+                    "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                     "type": "value_error",
                 })
         elif not q_info.is_required():
