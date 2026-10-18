@@ -243,6 +243,9 @@ else
         chown -R ephemres:ephemres "$INSTALL_DIR"
 fi
 
+# Purge any stale bytecode from previous runs to ensure clean imports
+find "$INSTALL_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
 run "Marking install directory as git safe directory" \
     git config --global --add safe.directory "$INSTALL_DIR"
 
@@ -443,6 +446,9 @@ fi
 
 # ============================================================
 print_header "Step 13: Running database migrations"
+
+# Purge any stale python bytecode in backend before executing migrations
+find "$INSTALL_DIR/backend" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
 run "Running native database migrations" \
     sudo -H -u ephemres bash -c "
