@@ -1470,6 +1470,11 @@ class CORSMiddleware:
                 "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
             )
 
+    def is_allowed_origin(self, origin: str) -> bool:
+        if "*" in self.allow_origins:
+            return True
+        return origin in self.allow_origins
+
     async def __call__(
         self,
         scope: Dict[str, Any],
@@ -1483,16 +1488,19 @@ class CORSMiddleware:
         request = Request(scope, receive, send)
         origin = request.headers.get("origin")
 
-        # Handle Preflight OPTIONS
+        # Handle Preflight OPTIONS: only answer preflight if origin is allowed; otherwise pass through
         if request.method == "OPTIONS" and origin:
-            headers = self._get_cors_headers(origin)
-            res = Response(content=b"", status_code=200, headers=headers)
-            await res(scope, receive, send)
+            if self.is_allowed_origin(origin):
+                headers = self._get_cors_headers(origin, request)
+                res = Response(content=b"", status_code=200, headers=headers)
+                await res(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
             return
 
         async def send_with_cors(message: Dict[str, Any]) -> None:
-            if message.get("type") == "http.response.start" and origin:
-                cors_headers = self._get_cors_headers(origin)
+            if message.get("type") == "http.response.start" and origin and self.is_allowed_origin(origin):
+                cors_headers = self._get_cors_headers(origin, request)
                 raw_headers = list(message.get("headers", []))
                 for k, v in cors_headers.items():
                     raw_headers.append((k.encode("latin-1"), v.encode("latin-1")))
@@ -1501,7 +1509,7 @@ class CORSMiddleware:
 
         await self.app(scope, receive, send_with_cors)
 
-    def _get_cors_headers(self, origin: str) -> Dict[str, str]:
+    def _get_cors_headers(self, origin: str, request: Optional[Request] = None) -> Dict[str, str]:
         headers: Dict[str, str] = {}
         if "*" in self.allow_origins:
             headers["Access-Control-Allow-Origin"] = "*"
@@ -1515,9 +1523,17 @@ class CORSMiddleware:
         if self.allow_methods:
             headers["Access-Control-Allow-Methods"] = ", ".join(self.allow_methods)
         if self.allow_headers:
-            headers["Access-Control-Allow-Headers"] = (
-                "*" if "*" in self.allow_headers else ", ".join(self.allow_headers)
-            )
+            if "*" in self.allow_headers:
+                if self.allow_credentials and request is not None:
+                    acrh = request.headers.get("access-control-request-headers")
+                    if acrh is not None:
+                        headers["Access-Control-Allow-Headers"] = acrh
+                        vary = headers.get("Vary", "")
+                        headers["Vary"] = f"{vary}, Access-Control-Request-Headers".lstrip(", ")
+                else:
+                    headers["Access-Control-Allow-Headers"] = "*"
+            else:
+                headers["Access-Control-Allow-Headers"] = ", ".join(self.allow_headers)
         return headers
 
 
