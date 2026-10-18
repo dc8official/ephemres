@@ -1068,6 +1068,12 @@ class Table:
         if col.primary_key and col.name not in self.primary_key.columns:
             self.primary_key.columns.append(col.name)
         self.foreign_keys.update(col.foreign_keys)
+        for fk in col.foreign_keys:
+            target = getattr(fk, "_colspec", None) or getattr(fk, "target_fullname", None)
+            if target:
+                self.constraints.append(
+                    ForeignKeyConstraint([col.name], [target], ondelete=fk.ondelete)
+                )
         if col.index:
             idx = Index(f"ix_{self.name}_{col.name}", col.name)
             idx.table = self
@@ -1145,11 +1151,31 @@ class CreateTable:
                 name_clause = f'CONSTRAINT "{c.name}" ' if c.name else ""
                 lines.append(f"    {name_clause}CHECK ({c.sqltext})")
             elif isinstance(c, ForeignKeyConstraint):
-                loc = ", ".join(c.columns)
-                rem = ", ".join(c.refcolumns)
+                loc = ", ".join(f'"{col.strip(chr(34))}"' for col in c.columns)
+                target_table = None
+                target_cols = []
+                for ref in c.refcolumns:
+                    if isinstance(ref, str):
+                        if "." in ref:
+                            t_name, col_name = ref.rsplit(".", 1)
+                            target_table = t_name.strip('"')
+                            target_cols.append(col_name.strip('"'))
+                        else:
+                            target_cols.append(ref.strip('"'))
+                    elif hasattr(ref, "table") and hasattr(ref, "name"):
+                        target_table = getattr(ref.table, "name", "").strip('"')
+                        target_cols.append(getattr(ref, "name", "").strip('"'))
+                    else:
+                        target_cols.append(str(ref).strip('"'))
+
                 on_del = f" ON DELETE {c.ondelete}" if c.ondelete else ""
                 name_clause = f'CONSTRAINT "{c.name}" ' if c.name else ""
-                lines.append(f"    {name_clause}FOREIGN KEY ({loc}) REFERENCES {rem}{on_del}")
+                if target_table:
+                    rem_cols = ", ".join(f'"{tc}"' for tc in target_cols)
+                    lines.append(f'    {name_clause}FOREIGN KEY ({loc}) REFERENCES "{target_table}" ({rem_cols}){on_del}')
+                else:
+                    rem = ", ".join(c.refcolumns)
+                    lines.append(f"    {name_clause}FOREIGN KEY ({loc}) REFERENCES {rem}{on_del}")
 
         body = ",\n".join(lines)
         ddl = f"CREATE TABLE {self.table.name} (\n{body}\n)"
