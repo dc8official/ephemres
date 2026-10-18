@@ -7,6 +7,14 @@ import importlib.util
 import os
 import sys
 from dataclasses import dataclass, field
+
+# If invoked directly via `python -m app.core.migrator` or as script,
+# register this module into sys.modules under its canonical import name
+# so subsequent `from app.core.migrator import op` imports inside migration scripts
+# resolve to this identical module instance rather than importing a duplicate copy.
+if "app.core.migrator" not in sys.modules and __name__ in sys.modules:
+    sys.modules["app.core.migrator"] = sys.modules[__name__]
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 import urllib.parse
@@ -166,10 +174,35 @@ _active_proxy: Optional[OperationsProxy] = None
 def set_current_proxy(proxy: Optional[OperationsProxy]) -> None:
     global _active_proxy
     _active_proxy = proxy
+    canonical = sys.modules.get("app.core.migrator")
+    if canonical is not None and canonical is not sys.modules.get(__name__):
+        try:
+            canonical._active_proxy = proxy
+        except Exception:
+            pass
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None and main_mod is not sys.modules.get(__name__):
+        if hasattr(main_mod, "_active_proxy"):
+            try:
+                main_mod._active_proxy = proxy
+            except Exception:
+                pass
 
 
 def get_current_proxy() -> Optional[OperationsProxy]:
-    return _active_proxy
+    if _active_proxy is not None:
+        return _active_proxy
+    canonical = sys.modules.get("app.core.migrator")
+    if canonical is not None and canonical is not sys.modules.get(__name__):
+        target = getattr(canonical, "_active_proxy", None)
+        if target is not None:
+            return target
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None and main_mod is not sys.modules.get(__name__):
+        target = getattr(main_mod, "_active_proxy", None)
+        if target is not None:
+            return target
+    return None
 
 
 class _DynamicOpProxy:
@@ -177,6 +210,18 @@ class _DynamicOpProxy:
 
     def __getattr__(self, name: str) -> Any:
         target = _active_proxy
+        if target is None:
+            canonical = sys.modules.get("app.core.migrator")
+            if canonical is not None and canonical is not sys.modules.get(__name__):
+                target = getattr(canonical, "_active_proxy", None)
+        if target is None:
+            main_mod = sys.modules.get("__main__")
+            if main_mod is not None and main_mod is not sys.modules.get(__name__):
+                target = getattr(main_mod, "_active_proxy", None)
+        if target is None:
+            alembic_op = sys.modules.get("alembic.op")
+            if alembic_op is not None and getattr(alembic_op, "_proxy", None) is not None:
+                target = alembic_op
         if target is None:
             raise RuntimeError(f"op.{name}() called outside an active migration context")
         return getattr(target, name)

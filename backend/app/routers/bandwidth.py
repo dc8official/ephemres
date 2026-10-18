@@ -38,6 +38,8 @@ from app.schemas.bandwidth import (
     TrafficSeriesPoint,
     TrafficSeriesResponse,
     UnmatchedExporterItem,
+    format_dscp_label,
+    format_tcp_flags,
 )
 from app.schemas.endpoints import InterfaceConfig
 from app.services.driver_manager import driver_manager
@@ -402,54 +404,88 @@ async def get_top_talkers(
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
 
-    # 1. Top endpoints
-    ep_filters = [FlowMinuteRollup.bucket >= start_time]
+    # 1. Top endpoints (True Ingress & Egress accounting across src_ip and dst_ip)
+    model = FlowMinuteRollup
+    ep_filters = [model.bucket >= start_time]
     if exporter_id is not None:
-        ep_filters.append(FlowMinuteRollup.exporter_id == exporter_id)
+        ep_filters.append(model.exporter_id == exporter_id)
     if endpoint_id is not None:
         ep_filters.append(
             or_(
-                FlowMinuteRollup.src_endpoint_id == endpoint_id,
-                FlowMinuteRollup.dst_endpoint_id == endpoint_id,
+                model.src_endpoint_id == endpoint_id,
+                model.dst_endpoint_id == endpoint_id,
             )
         )
 
-    top_ep_stmt = (
+    egress_stmt = (
         select(
-            FlowMinuteRollup.src_ip.label("ip"),
-            FlowMinuteRollup.src_endpoint_id.label("ep_id"),
-            func.sum(FlowMinuteRollup.bytes).label("total_bytes"),
-            func.sum(FlowMinuteRollup.flow_count).label("total_flows"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (FlowMinuteRollup.dst_endpoint_id.is_not(None), FlowMinuteRollup.bytes),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("ingress_bytes"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (FlowMinuteRollup.src_endpoint_id.is_not(None), FlowMinuteRollup.bytes),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("egress_bytes"),
+            model.src_ip,
+            model.src_endpoint_id,
+            func.sum(model.bytes).label("egress_bytes"),
+            func.sum(model.flow_count).label("egress_flows"),
         )
         .where(*ep_filters)
-        .group_by(FlowMinuteRollup.src_ip, FlowMinuteRollup.src_endpoint_id)
-        .order_by(func.sum(FlowMinuteRollup.bytes).desc())
-        .limit(limit)
+        .group_by(model.src_ip, model.src_endpoint_id)
+        .order_by(func.sum(model.bytes).desc())
+        .limit(limit * 3)
     )
 
-    top_ep_res = await db.execute(top_ep_stmt)
-    ep_rows = top_ep_res.all()
+    ingress_stmt = (
+        select(
+            model.dst_ip,
+            model.dst_endpoint_id,
+            func.sum(model.bytes).label("ingress_bytes"),
+            func.sum(model.flow_count).label("ingress_flows"),
+        )
+        .where(*ep_filters)
+        .group_by(model.dst_ip, model.dst_endpoint_id)
+        .order_by(func.sum(model.bytes).desc())
+        .limit(limit * 3)
+    )
+
+    egress_res = await db.execute(egress_stmt)
+    ingress_res = await db.execute(ingress_stmt)
+
+    egress_map: Dict[str, Dict[str, Any]] = {}
+    for row in egress_res.all():
+        ip_str = str(row[0])
+        ep_id = row[1]
+        eg_b = int(row[2] or 0)
+        eg_f = int(row[3] or 0)
+        egress_map[ip_str] = {"ep_id": ep_id, "bytes": eg_b, "flows": eg_f}
+
+    ingress_map: Dict[str, Dict[str, Any]] = {}
+    for row in ingress_res.all():
+        ip_str = str(row[0])
+        ep_id = row[1]
+        in_b = int(row[2] or 0)
+        in_f = int(row[3] or 0)
+        ingress_map[ip_str] = {"ep_id": ep_id, "bytes": in_b, "flows": in_f}
+
+    all_ips = set(egress_map.keys()) | set(ingress_map.keys())
+    merged_candidates: List[Dict[str, Any]] = []
+    for ip_str in all_ips:
+        eg = egress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0})
+        ing = ingress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0})
+        eg_bytes = eg["bytes"]
+        in_bytes = ing["bytes"]
+        tot_bytes = eg_bytes + in_bytes
+        tot_flows = eg["flows"] + ing["flows"]
+        ep_id = eg["ep_id"] or ing["ep_id"]
+        merged_candidates.append({
+            "ip": ip_str,
+            "endpoint_id": ep_id,
+            "ingress_bytes": in_bytes,
+            "egress_bytes": eg_bytes,
+            "total_bytes": tot_bytes,
+            "flow_count": tot_flows,
+        })
+
+    merged_candidates.sort(key=lambda x: x["total_bytes"], reverse=True)
+    selected_candidates = merged_candidates[:limit]
 
     # Load hostnames for known endpoints
-    ep_ids = [getattr(r, "ep_id", r[1]) for r in ep_rows if getattr(r, "ep_id", r[1])]
+    ep_ids = [c["endpoint_id"] for c in selected_candidates if c["endpoint_id"]]
     hostnames: Dict[UUID, str] = {}
     if ep_ids:
         h_stmt = select(Endpoint.id, Endpoint.hostname).where(Endpoint.id.in_(ep_ids))
@@ -458,30 +494,16 @@ async def get_top_talkers(
             hostnames[e_id] = h_name
 
     top_endpoints: List[TopTalkerItem] = []
-    for row in ep_rows:
-        ip = row[0]
-        ep_id = row[1]
-        b_sum = row[2]
-        f_sum = row[3]
-        total_b = int(b_sum or 0)
-        if len(row) >= 6:
-            in_b = int(row[4] or 0)
-            eg_b = int(row[5] or 0)
-            if in_b == 0 and eg_b == 0:
-                eg_b = total_b
-        else:
-            in_b = 0
-            eg_b = total_b
-        h_name = hostnames.get(ep_id)
+    for c in selected_candidates:
         top_endpoints.append(
             TopTalkerItem(
-                endpoint_id=ep_id,
-                ip_address=str(ip),
-                hostname=h_name,
-                total_bytes=total_b,
-                ingress_bytes=in_b,
-                egress_bytes=eg_b,
-                flow_count=int(f_sum or 0),
+                endpoint_id=c["endpoint_id"],
+                ip_address=c["ip"],
+                hostname=hostnames.get(c["endpoint_id"]),
+                total_bytes=c["total_bytes"],
+                ingress_bytes=c["ingress_bytes"],
+                egress_bytes=c["egress_bytes"],
+                flow_count=c["flow_count"],
             )
         )
 
@@ -505,6 +527,8 @@ async def get_top_talkers(
             FlowMinuteRollup.dst_port,
             func.sum(FlowMinuteRollup.bytes).label("total_bytes"),
             func.sum(FlowMinuteRollup.flow_count).label("total_flows"),
+            func.bit_or(FlowMinuteRollup.tcp_flags).label("tcp_flags_mask"),
+            func.max(FlowMinuteRollup.tos).label("max_tos"),
         )
         .where(*conv_filters)
         .group_by(
@@ -519,8 +543,30 @@ async def get_top_talkers(
 
     conv_res = await db.execute(top_conv_stmt)
     top_conversations: List[TopConversationItem] = []
-    for s_ip, d_ip, proto_id, port, b_sum, f_sum in conv_res.all():
+    for row in conv_res.all():
+        s_ip = row[0]
+        d_ip = row[1]
+        proto_id = row[2]
+        port = row[3]
+        b_sum = row[4]
+        f_sum = row[5]
+        tcp_flags = int(row[6] or 0) if len(row) > 6 else 0
+        tos = int(row[7] or 0) if len(row) > 7 else 0
+
         proto_name = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
+        flags_labels = format_tcp_flags(tcp_flags) if proto_name == "TCP" else []
+        dscp_val = (tos & 0xFF) >> 2
+        dscp_lbl = format_dscp_label(tos)
+
+        anomaly_hint = None
+        if proto_name == "TCP":
+            # SYN_ONLY: SYN bit set (0x02) and not ACK (0x10)
+            if (tcp_flags & 0x02) and not (tcp_flags & 0x10):
+                anomaly_hint = "SYN_ONLY"
+            # TCP_RST: RST bit set (0x04) and not FIN (0x01)
+            elif (tcp_flags & 0x04) and not (tcp_flags & 0x01):
+                anomaly_hint = "TCP_RST"
+
         top_conversations.append(
             TopConversationItem(
                 src_ip=str(s_ip),
@@ -529,6 +575,12 @@ async def get_top_talkers(
                 dst_port=int(port),
                 total_bytes=int(b_sum or 0),
                 flow_count=int(f_sum or 0),
+                tcp_flags=tcp_flags,
+                tcp_flags_labels=flags_labels,
+                tos=tos,
+                dscp=dscp_val,
+                dscp_label=dscp_lbl,
+                anomaly_hint=anomaly_hint,
             )
         )
 

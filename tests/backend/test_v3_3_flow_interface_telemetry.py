@@ -433,12 +433,14 @@ def test_bandwidth_top_talkers_with_exporter_id(client):
 
     m1 = MagicMock()
     m1.all.return_value = [mock_src_row]
+    m_in = MagicMock()
+    m_in.all.return_value = []
     m_ep = MagicMock()
-    m_ep.first.return_value = ("Edge-Router",)
+    m_ep.all.return_value = [(exporter_id, "Edge-Router")]
     m2 = MagicMock()
     m2.all.return_value = [mock_conv_row]
 
-    mock_session.execute.side_effect = [m1, m_ep, m2]
+    mock_session.execute.side_effect = [m1, m_in, m_ep, m2]
 
     resp = test_client.get(f"/api/v1/bandwidth/top-talkers?window=1h&exporter_id={exporter_id}")
     assert resp.status_code == 200
