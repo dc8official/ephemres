@@ -56,6 +56,8 @@ from app.core.schema import (
     _validate_constraints,
 )
 
+RequestValidationError = ValidationError
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -1561,6 +1563,23 @@ class EphemresApp:
 
         return decorator
 
+    def _find_handler(self, exc: Exception) -> Optional[Callable]:
+        if isinstance(exc, HTTPException):
+            handler = self.exception_handlers.get(exc.status_code)
+            if handler is not None:
+                return handler
+
+        for cls in type(exc).__mro__:
+            handler = self.exception_handlers.get(cls)
+            if handler is not None:
+                return handler
+            if cls is ValidationError:
+                handler = self.exception_handlers.get(RequestValidationError)
+                if handler is not None:
+                    return handler
+
+        return None
+
     def include_router(
         self,
         router: APIRouter,
@@ -1686,7 +1705,23 @@ class EphemresApp:
 
         if matched_route is None:
             if allowed_methods_for_path:
+                http_exc = HTTPException(status_code=405, detail="Method Not Allowed")
+                handler = self._find_handler(http_exc)
+                if handler is not None:
+                    resp = handler(request, http_exc)
+                    if inspect.isawaitable(resp):
+                        resp = await resp
+                    await resp(scope, receive, send)
+                    return
                 resp = JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
+                await resp(scope, receive, send)
+                return
+            http_exc = HTTPException(status_code=404, detail="Not Found")
+            handler = self._find_handler(http_exc)
+            if handler is not None:
+                resp = handler(request, http_exc)
+                if inspect.isawaitable(resp):
+                    resp = await resp
                 await resp(scope, receive, send)
                 return
             resp = JSONResponse({"detail": "Not Found"}, status_code=404)
@@ -1802,9 +1837,9 @@ class EphemresApp:
                 logger.exception("HTTPException raised after response already started on %s %s: %s", method, path, http_exc)
                 return
 
-            # Check custom exception handlers
-            if HTTPException in self.exception_handlers:
-                custom_resp = self.exception_handlers[HTTPException](request, http_exc)
+            handler = self._find_handler(http_exc)
+            if handler is not None:
+                custom_resp = handler(request, http_exc)
                 if inspect.isawaitable(custom_resp):
                     custom_resp = await custom_resp
                 await custom_resp(scope, receive, send)
@@ -1822,6 +1857,14 @@ class EphemresApp:
                 logger.exception("ValidationError raised after response already started on %s %s: %s", method, path, v_exc)
                 return
 
+            handler = self._find_handler(v_exc)
+            if handler is not None:
+                custom_resp = handler(request, v_exc)
+                if inspect.isawaitable(custom_resp):
+                    custom_resp = await custom_resp
+                await custom_resp(scope, receive, send)
+                return
+
             val_resp = JSONResponse(
                 content={"detail": v_exc.errors()},
                 status_code=422,
@@ -1833,13 +1876,13 @@ class EphemresApp:
                 logger.exception("Exception raised after response already started on %s %s: %s", method, path, exc)
                 return
 
-            for exc_type, handler in self.exception_handlers.items():
-                if isinstance(exc_type, type) and isinstance(exc, exc_type):
-                    res = handler(request, exc)
-                    if inspect.isawaitable(res):
-                        res = await res
-                    await res(scope, receive, send)
-                    return
+            handler = self._find_handler(exc)
+            if handler is not None:
+                res = handler(request, exc)
+                if inspect.isawaitable(res):
+                    res = await res
+                await res(scope, receive, send)
+                return
 
             logger.error("Unhandled API exception on %s %s: %s", method, path, exc, exc_info=True)
             err_resp = JSONResponse(
