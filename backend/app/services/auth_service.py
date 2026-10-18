@@ -349,27 +349,52 @@ def get_trusted_client_ip(
 # ---------------------------------------------------------------------------
 # Concurrent Session Management (Token-based FIFO rotation)
 # ---------------------------------------------------------------------------
-def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
-    """
-    Registers a new session JTI for the user.
-    If the user has reached max_sessions, the oldest session is evicted (FIFO).
-    """
+_background_session_tasks: Set[asyncio.Task] = set()
+
+
+def _handle_session_task_done(task: asyncio.Task) -> None:
+    _background_session_tasks.discard(task)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            logger.exception("Background session task failed: %s", exc)
+
+
+async def register_session_async(user_id: str, jti: str, max_sessions: int = 2) -> None:
+    """Registers a new session JTI for the user, updating in-memory cache and awaiting backing store."""
     u_id = str(user_id)
     active_list = _active_user_sessions.get(u_id, [])
-    if jti in active_list:
-        return
-    active_list.append(jti)
-    if len(active_list) > max_sessions:
-        # Evict oldest session(s)
-        active_list = active_list[-max_sessions:]
-    _active_user_sessions[u_id] = active_list
+    if jti not in active_list:
+        active_list.append(jti)
+        if len(active_list) > max_sessions:
+            active_list = active_list[-max_sessions:]
+        _active_user_sessions[u_id] = active_list
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.register_session(u_id, jti, max_sessions=max_sessions)
+    except Exception:
+        logger.exception("Failed to register session for user %s, jti %s in store", u_id, jti)
 
+
+def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
+    """Registers a new session JTI for the user (synchronous backward compatibility)."""
+    u_id = str(user_id)
+    active_list = _active_user_sessions.get(u_id, [])
+    if jti not in active_list:
+        active_list.append(jti)
+        if len(active_list) > max_sessions:
+            active_list = active_list[-max_sessions:]
+        _active_user_sessions[u_id] = active_list
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.register_session(u_id, jti, max_sessions=max_sessions))
+        task = loop.create_task(store.register_session(u_id, jti, max_sessions=max_sessions))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 
@@ -415,8 +440,8 @@ def is_session_active(user_id: str, jti: Optional[str]) -> AwaitableBool:
     return AwaitableBool(jti in _active_user_sessions[u_id])
 
 
-def invalidate_session(user_id: str, jti: Optional[str]) -> None:
-    """Invalidates a single active session JTI on logout."""
+async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
+    """Invalidates a single active session JTI on logout, awaiting backing store."""
     if not jti:
         return
     u_id = str(user_id)
@@ -429,25 +454,60 @@ def invalidate_session(user_id: str, jti: Optional[str]) -> None:
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.invalidate_session(u_id, jti)
+    except Exception:
+        logger.exception("Failed to invalidate session for user %s, jti %s in store", u_id, jti)
 
+
+def invalidate_session(user_id: str, jti: Optional[str]) -> None:
+    """Invalidates a single active session JTI on logout (synchronous backward compatibility)."""
+    if not jti:
+        return
+    u_id = str(user_id)
+    if u_id in _active_user_sessions:
+        _active_user_sessions[u_id] = [
+            s for s in _active_user_sessions[u_id] if s != jti
+        ]
+        if not _active_user_sessions[u_id]:
+            _active_user_sessions.pop(u_id, None)
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.invalidate_session(u_id, jti))
+        task = loop.create_task(store.invalidate_session(u_id, jti))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 
 
-def invalidate_all_user_sessions(user_id: str) -> None:
-    """Invalidates all sessions for a user (e.g. on password reset or account deactivation)."""
+async def invalidate_all_user_sessions_async(user_id: str) -> None:
+    """Invalidates all sessions for a user, awaiting backing store."""
     u_id = str(user_id)
     _active_user_sessions.pop(u_id, None)
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.invalidate_all_user_sessions(u_id)
+    except Exception:
+        logger.exception("Failed to invalidate all sessions for user %s in store", u_id)
 
+
+def invalidate_all_user_sessions(user_id: str) -> None:
+    """Invalidates all sessions for a user (synchronous backward compatibility)."""
+    u_id = str(user_id)
+    _active_user_sessions.pop(u_id, None)
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.invalidate_all_user_sessions(u_id))
+        task = loop.create_task(store.invalidate_all_user_sessions(u_id))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 

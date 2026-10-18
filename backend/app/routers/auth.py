@@ -27,12 +27,15 @@ from app.services.auth_service import (
     hash_password,
     hash_password_async,
     invalidate_all_user_sessions,
+    invalidate_all_user_sessions_async,
     invalidate_session,
+    invalidate_session_async,
     is_account_locked,
     is_session_active,
     needs_rehash,
     record_failed_attempt,
     register_session,
+    register_session_async,
     verify_password,
     verify_password_async,
 )
@@ -132,9 +135,7 @@ async def login(
 
     session_id = str(secrets.token_hex(16))
     max_sess = getattr(settings.security, "max_active_sessions_per_user", 2)
-    store = driver_manager.get_session_store()
-    await store.register_session(str(user_id), session_id, max_sessions=max_sess)
-    register_session(str(user_id), session_id, max_sessions=max_sess)
+    await register_session_async(str(user_id), session_id, max_sessions=max_sess)
 
     token = create_access_token(
         user_id=str(user_id),
@@ -179,9 +180,7 @@ async def logout(request: Request, response: Response):
         if payload and payload.get("sub") and payload.get("jti"):
             u_id = str(payload.get("sub"))
             jti = str(payload.get("jti"))
-            store = driver_manager.get_session_store()
-            await store.invalidate_session(u_id, jti)
-            invalidate_session(u_id, jti)
+            await invalidate_session_async(u_id, jti)
 
     is_secure = request.url.scheme == "https" or getattr(
         settings.security, "hsts_enabled", False
@@ -335,9 +334,7 @@ async def change_password(
     hashed = await hash_password_async(clean_new_pass)
 
     await auth_repo.update_password(user_uuid, hashed, must_change_password=False)
-    store = driver_manager.get_session_store()
-    await store.invalidate_all_user_sessions(str(user_uuid))
-    invalidate_all_user_sessions(str(user_uuid))
+    await invalidate_all_user_sessions_async(str(user_uuid))
     await auth_repo.create_audit_log(
         user_id=user_uuid,
         action="USER:CHANGE_PASSWORD",
