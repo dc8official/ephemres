@@ -317,9 +317,11 @@ def format_sql_literal(val: Any) -> str:
 
 def _unwrap_field_operand(other: Any) -> Tuple[Any, bool]:
     skip_where = False
-    if hasattr(other, "default"):
-        default_val = getattr(other, "default")
+    from app.core.asgi import _ParamInfo
+    if isinstance(other, _ParamInfo):
+        default_val = getattr(other, "default", None)
         if default_val is None:
+            logger.warning("Unresolved query param object used in SQL comparison; filter skipped")
             skip_where = True
             other = None
         elif default_val is not ...:
