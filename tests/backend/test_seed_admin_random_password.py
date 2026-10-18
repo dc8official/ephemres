@@ -46,3 +46,49 @@ async def test_seed_admin_generates_readable_password_when_unset(monkeypatch, ca
     gen_pwd = captured.split("[seed] Initial admin password generated: ")[1].strip()
     assert len(gen_pwd) > 0
     assert gen_pwd != "admin"
+
+
+@pytest.mark.anyio
+async def test_seed_admin_does_not_generate_password_when_admin_exists_and_unforced(monkeypatch, capsys):
+    monkeypatch.delenv("DEFAULT_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("FORCE_RESET_ADMIN", raising=False)
+
+    fake_db = AsyncMock()
+    role_row = MagicMock()
+    role_row.id = "00000000-0000-0000-0000-000000000001"
+    role_result = MagicMock()
+    role_result.fetchone.return_value = role_row
+
+    existing_user_row = MagicMock()
+    existing_user_row.id = "00000000-0000-0000-0000-000000000002"
+    existing_user_row.password_hash = "$scrypt$ln=16,r=8,p=1$..."
+    existing_user_row.must_change_password = False
+    user_result = MagicMock()
+    user_result.fetchone.return_value = existing_user_row
+
+    async def fake_execute(stmt, params=None):
+        sql = str(stmt)
+        if "FROM roles" in sql:
+            return role_result
+        if "FROM users" in sql:
+            return user_result
+        return MagicMock()
+
+    fake_db.execute = fake_execute
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return fake_db
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(seed_mod, "AsyncSessionLocal", lambda: FakeSessionContext())
+
+    success = await seed_admin()
+    assert success is True
+
+    captured = capsys.readouterr().out
+    assert "[seed] Initial admin password generated: " not in captured
+    assert "[seed] Admin user 'admin' already exists — skipping." in captured
+

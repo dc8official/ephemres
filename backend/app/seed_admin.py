@@ -13,9 +13,13 @@ logger = logging.getLogger("seed_admin")
 async def seed_admin(password: Optional[str] = None):
     if not password:
         password = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-    if not password:
-        password = generate_readable_password()
-        print(f"[seed] Initial admin password generated: {password}")
+
+    def _get_password_and_hash() -> str:
+        nonlocal password
+        if not password:
+            password = generate_readable_password()
+            print(f"[seed] Initial admin password generated: {password}")
+        return hash_password(password)
 
     async with AsyncSessionLocal() as db:
         role_res = await db.execute(
@@ -27,7 +31,6 @@ async def seed_admin(password: Optional[str] = None):
             return False
 
         role_id = role_row.id
-        hashed = hash_password(password)
 
         existing = await db.execute(
             text("SELECT id, password_hash, must_change_password FROM users WHERE username = 'admin' LIMIT 1")
@@ -51,7 +54,7 @@ async def seed_admin(password: Optional[str] = None):
                             updated_at = NOW()
                         WHERE username = 'admin'
                     """),
-                    {"p": hashed}
+                    {"p": _get_password_and_hash()}
                 )
                 await db.commit()
                 print(
@@ -74,7 +77,7 @@ async def seed_admin(password: Optional[str] = None):
                                 updated_at = NOW()
                             WHERE username = 'admin'
                         """),
-                        {"p": hashed}
+                        {"p": _get_password_and_hash()}
                     )
                     await db.commit()
                     logger.info("Successfully updated initial admin user account (must_change_password=TRUE).")
@@ -90,7 +93,7 @@ async def seed_admin(password: Optional[str] = None):
                         'admin', :p, CAST(:r AS uuid), TRUE, TRUE
                     )
                 """),
-                {"p": hashed, "r": str(role_id)}
+                {"p": _get_password_and_hash(), "r": str(role_id)}
             )
             logger.info("Successfully created default admin user account (username: admin).")
 
