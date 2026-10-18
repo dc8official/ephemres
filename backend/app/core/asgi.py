@@ -1377,14 +1377,16 @@ class BaseHTTPMiddleware:
         async def call_next(req: Request) -> Response:
             start_event = asyncio.Event()
             body_queue: asyncio.Queue[Union[Tuple[bytes, bool], Exception]] = asyncio.Queue()
+            response_started = False
             response_status = 200
             response_headers: List[Tuple[bytes, bytes]] = []
             app_exc: Optional[Exception] = None
 
             async def inner_send(message: Dict[str, Any]) -> None:
-                nonlocal response_status, response_headers
+                nonlocal response_status, response_headers, response_started
                 m_type = message.get("type", "")
                 if m_type == "http.response.start":
+                    response_started = True
                     response_status = message.get("status", 200)
                     response_headers = list(message.get("headers", []))
                     start_event.set()
@@ -1400,14 +1402,18 @@ class BaseHTTPMiddleware:
                 except Exception as exc:
                     app_exc = exc
                     await body_queue.put(exc)
-                    start_event.set()
+                finally:
+                    if not start_event.is_set():
+                        start_event.set()
 
             inner_task = asyncio.create_task(run_app())
 
             # Wait for response start or early failure
             await start_event.wait()
-            if app_exc is not None and not response_headers:
+            if app_exc is not None and not response_started:
                 raise app_exc
+            if not response_started:
+                raise RuntimeError("No response returned")
 
             async def body_stream() -> AsyncIterator[bytes]:
                 try:
