@@ -193,13 +193,15 @@ def jwt_decode(
 
     now = time.time()
 
-    if "exp" in payload:
-        try:
-            exp_ts = float(payload["exp"])
-        except (ValueError, TypeError) as exc:
-            raise JWTError("Invalid 'exp' claim in JWT.") from exc
-        if now >= exp_ts:
-            raise JWTError("JWT token has expired.")
+    if "exp" not in payload:
+        raise JWTError("Missing 'exp' claim.")
+
+    try:
+        exp_ts = float(payload["exp"])
+    except (ValueError, TypeError) as exc:
+        raise JWTError("Invalid 'exp' claim in JWT.") from exc
+    if now >= exp_ts:
+        raise JWTError("JWT token has expired.")
 
     if "nbf" in payload:
         try:
@@ -520,13 +522,14 @@ def create_access_token(
 ) -> str:
     session_id = jti or str(secrets.token_hex(16))
 
+    now_utc = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "username": username,
         "role": role_name,
         "jti": session_id,
-        "exp": datetime.now(timezone.utc)
-        + timedelta(minutes=settings.security.session_timeout_minutes),
+        "iat": now_utc,
+        "exp": now_utc + timedelta(minutes=settings.security.session_timeout_minutes),
     }
     return jwt_encode(
         payload,
