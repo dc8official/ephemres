@@ -740,8 +740,10 @@ function initSSE() {
   unsubscribeSSE = subscribeBatched((batch) => {
     const latestByEndpoint = new Map()
     for (const payload of batch) {
-      if (payload?.type === 'STATE_TRANSITION' && payload.endpoint_id) {
-        latestByEndpoint.set(payload.endpoint_id, payload)
+      const isStateChange = payload?.type === 'STATE_TRANSITION' || payload?.type === 'NODE_STATE_CHANGE'
+      const targetId = payload?.endpoint_id || payload?.node_id || payload?.data?.endpoint_id
+      if (isStateChange && targetId) {
+        latestByEndpoint.set(targetId, payload)
       }
     }
     if (latestByEndpoint.size === 0) return
@@ -750,16 +752,21 @@ function initSSE() {
     for (const [epId, payload] of latestByEndpoint.entries()) {
       const ep = map.get(epId)
       if (ep) {
-        ep.current_operational_state = payload.operational_state
-        ep.current_detailed_state = payload.detailed_state
-        ep.avg_rtt_ms = payload.avg_rtt_ms
-        ep.current_health_score = payload.health_score
+        const op = payload.operational_state || payload.new_state || payload.current_state || payload.data?.operational_state
+        const det = payload.detailed_state || payload.new_state || op || payload.data?.detailed_state
+        const rtt = payload.avg_rtt_ms ?? payload.data?.avg_rtt_ms
+        const hs = payload.health_score ?? payload.data?.health_score
+
+        if (op) ep.current_operational_state = op
+        if (det) ep.current_detailed_state = det
+        if (rtt != null) ep.avg_rtt_ms = rtt
+        if (hs != null) ep.current_health_score = hs
         ep.current_state = {
           ...ep.current_state,
-          operational_state: payload.operational_state,
-          detailed_state: payload.detailed_state,
-          avg_rtt_ms: payload.avg_rtt_ms,
-          health_score: payload.health_score,
+          operational_state: op || ep.current_state?.operational_state,
+          detailed_state: det || ep.current_state?.detailed_state,
+          avg_rtt_ms: rtt != null ? rtt : ep.current_state?.avg_rtt_ms,
+          health_score: hs != null ? hs : ep.current_state?.health_score,
         }
       }
     }

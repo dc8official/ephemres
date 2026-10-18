@@ -747,12 +747,11 @@ function initSSE() {
         continue
       }
       const isNodeStateChange = payload?.type === 'NODE_STATE_CHANGE'
-      const isStateTransition = payload?.type === 'STATE_TRANSITION'
-      if ((isNodeStateChange || isStateTransition) && payload.endpoint_id && nodesDataSet) {
-        const nodeId = payload.endpoint_id
+      const nodeId = payload?.endpoint_id || payload?.node_id || payload?.data?.endpoint_id
+      if ((isNodeStateChange || isStateTransition) && nodeId && nodesDataSet) {
         const newState = isNodeStateChange
-          ? payload.new_state
-          : (payload.detailed_state || payload.operational_state)
+          ? (payload.new_state || payload.operational_state || payload.current_state)
+          : (payload.detailed_state || payload.operational_state || payload.current_state || payload.new_state)
         const existing = nodesDataSet.get(nodeId)
         if (existing && newState) {
           const nodeType = existing.rawNode?.node_type || existing.rawNode?.type || 'monitored'

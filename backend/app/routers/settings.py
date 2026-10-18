@@ -296,23 +296,23 @@ async def update_settings(
     if current_flow_enabled and perf_mode_val is False and flow_ingestion_val is not False:
         raise HTTPException(
             status_code=400,
-            detail="Cannot disable Redis while Network Flow Telemetry is enabled. Please disable Flow Ingestion first.",
+            detail="Cannot disable FastStore while Network Flow Telemetry is enabled. Please disable Flow Ingestion first.",
         )
 
-    # Rule A (Enforce Redis Memory Acceleration)
+    # Rule A (Enforce FastStore Memory Acceleration)
     if effective_flow_enabled and not effective_perf_mode:
         raise HTTPException(
             status_code=400,
-            detail="Cannot enable Network Flow Telemetry: Redis Memory Acceleration must be activated first.",
+            detail="Cannot enable Network Flow Telemetry: FastStore Memory Acceleration must be activated first.",
         )
 
-    # Rule B (Enforce Active Redis Service Connectivity & Stream Capability)
+    # Rule B (Enforce Active FastStore Service Connectivity & Stream Capability)
     if effective_flow_enabled:
         ready, err_msg = await check_redis_flow_prerequisites()
         if not ready:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot enable Network Flow Telemetry: Redis prerequisite check failed ({err_msg}). Please ensure the Redis 6.0+ service is running.",
+                detail=f"Cannot enable Network Flow Telemetry: FastStore prerequisite check failed ({err_msg}). Please ensure the FastStore engine is accessible.",
             )
 
     reinit_driver = False
@@ -525,11 +525,11 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
         ready = version_supported and stream_ok and udp_ports_ok
         diag_parts = []
         if ready:
-            diag_parts.append(f"Redis v{redis_version} ready with Stream support.")
+            diag_parts.append(f"FastStore engine ready with Stream wire-buffer support.")
         elif not version_supported:
-            diag_parts.append(f"Redis v{redis_version} detected, but Redis 6.0+ is required.")
+            diag_parts.append(f"FastStore protocol version {redis_version} detected, but 6.0+ compatibility is required.")
         elif not stream_ok:
-            diag_parts.append("Redis stream capabilities failed.")
+            diag_parts.append("FastStore wire buffer stream capabilities failed.")
 
         if not rmem_ok and rmem_val is not None:
             diag_parts.append(f"Kernel rmem_max ({rmem_val} B) is below recommended 2MB (2097152 B).")
@@ -542,6 +542,9 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
             redis_connected=True,
             redis_version=redis_version,
             redis_version_supported=version_supported,
+            faststore_connected=True,
+            faststore_version=redis_version,
+            faststore_version_supported=version_supported,
             stream_write_success=stream_ok,
             rmem_max=rmem_val,
             rmem_max_supported=rmem_ok,
@@ -555,13 +558,16 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
             redis_connected=False,
             redis_version=None,
             redis_version_supported=False,
+            faststore_connected=False,
+            faststore_version=None,
+            faststore_version_supported=False,
             stream_write_success=False,
             rmem_max=rmem_val,
             rmem_max_supported=rmem_ok,
             udp_ports_available=udp_ports_ok,
             port_conflicts=port_conflicts,
             ready=False,
-            message=f"Redis connection failed: {exc}",
+            message=f"FastStore engine check failed: {exc}",
         )
 
 

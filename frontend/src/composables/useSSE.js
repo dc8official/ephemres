@@ -6,6 +6,8 @@ let wasDisconnected = false
 const listeners = new Set()
 const reconnectCallbacks = new Set()
 let reconnectTimer = null
+let retryAttempt = 0
+let retryTimer = null
 
 function isUserLoggedIn() {
   if (typeof window === 'undefined') return false
@@ -29,6 +31,17 @@ function triggerReconnect() {
   }, 300)
 }
 
+function scheduleRetry() {
+  if (retryTimer) clearTimeout(retryTimer)
+  const delay = Math.min(1000 * Math.pow(2, retryAttempt), 15000)
+  retryAttempt++
+  retryTimer = setTimeout(() => {
+    if (isUserLoggedIn() && (!eventSource || eventSource.readyState === EventSource.CLOSED)) {
+      ensureConnection()
+    }
+  }, delay)
+}
+
 export function closeConnection() {
   if (eventSource) {
     eventSource.close()
@@ -40,6 +53,11 @@ export function closeConnection() {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  if (retryTimer) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  retryAttempt = 0
 }
 
 export function resetConnection() {
@@ -56,6 +74,11 @@ function ensureConnection() {
       eventSource = new EventSource('/api/v1/events/stream', { withCredentials: true })
       eventSource.onopen = () => {
         sseConnected.value = true
+        retryAttempt = 0
+        if (retryTimer) {
+          clearTimeout(retryTimer)
+          retryTimer = null
+        }
         if (wasDisconnected) {
           wasDisconnected = false
           triggerReconnect()
@@ -74,10 +97,14 @@ function ensureConnection() {
       eventSource.onerror = () => {
         sseConnected.value = false
         wasDisconnected = true
+        if (eventSource.readyState === EventSource.CLOSED) {
+          scheduleRetry()
+        }
       }
     } catch (err) {
       sseConnected.value = false
       wasDisconnected = true
+      scheduleRetry()
     }
   }
 }

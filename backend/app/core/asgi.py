@@ -706,6 +706,9 @@ class StreamingResponse(Response):
             headers=headers,
             media_type=media_type,
         )
+        if headers is None or "content-length" not in headers:
+            if "content-length" in self.headers:
+                del self.headers["content-length"]
 
     def _init_headers(self) -> None:
         if self.media_type and "content-type" not in self.headers:
@@ -713,6 +716,8 @@ class StreamingResponse(Response):
             if ct.startswith("text/") and "charset=" not in ct:
                 ct += f"; charset={self.charset}"
             self.headers["content-type"] = ct
+        if "content-length" in self.headers:
+            del self.headers["content-length"]
 
     async def __call__(
         self,
@@ -762,22 +767,28 @@ class StreamingResponse(Response):
                 })
         elif hasattr(content, "__aiter__"):
             # Async generator / iterator
-            async for chunk in content:
-                raw_bytes = chunk if isinstance(chunk, bytes) else chunk.encode(self.charset)
-                await send({
-                    "type": "http.response.body",
-                    "body": raw_bytes,
-                    "more_body": True,
-                })
+            try:
+                async for chunk in content:
+                    raw_bytes = chunk if isinstance(chunk, bytes) else chunk.encode(self.charset)
+                    await send({
+                        "type": "http.response.body",
+                        "body": raw_bytes,
+                        "more_body": True,
+                    })
+            except (asyncio.CancelledError, GeneratorExit, Exception):
+                return
         elif hasattr(content, "__iter__"):
             # Sync generator / iterator
-            for chunk in content:
-                raw_bytes = chunk if isinstance(chunk, bytes) else chunk.encode(self.charset)
-                await send({
-                    "type": "http.response.body",
-                    "body": raw_bytes,
-                    "more_body": True,
-                })
+            try:
+                for chunk in content:
+                    raw_bytes = chunk if isinstance(chunk, bytes) else chunk.encode(self.charset)
+                    await send({
+                        "type": "http.response.body",
+                        "body": raw_bytes,
+                        "more_body": True,
+                    })
+            except (asyncio.CancelledError, GeneratorExit, Exception):
+                return
 
         await send({
             "type": "http.response.body",
@@ -1451,6 +1462,9 @@ class BaseHTTPMiddleware:
                 media_type=content_type,
             )
             resp.headers = MutableHeaders(raw=response_headers)
+            if content_type and (content_type.startswith("text/event-stream") or "event-stream" in content_type):
+                if "content-length" in resp.headers:
+                    del resp.headers["content-length"]
             return resp
 
         res = await self.dispatch(request, call_next)
@@ -1892,11 +1906,18 @@ class EphemresApp:
                 for k, v in injected_response.headers.items():
                     if k.lower() == "set-cookie":
                         final_response.headers.append(k, v)
+                    elif k.lower() == "content-length" and isinstance(final_response, StreamingResponse):
+                        continue
                     elif k.lower() not in final_response.headers:
                         final_response.headers[k] = v
 
-                # If final_response is a StreamingResponse, send it inside the exit stack
+                # If final_response is a StreamingResponse, ensure content-length is stripped and send inside exit stack
                 if isinstance(final_response, StreamingResponse):
+                    if (final_response.media_type and final_response.media_type.startswith("text/event-stream")) or (
+                        hasattr(final_response, "content_iterator") and inspect.isasyncgen(final_response.content_iterator)
+                    ):
+                        if "content-length" in final_response.headers:
+                            del final_response.headers["content-length"]
                     await final_response(scope, receive, send)
 
             # Exit stack closed here (deps cleaned up, get_db committed only on success)

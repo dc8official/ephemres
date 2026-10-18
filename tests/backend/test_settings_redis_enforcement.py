@@ -64,7 +64,7 @@ def test_rule_a_flow_without_perf_mode_rejected(client):
     payload = {"flow_ingestion_enabled": True, "performance_mode": False}
     resp = test_client.patch("/api/v1/settings", json=payload)
     assert resp.status_code == 400
-    assert "Redis Memory Acceleration must be activated first" in resp.json()["detail"]
+    assert "Memory Acceleration must be activated first" in resp.json()["detail"]
 
 
 def test_rule_b_flow_with_failing_redis_rejected(client):
@@ -82,7 +82,7 @@ def test_rule_b_flow_with_failing_redis_rejected(client):
         payload = {"flow_ingestion_enabled": True, "performance_mode": True}
         resp = test_client.patch("/api/v1/settings", json=payload)
         assert resp.status_code == 400
-        assert "Redis prerequisite check failed" in resp.json()["detail"]
+        assert "prerequisite check failed" in resp.json()["detail"]
 
 
 def test_rule_b_flow_with_healthy_redis_accepted(client):
@@ -131,4 +131,4 @@ def test_rule_c_disable_redis_while_flow_active_rejected(client):
     payload = {"performance_mode": False}
     resp = test_client.patch("/api/v1/settings", json=payload)
     assert resp.status_code == 400
-    assert "Cannot disable Redis while Network Flow Telemetry is enabled" in resp.json()["detail"]
+    assert "while Network Flow Telemetry is enabled" in resp.json()["detail"]

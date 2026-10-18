@@ -169,9 +169,11 @@ onMounted(async () => {
     try {
       const payload = JSON.parse(e.data)
       if (payload.type === 'STATE_TRANSITION') {
-        liveAnnouncement.value = `Network update: Endpoint state transitioned to ${payload.detailed_state}`
+        const state = payload.detailed_state || payload.operational_state || payload.current_state || 'UPDATED'
+        liveAnnouncement.value = `Network update: Endpoint state transitioned to ${state}`
       } else if (payload.type === 'NODE_STATE_CHANGE') {
-        liveAnnouncement.value = `Topology update: Node status is now ${payload.new_state}`
+        const state = payload.new_state || payload.operational_state || payload.current_state || 'UPDATED'
+        liveAnnouncement.value = `Topology update: Node status is now ${state}`
       }
     } catch (err) {}
   })
