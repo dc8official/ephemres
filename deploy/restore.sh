@@ -134,9 +134,9 @@ echo -e "${GREEN}[OK] Selected backup archive:${NC} ${BACKUP_FILE}"
 
 # 2. Discover Old Secret Key if not supplied
 if [[ -z "${OLD_SECRET_KEY}" ]]; then
-    for env_cand in /etc/netmon/netmon.env.bak /etc/netmon/netmon.env /etc/ephemres/ephemres.env.bak; do
+    for env_cand in /etc/netmon/netmon.env.bak /etc/netmon/netmon.env /etc/ephemres/ephemres.env.bak /etc/ephemres/ephemres.env; do
         if [[ -f "${env_cand}" ]]; then
-            DISC_KEY=$(grep -E "^SECRET_KEY=" "${env_cand}" 2>/dev/null | cut -d'=' -f2- | tr -d '"'\'' || true)
+            DISC_KEY=$(grep -E "^(EPHEMRES_|NETMON_)?SECRET_KEY=" "${env_cand}" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
             if [[ -n "${DISC_KEY}" ]]; then
                 OLD_SECRET_KEY="${DISC_KEY}"
                 echo -e "${GREEN}[INFO] Auto-detected previous SECRET_KEY from ${env_cand}.${NC}"
@@ -188,8 +188,8 @@ PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend:.:backend" "${PYTHON_BIN}" -m 
 # 6. Restart Platform Services
 if [[ -z "${DRY_RUN}" ]]; then
     echo -e "\n${BLUE}[INFO] Clearing stale FastStore shared-memory state and restarting platform services...${NC}"
-    rm -f /dev/shm/ephemres_faststore* 2>/dev/null || true
-    systemctl restart ephemres-api ephemres-engine ephemres-flowd 2>/dev/null || true
+    systemctl restart ephemres-api ephemres-engine 2>/dev/null || true
+    systemctl is-enabled ephemres-flowd &>/dev/null && systemctl restart ephemres-flowd 2>/dev/null || true
     echo -e "${GREEN}==================================================================${NC}"
     echo -e "${GREEN} Restoration Complete! Platform is operational.                   ${NC}"
     echo -e "${GREEN} Admin credentials: admin / ${ADMIN_PASS}                         ${NC}"

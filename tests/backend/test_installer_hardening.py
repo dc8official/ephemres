@@ -32,3 +32,18 @@ def test_flowd_service_capabilities_bounding_set():
     # Must contain both CAP_NET_BIND_SERVICE and CAP_NET_RAW to avoid conflict with python's file capabilities
     assert "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW" in flowd_service
     assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW" in flowd_service
+
+
+def test_restore_script_syntax_and_key_parsing():
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    restore_sh = root / "deploy" / "restore.sh"
+
+    # 1. Must pass bash syntax check without syntax errors
+    proc = subprocess.run(["bash", "-n", str(restore_sh)], capture_output=True, text=True)
+    assert proc.returncode == 0, f"bash -n deploy/restore.sh failed:\n{proc.stderr}"
+
+    # 2. Verify quoting fix in SECRET_KEY parsing
+    content = restore_sh.read_text(encoding="utf-8")
+    assert 'tr -d \'"\' | tr -d "\'"' in content or 'tr -d \'"\' | tr -d "\'"' in content
+    assert "tr -d '\"'\\''" not in content
