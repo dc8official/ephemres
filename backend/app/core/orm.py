@@ -1097,6 +1097,19 @@ class PostgreSQLDDLCompiler:
         if col.server_default is not None:
             sd = col.server_default
             sd_sql = sd.text_str if isinstance(sd, TextClause) else (sd.compile() if isinstance(sd, SQLElement) else str(sd))
+            sd_clean = sd_sql.strip()
+            # Quote unquoted string literals to prevent PostgreSQL from treating them as column references
+            if (
+                not (sd_clean.startswith("'") and sd_clean.endswith("'"))
+                and not (sd_clean.startswith('"') and sd_clean.endswith('"'))
+                and sd_clean.lower() not in ("true", "false", "null")
+                and "(" not in sd_clean
+                and "::" not in sd_clean
+            ):
+                try:
+                    float(sd_clean)
+                except ValueError:
+                    sd_sql = f"'{sd_clean}'"
             parts.append(f"DEFAULT {sd_sql}")
         if not col.nullable or col.primary_key:
             parts.append("NOT NULL")

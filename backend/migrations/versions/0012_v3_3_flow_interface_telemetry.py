@@ -23,7 +23,7 @@ def upgrade() -> None:
         sa.Column(
             "device_role",
             sa.String(length=30),
-            server_default="ACTIVE_HOST",
+            server_default="'ACTIVE_HOST'",
             nullable=False,
         ),
     )
