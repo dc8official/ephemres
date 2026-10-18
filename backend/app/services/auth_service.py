@@ -26,10 +26,10 @@ class ScryptPasswordHasher:
     Format: $scrypt$n=16384,r=8,p=1$<salt_b64>$<hash_b64>
     """
 
-    N = 16384
+    N = 2**17
     R = 8
     P = 1
-    MAXMEM = 32 * 1024 * 1024
+    MAXMEM = 256 * 1024 * 1024
     DKLEN = 64
 
     def hash(self, password: str) -> str:
