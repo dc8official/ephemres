@@ -73,17 +73,49 @@ class _SharedSQLiteStore:
         self.db_num = int(db)
         self.db_path = _get_db_path(self.db_num)
 
-        if os.path.exists(self.db_path):
-            st = os.stat(self.db_path)
-            if hasattr(os, "getuid") and st.st_uid != os.getuid():
-                raise FastStoreError(
-                    f"FastStore database file '{self.db_path}' is owned by UID {st.st_uid}, but current UID is {os.getuid()}."
-                )
-            if st.st_mode & 0o022:
-                raise FastStoreError(
-                    f"FastStore database file '{self.db_path}' has insecure permissions ({oct(st.st_mode)}): group or other write allowed."
-                )
+        for ext in ("", "-wal", "-shm"):
+            p = f"{self.db_path}{ext}"
+            if os.path.exists(p):
+                st = os.stat(p)
+                if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        raise FastStoreError(
+                            f"FastStore file '{p}' is owned by UID {st.st_uid}, but current UID is {os.getuid()}."
+                        )
+                if ext == "" and (st.st_mode & 0o022):
+                    raise FastStoreError(
+                        f"FastStore database file '{p}' has insecure permissions ({oct(st.st_mode)}): group or other write allowed."
+                    )
 
+        try:
+            self._open_connection()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            logger.warning(
+                "FastStore database at '%s' encountered initialization error (%s). Purging stale database and companion WAL/SHM files and retrying...",
+                self.db_path,
+                exc,
+            )
+            self._purge_companion_files()
+            self._open_connection()
+
+    def _purge_companion_files(self) -> None:
+        if hasattr(self, "_conn") and self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+        for ext in ("", "-wal", "-shm"):
+            p = f"{self.db_path}{ext}"
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    def _open_connection(self) -> None:
         old_umask = os.umask(0o077)
         try:
             self._conn = sqlite3.connect(

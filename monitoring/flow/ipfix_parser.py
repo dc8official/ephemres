@@ -21,12 +21,24 @@ IE_INGRESS_INTERFACE = 10
 IE_DESTINATION_TRANSPORT_PORT = 11
 IE_DESTINATION_IPV4_ADDRESS = 12
 IE_EGRESS_INTERFACE = 14
+IE_FLOW_END_SYS_UP_TIME = 21
+IE_FLOW_START_SYS_UP_TIME = 22
+IE_POST_OCTET_DELTA_COUNT = 23
+IE_POST_PACKET_DELTA_COUNT = 24
 IE_SOURCE_IPV6_ADDRESS = 27
 IE_DESTINATION_IPV6_ADDRESS = 28
+IE_OCTET_TOTAL_COUNT = 85
+IE_PACKET_TOTAL_COUNT = 86
 IE_FLOW_START_SECONDS = 150
 IE_FLOW_END_SECONDS = 151
 IE_FLOW_START_MILLISECONDS = 152
 IE_FLOW_END_MILLISECONDS = 153
+IE_FLOW_START_MICROSECONDS = 154
+IE_FLOW_END_MICROSECONDS = 155
+IE_FLOW_START_NANOSECONDS = 156
+IE_FLOW_END_NANOSECONDS = 157
+IE_FLOW_START_DELTA_MICROSECONDS = 158
+IE_FLOW_END_DELTA_MICROSECONDS = 159
 
 
 class IPFIXFieldSpec:
@@ -39,12 +51,21 @@ class IPFIXFieldSpec:
 
 
 class IPFIXTemplate:
-    __slots__ = ("template_id", "fields", "total_length", "created_at")
+    __slots__ = (
+        "template_id",
+        "fields",
+        "total_length",
+        "has_variable_length",
+        "min_length",
+        "created_at",
+    )
 
     def __init__(self, template_id: int, fields: List[IPFIXFieldSpec]):
         self.template_id = template_id
         self.fields = fields
         self.total_length = sum(f.length for f in fields)
+        self.has_variable_length = any(f.length == 65535 for f in fields)
+        self.min_length = sum(1 if f.length == 65535 else f.length for f in fields)
         self.created_at = time.time()
 
 
@@ -202,13 +223,13 @@ class IPFIXParser:
     ) -> Optional[List[dict[str, Any]]]:
         cache_key = (exporter_ip, obs_domain_id, template_id)
         tmpl = self._templates.get(cache_key)
-        if not tmpl or tmpl.total_length == 0:
+        if not tmpl or (tmpl.min_length == 0 and tmpl.total_length == 0):
             return None
 
         flows: List[dict[str, Any]] = []
         offset = 0
 
-        while offset + tmpl.total_length <= len(payload):
+        while offset + tmpl.min_length <= len(payload):
             src_ip: Optional[str] = None
             dst_ip: Optional[str] = None
             src_port = 0
@@ -217,26 +238,53 @@ class IPFIXParser:
             octets = 0
             packets = 0
             tcp_flags = 0
+            tos = 0
             input_if = 0
             output_if = 0
             start_time: Optional[float] = None
             end_time: Optional[float] = None
+            first_up_ms: Optional[int] = None
+            last_up_ms: Optional[int] = None
 
             rec_offset = offset
+            record_valid = True
             for f in tmpl.fields:
-                f_bytes = payload[rec_offset : rec_offset + f.length]
-                rec_offset += f.length
+                if f.length == 65535:
+                    if rec_offset >= len(payload):
+                        record_valid = False
+                        break
+                    first_byte = payload[rec_offset]
+                    rec_offset += 1
+                    if first_byte < 255:
+                        actual_len = first_byte
+                    else:
+                        if rec_offset + 2 > len(payload):
+                            record_valid = False
+                            break
+                        actual_len = int.from_bytes(payload[rec_offset : rec_offset + 2], "big")
+                        rec_offset += 2
+                    if rec_offset + actual_len > len(payload):
+                        record_valid = False
+                        break
+                    f_bytes = payload[rec_offset : rec_offset + actual_len]
+                    rec_offset += actual_len
+                else:
+                    if rec_offset + f.length > len(payload):
+                        record_valid = False
+                        break
+                    f_bytes = payload[rec_offset : rec_offset + f.length]
+                    rec_offset += f.length
 
                 if f.enterprise_number is not None:
                     continue  # Skip enterprise fields for standard metrics
 
-                if f.ie_id == IE_SOURCE_IPV4_ADDRESS and f.length == 4:
+                if f.ie_id == IE_SOURCE_IPV4_ADDRESS and len(f_bytes) == 4:
                     src_ip = socket.inet_ntop(socket.AF_INET, f_bytes)
-                elif f.ie_id == IE_DESTINATION_IPV4_ADDRESS and f.length == 4:
+                elif f.ie_id == IE_DESTINATION_IPV4_ADDRESS and len(f_bytes) == 4:
                     dst_ip = socket.inet_ntop(socket.AF_INET, f_bytes)
-                elif f.ie_id == IE_SOURCE_IPV6_ADDRESS and f.length == 16:
+                elif f.ie_id == IE_SOURCE_IPV6_ADDRESS and len(f_bytes) == 16:
                     src_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
-                elif f.ie_id == IE_DESTINATION_IPV6_ADDRESS and f.length == 16:
+                elif f.ie_id == IE_DESTINATION_IPV6_ADDRESS and len(f_bytes) == 16:
                     dst_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
                 elif f.ie_id == IE_SOURCE_TRANSPORT_PORT:
                     src_port = int.from_bytes(f_bytes, "big")
@@ -244,9 +292,15 @@ class IPFIXParser:
                     dst_port = int.from_bytes(f_bytes, "big")
                 elif f.ie_id == IE_PROTOCOL_IDENTIFIER:
                     protocol = int.from_bytes(f_bytes, "big")
+                elif f.ie_id == IE_IP_CLASS_OF_SERVICE:
+                    tos = int.from_bytes(f_bytes, "big")
                 elif f.ie_id == IE_OCTET_DELTA_COUNT:
                     octets = int.from_bytes(f_bytes, "big")
+                elif f.ie_id in (IE_POST_OCTET_DELTA_COUNT, IE_OCTET_TOTAL_COUNT) and octets == 0:
+                    octets = int.from_bytes(f_bytes, "big")
                 elif f.ie_id == IE_PACKET_DELTA_COUNT:
+                    packets = int.from_bytes(f_bytes, "big")
+                elif f.ie_id in (IE_POST_PACKET_DELTA_COUNT, IE_PACKET_TOTAL_COUNT) and packets == 0:
                     packets = int.from_bytes(f_bytes, "big")
                 elif f.ie_id == IE_TCP_CONTROL_BITS:
                     tcp_flags = int.from_bytes(f_bytes, "big")
@@ -262,10 +316,33 @@ class IPFIXParser:
                     start_time = int.from_bytes(f_bytes, "big") / 1000.0
                 elif f.ie_id == IE_FLOW_END_MILLISECONDS:
                     end_time = int.from_bytes(f_bytes, "big") / 1000.0
+                elif f.ie_id == IE_FLOW_START_MICROSECONDS:
+                    start_time = int.from_bytes(f_bytes, "big") / 1_000_000.0
+                elif f.ie_id == IE_FLOW_END_MICROSECONDS:
+                    end_time = int.from_bytes(f_bytes, "big") / 1_000_000.0
+                elif f.ie_id == IE_FLOW_START_NANOSECONDS:
+                    start_time = int.from_bytes(f_bytes, "big") / 1_000_000_000.0
+                elif f.ie_id == IE_FLOW_END_NANOSECONDS:
+                    end_time = int.from_bytes(f_bytes, "big") / 1_000_000_000.0
+                elif f.ie_id == IE_FLOW_START_DELTA_MICROSECONDS:
+                    start_time = float(export_time) - (int.from_bytes(f_bytes, "big") / 1_000_000.0)
+                elif f.ie_id == IE_FLOW_END_DELTA_MICROSECONDS:
+                    end_time = float(export_time) - (int.from_bytes(f_bytes, "big") / 1_000_000.0)
+                elif f.ie_id == IE_FLOW_START_SYS_UP_TIME:
+                    first_up_ms = int.from_bytes(f_bytes, "big")
+                elif f.ie_id == IE_FLOW_END_SYS_UP_TIME:
+                    last_up_ms = int.from_bytes(f_bytes, "big")
 
-            offset += tmpl.total_length
+            if not record_valid or rec_offset <= offset:
+                break
+            offset = rec_offset
 
             if src_ip and dst_ip:
+                if start_time is None and first_up_ms is not None and last_up_ms is not None:
+                    dur_sec = max(0.0, (last_up_ms - first_up_ms) / 1000.0)
+                    start_time = float(export_time) - dur_sec
+                    if end_time is None:
+                        end_time = float(export_time)
                 if start_time is None:
                     start_time = float(export_time)
                 if end_time is None:
@@ -283,6 +360,7 @@ class IPFIXParser:
                         "bytes": octets,
                         "packets": packets,
                         "tcp_flags": tcp_flags,
+                        "tos": tos,
                         "input_if": input_if,
                         "output_if": output_if,
                         "start_time": start_time,
