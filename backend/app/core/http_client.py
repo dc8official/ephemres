@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import ipaddress
 import json as json_mod
 import os
+import re
 import socket
 import ssl
 import typing
@@ -17,6 +18,7 @@ BLOCKED_IPS = {
 }
 
 CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 
 
 class HttpRequestError(Exception):
@@ -71,6 +73,17 @@ def _validate_resolved_ip(
 
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped  # type: ignore[assignment]
+    elif ip.version == 6:
+        embedded_ip = getattr(ip, "sixtofour", None)
+        if embedded_ip is None and ip in NAT64_NETWORK:
+            embedded_ip = ipaddress.IPv4Address(ip.packed[-4:])
+        if embedded_ip is not None:
+            _validate_resolved_ip(
+                str(embedded_ip),
+                hostname,
+                allow_private=allow_private,
+                allow_loopback=allow_loopback,
+            )
 
     str_ip = str(ip)
     if str_ip in BLOCKED_IPS:
@@ -205,8 +218,10 @@ class SSRFSafeHttpClient:
         follow_redirects: bool = False,
         allow_private: bool | None = None,
     ) -> None:
+        if follow_redirects:
+            raise ValueError("Redirects are not supported")
         self.timeout = float(timeout)
-        self.follow_redirects = bool(follow_redirects)
+        self.follow_redirects = False
         self._allow_private = _resolve_allow_private(allow_private)
         self._backend = SSRFSafeBackend(allow_private=self._allow_private)
 
@@ -266,6 +281,13 @@ class SSRFSafeHttpClient:
         follow_redirects: bool | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
+        if not isinstance(method, str) or not re.match(r"^[A-Z]+$", method):
+            raise ValueError(f"Invalid HTTP method: {method!r}")
+
+        eff_follow_redirects = self.follow_redirects if follow_redirects is None else follow_redirects
+        if eff_follow_redirects:
+            raise ValueError("Redirects are not supported")
+
         if not url or not isinstance(url, str):
             raise ValueError("URL cannot be empty.")
         if url.startswith("unix://") or url.startswith("http+unix://"):
@@ -313,9 +335,10 @@ class SSRFSafeHttpClient:
         if "\r" in path_and_query or "\n" in path_and_query or "\r" in hostname or "\n" in hostname:
             raise ValueError("Invalid control characters in URL.")
 
-        host_header = f"[{hostname}]:{port}" if ":" in hostname and parsed.port else (
-            f"{hostname}:{port}" if parsed.port else hostname
-        )
+        # Always bracket IPv6 literals in Host header
+        clean_host = hostname.strip("[]") if ":" in hostname else hostname
+        bracketed_host = f"[{clean_host}]" if ":" in hostname else hostname
+        host_header = f"{bracketed_host}:{port}" if parsed.port else bracketed_host
 
         wire_headers: dict[str, str] = {
             "Host": host_header,
@@ -324,7 +347,10 @@ class SSRFSafeHttpClient:
             "Connection": "close",
             "Content-Length": str(len(body_bytes)),
         }
+        forbidden_headers = {"host", "content-length", "transfer-encoding", "connection"}
         for k, v in req_headers.items():
+            if k.strip().lower() in forbidden_headers:
+                raise ValueError(f"Header '{k}' cannot be overridden by caller.")
             if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
                 raise ValueError("Invalid control characters in HTTP header.")
             wire_headers[k] = v
@@ -469,6 +495,8 @@ def create_ssrf_safe_client(
     Constructs a zero-dependency SSRFSafeHttpClient equipped with Zero-Trust
     socket-level SSRF defense and redirect protection.
     """
+    if follow_redirects:
+        raise ValueError("Redirects are not supported")
     return SSRFSafeHttpClient(
         timeout=timeout,
         follow_redirects=follow_redirects,
