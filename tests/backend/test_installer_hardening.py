@@ -47,3 +47,19 @@ def test_restore_script_syntax_and_key_parsing():
     content = restore_sh.read_text(encoding="utf-8")
     assert 'tr -d \'"\' | tr -d "\'"' in content or 'tr -d \'"\' | tr -d "\'"' in content
     assert "tr -d '\"'\\''" not in content
+
+
+def test_uninstall_script_purge_flag():
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    uninstall_sh = root / "deploy" / "uninstall.sh"
+
+    # 1. Must pass bash syntax check
+    proc = subprocess.run(["bash", "-n", str(uninstall_sh)], capture_output=True, text=True)
+    assert proc.returncode == 0, f"bash -n deploy/uninstall.sh failed:\n{proc.stderr}"
+
+    # 2. Check --purge-data flag implementation
+    content = uninstall_sh.read_text(encoding="utf-8")
+    assert "--purge-data" in content
+    assert "DROP DATABASE IF EXISTS" in content
+    assert "DROP USER IF EXISTS" in content
