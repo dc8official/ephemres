@@ -103,20 +103,6 @@ app = EphemresApp(
     lifespan=lifespan,
 )
 
-if "*" in settings.api.allowed_origins:
-    raise ValueError(
-        "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
-    )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.api.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-
 class AccessLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.perf_counter()
@@ -197,6 +183,19 @@ class HSTSMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(HSTSMiddleware)
+
+if "*" in settings.api.allowed_origins:
+    raise ValueError(
+        "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
+    )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.api.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 app.include_router(alerts.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")

@@ -1652,7 +1652,7 @@ class EphemresApp:
         # Build middleware stack if not already constructed
         if self._compiled_app is None:
             app_handler: Callable = self._dispatch_request
-            for middleware_cls, opts in reversed(self.middleware_stack):
+            for middleware_cls, opts in self.middleware_stack:
                 app_handler = middleware_cls(app=app_handler, **opts)
             self._compiled_app = app_handler
 
