@@ -561,3 +561,63 @@ def validate_outbound_url(
 
     except socket.gaierror as err:
         raise ValueError(f"Failed to resolve host '{hostname}': {err}") from err
+
+
+async def validate_outbound_url_async(
+    url: str,
+    allow_private: bool | None = None,
+    allow_loopback: bool = False,
+) -> None:
+    """
+    Asynchronously validates that a URL is safe for outbound dispatch using loop.getaddrinfo.
+    Rejects non-HTTP(S) protocols and destinations that resolve to loopback,
+    link-local metadata, or private IP addresses unless allow_private is explicitly enabled.
+    """
+    if not url:
+        raise ValueError("URL cannot be empty.")
+
+    eff_allow_private = _resolve_allow_private(allow_private)
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(
+            f"Invalid protocol '{parsed.scheme}'. Only HTTP and HTTPS URLs are permitted."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Invalid URL '{url}': Missing hostname.")
+
+    # Check for direct cloud metadata IP in host string
+    if hostname in BLOCKED_IPS:
+        raise ValueError(f"SSRF violation: Access to cloud metadata IP {hostname} is blocked.")
+
+    # Check if host is direct IP address or requires DNS resolution
+    try:
+        resolved_ips: list[str] = []
+        try:
+            direct_ip = ipaddress.ip_address(hostname)
+            resolved_ips.append(str(direct_ip))
+        except ValueError:
+            # Domain name: resolve via DNS asynchronously
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+            loop = asyncio.get_running_loop()
+            addr_info = await loop.getaddrinfo(
+                hostname, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+            )
+            for item in addr_info:
+                resolved_ips.append(item[4][0])
+
+        if not resolved_ips:
+            raise ValueError(f"DNS resolution failure for host '{hostname}'.")
+
+        for ip_str in resolved_ips:
+            _validate_resolved_ip(
+                ip_str,
+                hostname,
+                allow_private=eff_allow_private,
+                allow_loopback=allow_loopback,
+            )
+
+    except socket.gaierror as err:
+        raise ValueError(f"Failed to resolve host '{hostname}': {err}") from err
