@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import inspect
 import ipaddress
 import json
 import logging
@@ -2227,9 +2228,11 @@ class AsyncEngine:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
+        old_pool = None
         if self._pool is not None:
             pool_loop = getattr(self._pool, "_loop", None)
             if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                old_pool = self._pool
                 self._pool = None
             else:
                 return self._pool
@@ -2238,9 +2241,18 @@ class AsyncEngine:
             if self._pool is not None:
                 pool_loop = getattr(self._pool, "_loop", None)
                 if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                    old_pool = self._pool
                     self._pool = None
                 else:
                     return self._pool
+            if old_pool is not None:
+                try:
+                    close_coro = old_pool.close()
+                    if inspect.isawaitable(close_coro):
+                        await close_coro
+                except Exception:
+                    pass
+                old_pool = None
             if self._pool is None:
                 if asyncpg is None:
                     raise OperationalError("asyncpg is not installed. Please install asyncpg.")
