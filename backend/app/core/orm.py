@@ -1300,14 +1300,26 @@ class Select(SQLElement):
         s._group_by.extend(c for c in clauses if c is not None)
         return s
 
-    def limit(self, n: Optional[int]) -> Select:
+    def limit(self, n: Optional[Any]) -> Select:
         s = self.clone()
-        s._limit = n
+        if n is None:
+            s._limit = None
+        else:
+            val = int(n)
+            if val < 0:
+                raise ValueError("LIMIT cannot be negative")
+            s._limit = val
         return s
 
-    def offset(self, n: Optional[int]) -> Select:
+    def offset(self, n: Optional[Any]) -> Select:
         s = self.clone()
-        s._offset = n
+        if n is None:
+            s._offset = None
+        else:
+            val = int(n)
+            if val < 0:
+                raise ValueError("OFFSET cannot be negative")
+            s._offset = val
         return s
 
     def distinct(self, *on_exprs: Any) -> Select:
