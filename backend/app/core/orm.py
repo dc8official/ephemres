@@ -2474,6 +2474,14 @@ class AsyncSession:
     async def rollback(self) -> None:
         self._new.clear()
         self._deleted.clear()
+        for (model_cls, _), obj in list(self._identity_map.items()):
+            orm_state = getattr(obj, "_orm_state", None)
+            if isinstance(orm_state, dict):
+                for col_name, orig_val in orm_state.items():
+                    if isinstance(orig_val, (dict, list)):
+                        setattr(obj, col_name, copy.deepcopy(orig_val))
+                    else:
+                        setattr(obj, col_name, orig_val)
         if self._tx is not None:
             try:
                 if hasattr(self._tx, "rollback"):
