@@ -339,7 +339,7 @@ def get_trusted_client_ip(
                 if not is_ip_in_networks(candidate, trusted_nets):
                     return candidate
             if parts:
-                return parts[0]
+                return peer_ip
 
         real_ip = request.headers.get("X-Real-IP")
         if real_ip and isinstance(real_ip, str) and real_ip.strip():
