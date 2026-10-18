@@ -77,6 +77,11 @@ def test_all_13_revisions_upgrade_ddl_compilation():
     assert 'CREATE TABLE endpoints (' in full_sql
     assert 'CREATE TABLE endpoint_events (' in full_sql
     assert 'CREATE INDEX IF NOT EXISTS "idx_endpoint_events_incident_query"' in full_sql
+    assert 'FOREIGN KEY ("role_id") REFERENCES "roles" ("id")' in full_sql
+    assert 'FOREIGN KEY ("created_by") REFERENCES "users" ("id")' in full_sql
+    assert 'FOREIGN KEY ("endpoint_id") REFERENCES "endpoints" ("id")' in full_sql
+    assert 'REFERENCES roles.id' not in full_sql
+    assert 'REFERENCES users.id' not in full_sql
 
     # 0003 Diagnostic and topology
     assert 'ALTER TABLE "endpoints" ADD COLUMN allow_incident_trace' in full_sql
