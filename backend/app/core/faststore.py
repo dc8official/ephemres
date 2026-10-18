@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -10,6 +11,11 @@ import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
 import weakref
+
+
+logger = logging.getLogger(__name__)
+
+_WARNED_PARAMS = False
 
 
 class FastStoreError(Exception):
@@ -31,14 +37,26 @@ class ResponseError(FastStoreError):
     pass
 
 
-_SHM_DIR = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else "/tmp"
 _DB_LOCK = threading.RLock()
 _PUBSUB_WAITERS: Dict[str, weakref.WeakSet[asyncio.Queue]] = {}
 
 
+def _get_faststore_dir() -> str:
+    env_dir = os.environ.get("EPHEMRES_FASTSTORE_DIR")
+    if env_dir:
+        os.makedirs(env_dir, exist_ok=True)
+        return env_dir
+    if os.path.isdir("/run/ephemres") and os.access("/run/ephemres", os.W_OK):
+        return "/run/ephemres"
+    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+        return "/dev/shm"
+    return "/tmp"
+
+
 def _get_db_path(db: int = 0) -> str:
+    base_dir = _get_faststore_dir()
     uid = os.getuid() if hasattr(os, "getuid") else 0
-    return os.path.join(_SHM_DIR, f"ephemres_faststore_u{uid}_db{int(db)}.sqlite3")
+    return os.path.join(base_dir, f"ephemres_faststore_u{uid}_db{int(db)}.sqlite3")
 
 
 class _SharedSQLiteStore:
@@ -54,13 +72,44 @@ class _SharedSQLiteStore:
     def __init__(self, db: int = 0) -> None:
         self.db_num = int(db)
         self.db_path = _get_db_path(self.db_num)
-        self._conn = sqlite3.connect(
-            self.db_path,
-            timeout=30.0,
-            check_same_thread=False,
-            isolation_level=None,
-        )
+
+        if os.path.exists(self.db_path):
+            st = os.stat(self.db_path)
+            if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                raise FastStoreError(
+                    f"FastStore database file '{self.db_path}' is owned by UID {st.st_uid}, but current UID is {os.getuid()}."
+                )
+            if st.st_mode & 0o022:
+                raise FastStoreError(
+                    f"FastStore database file '{self.db_path}' has insecure permissions ({oct(st.st_mode)}): group or other write allowed."
+                )
+
+        old_umask = os.umask(0o077)
+        try:
+            self._conn = sqlite3.connect(
+                self.db_path,
+                timeout=30.0,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+        finally:
+            os.umask(old_umask)
+
+        if os.path.exists(self.db_path):
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
+
         self._init_schema()
+
+        for ext in ("-wal", "-shm"):
+            extra_path = f"{self.db_path}{ext}"
+            if os.path.exists(extra_path):
+                try:
+                    os.chmod(extra_path, 0o600)
+                except OSError:
+                    pass
 
     def _init_schema(self) -> None:
         with _DB_LOCK:
@@ -379,6 +428,12 @@ class FastStoreClient:
         socket_timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
+        global _WARNED_PARAMS
+        if not _WARNED_PARAMS and (password is not None or host != "127.0.0.1" or port != 6379):
+            _WARNED_PARAMS = True
+            logger.warning(
+                "FastStore is an in-process SQLite store; host, port, and password parameters are ignored."
+            )
         self.host = str(host)
         self.port = int(port)
         self.db = int(db)
