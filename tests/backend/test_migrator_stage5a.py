@@ -107,7 +107,8 @@ def test_all_13_revisions_upgrade_ddl_compilation():
     assert 'CREATE INDEX IF NOT EXISTS "idx_endpoints_flow_exporter_ips" ON "endpoints" USING gin ("flow_exporter_ips")' in full_sql
 
     # 0012 v3.3 flow interface telemetry
-    assert 'ALTER TABLE "endpoints" ADD COLUMN device_role' in full_sql
+    assert 'ALTER TABLE "endpoints" ADD COLUMN device_role VARCHAR(30) DEFAULT \'ACTIVE_HOST\' NOT NULL;' in full_sql
+    assert 'DEFAULT ACTIVE_HOST' not in full_sql
     assert 'ALTER TABLE "endpoints" ADD CONSTRAINT "ck_endpoints_device_role"' in full_sql
     assert 'CREATE TABLE flow_interface_minute_rollups (' in full_sql
     assert 'CREATE INDEX IF NOT EXISTS "idx_flow_if_rollups_exp_bucket"' in full_sql
