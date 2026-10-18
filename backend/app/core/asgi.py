@@ -543,6 +543,12 @@ class Response:
         httponly: bool = False,
         samesite: Optional[str] = "lax",
     ) -> None:
+        for invalid_char in (";", "\r", "\n"):
+            if invalid_char in key:
+                raise ValueError(f"Cookie key contains invalid character: {invalid_char!r}")
+            if invalid_char in value:
+                raise ValueError(f"Cookie value contains invalid character: {invalid_char!r}")
+
         cookie_parts = [f"{key}={value}", f"Path={path}"]
         if max_age is not None:
             cookie_parts.append(f"Max-Age={int(max_age)}")
