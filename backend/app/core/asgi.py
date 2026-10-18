@@ -602,6 +602,13 @@ class Response:
             "status": self.status_code,
             "headers": self.headers.raw,
         })
+        if scope.get("method", "").upper() == "HEAD":
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            })
+            return
         await send({
             "type": "http.response.body",
             "body": self.body,
@@ -714,6 +721,26 @@ class StreamingResponse(Response):
         })
 
         content = self.content_iterator
+        if scope.get("method", "").upper() == "HEAD":
+            if hasattr(content, "aclose") and callable(content.aclose):
+                try:
+                    res = content.aclose()
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:
+                    pass
+            elif hasattr(content, "close") and callable(content.close):
+                try:
+                    content.close()
+                except Exception:
+                    pass
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            })
+            return
+
         if hasattr(content, "read"):
             # File-like object (e.g. io.BytesIO)
             chunk_size = 64 * 1024
