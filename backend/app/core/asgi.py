@@ -22,6 +22,7 @@ import inspect
 import io
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -57,6 +58,8 @@ from app.core.schema import (
 )
 
 RequestValidationError = ValidationError
+
+MAX_BODY_BYTES = int(os.environ.get("EPHEMRES_MAX_BODY_BYTES", 10 * 1024 * 1024))
 
 logger = logging.getLogger(__name__)
 
@@ -450,12 +453,16 @@ class Request:
     async def body(self) -> bytes:
         if self._body is None:
             chunks = []
+            total_size = 0
             while True:
                 message = await self._receive()
                 m_type = message.get("type", "")
                 if m_type == "http.request":
                     chunk = message.get("body", b"")
                     if chunk:
+                        total_size += len(chunk)
+                        if total_size > MAX_BODY_BYTES:
+                            raise HTTPException(413, "Request body too large")
                         chunks.append(chunk)
                     if not message.get("more_body", False):
                         break
@@ -463,6 +470,8 @@ class Request:
                     self._is_disconnected = True
                     break
             self._body = b"".join(chunks)
+        elif len(self._body) > MAX_BODY_BYTES:
+            raise HTTPException(413, "Request body too large")
         return self._body
 
     async def json(self) -> Any:
@@ -1035,6 +1044,7 @@ async def _resolve_endpoint_kwargs(
     # Parse JSON body once if any parameter expects request body
     body_data = None
     body_parsed = False
+    body_json_invalid = False
 
     for param_name, param in sig.parameters.items():
         annotation = type_hints.get(param_name, param.annotation)
@@ -1195,11 +1205,24 @@ async def _resolve_endpoint_kwargs(
         )
         if is_body:
             if not body_parsed:
-                try:
-                    body_data = await request.json()
-                except Exception:
+                raw_body = await request.body()
+                if raw_body and raw_body.strip():
+                    try:
+                        body_data = json.loads(raw_body.decode("utf-8"))
+                    except Exception:
+                        body_json_invalid = True
+                        body_data = None
+                else:
                     body_data = None
                 body_parsed = True
+
+            if body_json_invalid:
+                validation_errors.append({
+                    "loc": ("body",),
+                    "msg": "Invalid JSON body",
+                    "type": "json_invalid",
+                })
+                continue
 
             b_info = default if isinstance(default, BodyParamInfo) else _FieldInfo(default=default)
 
