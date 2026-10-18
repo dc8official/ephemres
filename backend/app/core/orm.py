@@ -2106,10 +2106,11 @@ def _is_row_returning_sql(sql: str) -> bool:
 class AsyncConnection:
     """Managed async database connection."""
 
-    def __init__(self, conn: Any, in_tx: bool = False) -> None:
+    def __init__(self, conn: Any, in_tx: bool = False, engine: Optional[Any] = None) -> None:
         self._conn = conn
         self._in_tx = in_tx
         self._tx: Optional[Any] = None
+        self.engine = engine
 
     async def execute(self, stmt: Any, params: Optional[Any] = None) -> Result:
         if isinstance(stmt, TextClause):
@@ -2153,7 +2154,10 @@ class AsyncConnection:
             self._tx = None
 
     async def close(self) -> None:
-        pass
+        if self._conn is not None:
+            if self.engine is not None and getattr(self.engine, "_pool", None) is not None:
+                await self.engine._pool.release(self._conn)
+            self._conn = None
 
 
 def parse_rowcount(status_tag: Any) -> int:
@@ -2174,6 +2178,7 @@ class AsyncEngine:
         self.pool_size = kwargs.get("pool_size", 10)
         self.max_overflow = kwargs.get("max_overflow", 10)
         self.echo = kwargs.get("echo", False)
+        self.dialect = types.SimpleNamespace(name="postgresql")
         self._pool: Optional[Any] = None
         self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
 
@@ -2253,10 +2258,18 @@ class _AsyncEngineConnectContext:
         self.conn: Optional[Any] = None
         self.wrapped: Optional[AsyncConnection] = None
 
+    def __await__(self):
+        return self._acquire().__await__()
+
+    async def _acquire(self) -> "AsyncConnection":
+        pool = await self.engine._get_pool()
+        conn = await pool.acquire()
+        return AsyncConnection(conn, in_tx=False, engine=self.engine)
+
     async def __aenter__(self) -> AsyncConnection:
         pool = await self.engine._get_pool()
         self.conn = await pool.acquire()
-        self.wrapped = AsyncConnection(self.conn, in_tx=self.begin_tx)
+        self.wrapped = AsyncConnection(self.conn, in_tx=self.begin_tx, engine=self.engine)
         if self.begin_tx:
             self.wrapped._tx = self.conn.transaction()
             await self.wrapped._tx.start()
@@ -2270,8 +2283,12 @@ class _AsyncEngineConnectContext:
                 else:
                     await self.wrapped._tx.commit()
         finally:
-            if self.conn and self.engine._pool:
+            if self.wrapped and self.wrapped._conn is None:
+                pass
+            elif self.conn and self.engine._pool:
                 await self.engine._pool.release(self.conn)
+                if self.wrapped:
+                    self.wrapped._conn = None
 
 
 def create_async_engine(url: str, **kwargs: Any) -> AsyncEngine:
