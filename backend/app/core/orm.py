@@ -2137,12 +2137,18 @@ class AsyncConnection:
             res = await self._conn.execute(sql, *bound)
             return Result([], rowcount=parse_rowcount(res))
 
-        sql = stmt.compile() if isinstance(stmt, SQLElement) else str(stmt)
+        if isinstance(stmt, SQLElement):
+            ctx = CompileContext()
+            sql = stmt.compile(ctx)
+            stmt_params = ctx.params
+        else:
+            sql = str(stmt)
+            stmt_params = params if isinstance(params, (list, tuple)) else []
+
         if _is_row_returning_sql(sql):
-            p = getattr(stmt, "_params", None) or (params if isinstance(params, (list, tuple)) else [])
-            records = await self._conn.fetch(sql, *p)
+            records = await self._conn.fetch(sql, *stmt_params)
             return Result([Row(list(r.values()), list(r.keys()), dict(r)) for r in records], rowcount=len(records))
-        res = await self._conn.execute(sql)
+        res = await self._conn.execute(sql, *stmt_params)
         return Result([], rowcount=parse_rowcount(res))
 
     async def commit(self) -> None:
