@@ -227,8 +227,7 @@ async def get_current_user(
         )
         raise HTTPException(status_code=401, detail="Session expired or invalid.")
 
-    store = driver_manager.get_session_store()
-    if not await store.is_session_active(str(user_id_str), jti):
+    if not await is_session_active(str(user_id_str), jti):
         logger.warning(
             "Authentication session evicted (quota exceeded or expired)"
         )
