@@ -401,45 +401,23 @@ def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
         pass
 
 
-class AwaitableBool:
+async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     """
-    A boolean wrapper that supports both synchronous truthiness evaluation
-    and asynchronous await expressions. Ensures backwards compatibility across
-    sync test suites (e.g. test_auth_security.py) and async callers.
-    """
-    __slots__ = ("_val",)
-
-    def __init__(self, val: bool) -> None:
-        self._val = bool(val)
-
-    def __bool__(self) -> bool:
-        return self._val
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, AwaitableBool):
-            return self._val == other._val
-        return self._val == bool(other)
-
-    def __repr__(self) -> str:
-        return repr(self._val)
-
-    def __await__(self):
-        async def _coro():
-            return self._val
-        return _coro().__await__()
-
-
-def is_session_active(user_id: str, jti: Optional[str]) -> AwaitableBool:
-    """
-    Validates if a given JTI session token is active for the user.
+    Validates if a given JTI session token is active for the user by delegating
+    to the configured backing session store.
     Option B (Strict Security Wipe): Invalidate legacy tokens without jti immediately.
     """
     if not jti:
-        return AwaitableBool(False)
+        return False
     u_id = str(user_id)
-    if u_id not in _active_user_sessions:
-        return AwaitableBool(False)
-    return AwaitableBool(jti in _active_user_sessions[u_id])
+    try:
+        from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        if await store.is_session_active(u_id, jti):
+            return True
+    except Exception:
+        pass
+    return jti in _active_user_sessions.get(u_id, [])
 
 
 async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:

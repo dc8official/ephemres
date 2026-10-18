@@ -15,7 +15,8 @@ from app.core.http_client import validate_outbound_url
 from app.database import check_database_connection
 
 
-def test_session_eviction_deduplication():
+@pytest.mark.anyio
+async def test_session_eviction_deduplication():
     """Verify that multiple registrations of the same jti do not evict prior sessions."""
     user_id = str(uuid4())
     _active_user_sessions.pop(user_id, None)
@@ -35,15 +36,15 @@ def test_session_eviction_deduplication():
     # Re-registering session 2 must not push out session 1
     register_session(user_id, "token-2", max_sessions=2)
     assert _active_user_sessions[user_id] == ["token-1", "token-2"]
-    assert bool(is_session_active(user_id, "token-1")) is True
-    assert bool(is_session_active(user_id, "token-2")) is True
+    assert await is_session_active(user_id, "token-1") is True
+    assert await is_session_active(user_id, "token-2") is True
 
     # Session 3 should evict oldest session 1 (FIFO)
     register_session(user_id, "token-3", max_sessions=2)
     assert _active_user_sessions[user_id] == ["token-2", "token-3"]
-    assert bool(is_session_active(user_id, "token-1")) is False
-    assert bool(is_session_active(user_id, "token-2")) is True
-    assert bool(is_session_active(user_id, "token-3")) is True
+    assert await is_session_active(user_id, "token-1") is False
+    assert await is_session_active(user_id, "token-2") is True
+    assert await is_session_active(user_id, "token-3") is True
 
 
 def test_create_access_token_is_stateless():

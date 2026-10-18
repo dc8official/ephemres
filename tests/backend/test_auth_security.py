@@ -134,26 +134,29 @@ class TestSecurityAuditFixes(unittest.TestCase):
 
     def test_concurrent_session_fifo_rotation(self) -> None:
         from app.services.auth_service import register_session, is_session_active, invalidate_session, _active_user_sessions
-        user_id = str(uuid4())
-        _active_user_sessions.clear()
+        async def _run():
+            user_id = str(uuid4())
+            _active_user_sessions.clear()
 
-        # Session 1 & Session 2 registered
-        register_session(user_id, "jti_session_1", max_sessions=2)
-        register_session(user_id, "jti_session_2", max_sessions=2)
+            # Session 1 & Session 2 registered
+            register_session(user_id, "jti_session_1", max_sessions=2)
+            register_session(user_id, "jti_session_2", max_sessions=2)
 
-        self.assertTrue(is_session_active(user_id, "jti_session_1"))
-        self.assertTrue(is_session_active(user_id, "jti_session_2"))
+            self.assertTrue(await is_session_active(user_id, "jti_session_1"))
+            self.assertTrue(await is_session_active(user_id, "jti_session_2"))
 
-        # Session 3 registered -> FIFO evicts Session 1
-        register_session(user_id, "jti_session_3", max_sessions=2)
-        self.assertFalse(is_session_active(user_id, "jti_session_1"))
-        self.assertTrue(is_session_active(user_id, "jti_session_2"))
-        self.assertTrue(is_session_active(user_id, "jti_session_3"))
+            # Session 3 registered -> FIFO evicts Session 1
+            register_session(user_id, "jti_session_3", max_sessions=2)
+            self.assertFalse(await is_session_active(user_id, "jti_session_1"))
+            self.assertTrue(await is_session_active(user_id, "jti_session_2"))
+            self.assertTrue(await is_session_active(user_id, "jti_session_3"))
 
-        # Logout session 2
-        invalidate_session(user_id, "jti_session_2")
-        self.assertFalse(is_session_active(user_id, "jti_session_2"))
-        self.assertTrue(is_session_active(user_id, "jti_session_3"))
+            # Logout session 2
+            invalidate_session(user_id, "jti_session_2")
+            self.assertFalse(await is_session_active(user_id, "jti_session_2"))
+            self.assertTrue(await is_session_active(user_id, "jti_session_3"))
+
+        self.loop.run_until_complete(_run())
 
     def test_ip_scoped_failed_attempt_lockout(self) -> None:
         _failed_attempts.clear()
