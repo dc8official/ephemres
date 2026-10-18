@@ -2180,6 +2180,19 @@ class AsyncConnection:
                 await self.engine._pool.release(self._conn)
             self._conn = None
 
+    async def __aenter__(self) -> "AsyncConnection":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        try:
+            if self._tx:
+                if exc_type is not None:
+                    await self.rollback()
+                else:
+                    await self.commit()
+        finally:
+            await self.close()
+
 
 def parse_rowcount(status_tag: Any) -> int:
     """Parses affected row count from asyncpg command status (e.g. 'DELETE 5', 'UPDATE 1')."""
@@ -2296,7 +2309,11 @@ class _AsyncEngineConnectContext:
     async def _acquire(self) -> "AsyncConnection":
         pool = await self.engine._get_pool()
         conn = await pool.acquire()
-        return AsyncConnection(conn, in_tx=False, engine=self.engine)
+        wrapped = AsyncConnection(conn, in_tx=self.begin_tx, engine=self.engine)
+        if self.begin_tx:
+            wrapped._tx = conn.transaction()
+            await wrapped._tx.start()
+        return wrapped
 
     async def __aenter__(self) -> AsyncConnection:
         pool = await self.engine._get_pool()

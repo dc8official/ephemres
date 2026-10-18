@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from app.core.orm import AsyncEngine, create_async_engine
 
 
@@ -66,3 +66,27 @@ async def test_async_engine_dialect_and_awaitable_connect(monkeypatch):
 
     assert fake_pool.acquire_count == 3
     assert fake_pool.release_count == 3
+
+    # 6. AsyncConnection can be used directly as an async context manager
+    conn3 = await engine.connect()
+    assert fake_pool.acquire_count == 4
+    async with conn3:
+        pass
+    assert fake_pool.release_count == 4
+
+    # 7. await engine.begin() starts a transaction and rolls back/commits properly
+    tx_mock = AsyncMock()
+    fake_pg_conn = MagicMock()
+    fake_pg_conn.transaction.return_value = tx_mock
+    fake_pool.acquire = AsyncMock(return_value=fake_pg_conn)
+
+    conn4 = await engine.begin()
+    assert conn4._in_tx is True
+    assert conn4._tx is not None
+    tx_mock.start.assert_awaited_once()
+
+    async with conn4:
+        pass
+    tx_mock.commit.assert_awaited_once()
+    assert fake_pool.release_count == 5
+
