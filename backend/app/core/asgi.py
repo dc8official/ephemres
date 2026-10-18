@@ -1701,6 +1701,17 @@ class EphemresApp:
         bg_tasks = BackgroundTasks()
         final_response: Optional[Response] = None
 
+        response_started = False
+        original_send = send
+
+        async def tracked_send(message: Dict[str, Any]) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await original_send(message)
+
+        send = tracked_send
+
         try:
             async with contextlib.AsyncExitStack() as exit_stack:
                 # 0. Execute route-level and router-level dependencies
@@ -1742,13 +1753,27 @@ class EphemresApp:
                     final_response = Response(status_code=204)
                 else:
                     if matched_route.response_model is not None:
-                        result = TypeAdapter(matched_route.response_model).validate_python(result)
-                    eff_code = (
-                        injected_response.status_code
-                        if injected_response.status_code != 200
-                        else matched_route.status_code
-                    )
-                    final_response = JSONResponse(content=result, status_code=eff_code)
+                        try:
+                            result = TypeAdapter(matched_route.response_model).validate_python(result)
+                        except ValidationError as resp_val_err:
+                            logger.error(
+                                "Response validation failed for %s %s: %s",
+                                method,
+                                path,
+                                resp_val_err,
+                            )
+                            final_response = JSONResponse(
+                                content={"detail": "Internal Server Error"},
+                                status_code=500,
+                            )
+                            result = None
+                    if final_response is None:
+                        eff_code = (
+                            injected_response.status_code
+                            if injected_response.status_code != 200
+                            else matched_route.status_code
+                        )
+                        final_response = JSONResponse(content=result, status_code=eff_code)
 
                 # Merge injected headers & Set-Cookie headers
                 for k, v in injected_response.headers.items():
@@ -1773,6 +1798,10 @@ class EphemresApp:
                     logger.error("Background task execution error: %s", bg_exc, exc_info=True)
 
         except HTTPException as http_exc:
+            if response_started:
+                logger.exception("HTTPException raised after response already started on %s %s: %s", method, path, http_exc)
+                return
+
             # Check custom exception handlers
             if HTTPException in self.exception_handlers:
                 custom_resp = self.exception_handlers[HTTPException](request, http_exc)
@@ -1789,6 +1818,10 @@ class EphemresApp:
             await err_resp(scope, receive, send)
 
         except ValidationError as v_exc:
+            if response_started:
+                logger.exception("ValidationError raised after response already started on %s %s: %s", method, path, v_exc)
+                return
+
             val_resp = JSONResponse(
                 content={"detail": v_exc.errors()},
                 status_code=422,
@@ -1796,6 +1829,10 @@ class EphemresApp:
             await val_resp(scope, receive, send)
 
         except Exception as exc:
+            if response_started:
+                logger.exception("Exception raised after response already started on %s %s: %s", method, path, exc)
+                return
+
             for exc_type, handler in self.exception_handlers.items():
                 if isinstance(exc_type, type) and isinstance(exc, exc_type):
                     res = handler(request, exc)
