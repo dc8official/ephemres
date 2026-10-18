@@ -158,9 +158,12 @@ else
 fi
 
 # Enable unprivileged ICMP / raw socket capabilities for traceroute if available
-TRACEROUTE_BIN=$(command -v traceroute || true)
-if [ -n "$TRACEROUTE_BIN" ] && command -v setcap &>/dev/null; then
-    run "Setting network capabilities for traceroute" setcap cap_net_raw+ep "$TRACEROUTE_BIN" || true
+TRACEROUTE_PATH=$(command -v traceroute || true)
+if [ -n "$TRACEROUTE_PATH" ]; then
+    TRACEROUTE_BIN="$(readlink -f "$TRACEROUTE_PATH" 2>/dev/null || echo "$TRACEROUTE_PATH")"
+    if [ -f "$TRACEROUTE_BIN" ] && command -v setcap &>/dev/null; then
+        run "Setting network capabilities for traceroute ($TRACEROUTE_BIN)" setcap cap_net_raw+ep "$TRACEROUTE_BIN" || true
+    fi
 fi
 
 # ============================================================
@@ -277,7 +280,7 @@ print_header "Step 9: Building Vue frontend"
 # Ensure vite executable exists; reinstall if missing or corrupt
 if [ ! -x "$INSTALL_DIR/frontend/node_modules/.bin/vite" ]; then
     run "Installing frontend npm dependencies (including devDependencies)" \
-        bash -c "cd $INSTALL_DIR/frontend && npm install --include=dev"
+        bash -c "cd $INSTALL_DIR/frontend && npm install --include=dev --no-update-notifier"
 fi
 
 # Build frontend production bundle
@@ -485,7 +488,15 @@ done
 run "Reloading systemd daemon" systemctl daemon-reload
 run "Enabling ephemres-engine" systemctl enable ephemres-engine
 run "Enabling ephemres-api" systemctl enable ephemres-api
-run "Enabling ephemres-flowd" systemctl enable ephemres-flowd
+
+FLOW_ENABLED=false
+if grep -A 5 "\[flow\]" "$CONFIG_FILE" 2>/dev/null | grep -q "enabled = true"; then
+    FLOW_ENABLED=true
+fi
+
+if [ "$FLOW_ENABLED" = true ]; then
+    run "Enabling ephemres-flowd" systemctl enable ephemres-flowd
+fi
 
 # Grant ephemres user sudo privilege to start/stop ephemres-flowd dynamically from web UI
 if [ "$DRY_RUN" = false ] && [ -d "/etc/sudoers.d" ]; then
@@ -552,7 +563,12 @@ print_header "Step 18: Starting services"
 
 run "Starting ephemres-api" systemctl start ephemres-api
 run "Starting ephemres-engine" systemctl start ephemres-engine
-run "Starting ephemres-flowd" systemctl start ephemres-flowd
+
+if [ "$FLOW_ENABLED" = true ]; then
+    run "Starting ephemres-flowd" systemctl start ephemres-flowd
+else
+    echo "Flow telemetry is disabled in settings. ephemres-flowd service installed and ready for UI activation."
+fi
 
 # ============================================================
 print_header "Installation Complete"

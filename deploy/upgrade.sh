@@ -199,7 +199,7 @@ FRONTEND_DIR="${PROJECT_ROOT}/frontend"
 if [[ ${DRY_RUN} -eq 0 && -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
     if command -v npm &>/dev/null; then
         echo -e "${GREEN}[INFO] Building Vue 3 frontend bundle in pre-flight (${FRONTEND_DIR})...${NC}"
-        if (cd "${FRONTEND_DIR}" && npm install && npm run build); then
+        if (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build); then
             echo -e "${GREEN}[SUCCESS] Pre-flight frontend build completed successfully.${NC}"
         elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
             echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding with pre-built assets.${NC}"
@@ -258,9 +258,12 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         fi
 
         # Set network capabilities for raw ICMP traceroute
-        TRACEROUTE_BIN=$(command -v traceroute || true)
-        if [[ -n "${TRACEROUTE_BIN}" ]] && command -v setcap &>/dev/null; then
-            setcap cap_net_raw+ep "${TRACEROUTE_BIN}" || true
+        TRACEROUTE_PATH=$(command -v traceroute || true)
+        if [[ -n "${TRACEROUTE_PATH}" ]]; then
+            TRACEROUTE_BIN="$(readlink -f "${TRACEROUTE_PATH}" 2>/dev/null || echo "${TRACEROUTE_PATH}")"
+            if [[ -f "${TRACEROUTE_BIN}" ]] && command -v setcap &>/dev/null; then
+                setcap cap_net_raw+ep "${TRACEROUTE_BIN}" || true
+            fi
         fi
     fi
 
@@ -293,7 +296,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     if [[ -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
         if command -v npm &>/dev/null; then
             echo -e "${GREEN}[INFO] Rebuilding production Vue 3 frontend bundle in ${FRONTEND_DIR}...${NC}"
-            (cd "${FRONTEND_DIR}" && npm install && npm run build) || {
+            (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build) || {
                 if [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
                     echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding.${NC}"
                 else
