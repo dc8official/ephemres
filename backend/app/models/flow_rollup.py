@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from app.core.orm import BigInteger, DateTime, Integer, SmallInteger, func
+from app.core.orm import BigInteger, DateTime, Integer, SmallInteger, func, text
 from app.core.orm import INET, UUID as PG_UUID
 from app.core.orm import Mapped, mapped_column
 
@@ -102,6 +102,18 @@ class FlowMinuteRollup(Base):
         server_default="1",
         nullable=False,
     )
+    tcp_flags: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    tos: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
 
 class FlowHourlyRollup(Base):
@@ -155,6 +167,18 @@ class FlowHourlyRollup(Base):
         Integer,
         nullable=False,
     )
+    tcp_flags: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    tos: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
 
 class FlowDailyRollup(Base):
@@ -198,6 +222,18 @@ class FlowDailyRollup(Base):
     flow_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
+    )
+    tcp_flags: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    tos: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
 
 

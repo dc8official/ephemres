@@ -97,6 +97,8 @@ def test_bandwidth_top_talkers(client):
 
     m1 = MagicMock()
     m1.all.return_value = [mock_src_row]
+    m_in = MagicMock()
+    m_in.all.return_value = []
     # Hostname resolution query for ep_id
     m_host = MagicMock()
     m_host.all.return_value = [(ep_id, "app-server-1")]
@@ -104,7 +106,7 @@ def test_bandwidth_top_talkers(client):
     m2 = MagicMock()
     m2.all.return_value = [mock_conv_row]
 
-    mock_session.execute.side_effect = [m1, m_host, m2]
+    mock_session.execute.side_effect = [m1, m_in, m_host, m2]
 
     resp = test_client.get("/api/v1/bandwidth/top-talkers?window=1h")
     assert resp.status_code == 200

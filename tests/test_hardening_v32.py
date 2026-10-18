@@ -116,6 +116,8 @@ def test_flow_aggregator_insert_sql_bindparams():
         "bytes",
         "packets",
         "flow_count",
+        "tcp_flags",
+        "tos",
     }
     assert compiled_params == expected_params, f"Missing or incorrect params: {expected_params - compiled_params}"
 

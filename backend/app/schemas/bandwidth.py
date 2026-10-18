@@ -42,6 +42,44 @@ class TopTalkerItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+TCP_FLAG_MAP: List[Tuple[int, str]] = [
+    (0x01, "FIN"),
+    (0x02, "SYN"),
+    (0x04, "RST"),
+    (0x08, "PSH"),
+    (0x10, "ACK"),
+    (0x20, "URG"),
+    (0x40, "ECE"),
+    (0x80, "CWR"),
+]
+
+DSCP_CLASS_MAP: Dict[int, str] = {
+    0: "Best Effort (CS0)",
+    8: "Scavenger (CS1)",
+    10: "AF11",
+    16: "CS2",
+    18: "AF21",
+    24: "CS3",
+    26: "AF31",
+    32: "CS4",
+    34: "AF41 (Video)",
+    40: "CS5",
+    46: "EF (VoIP)",
+    48: "CS6 (Network Ctrl)",
+    56: "CS7",
+}
+
+
+def format_tcp_flags(mask: int) -> List[str]:
+    m = mask or 0
+    return [name for bit, name in TCP_FLAG_MAP if m & bit]
+
+
+def format_dscp_label(tos: int) -> str:
+    dscp = ((tos or 0) & 0xFF) >> 2
+    return DSCP_CLASS_MAP.get(dscp, f"DSCP {dscp}")
+
+
 class TopConversationItem(BaseModel):
     src_ip: str
     dst_ip: str
@@ -51,6 +89,12 @@ class TopConversationItem(BaseModel):
     dst_port: int
     total_bytes: int
     flow_count: int
+    tcp_flags: int = 0
+    tcp_flags_labels: List[str] = Field(default_factory=list)
+    tos: int = 0
+    dscp: int = 0
+    dscp_label: str = "Best Effort (CS0)"
+    anomaly_hint: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

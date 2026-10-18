@@ -263,7 +263,11 @@ class FlowAggregator:
                 grouped_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
                 for key, vals in snapshot.items():
                     bucket, exp_id, src_ep_id, dst_ep_id, src_ip, dst_ip, proto, d_port = key
-                    bytes_val, pkts_val, count_val, tcp_flags_val, tos_val = vals
+                    bytes_val = vals[0]
+                    pkts_val = vals[1]
+                    count_val = vals[2]
+                    tcp_flags_val = vals[3] if len(vals) > 3 else 0
+                    tos_val = vals[4] if len(vals) > 4 else 0
                     pk = (bucket, exp_id, src_ip, dst_ip, proto, d_port)
                     if pk not in grouped_rows:
                         grouped_rows[pk] = {

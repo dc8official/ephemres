@@ -421,6 +421,7 @@
               <th>Destination IP</th>
               <th>Protocol</th>
               <th>Service Port</th>
+              <th>Flags &amp; QoS</th>
               <th class="text-right">Volume</th>
               <th class="text-right">Burst Count</th>
             </tr>
@@ -443,11 +444,44 @@
                   {{ formatPortLabel(c.dst_port, c.protocol) }}
                 </span>
               </td>
+              <td>
+                <div class="metadata-badge-group">
+                  <span
+                    v-if="c.protocol === 'TCP' && c.tcp_flags_labels && c.tcp_flags_labels.length > 0"
+                    class="badge-tcp-flags font-mono"
+                    :title="`TCP Flags: ${c.tcp_flags_labels.join(', ')} (0x${(c.tcp_flags || 0).toString(16).padStart(2, '0')})`"
+                  >
+                    {{ c.tcp_flags_labels.join(' ') }}
+                  </span>
+                  <span
+                    v-if="c.anomaly_hint === 'SYN_ONLY'"
+                    class="badge-anomaly badge-syn-only"
+                    title="Anomaly: SYN-only packets observed without ACK (potential port scan)"
+                  >
+                    SYN ONLY
+                  </span>
+                  <span
+                    v-else-if="c.anomaly_hint === 'TCP_RST'"
+                    class="badge-anomaly badge-tcp-rst"
+                    title="Anomaly: Connection reset (RST) observed"
+                  >
+                    RST
+                  </span>
+                  <span
+                    v-if="c.dscp > 0"
+                    class="badge-dscp"
+                    :class="{ 'badge-dscp-ef': c.dscp === 46, 'badge-dscp-af': c.dscp_label && c.dscp_label.includes('AF') }"
+                    :title="`ToS: 0x${(c.tos || 0).toString(16).padStart(2, '0')} · DSCP: ${c.dscp} (${c.dscp_label})`"
+                  >
+                    {{ c.dscp_label }}
+                  </span>
+                </div>
+              </td>
               <td class="text-right tnum font-bold">{{ formatBytes(c.total_bytes) }}</td>
               <td class="text-right tnum text-muted">{{ formatNumber(c.flow_count) }}</td>
             </tr>
             <tr v-if="filteredConversations.length === 0">
-              <td colspan="6" class="text-center text-muted">
+              <td colspan="7" class="text-center text-muted">
                 {{ topConversations.length === 0 ? 'No conversations recorded in this window.' : 'No conversations matching current search filter.' }}
               </td>
             </tr>
@@ -803,7 +837,10 @@ const filteredConversations = computed(() => {
       (c.src_hostname && c.src_hostname.toLowerCase().includes(q)) ||
       (c.dst_hostname && c.dst_hostname.toLowerCase().includes(q)) ||
       String(c.dst_port).includes(q) ||
-      (c.protocol && c.protocol.toLowerCase().includes(q))
+      (c.protocol && c.protocol.toLowerCase().includes(q)) ||
+      (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
+      (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
+      (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
     )
   })
 })
@@ -1644,6 +1681,75 @@ html.dark .unmatched-banner {
   background: rgba(107, 114, 128, 0.12);
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
+}
+
+/* Forensic L3/L4 Telemetry & Anomaly Badges */
+.metadata-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge-tcp-flags {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.badge-anomaly {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.badge-syn-only {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-tcp-rst {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-dscp {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  background: rgba(139, 92, 246, 0.12);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.badge-dscp-ef {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+  font-weight: 700;
+}
+
+.badge-dscp-af {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  border-color: rgba(59, 130, 246, 0.4);
 }
 
 /* Scope Selector */
