@@ -63,3 +63,25 @@ def test_ignored_params_warning(caplog):
     caplog.clear()
     FastStoreClient(db=91, host="10.0.0.1")
     assert not any("ignored" in r.message for r in caplog.records)
+
+
+def test_auto_recovery_from_corrupted_companion_files(tmp_path, monkeypatch):
+    custom_dir = str(tmp_path / "corrupt_store")
+    monkeypatch.setenv("EPHEMRES_FASTSTORE_DIR", custom_dir)
+    db_path = _get_db_path(92)
+    wal_path = f"{db_path}-wal"
+    shm_path = f"{db_path}-shm"
+
+    _SharedSQLiteStore._instances.pop(92, None)
+
+    # Pre-create corrupted wal / shm files
+    os.makedirs(custom_dir, exist_ok=True)
+    with open(wal_path, "wb") as f:
+        f.write(b"CORRUPTED WAL DATA GARBAGE")
+    with open(shm_path, "wb") as f:
+        f.write(b"CORRUPTED SHM DATA GARBAGE")
+
+    # FastStore should auto-purge corrupted files and initialize cleanly
+    client = FastStoreClient(db=92)
+    assert client is not None
+    assert os.path.exists(db_path)

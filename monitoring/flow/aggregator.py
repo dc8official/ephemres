@@ -22,13 +22,25 @@ CONSUMER_NAME = "aggregator_worker_1"
 SENTINEL_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 
-def normalize_service_port(src_port: int, dst_port: int) -> int:
+KNOWN_SERVICE_PORTS = frozenset({
+    1194, 1433, 1521, 1812, 1813, 2049, 2055, 2181, 2379, 3000, 3306, 3389,
+    4500, 4739, 5000, 5060, 5061, 5432, 5601, 5672, 5900, 5985, 5986, 6379,
+    6443, 8000, 8080, 8443, 8888, 9000, 9090, 9092, 9100, 9200, 11211, 27017,
+    51820,
+})
+
+
+def normalize_service_port(src_port: int, dst_port: int, protocol: int = 0) -> int:
     """
     Normalizes service ports to protect index cardinality from ephemeral client ports (1024-65535).
     """
-    if src_port < 1024 and dst_port >= 1024:
+    if protocol in (1, 58):
+        return 0
+    if 0 < dst_port < 1024 or dst_port in KNOWN_SERVICE_PORTS:
+        return dst_port
+    if 0 < src_port < 1024 or src_port in KNOWN_SERVICE_PORTS:
         return src_port
-    if src_port in (8080, 8443, 3306, 5432, 6379, 9200) and dst_port > 10000:
+    if 0 < src_port < 10000 and dst_port >= 10000:
         return src_port
     return dst_port
 
@@ -52,11 +64,11 @@ class FlowAggregator:
         self.db_factory = db_session_factory
         self.flush_interval = flush_interval_seconds
 
-        # (bucket, exporter_id, src_endpoint_id, dst_endpoint_id, src_ip, dst_ip, protocol, dst_port) -> [bytes, packets, flow_count]
+        # (bucket, exporter_id, src_endpoint_id, dst_endpoint_id, src_ip, dst_ip, protocol, dst_port) -> [bytes, packets, flow_count, tcp_flags_or, max_tos]
         self._accumulator: Dict[
             Tuple[datetime.datetime, UUID, Optional[UUID], Optional[UUID], str, str, int, int],
             List[int],
-        ] = collections.defaultdict(lambda: [0, 0, 0])
+        ] = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
 
         # (bucket, exporter_id, interface_idx) -> [in_bytes, out_bytes, in_packets, out_packets, flow_count]
         self._interface_accumulator: Dict[
@@ -173,6 +185,8 @@ class FlowAggregator:
         start_time_unix: float,
         in_if: int = 0,
         out_if: int = 0,
+        tcp_flags: int = 0,
+        tos: int = 0,
     ) -> None:
         if not src_ip or not dst_ip:
             return
@@ -181,6 +195,9 @@ class FlowAggregator:
             ipaddress.ip_address(dst_ip.strip() if isinstance(dst_ip, str) else dst_ip)
         except (ValueError, AttributeError):
             return
+
+        tcp_flags = int(tcp_flags) & 0xFF
+        tos = int(tos) & 0xFF
 
         exporter_id, src_ep_id, dst_ep_id = self.correlator.correlate(
             exporter_ip, src_ip, dst_ip
@@ -191,7 +208,7 @@ class FlowAggregator:
         dt = datetime.datetime.fromtimestamp(start_time_unix, tz=datetime.timezone.utc)
         bucket = dt.replace(second=0, microsecond=0)
 
-        normalized_port = normalize_service_port(src_port, dst_port)
+        normalized_port = normalize_service_port(src_port, dst_port, protocol)
         key = (
             bucket,
             resolved_exporter,
@@ -204,12 +221,14 @@ class FlowAggregator:
         )
 
         if key not in self._accumulator:
-            self._accumulator[key] = [flow_bytes, flow_packets, 1]
+            self._accumulator[key] = [flow_bytes, flow_packets, 1, tcp_flags, tos]
         else:
             entry = self._accumulator[key]
             entry[0] += flow_bytes
             entry[1] += flow_packets
             entry[2] += 1
+            entry[3] |= tcp_flags
+            entry[4] = max(entry[4], tos)
 
         # Accumulate interface metrics if exporter is identified and not sentinel
         if exporter_id is not None and exporter_id != SENTINEL_UUID:
@@ -244,7 +263,7 @@ class FlowAggregator:
                 grouped_rows: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
                 for key, vals in snapshot.items():
                     bucket, exp_id, src_ep_id, dst_ep_id, src_ip, dst_ip, proto, d_port = key
-                    bytes_val, pkts_val, count_val = vals
+                    bytes_val, pkts_val, count_val, tcp_flags_val, tos_val = vals
                     pk = (bucket, exp_id, src_ip, dst_ip, proto, d_port)
                     if pk not in grouped_rows:
                         grouped_rows[pk] = {
@@ -259,12 +278,16 @@ class FlowAggregator:
                             "bytes": bytes_val,
                             "packets": pkts_val,
                             "flow_count": count_val,
+                            "tcp_flags": tcp_flags_val,
+                            "tos": tos_val,
                         }
                     else:
                         existing = grouped_rows[pk]
                         existing["bytes"] += bytes_val
                         existing["packets"] += pkts_val
                         existing["flow_count"] += count_val
+                        existing["tcp_flags"] |= tcp_flags_val
+                        existing["tos"] = max(existing["tos"], tos_val)
                         if not existing["src_endpoint_id"] and src_ep_id:
                             existing["src_endpoint_id"] = src_ep_id
                         if not existing["dst_endpoint_id"] and dst_ep_id:
@@ -305,17 +328,19 @@ class FlowAggregator:
                 INSERT INTO flow_minute_rollups (
                     bucket, exporter_id, src_endpoint_id, dst_endpoint_id,
                     src_ip, dst_ip, protocol, dst_port,
-                    bytes, packets, flow_count
+                    bytes, packets, flow_count, tcp_flags, tos
                 ) VALUES (
                     :bucket, :exporter_id, :src_endpoint_id, :dst_endpoint_id,
                     CAST(:src_ip AS inet), CAST(:dst_ip AS inet), :protocol, :dst_port,
-                    :bytes, :packets, :flow_count
+                    :bytes, :packets, :flow_count, :tcp_flags, :tos
                 )
                 ON CONFLICT (bucket, exporter_id, src_ip, dst_ip, protocol, dst_port)
                 DO UPDATE SET
                     bytes = flow_minute_rollups.bytes + EXCLUDED.bytes,
                     packets = flow_minute_rollups.packets + EXCLUDED.packets,
                     flow_count = flow_minute_rollups.flow_count + EXCLUDED.flow_count,
+                    tcp_flags = (COALESCE(flow_minute_rollups.tcp_flags, 0) | EXCLUDED.tcp_flags),
+                    tos = GREATEST(COALESCE(flow_minute_rollups.tos, 0), EXCLUDED.tos),
                     src_endpoint_id = COALESCE(flow_minute_rollups.src_endpoint_id, EXCLUDED.src_endpoint_id),
                     dst_endpoint_id = COALESCE(flow_minute_rollups.dst_endpoint_id, EXCLUDED.dst_endpoint_id);
             """)
@@ -450,6 +475,8 @@ class FlowAggregator:
                             proto = int(fields.get("proto", 0))
                             f_bytes = int(fields.get("b", 0))
                             f_pkts = int(fields.get("p", 0))
+                            tcp_flags = int(fields.get("flags", 0) or 0)
+                            tos = int(fields.get("tos", 0) or 0)
                             ts_start = float(fields.get("ts_start", time.time()))
 
                             # Extract interface indexes with IPFIX 32-bit bound checks
@@ -470,6 +497,8 @@ class FlowAggregator:
                                 start_time_unix=ts_start,
                                 in_if=valid_in_if,
                                 out_if=valid_out_if,
+                                tcp_flags=tcp_flags,
+                                tos=tos,
                             )
                         except Exception as parse_err:
                             logger.debug("Corrupted stream message %s: %s", msg_id, parse_err)

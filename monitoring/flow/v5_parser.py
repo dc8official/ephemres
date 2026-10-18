@@ -106,6 +106,7 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
                 "bytes": scaled_bytes,
                 "packets": scaled_packets,
                 "tcp_flags": tcp_flags,
+                "tos": tos,
                 "input_if": input_if,
                 "output_if": output_if,
                 "start_time": start_time,

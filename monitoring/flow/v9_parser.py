@@ -24,6 +24,8 @@ FT_IPV4_DST_ADDR = 12
 FT_OUTPUT_SNMP = 14
 FT_LAST_SWITCHED = 21
 FT_FIRST_SWITCHED = 22
+FT_OUT_BYTES = 23
+FT_OUT_PKTS = 24
 FT_IPV6_SRC_ADDR = 27
 FT_IPV6_DST_ADDR = 28
 
@@ -205,6 +207,7 @@ class V9Parser:
             octets = 0
             packets = 0
             tcp_flags = 0
+            tos = 0
             input_if = 0
             output_if = 0
             first_ms: Optional[int] = None
@@ -229,9 +232,15 @@ class V9Parser:
                     dst_port = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_PROTOCOL:
                     protocol = int.from_bytes(f_bytes, "big")
+                elif f_type == FT_SRC_TOS:
+                    tos = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_IN_BYTES:
                     octets = int.from_bytes(f_bytes, "big")
+                elif f_type == FT_OUT_BYTES and octets == 0:
+                    octets = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_IN_PKTS:
+                    packets = int.from_bytes(f_bytes, "big")
+                elif f_type == FT_OUT_PKTS and packets == 0:
                     packets = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_TCP_FLAGS:
                     tcp_flags = int.from_bytes(f_bytes, "big")
@@ -272,6 +281,7 @@ class V9Parser:
                         "bytes": octets,
                         "packets": packets,
                         "tcp_flags": tcp_flags,
+                        "tos": tos,
                         "input_if": input_if,
                         "output_if": output_if,
                         "start_time": start_time,
