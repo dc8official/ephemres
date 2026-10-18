@@ -33,6 +33,7 @@ from app.core.http_client import (
     HttpTimeoutError,
     create_ssrf_safe_client,
     validate_outbound_url,
+    validate_outbound_url_async,
 )
 
 logger = logging.getLogger(__name__)
@@ -653,7 +654,7 @@ class AlertDispatcher:
             if not webhook_url:
                 raise ValueError(f"Webhook URL missing in {channel_type} configuration.")
 
-            await asyncio.to_thread(validate_outbound_url, webhook_url)
+            await validate_outbound_url_async(webhook_url)
 
             if ctype == "TEAMS":
                 payload = build_polyglot_payload(
@@ -730,7 +731,7 @@ class AlertDispatcher:
         elif ctype == "EMAIL_SMTP":
             smtp_host = config.get("smtp_host", "localhost")
             try:
-                await asyncio.to_thread(validate_outbound_url, f"http://{smtp_host}", True, True)
+                await validate_outbound_url_async(f"http://{smtp_host}", allow_private=True, allow_loopback=True)
             except ValueError as err:
                 if "SSRF violation" in str(err) or "Invalid protocol" in str(err) or "blocked" in str(err):
                     raise
@@ -869,7 +870,7 @@ class AlertDispatcher:
         try:
             webhook_url = config.get("webhook_url")
             if webhook_url:
-                await asyncio.to_thread(validate_outbound_url, webhook_url)
+                await validate_outbound_url_async(webhook_url)
 
             status, code, msg = await self._send_to_provider(
                 channel_type=ctype,

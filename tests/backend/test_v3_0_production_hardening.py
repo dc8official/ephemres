@@ -369,9 +369,9 @@ class TestOptionBStrictSecurityWipe(unittest.TestCase):
         async def _run():
             user_id = str(uuid4())
 
-            # 1. auth_service.is_session_active (sync & async)
-            self.assertFalse(is_session_active(user_id, jti=None))
-            self.assertFalse(is_session_active(user_id, jti=""))
+            # 1. auth_service.is_session_active (async)
+            self.assertFalse(await is_session_active(user_id, jti=None))
+            self.assertFalse(await is_session_active(user_id, jti=""))
             is_active_none = await is_session_active(user_id, jti=None)
             self.assertFalse(is_active_none)
             is_active_empty = await is_session_active(user_id, jti="")

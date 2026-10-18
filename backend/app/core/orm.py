@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import inspect
 import ipaddress
 import json
 import logging
@@ -317,9 +318,11 @@ def format_sql_literal(val: Any) -> str:
 
 def _unwrap_field_operand(other: Any) -> Tuple[Any, bool]:
     skip_where = False
-    if hasattr(other, "default"):
-        default_val = getattr(other, "default")
+    from app.core.asgi import _ParamInfo
+    if isinstance(other, _ParamInfo):
+        default_val = getattr(other, "default", None)
         if default_val is None:
+            logger.warning("Unresolved query param object used in SQL comparison; filter skipped")
             skip_where = True
             other = None
         elif default_val is not ...:
@@ -1298,14 +1301,26 @@ class Select(SQLElement):
         s._group_by.extend(c for c in clauses if c is not None)
         return s
 
-    def limit(self, n: Optional[int]) -> Select:
+    def limit(self, n: Optional[Any]) -> Select:
         s = self.clone()
-        s._limit = n
+        if n is None:
+            s._limit = None
+        else:
+            val = int(n)
+            if val < 0:
+                raise ValueError("LIMIT cannot be negative")
+            s._limit = val
         return s
 
-    def offset(self, n: Optional[int]) -> Select:
+    def offset(self, n: Optional[Any]) -> Select:
         s = self.clone()
-        s._offset = n
+        if n is None:
+            s._offset = None
+        else:
+            val = int(n)
+            if val < 0:
+                raise ValueError("OFFSET cannot be negative")
+            s._offset = val
         return s
 
     def distinct(self, *on_exprs: Any) -> Select:
@@ -2106,10 +2121,11 @@ def _is_row_returning_sql(sql: str) -> bool:
 class AsyncConnection:
     """Managed async database connection."""
 
-    def __init__(self, conn: Any, in_tx: bool = False) -> None:
+    def __init__(self, conn: Any, in_tx: bool = False, engine: Optional[Any] = None) -> None:
         self._conn = conn
         self._in_tx = in_tx
         self._tx: Optional[Any] = None
+        self.engine = engine
 
     async def execute(self, stmt: Any, params: Optional[Any] = None) -> Result:
         if isinstance(stmt, TextClause):
@@ -2134,12 +2150,18 @@ class AsyncConnection:
             res = await self._conn.execute(sql, *bound)
             return Result([], rowcount=parse_rowcount(res))
 
-        sql = stmt.compile() if isinstance(stmt, SQLElement) else str(stmt)
+        if isinstance(stmt, SQLElement):
+            ctx = CompileContext()
+            sql = stmt.compile(ctx)
+            stmt_params = ctx.params
+        else:
+            sql = str(stmt)
+            stmt_params = params if isinstance(params, (list, tuple)) else []
+
         if _is_row_returning_sql(sql):
-            p = getattr(stmt, "_params", None) or (params if isinstance(params, (list, tuple)) else [])
-            records = await self._conn.fetch(sql, *p)
+            records = await self._conn.fetch(sql, *stmt_params)
             return Result([Row(list(r.values()), list(r.keys()), dict(r)) for r in records], rowcount=len(records))
-        res = await self._conn.execute(sql)
+        res = await self._conn.execute(sql, *stmt_params)
         return Result([], rowcount=parse_rowcount(res))
 
     async def commit(self) -> None:
@@ -2153,7 +2175,23 @@ class AsyncConnection:
             self._tx = None
 
     async def close(self) -> None:
-        pass
+        if self._conn is not None:
+            if self.engine is not None and getattr(self.engine, "_pool", None) is not None:
+                await self.engine._pool.release(self._conn)
+            self._conn = None
+
+    async def __aenter__(self) -> "AsyncConnection":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        try:
+            if self._tx:
+                if exc_type is not None:
+                    await self.rollback()
+                else:
+                    await self.commit()
+        finally:
+            await self.close()
 
 
 def parse_rowcount(status_tag: Any) -> int:
@@ -2174,6 +2212,7 @@ class AsyncEngine:
         self.pool_size = kwargs.get("pool_size", 10)
         self.max_overflow = kwargs.get("max_overflow", 10)
         self.echo = kwargs.get("echo", False)
+        self.dialect = types.SimpleNamespace(name="postgresql")
         self._pool: Optional[Any] = None
         self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
 
@@ -2202,9 +2241,11 @@ class AsyncEngine:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
+        old_pool = None
         if self._pool is not None:
             pool_loop = getattr(self._pool, "_loop", None)
             if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                old_pool = self._pool
                 self._pool = None
             else:
                 return self._pool
@@ -2213,9 +2254,18 @@ class AsyncEngine:
             if self._pool is not None:
                 pool_loop = getattr(self._pool, "_loop", None)
                 if isinstance(pool_loop, asyncio.AbstractEventLoop) and (pool_loop is not loop or pool_loop.is_closed()):
+                    old_pool = self._pool
                     self._pool = None
                 else:
                     return self._pool
+            if old_pool is not None:
+                try:
+                    close_coro = old_pool.close()
+                    if inspect.isawaitable(close_coro):
+                        await close_coro
+                except Exception:
+                    pass
+                old_pool = None
             if self._pool is None:
                 if asyncpg is None:
                     raise OperationalError("asyncpg is not installed. Please install asyncpg.")
@@ -2253,10 +2303,22 @@ class _AsyncEngineConnectContext:
         self.conn: Optional[Any] = None
         self.wrapped: Optional[AsyncConnection] = None
 
+    def __await__(self):
+        return self._acquire().__await__()
+
+    async def _acquire(self) -> "AsyncConnection":
+        pool = await self.engine._get_pool()
+        conn = await pool.acquire()
+        wrapped = AsyncConnection(conn, in_tx=self.begin_tx, engine=self.engine)
+        if self.begin_tx:
+            wrapped._tx = conn.transaction()
+            await wrapped._tx.start()
+        return wrapped
+
     async def __aenter__(self) -> AsyncConnection:
         pool = await self.engine._get_pool()
         self.conn = await pool.acquire()
-        self.wrapped = AsyncConnection(self.conn, in_tx=self.begin_tx)
+        self.wrapped = AsyncConnection(self.conn, in_tx=self.begin_tx, engine=self.engine)
         if self.begin_tx:
             self.wrapped._tx = self.conn.transaction()
             await self.wrapped._tx.start()
@@ -2270,8 +2332,12 @@ class _AsyncEngineConnectContext:
                 else:
                     await self.wrapped._tx.commit()
         finally:
-            if self.conn and self.engine._pool:
+            if self.wrapped and self.wrapped._conn is None:
+                pass
+            elif self.conn and self.engine._pool:
                 await self.engine._pool.release(self.conn)
+                if self.wrapped:
+                    self.wrapped._conn = None
 
 
 def create_async_engine(url: str, **kwargs: Any) -> AsyncEngine:
@@ -2308,8 +2374,6 @@ class AsyncSession:
         try:
             if exc_type is not None:
                 await self.rollback()
-            elif self.in_transaction():
-                await self.commit()
         finally:
             await self.close()
 
@@ -2451,6 +2515,14 @@ class AsyncSession:
     async def rollback(self) -> None:
         self._new.clear()
         self._deleted.clear()
+        for (model_cls, _), obj in list(self._identity_map.items()):
+            orm_state = getattr(obj, "_orm_state", None)
+            if isinstance(orm_state, dict):
+                for col_name, orig_val in orm_state.items():
+                    if isinstance(orig_val, (dict, list)):
+                        setattr(obj, col_name, copy.deepcopy(orig_val))
+                    else:
+                        setattr(obj, col_name, orig_val)
         if self._tx is not None:
             try:
                 if hasattr(self._tx, "rollback"):

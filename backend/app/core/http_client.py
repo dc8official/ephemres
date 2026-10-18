@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import ipaddress
 import json as json_mod
 import os
+import re
 import socket
 import ssl
 import typing
@@ -17,6 +18,7 @@ BLOCKED_IPS = {
 }
 
 CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 
 
 class HttpRequestError(Exception):
@@ -27,6 +29,9 @@ class HttpRequestError(Exception):
 class HttpTimeoutError(HttpRequestError, TimeoutError):
     """Raised when an outbound HTTP connection or read operation times out."""
     pass
+
+
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
 
 @dataclass
@@ -68,6 +73,17 @@ def _validate_resolved_ip(
 
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped  # type: ignore[assignment]
+    elif ip.version == 6:
+        embedded_ip = getattr(ip, "sixtofour", None)
+        if embedded_ip is None and ip in NAT64_NETWORK:
+            embedded_ip = ipaddress.IPv4Address(ip.packed[-4:])
+        if embedded_ip is not None:
+            _validate_resolved_ip(
+                str(embedded_ip),
+                hostname,
+                allow_private=allow_private,
+                allow_loopback=allow_loopback,
+            )
 
     str_ip = str(ip)
     if str_ip in BLOCKED_IPS:
@@ -202,8 +218,10 @@ class SSRFSafeHttpClient:
         follow_redirects: bool = False,
         allow_private: bool | None = None,
     ) -> None:
+        if follow_redirects:
+            raise ValueError("Redirects are not supported")
         self.timeout = float(timeout)
-        self.follow_redirects = bool(follow_redirects)
+        self.follow_redirects = False
         self._allow_private = _resolve_allow_private(allow_private)
         self._backend = SSRFSafeBackend(allow_private=self._allow_private)
 
@@ -263,6 +281,13 @@ class SSRFSafeHttpClient:
         follow_redirects: bool | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
+        if not isinstance(method, str) or not re.match(r"^[A-Z]+$", method):
+            raise ValueError(f"Invalid HTTP method: {method!r}")
+
+        eff_follow_redirects = self.follow_redirects if follow_redirects is None else follow_redirects
+        if eff_follow_redirects:
+            raise ValueError("Redirects are not supported")
+
         if not url or not isinstance(url, str):
             raise ValueError("URL cannot be empty.")
         if url.startswith("unix://") or url.startswith("http+unix://"):
@@ -310,9 +335,10 @@ class SSRFSafeHttpClient:
         if "\r" in path_and_query or "\n" in path_and_query or "\r" in hostname or "\n" in hostname:
             raise ValueError("Invalid control characters in URL.")
 
-        host_header = f"[{hostname}]:{port}" if ":" in hostname and parsed.port else (
-            f"{hostname}:{port}" if parsed.port else hostname
-        )
+        # Always bracket IPv6 literals in Host header
+        clean_host = hostname.strip("[]") if ":" in hostname else hostname
+        bracketed_host = f"[{clean_host}]" if ":" in hostname else hostname
+        host_header = f"{bracketed_host}:{port}" if parsed.port else bracketed_host
 
         wire_headers: dict[str, str] = {
             "Host": host_header,
@@ -321,7 +347,10 @@ class SSRFSafeHttpClient:
             "Connection": "close",
             "Content-Length": str(len(body_bytes)),
         }
+        forbidden_headers = {"host", "content-length", "transfer-encoding", "connection"}
         for k, v in req_headers.items():
+            if k.strip().lower() in forbidden_headers:
+                raise ValueError(f"Header '{k}' cannot be overridden by caller.")
             if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
                 raise ValueError("Invalid control characters in HTTP header.")
             wire_headers[k] = v
@@ -338,92 +367,111 @@ class SSRFSafeHttpClient:
 
         writer: asyncio.StreamWriter | None = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
+            async with asyncio.timeout(eff_timeout):
+                reader, writer = await asyncio.open_connection(
                     host=validated_ip,
                     port=port,
                     ssl=ssl_ctx,
                     server_hostname=hostname if is_https else None,
-                ),
-                timeout=eff_timeout,
-            )
+                )
 
-            writer.write(raw_head + body_bytes)
-            await asyncio.wait_for(writer.drain(), timeout=eff_timeout)
+                writer.write(raw_head + body_bytes)
+                await writer.drain()
 
-            status_line_bytes = await asyncio.wait_for(reader.readline(), timeout=eff_timeout)
-            if not status_line_bytes:
-                raise HttpRequestError("Remote server closed connection before sending status line.")
+                status_line_bytes = await reader.readline()
+                if not status_line_bytes:
+                    raise HttpRequestError("Remote server closed connection before sending status line.")
 
-            status_line = status_line_bytes.decode("latin-1", errors="replace").strip()
-            parts = status_line.split(" ", 2)
-            if len(parts) < 2 or not parts[0].startswith("HTTP/"):
-                raise HttpRequestError(f"Malformed HTTP status line: {status_line!r}")
-            try:
-                status_code = int(parts[1])
-            except ValueError as exc:
-                raise HttpRequestError(f"Invalid HTTP status code in line: {status_line!r}") from exc
-
-            resp_headers: dict[str, str] = {}
-            while True:
-                hdr_line = await asyncio.wait_for(reader.readline(), timeout=eff_timeout)
-                if not hdr_line or hdr_line in (b"\r\n", b"\n"):
-                    break
-                decoded_hdr = hdr_line.decode("latin-1", errors="replace").strip()
-                if ":" in decoded_hdr:
-                    hk, hv = decoded_hdr.split(":", 1)
-                    resp_headers[hk.strip().lower()] = hv.strip()
-
-            body_chunks = bytearray()
-            cl_hdr = resp_headers.get("content-length")
-            is_chunked = resp_headers.get("transfer-encoding", "").lower() == "chunked"
-
-            if cl_hdr is not None:
+                status_line = status_line_bytes.decode("latin-1", errors="replace").strip()
+                parts = status_line.split(" ", 2)
+                if len(parts) < 2 or not parts[0].startswith("HTTP/"):
+                    raise HttpRequestError(f"Malformed HTTP status line: {status_line!r}")
                 try:
-                    content_len = int(cl_hdr)
-                except ValueError:
-                    content_len = None
-            else:
-                content_len = None
+                    status_code = int(parts[1])
+                except ValueError as exc:
+                    raise HttpRequestError(f"Invalid HTTP status code in line: {status_line!r}") from exc
 
-            if content_len is not None:
-                while len(body_chunks) < content_len:
-                    chunk = await asyncio.wait_for(
-                        reader.read(min(65536, content_len - len(body_chunks))),
-                        timeout=eff_timeout,
-                    )
-                    if not chunk:
-                        break
-                    body_chunks.extend(chunk)
-            elif is_chunked:
+                resp_headers: dict[str, str] = {}
                 while True:
-                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
-                    if not chunk:
+                    hdr_line = await reader.readline()
+                    if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                         break
-                    body_chunks.extend(chunk)
-                    if b"0\r\n\r\n" in body_chunks:
-                        break
-            else:
-                while True:
-                    chunk = await asyncio.wait_for(reader.read(65536), timeout=eff_timeout)
-                    if not chunk:
-                        break
-                    body_chunks.extend(chunk)
-                    if len(body_chunks) > 10 * 1024 * 1024:
-                        break
+                    decoded_hdr = hdr_line.decode("latin-1", errors="replace").strip()
+                    if ":" in decoded_hdr:
+                        hk, hv = decoded_hdr.split(":", 1)
+                        resp_headers[hk.strip().lower()] = hv.strip()
 
-            raw_resp_body = bytes(body_chunks)
-            if is_chunked:
-                raw_resp_body = _decode_chunked_body(raw_resp_body)
+                body_chunks = bytearray()
+                cl_hdr = resp_headers.get("content-length")
+                is_chunked = "chunked" in resp_headers.get("transfer-encoding", "").lower()
 
-            resp_text = raw_resp_body.decode("utf-8", errors="replace")
-            return HttpResponse(
-                status_code=status_code,
-                text=resp_text,
-                headers=resp_headers,
-                content=raw_resp_body,
-            )
-        except asyncio.TimeoutError as exc:
+                if is_chunked:
+                    while True:
+                        line = await reader.readline()
+                        if not line:
+                            raise HttpRequestError("Connection closed prematurely during chunked read.")
+                        size_str = line.split(b";")[0].strip()
+                        try:
+                            chunk_size = int(size_str, 16)
+                        except ValueError as exc:
+                            raise HttpRequestError(f"Invalid chunk size: {line!r}") from exc
+
+                        if chunk_size < 0:
+                            raise HttpRequestError(f"Negative chunk size: {chunk_size}")
+
+                        if chunk_size == 0:
+                            while True:
+                                trailer = await reader.readline()
+                                if not trailer or trailer in (b"\r\n", b"\n"):
+                                    break
+                            break
+
+                        if len(body_chunks) + chunk_size > MAX_RESPONSE_BYTES:
+                            raise HttpRequestError("Response too large")
+
+                        chunk_data = await reader.readexactly(chunk_size)
+                        body_chunks.extend(chunk_data)
+
+                        crlf = await reader.readline()
+                        if crlf not in (b"\r\n", b"\n"):
+                            raise HttpRequestError("Malformed chunk: missing trailing CRLF")
+
+                elif cl_hdr is not None:
+                    try:
+                        content_len = int(cl_hdr)
+                    except ValueError as exc:
+                        raise HttpRequestError(f"Invalid Content-Length: {cl_hdr!r}") from exc
+
+                    if content_len < 0:
+                        raise HttpRequestError(f"Negative Content-Length: {content_len}")
+                    if content_len > MAX_RESPONSE_BYTES:
+                        raise HttpRequestError("Response too large")
+
+                    while len(body_chunks) < content_len:
+                        needed = min(65536, content_len - len(body_chunks))
+                        chunk = await reader.read(needed)
+                        if not chunk:
+                            break
+                        body_chunks.extend(chunk)
+
+                else:
+                    while True:
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            break
+                        if len(body_chunks) + len(chunk) > MAX_RESPONSE_BYTES:
+                            raise HttpRequestError("Response too large")
+                        body_chunks.extend(chunk)
+
+                raw_resp_body = bytes(body_chunks)
+                resp_text = raw_resp_body.decode("utf-8", errors="replace")
+                return HttpResponse(
+                    status_code=status_code,
+                    text=resp_text,
+                    headers=resp_headers,
+                    content=raw_resp_body,
+                )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             raise HttpTimeoutError(f"HTTP request to '{url}' timed out after {eff_timeout}s.") from exc
         except (ValueError, HttpRequestError):
             raise
@@ -447,6 +495,8 @@ def create_ssrf_safe_client(
     Constructs a zero-dependency SSRFSafeHttpClient equipped with Zero-Trust
     socket-level SSRF defense and redirect protection.
     """
+    if follow_redirects:
+        raise ValueError("Redirects are not supported")
     return SSRFSafeHttpClient(
         timeout=timeout,
         follow_redirects=follow_redirects,
@@ -494,6 +544,66 @@ def validate_outbound_url(
             port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
             addr_info = socket.getaddrinfo(
                 hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+            for item in addr_info:
+                resolved_ips.append(item[4][0])
+
+        if not resolved_ips:
+            raise ValueError(f"DNS resolution failure for host '{hostname}'.")
+
+        for ip_str in resolved_ips:
+            _validate_resolved_ip(
+                ip_str,
+                hostname,
+                allow_private=eff_allow_private,
+                allow_loopback=allow_loopback,
+            )
+
+    except socket.gaierror as err:
+        raise ValueError(f"Failed to resolve host '{hostname}': {err}") from err
+
+
+async def validate_outbound_url_async(
+    url: str,
+    allow_private: bool | None = None,
+    allow_loopback: bool = False,
+) -> None:
+    """
+    Asynchronously validates that a URL is safe for outbound dispatch using loop.getaddrinfo.
+    Rejects non-HTTP(S) protocols and destinations that resolve to loopback,
+    link-local metadata, or private IP addresses unless allow_private is explicitly enabled.
+    """
+    if not url:
+        raise ValueError("URL cannot be empty.")
+
+    eff_allow_private = _resolve_allow_private(allow_private)
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(
+            f"Invalid protocol '{parsed.scheme}'. Only HTTP and HTTPS URLs are permitted."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Invalid URL '{url}': Missing hostname.")
+
+    # Check for direct cloud metadata IP in host string
+    if hostname in BLOCKED_IPS:
+        raise ValueError(f"SSRF violation: Access to cloud metadata IP {hostname} is blocked.")
+
+    # Check if host is direct IP address or requires DNS resolution
+    try:
+        resolved_ips: list[str] = []
+        try:
+            direct_ip = ipaddress.ip_address(hostname)
+            resolved_ips.append(str(direct_ip))
+        except ValueError:
+            # Domain name: resolve via DNS asynchronously
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+            loop = asyncio.get_running_loop()
+            addr_info = await loop.getaddrinfo(
+                hostname, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
             )
             for item in addr_info:
                 resolved_ips.append(item[4][0])

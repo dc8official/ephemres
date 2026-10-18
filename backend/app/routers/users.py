@@ -23,6 +23,7 @@ from app.services.auth_service import (
     hash_password,
     hash_password_async,
     invalidate_all_user_sessions,
+    invalidate_all_user_sessions_async,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,9 +160,7 @@ async def reset_password(
     hashed = await hash_password_async(plain_password)
 
     await auth_repo.update_password(user_id, hashed, must_change_password=True)
-    store = driver_manager.get_session_store()
-    await store.invalidate_all_user_sessions(str(user_id))
-    invalidate_all_user_sessions(str(user_id))
+    await invalidate_all_user_sessions_async(str(user_id))
 
     admin_uuid = None
     if current_user.get("sub"):
@@ -243,9 +242,7 @@ async def update_user(
     )
 
     if request.is_active is False:
-        store = driver_manager.get_session_store()
-        await store.invalidate_all_user_sessions(str(user_id))
-        invalidate_all_user_sessions(str(user_id))
+        await invalidate_all_user_sessions_async(str(user_id))
 
     await db.commit()
 
@@ -273,9 +270,7 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found.")
 
     await auth_repo.deactivate_user(user_id)
-    store = driver_manager.get_session_store()
-    await store.invalidate_all_user_sessions(str(user_id))
-    invalidate_all_user_sessions(str(user_id))
+    await invalidate_all_user_sessions_async(str(user_id))
 
     admin_uuid = None
     if current_user.get("sub"):

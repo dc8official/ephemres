@@ -25,7 +25,7 @@ from app.schemas.alerts import (
 )
 from app.services.alert_dispatcher import alert_dispatcher
 from app.core.crypto import decrypt_secret, encrypt_secret, mask_secret
-from app.core.http_client import validate_outbound_url
+from app.core.http_client import validate_outbound_url, validate_outbound_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ async def create_alert_channel(
         if not url:
             raise HTTPException(status_code=400, detail="Webhook URL is required for webhook channels.")
         try:
-            await asyncio.to_thread(validate_outbound_url, url)
+            await validate_outbound_url_async(url)
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err))
     elif ctype == "EMAIL_SMTP":
@@ -139,7 +139,7 @@ async def create_alert_channel(
         if not smtp_host:
             raise HTTPException(status_code=400, detail="smtp_host is required for EMAIL_SMTP channel.")
         try:
-            await asyncio.to_thread(validate_outbound_url, f"http://{smtp_host}", allow_private=True, allow_loopback=True)
+            await validate_outbound_url_async(f"http://{smtp_host}", allow_private=True, allow_loopback=True)
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err))
 
@@ -239,14 +239,14 @@ async def update_alert_channel(
             url = merged_cfg.get("webhook_url")
             if url:
                 try:
-                    await asyncio.to_thread(validate_outbound_url, url)
+                    await validate_outbound_url_async(url)
                 except ValueError as err:
                     raise HTTPException(status_code=400, detail=str(err))
         elif ch.channel_type == "EMAIL_SMTP":
             smtp_host = merged_cfg.get("smtp_host")
             if smtp_host:
                 try:
-                    await asyncio.to_thread(validate_outbound_url, f"http://{smtp_host}", allow_private=True, allow_loopback=True)
+                    await validate_outbound_url_async(f"http://{smtp_host}", allow_private=True, allow_loopback=True)
                 except ValueError as err:
                     raise HTTPException(status_code=400, detail=str(err))
             else:
@@ -312,14 +312,14 @@ async def test_alert_channel(
             url = cfg.get("webhook_url")
             if url:
                 try:
-                    await asyncio.to_thread(validate_outbound_url, url)
+                    await validate_outbound_url_async(url)
                 except ValueError as err:
                     raise HTTPException(status_code=400, detail=str(err))
         elif ch.channel_type == "EMAIL_SMTP":
             smtp_host = cfg.get("smtp_host")
             if smtp_host:
                 try:
-                    await asyncio.to_thread(validate_outbound_url, f"http://{smtp_host}", allow_private=True, allow_loopback=True)
+                    await validate_outbound_url_async(f"http://{smtp_host}", allow_private=True, allow_loopback=True)
                 except ValueError as err:
                     raise HTTPException(status_code=400, detail=str(err))
             else:
@@ -343,7 +343,7 @@ async def test_alert_channel(
             url = test_ch["config"].get("webhook_url")
             if url:
                 try:
-                    await asyncio.to_thread(validate_outbound_url, url)
+                    await validate_outbound_url_async(url)
                 except ValueError as err:
                     raise HTTPException(status_code=400, detail=str(err))
         elif test_ch["channel_type"] == "EMAIL_SMTP":
@@ -351,7 +351,7 @@ async def test_alert_channel(
             if not smtp_host:
                 raise HTTPException(status_code=400, detail="smtp_host is required for EMAIL_SMTP channel.")
             try:
-                await asyncio.to_thread(validate_outbound_url, f"http://{smtp_host}", allow_private=True, allow_loopback=True)
+                await validate_outbound_url_async(f"http://{smtp_host}", allow_private=True, allow_loopback=True)
             except ValueError as err:
                 raise HTTPException(status_code=400, detail=str(err))
         result = await alert_dispatcher.send_test_alert(test_ch)

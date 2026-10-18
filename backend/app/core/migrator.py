@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
+import urllib.parse
 
 from app.core import orm as sa
 from app.core.orm import NULLTYPE, postgresql
@@ -339,6 +340,15 @@ def get_db_url() -> str:
     try:
         from app.config import settings
 
+        if hasattr(settings, "database"):
+            host = settings.database.host
+            port = settings.database.port
+            user = settings.database.user
+            password = settings.database.password
+            name = settings.database.name
+            quoted_user = urllib.parse.quote(str(user), safe="")
+            quoted_password = urllib.parse.quote(str(password), safe="")
+            return f"postgresql://{quoted_user}:{quoted_password}@{host}:{port}/{name}"
         if hasattr(settings, "db_url"):
             return settings.db_url.replace("postgresql+asyncpg://", "postgresql://")
     except Exception:
@@ -349,7 +359,9 @@ def get_db_url() -> str:
     user = os.environ.get("EPHEMRES_DB_USER") or os.environ.get("NETMON_DB_USER", "ephemres")
     password = os.environ.get("EPHEMRES_DB_PASSWORD") or os.environ.get("NETMON_DB_PASSWORD", "")
     name = os.environ.get("EPHEMRES_DB_NAME") or os.environ.get("NETMON_DB_NAME", "ephemres")
-    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+    quoted_user = urllib.parse.quote(user, safe="")
+    quoted_password = urllib.parse.quote(password, safe="")
+    return f"postgresql://{quoted_user}:{quoted_password}@{host}:{port}/{name}"
 
 
 async def get_db_connection() -> Any:
@@ -418,6 +430,7 @@ async def upgrade_database(
 
     conn = await get_db_connection()
     try:
+        await conn.execute("SELECT pg_advisory_lock(727274)")
         current_rev = await get_current_revision(conn)
         if current_rev == target_rev:
             print(f"INFO  [alembic.runtime.migration] Database is already at target revision: {current_rev}")
@@ -449,6 +462,10 @@ async def upgrade_database(
             all_sql.extend(stmts)
         return all_sql
     finally:
+        try:
+            await conn.execute("SELECT pg_advisory_unlock(727274)")
+        except Exception:
+            pass
         await conn.close()
 
 
@@ -468,6 +485,7 @@ async def downgrade_database(
 
     conn = await get_db_connection()
     try:
+        await conn.execute("SELECT pg_advisory_lock(727274)")
         current_rev = await get_current_revision(conn)
         if current_rev is None:
             print("INFO  [alembic.runtime.migration] Database is already at base (no revisions applied).")
@@ -507,6 +525,10 @@ async def downgrade_database(
             all_sql.extend(stmts)
         return all_sql
     finally:
+        try:
+            await conn.execute("SELECT pg_advisory_unlock(727274)")
+        except Exception:
+            pass
         await conn.close()
 
 

@@ -26,10 +26,10 @@ class ScryptPasswordHasher:
     Format: $scrypt$n=16384,r=8,p=1$<salt_b64>$<hash_b64>
     """
 
-    N = 16384
+    N = 2**17
     R = 8
     P = 1
-    MAXMEM = 32 * 1024 * 1024
+    MAXMEM = 256 * 1024 * 1024
     DKLEN = 64
 
     def hash(self, password: str) -> str:
@@ -51,6 +51,9 @@ class ScryptPasswordHasher:
 
     def verify(self, hashed: str, plain: str) -> bool:
         if not hashed or not isinstance(hashed, str) or not isinstance(plain, str):
+            return False
+        if hashed.startswith("$argon2"):
+            logger.warning("Legacy argon2 hash for login attempt; run app.reset_legacy_passwords")
             return False
         parts = hashed.split("$")
         if len(parts) != 5 or parts[1] != "scrypt":
@@ -190,13 +193,15 @@ def jwt_decode(
 
     now = time.time()
 
-    if "exp" in payload:
-        try:
-            exp_ts = float(payload["exp"])
-        except (ValueError, TypeError) as exc:
-            raise JWTError("Invalid 'exp' claim in JWT.") from exc
-        if now >= exp_ts:
-            raise JWTError("JWT token has expired.")
+    if "exp" not in payload:
+        raise JWTError("Missing 'exp' claim.")
+
+    try:
+        exp_ts = float(payload["exp"])
+    except (ValueError, TypeError) as exc:
+        raise JWTError("Invalid 'exp' claim in JWT.") from exc
+    if now >= exp_ts:
+        raise JWTError("JWT token has expired.")
 
     if "nbf" in payload:
         try:
@@ -260,6 +265,31 @@ async def verify_password_async(plain: str, hashed: str) -> bool:
     return await asyncio.to_thread(verify_password, plain, hashed)
 
 
+def needs_rehash(hashed: str) -> bool:
+    """Returns True if the password hash is not an OpenSSL scrypt hash matching current cost parameters."""
+    if not hashed or not isinstance(hashed, str):
+        return True
+    if not hashed.startswith("$scrypt$"):
+        return True
+    parts = hashed.split("$")
+    if len(parts) != 5 or parts[1] != "scrypt":
+        return True
+    try:
+        params: Dict[str, int] = {}
+        for item in parts[2].split(","):
+            k, v = item.split("=", 1)
+            params[k.strip()] = int(v.strip())
+        if (
+            params.get("n") != ScryptPasswordHasher.N
+            or params.get("r") != ScryptPasswordHasher.R
+            or params.get("p") != ScryptPasswordHasher.P
+        ):
+            return True
+        return False
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Trusted Reverse Proxy Header Security
 # ---------------------------------------------------------------------------
@@ -309,7 +339,7 @@ def get_trusted_client_ip(
                 if not is_ip_in_networks(candidate, trusted_nets):
                     return candidate
             if parts:
-                return parts[0]
+                return peer_ip
 
         real_ip = request.headers.get("X-Real-IP")
         if real_ip and isinstance(real_ip, str) and real_ip.strip():
@@ -321,74 +351,77 @@ def get_trusted_client_ip(
 # ---------------------------------------------------------------------------
 # Concurrent Session Management (Token-based FIFO rotation)
 # ---------------------------------------------------------------------------
-def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
-    """
-    Registers a new session JTI for the user.
-    If the user has reached max_sessions, the oldest session is evicted (FIFO).
-    """
+_background_session_tasks: Set[asyncio.Task] = set()
+
+
+def _handle_session_task_done(task: asyncio.Task) -> None:
+    _background_session_tasks.discard(task)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            logger.exception("Background session task failed: %s", exc)
+
+
+async def register_session_async(user_id: str, jti: str, max_sessions: int = 2) -> None:
+    """Registers a new session JTI for the user, updating in-memory cache and awaiting backing store."""
     u_id = str(user_id)
     active_list = _active_user_sessions.get(u_id, [])
-    if jti in active_list:
-        return
-    active_list.append(jti)
-    if len(active_list) > max_sessions:
-        # Evict oldest session(s)
-        active_list = active_list[-max_sessions:]
-    _active_user_sessions[u_id] = active_list
+    if jti not in active_list:
+        active_list.append(jti)
+        if len(active_list) > max_sessions:
+            active_list = active_list[-max_sessions:]
+        _active_user_sessions[u_id] = active_list
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.register_session(u_id, jti, max_sessions=max_sessions)
+    except Exception:
+        logger.exception("Failed to register session for user %s, jti %s in store", u_id, jti)
 
+
+def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
+    """Registers a new session JTI for the user (synchronous backward compatibility)."""
+    u_id = str(user_id)
+    active_list = _active_user_sessions.get(u_id, [])
+    if jti not in active_list:
+        active_list.append(jti)
+        if len(active_list) > max_sessions:
+            active_list = active_list[-max_sessions:]
+        _active_user_sessions[u_id] = active_list
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.register_session(u_id, jti, max_sessions=max_sessions))
+        task = loop.create_task(store.register_session(u_id, jti, max_sessions=max_sessions))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 
 
-class AwaitableBool:
+async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     """
-    A boolean wrapper that supports both synchronous truthiness evaluation
-    and asynchronous await expressions. Ensures backwards compatibility across
-    sync test suites (e.g. test_auth_security.py) and async callers.
-    """
-    __slots__ = ("_val",)
-
-    def __init__(self, val: bool) -> None:
-        self._val = bool(val)
-
-    def __bool__(self) -> bool:
-        return self._val
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, AwaitableBool):
-            return self._val == other._val
-        return self._val == bool(other)
-
-    def __repr__(self) -> str:
-        return repr(self._val)
-
-    def __await__(self):
-        async def _coro():
-            return self._val
-        return _coro().__await__()
-
-
-def is_session_active(user_id: str, jti: Optional[str]) -> AwaitableBool:
-    """
-    Validates if a given JTI session token is active for the user.
+    Validates if a given JTI session token is active for the user by delegating
+    to the configured backing session store.
     Option B (Strict Security Wipe): Invalidate legacy tokens without jti immediately.
     """
     if not jti:
-        return AwaitableBool(False)
+        return False
     u_id = str(user_id)
-    if u_id not in _active_user_sessions:
-        return AwaitableBool(False)
-    return AwaitableBool(jti in _active_user_sessions[u_id])
+    try:
+        from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        if await store.is_session_active(u_id, jti):
+            return True
+    except Exception:
+        pass
+    return jti in _active_user_sessions.get(u_id, [])
 
 
-def invalidate_session(user_id: str, jti: Optional[str]) -> None:
-    """Invalidates a single active session JTI on logout."""
+async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
+    """Invalidates a single active session JTI on logout, awaiting backing store."""
     if not jti:
         return
     u_id = str(user_id)
@@ -401,25 +434,60 @@ def invalidate_session(user_id: str, jti: Optional[str]) -> None:
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.invalidate_session(u_id, jti)
+    except Exception:
+        logger.exception("Failed to invalidate session for user %s, jti %s in store", u_id, jti)
 
+
+def invalidate_session(user_id: str, jti: Optional[str]) -> None:
+    """Invalidates a single active session JTI on logout (synchronous backward compatibility)."""
+    if not jti:
+        return
+    u_id = str(user_id)
+    if u_id in _active_user_sessions:
+        _active_user_sessions[u_id] = [
+            s for s in _active_user_sessions[u_id] if s != jti
+        ]
+        if not _active_user_sessions[u_id]:
+            _active_user_sessions.pop(u_id, None)
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.invalidate_session(u_id, jti))
+        task = loop.create_task(store.invalidate_session(u_id, jti))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 
 
-def invalidate_all_user_sessions(user_id: str) -> None:
-    """Invalidates all sessions for a user (e.g. on password reset or account deactivation)."""
+async def invalidate_all_user_sessions_async(user_id: str) -> None:
+    """Invalidates all sessions for a user, awaiting backing store."""
     u_id = str(user_id)
     _active_user_sessions.pop(u_id, None)
 
     try:
         from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        await store.invalidate_all_user_sessions(u_id)
+    except Exception:
+        logger.exception("Failed to invalidate all sessions for user %s in store", u_id)
 
+
+def invalidate_all_user_sessions(user_id: str) -> None:
+    """Invalidates all sessions for a user (synchronous backward compatibility)."""
+    u_id = str(user_id)
+    _active_user_sessions.pop(u_id, None)
+
+    try:
+        from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        loop.create_task(store.invalidate_all_user_sessions(u_id))
+        task = loop.create_task(store.invalidate_all_user_sessions(u_id))
+        _background_session_tasks.add(task)
+        task.add_done_callback(_handle_session_task_done)
     except Exception:
         pass
 
@@ -432,13 +500,14 @@ def create_access_token(
 ) -> str:
     session_id = jti or str(secrets.token_hex(16))
 
+    now_utc = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "username": username,
         "role": role_name,
         "jti": session_id,
-        "exp": datetime.now(timezone.utc)
-        + timedelta(minutes=settings.security.session_timeout_minutes),
+        "iat": now_utc,
+        "exp": now_utc + timedelta(minutes=settings.security.session_timeout_minutes),
     }
     return jwt_encode(
         payload,

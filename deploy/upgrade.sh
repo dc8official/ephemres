@@ -41,6 +41,7 @@ REPO_URL="${EPHEMRES_REPO_URL:-https://github.com/dc8official/ephemres.git}"
 # Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.2v)
 CURRENT_GIT_BRANCH="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.2v}}"
+UPGRADE_LOG="${EPHEMRES_UPGRADE_LOG:-/var/log/ephemres/upgrade.log}"
 
 # 3. Read Configuration Values
 ENV_FILE=""
@@ -71,9 +72,14 @@ fi
 
 DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}}"
 DB_USER="${EPHEMRES_DB_USER:-${NETMON_DB_USER:-${POSTGRES_USER:-netmon_user}}}"
-DB_PASS="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD:-${POSTGRES_PASSWORD:-netmon_secure_password}}}"
+DB_PASS="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}}"
 DB_HOST="${EPHEMRES_DB_HOST:-${NETMON_DB_HOST:-${POSTGRES_HOST:-127.0.0.1}}}"
 DB_PORT="${EPHEMRES_DB_PORT:-${NETMON_DB_PORT:-${POSTGRES_PORT:-5432}}}"
+
+if [[ -z "${DB_PASS}" && ${DRY_RUN} -eq 0 ]]; then
+    echo -e "${RED}[ERROR] Database password is unset. Please configure EPHEMRES_DB_PASSWORD in the environment or configuration file.${NC}" >&2
+    exit 1
+fi
 
 # 3. Pre-Upgrade Database Backup
 BACKUP_DIR="/var/backups/ephemres"
@@ -388,12 +394,27 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         
         if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
-            PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin || true
+            if ! PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin; then
+                echo -e "${RED}[ERROR] Default admin seeding failed.${NC}" >&2
+                exit 1
+            fi
+
+            echo -e "${GREEN}[INFO] Checking and resetting legacy password hashes...${NC}"
+            RESET_REPORT="/opt/ephemres/legacy_password_resets.txt"
+            PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.reset_legacy_passwords
+            if [[ -s "${RESET_REPORT}" ]]; then
+                RESET_COUNT=$(wc -l < "${RESET_REPORT}")
+                echo -e "${YELLOW}========================================================================${NC}"
+                echo -e "${YELLOW}[NOTICE] ${RESET_COUNT} users had legacy password hashes and were assigned temporary passwords.${NC}"
+                echo -e "${YELLOW}See ${RESET_REPORT} (root-only). Distribute and delete it.${NC}"
+                echo -e "${YELLOW}========================================================================${NC}"
+            fi
         fi
 
         # TimescaleDB Hypertable Decompression Safety & Legacy Row Sanitization
         echo -e "${GREEN}[INFO] Applying TimescaleDB hypertable decompression safety configuration...${NC}"
         if command -v psql &>/dev/null; then
+            mkdir -p "$(dirname "${UPGRADE_LOG}")" || true
             PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=0 -c "
             DO \$\$
             BEGIN
@@ -409,10 +430,10 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
                 -- Drop legacy cycle count check constraints to allow continuous state monitoring
                 ALTER TABLE endpoint_events DROP CONSTRAINT IF EXISTS ck_events_success_count;
                 ALTER TABLE endpoint_events DROP CONSTRAINT IF EXISTS ck_events_failed_count;
-            END \$\$;" 2>/dev/null || true
+            END \$\$;" 2>>"${UPGRADE_LOG}" || true
 
             PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c \
-                "ALTER DATABASE \"${DB_NAME}\" SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;" 2>/dev/null || true
+                "ALTER DATABASE \"${DB_NAME}\" SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;" 2>>"${UPGRADE_LOG}" || true
         fi
     fi
 else

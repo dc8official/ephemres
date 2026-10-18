@@ -22,6 +22,7 @@ import inspect
 import io
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -55,6 +56,10 @@ from app.core.schema import (
     _coerce_value,
     _validate_constraints,
 )
+
+RequestValidationError = ValidationError
+
+MAX_BODY_BYTES = int(os.environ.get("EPHEMRES_MAX_BODY_BYTES", 10 * 1024 * 1024))
 
 logger = logging.getLogger(__name__)
 
@@ -448,12 +453,16 @@ class Request:
     async def body(self) -> bytes:
         if self._body is None:
             chunks = []
+            total_size = 0
             while True:
                 message = await self._receive()
                 m_type = message.get("type", "")
                 if m_type == "http.request":
                     chunk = message.get("body", b"")
                     if chunk:
+                        total_size += len(chunk)
+                        if total_size > MAX_BODY_BYTES:
+                            raise HTTPException(413, "Request body too large")
                         chunks.append(chunk)
                     if not message.get("more_body", False):
                         break
@@ -461,6 +470,8 @@ class Request:
                     self._is_disconnected = True
                     break
             self._body = b"".join(chunks)
+        elif len(self._body) > MAX_BODY_BYTES:
+            raise HTTPException(413, "Request body too large")
         return self._body
 
     async def json(self) -> Any:
@@ -532,6 +543,12 @@ class Response:
         httponly: bool = False,
         samesite: Optional[str] = "lax",
     ) -> None:
+        for invalid_char in (";", "\r", "\n"):
+            if invalid_char in key:
+                raise ValueError(f"Cookie key contains invalid character: {invalid_char!r}")
+            if invalid_char in value:
+                raise ValueError(f"Cookie value contains invalid character: {invalid_char!r}")
+
         cookie_parts = [f"{key}={value}", f"Path={path}"]
         if max_age is not None:
             cookie_parts.append(f"Max-Age={int(max_age)}")
@@ -591,6 +608,13 @@ class Response:
             "status": self.status_code,
             "headers": self.headers.raw,
         })
+        if scope.get("method", "").upper() == "HEAD":
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            })
+            return
         await send({
             "type": "http.response.body",
             "body": self.body,
@@ -703,6 +727,26 @@ class StreamingResponse(Response):
         })
 
         content = self.content_iterator
+        if scope.get("method", "").upper() == "HEAD":
+            if hasattr(content, "aclose") and callable(content.aclose):
+                try:
+                    res = content.aclose()
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:
+                    pass
+            elif hasattr(content, "close") and callable(content.close):
+                try:
+                    content.close()
+                except Exception:
+                    pass
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            })
+            return
+
         if hasattr(content, "read"):
             # File-like object (e.g. io.BytesIO)
             chunk_size = 64 * 1024
@@ -1033,6 +1077,7 @@ async def _resolve_endpoint_kwargs(
     # Parse JSON body once if any parameter expects request body
     body_data = None
     body_parsed = False
+    body_json_invalid = False
 
     for param_name, param in sig.parameters.items():
         annotation = type_hints.get(param_name, param.annotation)
@@ -1126,7 +1171,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("path", param_name),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1152,7 +1197,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("header", h_alias),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1178,7 +1223,7 @@ async def _resolve_endpoint_kwargs(
                 except Exception as exc:
                     validation_errors.append({
                         "loc": ("cookie", c_alias),
-                        "msg": str(exc),
+                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                         "type": "value_error",
                     })
             continue
@@ -1193,11 +1238,24 @@ async def _resolve_endpoint_kwargs(
         )
         if is_body:
             if not body_parsed:
-                try:
-                    body_data = await request.json()
-                except Exception:
+                raw_body = await request.body()
+                if raw_body and raw_body.strip():
+                    try:
+                        body_data = json.loads(raw_body.decode("utf-8"))
+                    except Exception:
+                        body_json_invalid = True
+                        body_data = None
+                else:
                     body_data = None
                 body_parsed = True
+
+            if body_json_invalid:
+                validation_errors.append({
+                    "loc": ("body",),
+                    "msg": "Invalid JSON body",
+                    "type": "json_invalid",
+                })
+                continue
 
             b_info = default if isinstance(default, BodyParamInfo) else _FieldInfo(default=default)
 
@@ -1225,7 +1283,7 @@ async def _resolve_endpoint_kwargs(
                     except Exception as exc:
                         validation_errors.append({
                             "loc": ("body",),
-                            "msg": str(exc),
+                            "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                             "type": "value_error",
                         })
                 continue
@@ -1256,7 +1314,7 @@ async def _resolve_endpoint_kwargs(
                     except Exception as exc:
                         validation_errors.append({
                             "loc": ("body",),
-                            "msg": str(exc),
+                            "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                             "type": "value_error",
                         })
                 continue
@@ -1281,7 +1339,7 @@ async def _resolve_endpoint_kwargs(
             except Exception as exc:
                 validation_errors.append({
                     "loc": ("query", alias),
-                    "msg": str(exc),
+                    "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
                     "type": "value_error",
                 })
         elif not q_info.is_required():
@@ -1325,14 +1383,16 @@ class BaseHTTPMiddleware:
         async def call_next(req: Request) -> Response:
             start_event = asyncio.Event()
             body_queue: asyncio.Queue[Union[Tuple[bytes, bool], Exception]] = asyncio.Queue()
+            response_started = False
             response_status = 200
             response_headers: List[Tuple[bytes, bytes]] = []
             app_exc: Optional[Exception] = None
 
             async def inner_send(message: Dict[str, Any]) -> None:
-                nonlocal response_status, response_headers
+                nonlocal response_status, response_headers, response_started
                 m_type = message.get("type", "")
                 if m_type == "http.response.start":
+                    response_started = True
                     response_status = message.get("status", 200)
                     response_headers = list(message.get("headers", []))
                     start_event.set()
@@ -1348,14 +1408,18 @@ class BaseHTTPMiddleware:
                 except Exception as exc:
                     app_exc = exc
                     await body_queue.put(exc)
-                    start_event.set()
+                finally:
+                    if not start_event.is_set():
+                        start_event.set()
 
             inner_task = asyncio.create_task(run_app())
 
             # Wait for response start or early failure
             await start_event.wait()
-            if app_exc is not None and not response_headers:
+            if app_exc is not None and not response_started:
                 raise app_exc
+            if not response_started:
+                raise RuntimeError("No response returned")
 
             async def body_stream() -> AsyncIterator[bytes]:
                 try:
@@ -1418,6 +1482,11 @@ class CORSMiddleware:
                 "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
             )
 
+    def is_allowed_origin(self, origin: str) -> bool:
+        if "*" in self.allow_origins:
+            return True
+        return origin in self.allow_origins
+
     async def __call__(
         self,
         scope: Dict[str, Any],
@@ -1431,16 +1500,19 @@ class CORSMiddleware:
         request = Request(scope, receive, send)
         origin = request.headers.get("origin")
 
-        # Handle Preflight OPTIONS
+        # Handle Preflight OPTIONS: only answer preflight if origin is allowed; otherwise pass through
         if request.method == "OPTIONS" and origin:
-            headers = self._get_cors_headers(origin)
-            res = Response(content=b"", status_code=200, headers=headers)
-            await res(scope, receive, send)
+            if self.is_allowed_origin(origin):
+                headers = self._get_cors_headers(origin, request)
+                res = Response(content=b"", status_code=200, headers=headers)
+                await res(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
             return
 
         async def send_with_cors(message: Dict[str, Any]) -> None:
-            if message.get("type") == "http.response.start" and origin:
-                cors_headers = self._get_cors_headers(origin)
+            if message.get("type") == "http.response.start" and origin and self.is_allowed_origin(origin):
+                cors_headers = self._get_cors_headers(origin, request)
                 raw_headers = list(message.get("headers", []))
                 for k, v in cors_headers.items():
                     raw_headers.append((k.encode("latin-1"), v.encode("latin-1")))
@@ -1449,7 +1521,7 @@ class CORSMiddleware:
 
         await self.app(scope, receive, send_with_cors)
 
-    def _get_cors_headers(self, origin: str) -> Dict[str, str]:
+    def _get_cors_headers(self, origin: str, request: Optional[Request] = None) -> Dict[str, str]:
         headers: Dict[str, str] = {}
         if "*" in self.allow_origins:
             headers["Access-Control-Allow-Origin"] = "*"
@@ -1463,9 +1535,17 @@ class CORSMiddleware:
         if self.allow_methods:
             headers["Access-Control-Allow-Methods"] = ", ".join(self.allow_methods)
         if self.allow_headers:
-            headers["Access-Control-Allow-Headers"] = (
-                "*" if "*" in self.allow_headers else ", ".join(self.allow_headers)
-            )
+            if "*" in self.allow_headers:
+                if self.allow_credentials and request is not None:
+                    acrh = request.headers.get("access-control-request-headers")
+                    if acrh is not None:
+                        headers["Access-Control-Allow-Headers"] = acrh
+                        vary = headers.get("Vary", "")
+                        headers["Vary"] = f"{vary}, Access-Control-Request-Headers".lstrip(", ")
+                else:
+                    headers["Access-Control-Allow-Headers"] = "*"
+            else:
+                headers["Access-Control-Allow-Headers"] = ", ".join(self.allow_headers)
         return headers
 
 
@@ -1561,6 +1641,23 @@ class EphemresApp:
 
         return decorator
 
+    def _find_handler(self, exc: Exception) -> Optional[Callable]:
+        if isinstance(exc, HTTPException):
+            handler = self.exception_handlers.get(exc.status_code)
+            if handler is not None:
+                return handler
+
+        for cls in type(exc).__mro__:
+            handler = self.exception_handlers.get(cls)
+            if handler is not None:
+                return handler
+            if cls is ValidationError:
+                handler = self.exception_handlers.get(RequestValidationError)
+                if handler is not None:
+                    return handler
+
+        return None
+
     def include_router(
         self,
         router: APIRouter,
@@ -1610,7 +1707,7 @@ class EphemresApp:
         # Build middleware stack if not already constructed
         if self._compiled_app is None:
             app_handler: Callable = self._dispatch_request
-            for middleware_cls, opts in reversed(self.middleware_stack):
+            for middleware_cls, opts in self.middleware_stack:
                 app_handler = middleware_cls(app=app_handler, **opts)
             self._compiled_app = app_handler
 
@@ -1686,7 +1783,23 @@ class EphemresApp:
 
         if matched_route is None:
             if allowed_methods_for_path:
+                http_exc = HTTPException(status_code=405, detail="Method Not Allowed")
+                handler = self._find_handler(http_exc)
+                if handler is not None:
+                    resp = handler(request, http_exc)
+                    if inspect.isawaitable(resp):
+                        resp = await resp
+                    await resp(scope, receive, send)
+                    return
                 resp = JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
+                await resp(scope, receive, send)
+                return
+            http_exc = HTTPException(status_code=404, detail="Not Found")
+            handler = self._find_handler(http_exc)
+            if handler is not None:
+                resp = handler(request, http_exc)
+                if inspect.isawaitable(resp):
+                    resp = await resp
                 await resp(scope, receive, send)
                 return
             resp = JSONResponse({"detail": "Not Found"}, status_code=404)
@@ -1699,9 +1812,21 @@ class EphemresApp:
         injected_response = Response()
         dep_cache: Dict[Any, Any] = {}
         bg_tasks = BackgroundTasks()
+        final_response: Optional[Response] = None
 
-        async with contextlib.AsyncExitStack() as exit_stack:
-            try:
+        response_started = False
+        original_send = send
+
+        async def tracked_send(message: Dict[str, Any]) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await original_send(message)
+
+        send = tracked_send
+
+        try:
+            async with contextlib.AsyncExitStack() as exit_stack:
                 # 0. Execute route-level and router-level dependencies
                 for dep in matched_route.dependencies:
                     await _resolve_dependency(
@@ -1741,13 +1866,27 @@ class EphemresApp:
                     final_response = Response(status_code=204)
                 else:
                     if matched_route.response_model is not None:
-                        result = TypeAdapter(matched_route.response_model).validate_python(result)
-                    eff_code = (
-                        injected_response.status_code
-                        if injected_response.status_code != 200
-                        else matched_route.status_code
-                    )
-                    final_response = JSONResponse(content=result, status_code=eff_code)
+                        try:
+                            result = TypeAdapter(matched_route.response_model).validate_python(result)
+                        except ValidationError as resp_val_err:
+                            logger.error(
+                                "Response validation failed for %s %s: %s",
+                                method,
+                                path,
+                                resp_val_err,
+                            )
+                            final_response = JSONResponse(
+                                content={"detail": "Internal Server Error"},
+                                status_code=500,
+                            )
+                            result = None
+                    if final_response is None:
+                        eff_code = (
+                            injected_response.status_code
+                            if injected_response.status_code != 200
+                            else matched_route.status_code
+                        )
+                        final_response = JSONResponse(content=result, status_code=eff_code)
 
                 # Merge injected headers & Set-Cookie headers
                 for k, v in injected_response.headers.items():
@@ -1756,53 +1895,79 @@ class EphemresApp:
                     elif k.lower() not in final_response.headers:
                         final_response.headers[k] = v
 
+                # If final_response is a StreamingResponse, send it inside the exit stack
+                if isinstance(final_response, StreamingResponse):
+                    await final_response(scope, receive, send)
+
+            # Exit stack closed here (deps cleaned up, get_db committed only on success)
+            if final_response is not None and not isinstance(final_response, StreamingResponse):
                 await final_response(scope, receive, send)
 
-                # Execute background tasks after response return
-                if bg_tasks and bg_tasks.tasks:
-                    try:
-                        await bg_tasks()
-                    except Exception as bg_exc:
-                        logger.error("Background task execution error: %s", bg_exc, exc_info=True)
+            # Execute background tasks after response return
+            if bg_tasks and bg_tasks.tasks:
+                try:
+                    await bg_tasks()
+                except Exception as bg_exc:
+                    logger.error("Background task execution error: %s", bg_exc, exc_info=True)
 
-            except HTTPException as http_exc:
-                # Check custom exception handlers
-                if HTTPException in self.exception_handlers:
-                    custom_resp = self.exception_handlers[HTTPException](request, http_exc)
-                    if inspect.isawaitable(custom_resp):
-                        custom_resp = await custom_resp
-                    await custom_resp(scope, receive, send)
-                    return
+        except HTTPException as http_exc:
+            if response_started:
+                logger.exception("HTTPException raised after response already started on %s %s: %s", method, path, http_exc)
+                return
 
-                err_resp = JSONResponse(
-                    content={"detail": http_exc.detail},
-                    status_code=http_exc.status_code,
-                    headers=http_exc.headers,
-                )
-                await err_resp(scope, receive, send)
+            handler = self._find_handler(http_exc)
+            if handler is not None:
+                custom_resp = handler(request, http_exc)
+                if inspect.isawaitable(custom_resp):
+                    custom_resp = await custom_resp
+                await custom_resp(scope, receive, send)
+                return
 
-            except ValidationError as v_exc:
-                val_resp = JSONResponse(
-                    content={"detail": v_exc.errors()},
-                    status_code=422,
-                )
-                await val_resp(scope, receive, send)
+            err_resp = JSONResponse(
+                content={"detail": http_exc.detail},
+                status_code=http_exc.status_code,
+                headers=http_exc.headers,
+            )
+            await err_resp(scope, receive, send)
 
-            except Exception as exc:
-                for exc_type, handler in self.exception_handlers.items():
-                    if isinstance(exc_type, type) and isinstance(exc, exc_type):
-                        res = handler(request, exc)
-                        if inspect.isawaitable(res):
-                            res = await res
-                        await res(scope, receive, send)
-                        return
+        except ValidationError as v_exc:
+            if response_started:
+                logger.exception("ValidationError raised after response already started on %s %s: %s", method, path, v_exc)
+                return
 
-                logger.error("Unhandled API exception on %s %s: %s", method, path, exc, exc_info=True)
-                err_resp = JSONResponse(
-                    content={"detail": "Internal Server Error"},
-                    status_code=500,
-                )
-                await err_resp(scope, receive, send)
+            handler = self._find_handler(v_exc)
+            if handler is not None:
+                custom_resp = handler(request, v_exc)
+                if inspect.isawaitable(custom_resp):
+                    custom_resp = await custom_resp
+                await custom_resp(scope, receive, send)
+                return
+
+            val_resp = JSONResponse(
+                content={"detail": v_exc.errors()},
+                status_code=422,
+            )
+            await val_resp(scope, receive, send)
+
+        except Exception as exc:
+            if response_started:
+                logger.exception("Exception raised after response already started on %s %s: %s", method, path, exc)
+                return
+
+            handler = self._find_handler(exc)
+            if handler is not None:
+                res = handler(request, exc)
+                if inspect.isawaitable(res):
+                    res = await res
+                await res(scope, receive, send)
+                return
+
+            logger.error("Unhandled API exception on %s %s: %s", method, path, exc, exc_info=True)
+            err_resp = JSONResponse(
+                content={"detail": "Internal Server Error"},
+                status_code=500,
+            )
+            await err_resp(scope, receive, send)
 
 
 FastAPI = EphemresApp
