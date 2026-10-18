@@ -61,6 +61,12 @@ cd /opt/ephemres/deploy
 sudo ./uninstall.sh
 ```
 
+**Complete Data Purge (Clean Slate):**
+To also drop the PostgreSQL database (`netmon`), remove the database role (`netmon_user`), and purge all configuration and logs:
+```bash
+sudo ./uninstall.sh --purge-data
+```
+
 ---
 
 ## 5. Password Reset (CLI)
