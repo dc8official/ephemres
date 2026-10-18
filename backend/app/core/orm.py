@@ -2325,8 +2325,6 @@ class AsyncSession:
         try:
             if exc_type is not None:
                 await self.rollback()
-            elif self.in_transaction():
-                await self.commit()
         finally:
             await self.close()
 

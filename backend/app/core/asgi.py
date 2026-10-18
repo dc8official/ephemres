@@ -1699,9 +1699,10 @@ class EphemresApp:
         injected_response = Response()
         dep_cache: Dict[Any, Any] = {}
         bg_tasks = BackgroundTasks()
+        final_response: Optional[Response] = None
 
-        async with contextlib.AsyncExitStack() as exit_stack:
-            try:
+        try:
+            async with contextlib.AsyncExitStack() as exit_stack:
                 # 0. Execute route-level and router-level dependencies
                 for dep in matched_route.dependencies:
                     await _resolve_dependency(
@@ -1756,53 +1757,59 @@ class EphemresApp:
                     elif k.lower() not in final_response.headers:
                         final_response.headers[k] = v
 
+                # If final_response is a StreamingResponse, send it inside the exit stack
+                if isinstance(final_response, StreamingResponse):
+                    await final_response(scope, receive, send)
+
+            # Exit stack closed here (deps cleaned up, get_db committed only on success)
+            if final_response is not None and not isinstance(final_response, StreamingResponse):
                 await final_response(scope, receive, send)
 
-                # Execute background tasks after response return
-                if bg_tasks and bg_tasks.tasks:
-                    try:
-                        await bg_tasks()
-                    except Exception as bg_exc:
-                        logger.error("Background task execution error: %s", bg_exc, exc_info=True)
+            # Execute background tasks after response return
+            if bg_tasks and bg_tasks.tasks:
+                try:
+                    await bg_tasks()
+                except Exception as bg_exc:
+                    logger.error("Background task execution error: %s", bg_exc, exc_info=True)
 
-            except HTTPException as http_exc:
-                # Check custom exception handlers
-                if HTTPException in self.exception_handlers:
-                    custom_resp = self.exception_handlers[HTTPException](request, http_exc)
-                    if inspect.isawaitable(custom_resp):
-                        custom_resp = await custom_resp
-                    await custom_resp(scope, receive, send)
+        except HTTPException as http_exc:
+            # Check custom exception handlers
+            if HTTPException in self.exception_handlers:
+                custom_resp = self.exception_handlers[HTTPException](request, http_exc)
+                if inspect.isawaitable(custom_resp):
+                    custom_resp = await custom_resp
+                await custom_resp(scope, receive, send)
+                return
+
+            err_resp = JSONResponse(
+                content={"detail": http_exc.detail},
+                status_code=http_exc.status_code,
+                headers=http_exc.headers,
+            )
+            await err_resp(scope, receive, send)
+
+        except ValidationError as v_exc:
+            val_resp = JSONResponse(
+                content={"detail": v_exc.errors()},
+                status_code=422,
+            )
+            await val_resp(scope, receive, send)
+
+        except Exception as exc:
+            for exc_type, handler in self.exception_handlers.items():
+                if isinstance(exc_type, type) and isinstance(exc, exc_type):
+                    res = handler(request, exc)
+                    if inspect.isawaitable(res):
+                        res = await res
+                    await res(scope, receive, send)
                     return
 
-                err_resp = JSONResponse(
-                    content={"detail": http_exc.detail},
-                    status_code=http_exc.status_code,
-                    headers=http_exc.headers,
-                )
-                await err_resp(scope, receive, send)
-
-            except ValidationError as v_exc:
-                val_resp = JSONResponse(
-                    content={"detail": v_exc.errors()},
-                    status_code=422,
-                )
-                await val_resp(scope, receive, send)
-
-            except Exception as exc:
-                for exc_type, handler in self.exception_handlers.items():
-                    if isinstance(exc_type, type) and isinstance(exc, exc_type):
-                        res = handler(request, exc)
-                        if inspect.isawaitable(res):
-                            res = await res
-                        await res(scope, receive, send)
-                        return
-
-                logger.error("Unhandled API exception on %s %s: %s", method, path, exc, exc_info=True)
-                err_resp = JSONResponse(
-                    content={"detail": "Internal Server Error"},
-                    status_code=500,
-                )
-                await err_resp(scope, receive, send)
+            logger.error("Unhandled API exception on %s %s: %s", method, path, exc, exc_info=True)
+            err_resp = JSONResponse(
+                content={"detail": "Internal Server Error"},
+                status_code=500,
+            )
+            await err_resp(scope, receive, send)
 
 
 FastAPI = EphemresApp
