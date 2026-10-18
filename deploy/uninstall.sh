@@ -25,11 +25,39 @@ echo -e "${YELLOW}WARNING: This utility will stop and remove all Ephemres system
 echo -e "${YELLOW}disable background monitoring daemons, and remove web server routes.${NC}"
 echo ""
 
+# Flags
+PURGE_DATA=false
+AUTO_CONFIRM=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --purge-data|--purge-db|--purge|-p)
+            PURGE_DATA=true
+            ;;
+        --yes|-y)
+            AUTO_CONFIRM=true
+            ;;
+        --help|-h)
+            echo "Usage: sudo ./uninstall.sh [--purge-data] [--yes]"
+            echo "  --purge-data, --purge   Completely drop PostgreSQL database (netmon) and delete all data"
+            echo "  --yes, -y               Skip interactive confirmation prompt"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: sudo ./uninstall.sh [--purge-data] [--yes]"
+            exit 1
+            ;;
+    esac
+done
+
 # Safety Confirmation
-read -rp "Are you sure you want to uninstall Ephemres? (Type 'YES' to proceed): " CONFIRM
-if [[ "${CONFIRM}" != "YES" ]]; then
-    echo -e "${GREEN}[ABORTED] Uninstallation cancelled. No changes were made.${NC}"
-    exit 0
+if [[ "${AUTO_CONFIRM}" != true ]]; then
+    read -rp "Are you sure you want to uninstall Ephemres? (Type 'YES' to proceed): " CONFIRM
+    if [[ "${CONFIRM}" != "YES" ]]; then
+        echo -e "${GREEN}[ABORTED] Uninstallation cancelled. No changes were made.${NC}"
+        exit 0
+    fi
 fi
 
 # Load Database credentials for safety dump if available
@@ -94,10 +122,32 @@ echo -e "${GREEN}[SUCCESS] Nginx web routing removed.${NC}"
 
 # 4. Optional Application Directory and Database Cleanup
 echo -e "\n${BLUE}--- Step 4/4: Application Directory & Database ---${NC}"
-read -rp "Do you want to delete application files in /opt/ephemres? [y/N]: " REMOVE_FILES
-if [[ "${REMOVE_FILES,,}" == "y" || "${REMOVE_FILES,,}" == "yes" ]]; then
-    rm -rf /opt/ephemres /opt/netmon
-    echo -e "${GREEN}[INFO] Removed application directories.${NC}"
+
+if [[ "${PURGE_DATA}" == false && "${AUTO_CONFIRM}" == false ]]; then
+    read -rp "Do you want to delete the PostgreSQL database and all monitoring data? [y/N]: " PURGE_PROMPT
+    if [[ "${PURGE_PROMPT,,}" == "y" || "${PURGE_PROMPT,,}" == "yes" ]]; then
+        PURGE_DATA=true
+    fi
+fi
+
+if [[ "${PURGE_DATA}" == true ]]; then
+    echo -e "${RED}[WARN] Dropping PostgreSQL database '${DB_NAME}' and role '${DB_USER}'...${NC}"
+    if command -v psql &>/dev/null; then
+        sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();" 2>/dev/null || true
+        sudo -u postgres psql -c "DROP DATABASE IF EXISTS ${DB_NAME};" 2>/dev/null || true
+        sudo -u postgres psql -c "DROP USER IF EXISTS ${DB_USER};" 2>/dev/null || true
+        echo -e "${GREEN}[SUCCESS] Database '${DB_NAME}' and user '${DB_USER}' removed.${NC}"
+    fi
+    rm -rf /opt/ephemres /opt/netmon /etc/ephemres /etc/netmon /run/ephemres /var/log/ephemres
+    echo -e "${GREEN}[INFO] Purged application directories, logs, and configuration files.${NC}"
+else
+    if [[ "${AUTO_CONFIRM}" == false ]]; then
+        read -rp "Do you want to delete application files in /opt/ephemres? [y/N]: " REMOVE_FILES
+        if [[ "${REMOVE_FILES,,}" == "y" || "${REMOVE_FILES,,}" == "yes" ]]; then
+            rm -rf /opt/ephemres /opt/netmon
+            echo -e "${GREEN}[INFO] Removed application directories.${NC}"
+        fi
+    fi
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"
