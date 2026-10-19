@@ -5,7 +5,9 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List
+import re
 import uuid
+import asyncpg
 import pytest
 
 from app.config import settings
@@ -65,9 +67,56 @@ class MockDbConnection:
             return self.existing_endpoints
         return []
 
+    def _validate_query_syntax(self, query: str) -> None:
+        # Parse DO UPDATE SET clauses to detect invalid duplicate column assignments
+        for match in re.finditer(r"\bDO\s+UPDATE\s+SET\s+(.*?)(?:\s+WHERE\b|;|\Z)", query, re.IGNORECASE | re.DOTALL):
+            set_str = match.group(1).strip()
+            parts: List[str] = []
+            curr: List[str] = []
+            depth = 0
+            in_single = False
+            in_double = False
+            for char in set_str:
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                    curr.append(char)
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                    curr.append(char)
+                elif char == "(" and not in_single and not in_double:
+                    depth += 1
+                    curr.append(char)
+                elif char == ")" and not in_single and not in_double:
+                    depth -= 1
+                    curr.append(char)
+                elif char == "," and depth == 0 and not in_single and not in_double:
+                    parts.append("".join(curr).strip())
+                    curr = []
+                else:
+                    curr.append(char)
+            if curr:
+                parts.append("".join(curr).strip())
+
+            seen_cols: set[str] = set()
+            for part in parts:
+                if "=" in part:
+                    left = part.split("=", 1)[0].strip()
+                    if left.startswith("(") and left.endswith(")"):
+                        raw_cols = [c.strip().strip('"').lower() for c in left[1:-1].split(",") if c.strip()]
+                    else:
+                        raw_cols = [left.strip('"').lower()]
+                    for col in raw_cols:
+                        if col in seen_cols:
+                            raise asyncpg.exceptions.PostgresSyntaxError(
+                                f'multiple assignments to same column "{col}"'
+                            )
+                        seen_cols.add(col)
+
     async def execute(self, query: str, *args: Any) -> Any:
         self.executed_queries.append(query)
         self.executed_params.append(args)
+
+        self._validate_query_syntax(query)
 
         # Parse table name from INSERT
         if "INSERT INTO" in query:
@@ -84,6 +133,7 @@ class MockDbConnection:
     async def executemany(self, query: str, args_list: List[List[Any]]) -> None:
         self.executed_queries.append(query)
         self.batch_executions.append((query, args_list))
+        self._validate_query_syntax(query)
         if "INSERT INTO" in query:
             for t in self.target_schema:
                 if f'"{t}"' in query or f" {t} " in query or f" {t}(" in query:
@@ -484,4 +534,107 @@ ev000000-0000-0000-0000-000000000002	ffffffff-ffff-ffff-ffff-ffffffffffff	DOWN	O
     assert summary["telemetry_rows_restored"] == 1
     assert len(mock_conn.tables["endpoint_events"]) == 1
     assert str(mock_conn.tables["endpoint_events"][0]["endpoint_id"]) == "e0000000-0000-0000-0000-000000000010"
+
+
+# ---------------------------------------------------------------------------
+# Test 7: MockDbConnection Syntax Check & Restore DO UPDATE SET Integrity
+# ---------------------------------------------------------------------------
+@pytest.mark.anyio
+async def test_mock_db_detects_duplicate_assignments_and_restore_syntax(tmp_path: Path):
+    mock_conn = MockDbConnection({
+        "users": {"id": "uuid", "username": "varchar", "password_hash": "text", "role_id": "uuid", "is_active": "bool", "must_change_password": "bool", "created_at": "timestamptz", "updated_at": "timestamptz"},
+    })
+
+    # 1. Direct test of MockDbConnection.execute catching duplicate DO UPDATE SET column
+    with pytest.raises(asyncpg.exceptions.PostgresSyntaxError) as exc_info:
+        await mock_conn.execute(
+            'INSERT INTO "users" ("id", "username") VALUES ($1, $2) '
+            'ON CONFLICT ("username") DO UPDATE SET "updated_at" = EXCLUDED."updated_at", updated_at = NOW();',
+            uuid.uuid4(), "testuser"
+        )
+    assert 'multiple assignments to same column "updated_at"' in str(exc_info.value)
+
+    # 1b. Test lowercase 'do update set' syntax detection
+    with pytest.raises(asyncpg.exceptions.PostgresSyntaxError) as exc_info:
+        await mock_conn.execute(
+            'INSERT INTO "users" ("id", "username") VALUES ($1, $2) '
+            'on conflict ("username") do update set "updated_at" = EXCLUDED."updated_at", updated_at = NOW();',
+            uuid.uuid4(), "testuser_lower"
+        )
+    assert 'multiple assignments to same column "updated_at"' in str(exc_info.value)
+
+    # 1c. Test unquoted case-folding detection (UPDATED_AT vs updated_at)
+    with pytest.raises(asyncpg.exceptions.PostgresSyntaxError) as exc_info:
+        await mock_conn.execute(
+            'INSERT INTO "users" ("id", "username") VALUES ($1, $2) '
+            'ON CONFLICT ("username") DO UPDATE SET UPDATED_AT = NOW(), "updated_at" = NOW();',
+            uuid.uuid4(), "testuser_case"
+        )
+    assert 'multiple assignments to same column "updated_at"' in str(exc_info.value)
+
+    # 1d. Test MockDbConnection.executemany duplicate assignment detection
+    with pytest.raises(asyncpg.exceptions.PostgresSyntaxError) as exc_info:
+        await mock_conn.executemany(
+            'INSERT INTO "users" ("id", "username") VALUES ($1, $2) '
+            'ON CONFLICT ("username") DO UPDATE SET "updated_at" = EXCLUDED."updated_at", updated_at = NOW();',
+            [[uuid.uuid4(), "batchuser"]]
+        )
+    assert 'multiple assignments to same column "updated_at"' in str(exc_info.value)
+
+    # 2. Verify execute succeeds on distinct DO UPDATE SET columns
+    await mock_conn.execute(
+        'INSERT INTO "users" ("id", "username") VALUES ($1, $2) '
+        'ON CONFLICT ("username") DO UPDATE SET "password_hash" = EXCLUDED."password_hash", "updated_at" = NOW();',
+        uuid.uuid4(), "testuser2"
+    )
+
+    # 3. Test minimal user restore without updated_at column in target schema (DO NOTHING fallback)
+    dump_content = """
+COPY public.users (id, username, created_at) FROM stdin;
+u0000000-0000-0000-0000-000000000001	user_minimal	2026-01-01 00:00:00+00
+\\.
+"""
+    dump_file = tmp_path / "minimal_user.sql"
+    dump_file.write_text(dump_content, encoding="utf-8")
+
+    mock_conn_minimal = MockDbConnection({
+        "users": {"id": "uuid", "username": "varchar", "created_at": "timestamptz"},
+    })
+
+    summary = await reconcile_and_restore_database(
+        conn=mock_conn_minimal,
+        backup_path=dump_file,
+    )
+    assert summary["user_count"] == 1
+    # Verify DO NOTHING was used because there are no update columns and no updated_at
+    assert any('ON CONFLICT ("username") DO NOTHING;' in q for q in mock_conn_minimal.executed_queries)
+
+    # 4. Test user restore with update columns and updated_at in target schema:
+    # Verifies that "updated_at" = NOW() is used, EXCLUDED."updated_at" is excluded,
+    # and exactly one assignment to updated_at exists.
+    dump_content_full = """
+COPY public.users (id, username, password_hash, role_id, is_active, must_change_password, created_at, updated_at) FROM stdin;
+u0000000-0000-0000-0000-000000000002	user_full	$scrypt$ln=14,r=8,p=1$already_scrypt_hash	00000000-0000-0000-0000-000000000001	t	f	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00
+\\.
+"""
+    dump_file_full = tmp_path / "full_user.sql"
+    dump_file_full.write_text(dump_content_full, encoding="utf-8")
+
+    mock_conn_full = MockDbConnection({
+        "roles": {"id": "uuid", "role_name": "varchar"},
+        "users": {"id": "uuid", "username": "varchar", "password_hash": "text", "role_id": "uuid", "is_active": "bool", "must_change_password": "bool", "created_at": "timestamptz", "updated_at": "timestamptz"},
+    })
+
+    summary_full = await reconcile_and_restore_database(
+        conn=mock_conn_full,
+        backup_path=dump_file_full,
+    )
+    assert summary_full["user_count"] == 1
+    user_queries = [q for q in mock_conn_full.executed_queries if 'INSERT INTO "users"' in q]
+    assert len(user_queries) == 1
+    uq = user_queries[0]
+    assert 'ON CONFLICT ("username") DO UPDATE SET' in uq
+    assert '"updated_at" = NOW()' in uq
+    assert 'EXCLUDED."updated_at"' not in uq
+    assert uq.count('"updated_at"') == 2  # Once in INSERT column list, once in DO UPDATE SET "updated_at" = NOW()
 

@@ -788,10 +788,13 @@ async def reconcile_and_restore_database(
             placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
             vals = [_prepare_column_val(row.get(c), target_cols.get(c, "varchar")) for c in usable]
 
-            update_cols = [c for c in usable if c not in ("id", "username", "created_at")]
-            set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
-            if set_clause:
-                sql = f'INSERT INTO "users" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("username") DO UPDATE SET {set_clause}, updated_at = NOW();'
+            update_cols = [c for c in usable if c not in ("id", "username", "created_at", "updated_at")]
+            set_parts = [f'"{c}" = EXCLUDED."{c}"' for c in update_cols]
+            if "updated_at" in target_cols:
+                set_parts.append('"updated_at" = NOW()')
+            if set_parts:
+                set_clause = ", ".join(set_parts)
+                sql = f'INSERT INTO "users" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("username") DO UPDATE SET {set_clause};'
             else:
                 sql = f'INSERT INTO "users" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("username") DO NOTHING;'
             await _execute_sql(conn, sql, *vals)
