@@ -117,6 +117,8 @@ def test_bandwidth_top_talkers(client):
     assert data["data"]["top_endpoints"][0]["hostname"] == "app-server-1"
     assert len(data["data"]["top_conversations"]) == 1
     assert data["data"]["top_conversations"][0]["dst_port"] == 5432
+    assert data["data"]["top_conversations"][0]["src_hostname"] == "app-server-1"
+    assert data["data"]["top_conversations"][0]["dst_hostname"] is None
 
 
 def test_bandwidth_applications(client):
@@ -257,4 +259,74 @@ def test_list_flow_exporters_and_unmatched(mock_get_flow_redis, client):
 
     assert len(unmatched) == 1
     assert unmatched[0]["ip_address"] == "10.10.10.0"
+
+    # Verify that the generated statement compiled cleanly with recent_exporters subqueries
+    call_stmt = mock_session.execute.call_args[0][0]
+    compiled_sql = call_stmt.compile()
+    assert "IN (SELECT DISTINCT" in compiled_sql
+
+
+def test_bandwidth_traffic_zones_with_cidr_masks(client):
+    """Verify _is_internal correctly strips CIDR subnet masks (/32, /24, /128) when evaluating zone mesh."""
+    test_client, mock_session = client
+
+    m_apps = MagicMock()
+    m_apps.all.return_value = []
+
+    m_qos = MagicMock()
+    m_qos.all.return_value = []
+
+    # Row: (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
+    mock_rows = [
+        ("192.168.1.10/32", "10.0.0.5/24", None, None, 100000, 10),      # East-West (both private with CIDR)
+        ("192.168.1.10/32", "8.8.8.8/32", None, None, 500000, 50),       # North-South Egress (src private, dst public)
+        ("8.8.8.8/32", "192.168.1.10/32", None, None, 800000, 80),       # North-South Ingress (src public, dst private)
+        ("1.1.1.1/32", "8.8.8.8/32", None, None, 20000, 2),              # External / Transit (both public)
+    ]
+    m_zone = MagicMock()
+    m_zone.all.return_value = mock_rows
+
+    mock_session.execute.side_effect = [m_apps, m_qos, m_zone]
+
+    resp = test_client.get("/api/v1/bandwidth/applications?window=1h")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    zones = {z["zone"]: z for z in data["data"]["traffic_zones"]}
+    assert zones["East-West (Internal)"]["total_bytes"] == 100000
+    assert zones["North-South Egress"]["total_bytes"] == 500000
+    assert zones["North-South Ingress"]["total_bytes"] == 800000
+    assert zones["External / Transit"]["total_bytes"] == 20000
+
+
+@patch("app.routers.bandwidth.get_flow_store")
+def test_bandwidth_overview_unmatched_zset_and_fallback(mock_get_store, client):
+    """Verify overview queries flow:unmatched:zset first, falling back to flow:unmatched:set."""
+    test_client, mock_session = client
+
+    mock_res = MagicMock()
+    mock_res.one_or_none.return_value = (50000000, 12000, 3)
+    mock_session.execute.return_value = mock_res
+
+    # 1. Primary: zcard succeeds with non-zero
+    mock_store_zset = AsyncMock()
+    mock_store_zset.zcard = AsyncMock(return_value=7)
+    mock_get_store.return_value = mock_store_zset
+
+    resp = test_client.get("/api/v1/bandwidth/overview")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["unmatched_exporters_count"] == 7
+    mock_store_zset.zcard.assert_awaited_with("flow:unmatched:zset")
+
+    # 2. Fallback: zcard returns 0, fallback to scard
+    mock_store_fallback = AsyncMock()
+    mock_store_fallback.zcard = AsyncMock(return_value=0)
+    mock_store_fallback.scard = AsyncMock(return_value=4)
+    mock_get_store.return_value = mock_store_fallback
+
+    resp2 = test_client.get("/api/v1/bandwidth/overview")
+    assert resp2.status_code == 200
+    assert resp2.json()["data"]["unmatched_exporters_count"] == 4
+    mock_store_fallback.scard.assert_awaited_with("flow:unmatched:set")
+
 

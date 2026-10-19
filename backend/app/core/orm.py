@@ -579,7 +579,12 @@ class InExpression(SQLElement):
         col_type = getattr(self.expr, "type", None)
 
         if isinstance(self.target, (Select, Subquery)):
-            sub_sql = self.target.compile_subquery_sql(ctx)
+            if hasattr(self.target, "compile_subquery_sql"):
+                sub_sql = self.target.compile_subquery_sql(ctx)
+            elif isinstance(self.target, Select):
+                sub_sql = self.target.compile_core(ctx)
+            else:
+                sub_sql = str(self.target)
             return f"{e_sql} NOT IN ({sub_sql})" if self.negated else f"{e_sql} IN ({sub_sql})"
 
         # Iterable
@@ -1579,6 +1584,9 @@ class Select(SQLElement):
                 cte_defs = [cte.compile_cte_definition(ctx) for cte in ctes]
                 with_block = f"WITH {', '.join(cte_defs)} "
                 return with_block + self.compile_core(ctx)
+        return self.compile_core(ctx)
+
+    def compile_subquery_sql(self, ctx: CompileContext) -> str:
         return self.compile_core(ctx)
 
 

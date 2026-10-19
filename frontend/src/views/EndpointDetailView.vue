@@ -990,7 +990,7 @@ async function loadFlowTelemetry() {
   loadingFlow.value = true
   try {
     const epId = endpoint.value.id
-    const isExporter = flowMode.value === 'exporter' || endpoint.value.device_role === 'FLOW_EXPORTER'
+    const isExporter = flowMode.value === 'exporter'
     const res = await getTrafficSeries(
       flowWindow.value,
       isExporter ? epId : null,

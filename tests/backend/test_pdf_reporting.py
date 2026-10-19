@@ -124,9 +124,9 @@ async def test_pdf_rendering_and_immutability():
 @pytest.mark.anyio
 async def test_render_bandwidth_and_master_templates_pdf():
     """Verify template_b_bandwidth.html and template_c_master.html render to valid encrypted PDF."""
-    from jinja2 import Environment, FileSystemLoader
+    from app.core.template import TemplateEnvironment
     templates_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "backend", "app", "templates", "reports"))
-    env = Environment(loader=FileSystemLoader(templates_dir))
+    env = TemplateEnvironment(search_path=templates_dir, autoescape=True)
 
     bw_context = {
         "org": {"company_name": "Acme Corp", "department": "NetOps"},
@@ -667,3 +667,59 @@ def test_organization_branding_rbac_and_crud():
         assert "exceeds maximum allowed size" in oversized_res.json()["detail"]
 
     test_app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_report_compiler_traffic_zones_with_cidr_masks():
+    """Verify compile_bandwidth_report_data strips CIDR subnet masks (/32, /24) when classifying traffic zones."""
+    from datetime import datetime, timezone, timedelta
+    from app.models.endpoint import Endpoint
+
+    exp_id = uuid4()
+    mock_router = MagicMock()
+    mock_router.id = exp_id
+    mock_router.hostname = "edge-router-01"
+    mock_router.ip_address = "10.0.0.1/32"
+    mock_router.flow_interface_aliases = {}
+
+    m_routers = MagicMock()
+    m_routers.scalars.return_value.all.return_value = [mock_router]
+
+    m_if = MagicMock()
+    m_if.all.return_value = []
+
+    m_conv = MagicMock()
+    m_conv.all.return_value = []
+
+    m_qos = MagicMock()
+    m_qos.all.return_value = []
+
+    m_anomaly = MagicMock()
+    m_anomaly.all.return_value = []
+
+    # Traffic zones rows with CIDR netmasks: (src_ip, dst_ip, src_ep, dst_ep, bytes, flows)
+    m_zone = MagicMock()
+    m_zone.all.return_value = [
+        ("192.168.10.1/32", "172.16.0.5/24", None, None, 50000, 10),    # East-West (both private with CIDR)
+        ("192.168.10.1/32", "8.8.4.4/32", None, None, 150000, 30),      # North-South Egress
+        ("8.8.4.4/32", "192.168.10.1/32", None, None, 200000, 40),      # North-South Ingress
+        ("1.0.0.1/32", "8.8.8.8/32", None, None, 10000, 2),             # External / Transit
+    ]
+
+    mock_db = AsyncMock()
+    mock_db.execute.side_effect = [m_routers, m_if, m_conv, m_qos, m_anomaly, m_zone]
+
+    now = datetime.now(timezone.utc)
+    res = await compile_bandwidth_report_data(
+        mock_db,
+        start_dt=now - timedelta(hours=1),
+        end_dt=now,
+        exporter_ids=[exp_id],
+    )
+
+    zones = {z["zone"]: z for z in res["traffic_zones"]}
+    assert zones["East-West (Internal)"]["total_bytes"] == 50000
+    assert zones["North-South Egress"]["total_bytes"] == 150000
+    assert zones["North-South Ingress"]["total_bytes"] == 200000
+    assert zones["External / Transit"]["total_bytes"] == 10000
+

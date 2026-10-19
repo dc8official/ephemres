@@ -309,9 +309,14 @@ async def get_bandwidth_overview(
     store_client = await get_flow_store()
     if store_client:
         try:
-            unmatched_count = await store_client.scard("flow:unmatched:set")
+            unmatched_count = await store_client.zcard("flow:unmatched:zset")
+            if not unmatched_count:
+                unmatched_count = await store_client.scard("flow:unmatched:set")
         except Exception:
-            pass
+            try:
+                unmatched_count = await store_client.scard("flow:unmatched:set")
+            except Exception:
+                pass
 
     return APIResponse.success(
         data=BandwidthOverview(
@@ -630,6 +635,13 @@ async def get_top_talkers(
         for e_id, h_name in h_res.all():
             hostnames[e_id] = h_name
 
+    ip_to_hostname: Dict[str, str] = {}
+    for c in selected_candidates:
+        if c.get("endpoint_id") and c["endpoint_id"] in hostnames:
+            c_ip_clean = str(c["ip"]).split("/")[0].strip()
+            ip_to_hostname[c_ip_clean] = hostnames[c["endpoint_id"]]
+            ip_to_hostname[str(c["ip"])] = hostnames[c["endpoint_id"]]
+
     top_endpoints: List[TopTalkerItem] = []
     for c in selected_candidates:
         top_endpoints.append(
@@ -712,10 +724,19 @@ async def get_top_talkers(
         pkts_per_flow = round(float(tot_packets) / float(f_sum), 1) if f_sum > 0 else 0.0
         traffic_prof = derive_traffic_profile(anomaly_hint, avg_pkt_size, pkts_per_flow, dscp_val, int(port))
 
+        s_ip_str = str(s_ip)
+        d_ip_str = str(d_ip)
+        s_ip_clean = s_ip_str.split("/")[0].strip()
+        d_ip_clean = d_ip_str.split("/")[0].strip()
+        s_host = ip_to_hostname.get(s_ip_clean) or ip_to_hostname.get(s_ip_str)
+        d_host = ip_to_hostname.get(d_ip_clean) or ip_to_hostname.get(d_ip_str)
+
         top_conversations.append(
             TopConversationItem(
-                src_ip=str(s_ip),
-                dst_ip=str(d_ip),
+                src_ip=s_ip_str,
+                dst_ip=d_ip_str,
+                src_hostname=s_host,
+                dst_hostname=d_host,
                 protocol=proto_name,
                 dst_port=int(port),
                 total_bytes=b_sum,
@@ -895,7 +916,8 @@ async def get_applications_breakdown(
             if ep_val is not None:
                 return True
             try:
-                return ipaddress.ip_address(ip_val).is_private
+                clean_ip = str(ip_val).split("/")[0].strip()
+                return ipaddress.ip_address(clean_ip).is_private
             except Exception:
                 return False
 

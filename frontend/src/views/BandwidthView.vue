@@ -1537,7 +1537,9 @@ const donutData = computed(() => {
   const data = applicationStats.value.map((a) => a.total_bytes)
   const colors = [
     '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
-    '#EC4899', '#06B6D4', '#14B8A6', '#84CC16', '#6366F1'
+    '#EC4899', '#06B6D4', '#14B8A6', '#84CC16', '#6366F1',
+    '#F97316', '#A855F7', '#0EA5E9', '#D946EF', '#EAB308',
+    '#64748B'
   ]
 
   return {
@@ -1545,7 +1547,7 @@ const donutData = computed(() => {
     datasets: [
       {
         data,
-        backgroundColor: colors.slice(0, labels.length),
+        backgroundColor: labels.map((_, i) => colors[i % colors.length]),
         borderWidth: 1,
       },
     ],

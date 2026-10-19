@@ -486,3 +486,19 @@ def test_atomic_shim_cutover_and_requirements():
     assert hasattr(pg, "insert")
     assert hasattr(sa, "NULLTYPE")
     assert hasattr(sa, "SQLAlchemyError")
+
+
+def test_select_subquery_in_expression_compilation():
+    """Verify Endpoint.id.in_(select(FlowMinuteRollup.exporter_id)).compile() compiles correctly."""
+    from app.core.orm import select
+    from app.models.endpoint import Endpoint
+    from app.models.flow_rollup import FlowMinuteRollup
+
+    expr = Endpoint.id.in_(select(FlowMinuteRollup.exporter_id))
+    sql = expr.compile()
+    assert sql == '"endpoints"."id" IN (SELECT "flow_minute_rollups"."exporter_id" FROM "flow_minute_rollups")'
+
+    neg_expr = Endpoint.id.not_in(select(FlowMinuteRollup.exporter_id))
+    neg_sql = neg_expr.compile()
+    assert neg_sql == '"endpoints"."id" NOT IN (SELECT "flow_minute_rollups"."exporter_id" FROM "flow_minute_rollups")'
+
