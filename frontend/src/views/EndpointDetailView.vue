@@ -582,9 +582,20 @@
 
           <!-- Top Node Conversations / Flows Table -->
           <div class="table-card">
-            <div class="section-header p-4">
-              <span class="font-bold text-base">Forensic Node Conversations</span>
-              <span class="text-muted text-xs">Granular 1-minute rollup pairs with packet physics &amp; threat telemetry</span>
+            <div class="section-header section-header-split p-4">
+              <div>
+                <span class="font-bold text-base">Forensic Node Conversations</span>
+                <span class="text-muted text-xs block mt-1">Granular 1-minute rollup pairs with packet physics &amp; threat telemetry</span>
+              </div>
+              <div class="header-controls">
+                <input
+                  v-model="nodeConversationFilter"
+                  class="filter-select"
+                  style="min-width: 220px;"
+                  placeholder="Filter IP, port, flag, profile..."
+                  aria-label="Filter node conversations"
+                />
+              </div>
             </div>
             <div class="table-responsive">
               <table class="dense-table" aria-label="Forensic Node Conversations Table">
@@ -601,7 +612,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(fc, idx) in nodeConversations" :key="idx">
+                  <tr v-for="(fc, idx) in filteredNodeConversations" :key="idx">
                     <td>
                       <span class="tnum font-mono">{{ fc.src_ip }}</span>
                       <span v-if="fc.src_hostname" class="text-muted text-xs block">({{ fc.src_hostname }})</span>
@@ -663,8 +674,10 @@
                     <td class="text-right tnum font-bold">{{ formatBytes(fc.total_bytes) }}</td>
                     <td class="text-right tnum text-muted">{{ formatNumber(fc.flow_count) }}</td>
                   </tr>
-                  <tr v-if="nodeConversations.length === 0">
-                    <td colspan="8" class="text-center text-muted p-4">No active conversations found for this node in the selected {{ flowWindow }} window.</td>
+                  <tr v-if="filteredNodeConversations.length === 0">
+                    <td colspan="8" class="text-center text-muted p-4">
+                      {{ nodeConversations.length === 0 ? `No active conversations found for this node in the selected ${flowWindow} window.` : 'No conversations matching current filter.' }}
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -927,6 +940,25 @@ const flowWindow = ref('1h')
 const loadingFlow = ref(false)
 const flowSeriesPoints = shallowRef([])
 const nodeConversations = shallowRef([])
+const nodeConversationFilter = ref('')
+const filteredNodeConversations = computed(() => {
+  const q = nodeConversationFilter.value.trim().toLowerCase()
+  if (!q) return nodeConversations.value
+  return nodeConversations.value.filter((c) => {
+    return (
+      (c.src_ip && c.src_ip.toLowerCase().includes(q)) ||
+      (c.dst_ip && c.dst_ip.toLowerCase().includes(q)) ||
+      (c.src_hostname && c.src_hostname.toLowerCase().includes(q)) ||
+      (c.dst_hostname && c.dst_hostname.toLowerCase().includes(q)) ||
+      String(c.dst_port).includes(q) ||
+      (c.protocol && c.protocol.toLowerCase().includes(q)) ||
+      (c.traffic_profile && c.traffic_profile.toLowerCase().includes(q)) ||
+      (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
+      (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
+      (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
+    )
+  })
+})
 const nodeChartMetricMode = ref('bps')
 
 const interfaceTelemetry = shallowRef([])
