@@ -263,6 +263,9 @@ class FlowPreflightResponse(BaseModel):
     redis_connected: bool
     redis_version: Optional[str] = None
     redis_version_supported: bool
+    faststore_connected: Optional[bool] = None
+    faststore_version: Optional[str] = None
+    faststore_version_supported: Optional[bool] = None
     stream_write_success: bool
     rmem_max: Optional[int] = None
     rmem_max_supported: bool = True

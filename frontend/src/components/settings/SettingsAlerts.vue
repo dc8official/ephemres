@@ -6,7 +6,7 @@
         <div class="flex-1">
           <div class="flex-row-center gap-2">
             <h2 class="card-title">🚨 Enterprise Alerting & Notification Engine</h2>
-            <span class="engine-badge" :class="alertingEnabled ? 'badge-redis' : 'badge-pg'">
+            <span class="engine-badge" :class="alertingEnabled ? 'badge-faststore' : 'badge-pg'">
               {{ alertingEnabled ? 'DISPATCHER ACTIVE' : 'DISPATCHER PAUSED' }}
             </span>
           </div>
@@ -883,6 +883,7 @@ onMounted(() => {
   border-radius: 4px;
 }
 
+.badge-faststore,
 .badge-redis {
   background: rgba(16, 185, 129, 0.2);
   color: #10b981;

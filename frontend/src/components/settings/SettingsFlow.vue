@@ -4,18 +4,18 @@
     <div class="settings-card">
       <div class="card-header">
         <h2 class="card-title">⚡ Performance & Caching Engine</h2>
-        <span class="engine-badge" :class="settings.performanceMode ? 'badge-redis' : 'badge-pg'">
-          {{ settings.performanceMode ? 'REDIS ACCELERATED' : 'POSTGRESQL NATIVE' }}
+        <span class="engine-badge" :class="settings.performanceMode ? 'badge-faststore' : 'badge-pg'">
+          {{ settings.performanceMode ? 'FASTSTORE ACCELERATED' : 'POSTGRESQL NATIVE' }}
         </span>
       </div>
       <p class="card-desc">
-        Accelerate session lookups and real-time event broadcasting using in-memory Redis caching, with zero-downtime PostgreSQL fallback.
+        Accelerate session lookups and real-time event broadcasting using in-memory FastStore caching, with zero-downtime PostgreSQL fallback.
       </p>
 
       <div class="setting-row">
         <div>
           <label class="setting-label">Memory Acceleration Driver</label>
-          <p class="setting-hint">When enabled, user session tokens and pub/sub events are routed through Redis.</p>
+          <p class="setting-hint">When enabled, user session tokens and pub/sub events are routed through FastStore.</p>
         </div>
         <div class="driver-toggle">
           <button 
@@ -32,7 +32,7 @@
             :class="{ active: settings.performanceMode }"
             @click="setPerformanceMode(true)"
           >
-            Accelerated (Redis)
+            Accelerated (FastStore)
           </button>
         </div>
       </div>
@@ -44,12 +44,12 @@
         <div class="flex-1">
           <div class="flex-row-center gap-2">
             <h2 class="card-title">🌊 Network Flow Telemetry Engine (NetFlow & IPFIX)</h2>
-            <span class="engine-badge" :class="settings.flowIngestionEnabled ? 'badge-redis' : 'badge-pg'">
+            <span class="engine-badge" :class="settings.flowIngestionEnabled ? 'badge-faststore' : 'badge-pg'">
               {{ settings.flowIngestionEnabled ? 'FLOW INGESTION ACTIVE' : 'FLOW INGESTION DISABLED' }}
             </span>
           </div>
           <p class="card-desc mt-1">
-            Ingests raw NetFlow v5, NetFlow v9, and IPFIX datagrams into Redis Stream wire buffers, correlating with monitored endpoints and batching into TimescaleDB rollups.
+            Ingests raw NetFlow v5, NetFlow v9, and IPFIX datagrams into FastStore Stream wire buffers, correlating with monitored endpoints and batching into TimescaleDB rollups.
           </p>
         </div>
         <div class="master-toggle-wrap">
@@ -60,13 +60,13 @@
         </div>
       </div>
 
-      <!-- Prerequisite Banner when Redis is disabled -->
+      <!-- Prerequisite Banner when FastStore is disabled -->
       <div v-if="!settings.performanceMode" class="alert-banner alert-warning mt-3" role="alert">
         <div class="flex-row-center gap-2">
-          <span>⚠️ Redis Memory Acceleration is required to buffer raw packet streams. Please activate Redis first.</span>
+          <span>⚠️ FastStore Memory Acceleration is required to buffer raw packet streams. Please activate FastStore first.</span>
         </div>
-        <button type="button" class="btn-primary btn-small ml-3" @click="activateRedisDriver">
-          Activate Redis Driver
+        <button type="button" class="btn-primary btn-small ml-3" @click="activateFastStoreDriver">
+          Activate FastStore Driver
         </button>
       </div>
 
@@ -119,7 +119,7 @@
         <div class="setting-row pt-2">
           <div>
             <label class="setting-label">Engine Diagnostic Preflight (STAB-05)</label>
-            <p class="setting-hint">Verify Redis 6.0+ streams, Linux kernel receive buffer (rmem_max >= 2MB), and UDP socket port bindings.</p>
+            <p class="setting-hint">Verify FastStore streams, Linux kernel receive buffer (rmem_max >= 2MB), and UDP socket port bindings.</p>
           </div>
           <button type="button" class="btn-action" @click="openPreflightModal">
             🔍 Run Diagnostic Preflight
@@ -137,7 +137,7 @@
         </div>
         <div class="modal-form">
           <div v-if="preflightChecking" class="loading-state p-4 text-center">
-            <p class="mt-2 text-sm">Verifying Redis 6+ streams, kernel rmem_max, and UDP socket bindings...</p>
+            <p class="mt-2 text-sm">Verifying FastStore streams, kernel rmem_max, and UDP socket bindings...</p>
           </div>
           <div v-else>
             <div :class="preflightResult?.ready ? 'alert-info success-alert' : 'alert-error'" role="alert">
@@ -147,19 +147,19 @@
 
             <div class="preflight-details mt-3 text-sm">
               <div class="preflight-item">
-                <span>Redis Server Connection: </span>
-                <span class="font-bold font-mono" :class="preflightResult?.redis_connected ? 'text-success' : 'text-danger'">
-                  {{ preflightResult?.redis_connected ? 'CONNECTED' : 'UNREACHABLE' }}
+                <span>FastStore Engine Connection: </span>
+                <span class="font-bold font-mono" :class="(preflightResult?.faststore_connected ?? preflightResult?.redis_connected) ? 'text-success' : 'text-danger'">
+                  {{ (preflightResult?.faststore_connected ?? preflightResult?.redis_connected) ? 'CONNECTED' : 'UNREACHABLE' }}
                 </span>
               </div>
               <div class="preflight-item mt-1">
-                <span>Detected Redis Version: </span>
+                <span>FastStore Protocol Version: </span>
                 <span class="font-bold font-mono">
-                  {{ preflightResult?.redis_version || 'N/A' }} (Requires >= 6.0)
+                  {{ preflightResult?.faststore_version || preflightResult?.redis_version || 'N/A' }} (FastStore WAL)
                 </span>
               </div>
               <div class="preflight-item mt-1">
-                <span>Redis Stream Write (XADD): </span>
+                <span>Wire Buffer Stream Write (XADD): </span>
                 <span class="font-bold font-mono" :class="preflightResult?.stream_write_success ? 'text-success' : 'text-danger'">
                   {{ preflightResult?.stream_write_success ? 'SUPPORTED' : 'FAILED' }}
                 </span>
@@ -182,7 +182,7 @@
             </div>
 
             <p v-if="!preflightResult?.ready" class="text-xs text-muted mt-3">
-              Flow telemetry buffering requires an active Redis 6.0+ server and unbound UDP ports. If needed, start Redis via <code>systemctl start redis-server</code> and ensure port conflicts are resolved.
+              Flow telemetry buffering requires active FastStore embedded memory storage in <code>/run/ephemres</code> and unbound UDP ports. If needed, verify permissions (<code>sudo chown -R ephemres:ephemres /run/ephemres</code>) and ensure port conflicts are resolved.
             </p>
           </div>
 
@@ -243,7 +243,7 @@ function setPerformanceMode(val) {
     toast.add({
       severity: 'warn',
       summary: 'Action Blocked',
-      detail: 'Cannot disable Redis Memory Acceleration while Flow Ingestion is active. Please disable Flow Ingestion first.',
+      detail: 'Cannot disable FastStore Memory Acceleration while Flow Ingestion is active. Please disable Flow Ingestion first.',
       life: 5000,
     })
     return
@@ -252,7 +252,7 @@ function setPerformanceMode(val) {
   emitChange()
 }
 
-async function activateRedisDriver() {
+async function activateFastStoreDriver() {
   props.settings.performanceMode = true
   emitChange()
   showPreflightModal.value = true
@@ -267,7 +267,7 @@ async function toggleFlowIngestion(e) {
       toast.add({
         severity: 'warn',
         summary: 'Prerequisite Required',
-        detail: 'Network Flow Telemetry requires Redis Memory Acceleration. Please activate Redis first.',
+        detail: 'Network Flow Telemetry requires FastStore Memory Acceleration. Please activate FastStore first.',
         life: 5000,
       })
       return
@@ -298,6 +298,9 @@ async function runPreflightCheck() {
       redis_connected: false,
       redis_version: null,
       redis_version_supported: false,
+      faststore_connected: false,
+      faststore_version: null,
+      faststore_version_supported: false,
       stream_write_success: false,
       rmem_max_supported: false,
       udp_ports_available: false,
@@ -389,6 +392,7 @@ function confirmFlowActivation() {
   border-radius: 4px;
 }
 
+.badge-faststore,
 .badge-redis {
   background: rgba(16, 185, 129, 0.2);
   color: #10b981;

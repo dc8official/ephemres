@@ -277,6 +277,7 @@ async def test_streaming_response_and_disconnect():
     res_stream = client.get("/stream-async")
     assert res_stream.status_code == 200
     assert res_stream.text == "part1\npart2\n"
+    assert "content-length" not in res_stream.headers, "StreamingResponse must not contain content-length"
 
     # Test BytesIO stream
     res_pdf = client.get("/stream-bytesio")

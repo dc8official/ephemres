@@ -1756,9 +1756,16 @@ onMounted(() => {
   unsubscribeSSE = subscribe((rawEvent) => {
     try {
       const event = typeof rawEvent?.data === 'string' ? JSON.parse(rawEvent.data) : rawEvent
-      if (event?.type === 'NODE_STATE_CHANGE' && event?.data?.endpoint_id === endpointId) {
-        if (endpoint.value && event.data.avg_rtt_ms != null) {
-          endpoint.value.avg_rtt_ms = event.data.avg_rtt_ms
+      const targetId = event?.endpoint_id || event?.node_id || event?.data?.endpoint_id
+      if ((event?.type === 'NODE_STATE_CHANGE' || event?.type === 'STATE_TRANSITION') && targetId === endpointId) {
+        const rtt = event?.avg_rtt_ms ?? event?.data?.avg_rtt_ms
+        if (endpoint.value && rtt != null) {
+          endpoint.value.avg_rtt_ms = rtt
+        }
+        const newState = event?.new_state || event?.detailed_state || event?.operational_state || event?.data?.new_state
+        if (endpoint.value && newState) {
+          endpoint.value.current_operational_state = newState
+          endpoint.value.current_detailed_state = newState
         }
         if (activePerspective.value === 'flow') {
           loadFlowTelemetry()
