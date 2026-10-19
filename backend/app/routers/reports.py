@@ -783,6 +783,9 @@ async def generate_pdf_report(
             "exporters": data["exporters"],
             "interfaces": data["interfaces"],
             "conversations": data["conversations"],
+            "qos_classes": data.get("qos_classes", []),
+            "anomalies": data.get("anomalies", {}),
+            "traffic_zones": data.get("traffic_zones", []),
         }
     else:  # master
         data = await compile_master_report_data(
@@ -806,6 +809,9 @@ async def generate_pdf_report(
             "exporters": data["exporters"],
             "interfaces": data["interfaces"],
             "conversations": data["conversations"],
+            "qos_classes": data.get("qos_classes", []),
+            "anomalies": data.get("anomalies", {}),
+            "traffic_zones": data.get("traffic_zones", []),
         }
 
     template = jinja_env.get_template(template_name)

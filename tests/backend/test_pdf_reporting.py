@@ -121,6 +121,130 @@ async def test_pdf_rendering_and_immutability():
     assert "Ephemres Reporting Engine" in metadata["/Producer"]
 
 
+@pytest.mark.anyio
+async def test_render_bandwidth_and_master_templates_pdf():
+    """Verify template_b_bandwidth.html and template_c_master.html render to valid encrypted PDF."""
+    from jinja2 import Environment, FileSystemLoader
+    templates_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "backend", "app", "templates", "reports"))
+    env = Environment(loader=FileSystemLoader(templates_dir))
+
+    bw_context = {
+        "org": {"company_name": "Acme Corp", "department": "NetOps"},
+        "report_title": "Acme Corp — Network Bandwidth & Flow Telemetry Report",
+        "report_type_label": "Network Bandwidth & Flow Telemetry Report",
+        "period_label": "2026-09-01 to 2026-09-02 UTC",
+        "generated_at": "2026-09-02 12:00",
+        "theme_accent": "#059669",
+        "scope_title": "2 Core Flow Exporters",
+        "exporters": [
+            {
+                "hostname": "core-gw-01",
+                "primary_ip": "10.0.0.1",
+                "active_interfaces_count": 2,
+                "formatted_ingress_bytes": "50 MB",
+                "formatted_egress_bytes": "100 MB",
+                "formatted_ingress_bps": "4.6 Mbps",
+                "formatted_peak_bps": "10.0 Mbps",
+            }
+        ],
+        "interfaces": [
+            {
+                "router_hostname": "core-gw-01",
+                "interface_idx": 1,
+                "interface_name": "WAN-01",
+                "speed_mbps": 1000,
+                "formatted_speed": "1 Gbps",
+                "formatted_in_bps": "2.5 Mbps",
+                "formatted_out_bps": "5.0 Mbps",
+                "formatted_peak_bps": "8.0 Mbps",
+                "utilization_pct": 25.0,
+            }
+        ],
+        "conversations": [
+            {
+                "src_display": "10.0.0.10",
+                "dst_display": "1.1.1.1",
+                "port_label": "53 / DNS",
+                "router_name": "core-gw-01",
+                "formatted_bytes": "5 MB",
+                "pct_of_transit": 100.0,
+            }
+        ],
+        "qos_classes": [
+            {
+                "dscp": 46,
+                "dscp_label": "EF (VoIP)",
+                "formatted_bytes": "10 MB",
+                "formatted_packets": "8,000",
+                "formatted_flows": "50",
+                "percentage": 20.0,
+            },
+            {
+                "dscp": 0,
+                "dscp_label": "Best Effort (CS0)",
+                "formatted_bytes": "40 MB",
+                "formatted_packets": "30,000",
+                "formatted_flows": "200",
+                "percentage": 80.0,
+            },
+        ],
+        "anomalies": {
+            "total_count": 23,
+            "syn_scan_count": 15,
+            "syn_scan_bytes": "750 B",
+            "rst_burst_count": 8,
+            "rst_burst_bytes": "400 B",
+            "has_anomalies": True,
+        },
+        "traffic_zones": [
+            {
+                "zone": "East-West (Internal)",
+                "description": "Internal Mesh / Host-to-Host",
+                "formatted_bytes": "30 MB",
+                "formatted_flows": "150",
+                "percentage": 60.0,
+            },
+            {
+                "zone": "North-South Egress",
+                "description": "Internal to External Transit",
+                "formatted_bytes": "20 MB",
+                "formatted_flows": "100",
+                "percentage": 40.0,
+            },
+        ],
+    }
+
+    bw_html = env.get_template("template_b_bandwidth.html").render(**bw_context)
+    pdf_bytes = await render_pdf_async(bw_html, title="Bandwidth Report")
+    assert isinstance(pdf_bytes, bytes)
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert len(pdf_bytes) > 1000
+
+    # Also test template C master
+    master_context = dict(bw_context)
+    master_context["endpoints"] = [
+        {
+            "hostname": "core-gw-01",
+            "ip_address": "10.0.0.1",
+            "device_type": "ROUTER",
+            "uptime_percentage": 99.98,
+            "incident_count": 0,
+            "formatted_downtime": "0s",
+            "packet_loss_pct": 0.0,
+            "avg_rtt_ms": 1.2,
+            "operational_state": "UP",
+        }
+    ]
+    master_context["incidents"] = []
+    master_context["summary"] = {"mean_uptime": "99.98"}
+
+    master_html = env.get_template("template_c_master.html").render(**master_context)
+    master_pdf = await render_pdf_async(master_html, title="Master Audit")
+    assert isinstance(master_pdf, bytes)
+    assert master_pdf.startswith(b"%PDF-")
+    assert len(master_pdf) > 1000
+
+
 # =====================================================================
 # 3. Report Compiler Logic Tests
 # =====================================================================
@@ -250,10 +374,34 @@ async def test_compile_bandwidth_report_data():
         ("10.0.0.10", "1.1.1.1", 53, 17, ep_id, 5000000),
     ]
 
+    # 4. QoS / DSCP Breakdown (tos, total_bytes, total_packets, flow_count)
+    mock_res_qos = MagicMock()
+    mock_res_qos.all.return_value = [
+        (184, 10000000, 8000, 50),  # ToS 184 -> DSCP 46 (EF VoIP)
+        (0, 40000000, 30000, 200),  # ToS 0 -> DSCP 0 (Best Effort CS0)
+    ]
+
+    # 5. Anomaly Query (protocol, tcp_flags, flow_count, total_bytes)
+    mock_res_anomalies = MagicMock()
+    mock_res_anomalies.all.return_value = [
+        (6, 2, 15, 750),  # SYN ONLY
+        (6, 4, 8, 400),   # TCP RST
+    ]
+
+    # 6. Traffic Zones Query (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
+    mock_res_zones = MagicMock()
+    mock_res_zones.all.return_value = [
+        ("10.0.0.10", "10.0.0.20", ep_id, ep_id, 30000000, 150),
+        ("10.0.0.10", "8.8.8.8", ep_id, None, 20000000, 100),
+    ]
+
     mock_db.execute.side_effect = [
         mock_res_ep,
         mock_res_ifs,
         mock_res_convs,
+        mock_res_qos,
+        mock_res_anomalies,
+        mock_res_zones,
     ]
 
     start_dt = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -272,6 +420,22 @@ async def test_compile_bandwidth_report_data():
     assert data["interfaces"][0]["formatted_speed"] == "1 Gbps"
     assert len(data["conversations"]) == 1
     assert data["conversations"][0]["port_label"] == "53 / DNS"
+
+    # Verify enriched flow analytics
+    assert "qos_classes" in data
+    assert len(data["qos_classes"]) == 2
+    assert any(q["dscp"] == 46 for q in data["qos_classes"])
+
+    assert "anomalies" in data
+    assert data["anomalies"]["total_count"] == 23
+    assert data["anomalies"]["syn_scan_count"] == 15
+    assert data["anomalies"]["rst_burst_count"] == 8
+    assert data["anomalies"]["has_anomalies"] is True
+
+    assert "traffic_zones" in data
+    assert len(data["traffic_zones"]) == 4
+    east_west = next(z for z in data["traffic_zones"] if "East-West" in z["zone"])
+    assert east_west["total_bytes"] == 30000000
 
 
 @pytest.mark.anyio

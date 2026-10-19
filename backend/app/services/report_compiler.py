@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,7 @@ from app.models.flow_rollup import FlowHourlyRollup, FlowInterfaceMinuteRollup, 
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
+from app.schemas.bandwidth import format_dscp_label
 from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
@@ -468,10 +470,215 @@ async def compile_bandwidth_report_data(
             "pct_of_transit": pct,
         })
 
+    # 3. Fleet-Wide DSCP QoS Distribution
+    qos_stmt = (
+        select(
+            FlowMinuteRollup.tos,
+            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
+            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
+        )
+        .where(
+            FlowMinuteRollup.exporter_id.in_(exporter_ids),
+            FlowMinuteRollup.bucket >= start_dt,
+            FlowMinuteRollup.bucket <= end_dt,
+        )
+        .group_by(FlowMinuteRollup.tos)
+    )
+    qos_rows = []
+    try:
+        qos_res = await db.execute(qos_stmt)
+        raw_qos = qos_res.all() if qos_res else []
+        dscp_buckets: Dict[int, Dict[str, Any]] = {}
+        total_qos_bytes = 0
+        for q_row in raw_qos:
+            if len(q_row) < 2:
+                continue
+            tos_val = int(q_row[0] or 0)
+            q_bytes = int(q_row[1] or 0)
+            q_pkts = int(q_row[2] or 0) if len(q_row) > 2 else 0
+            q_flows = int(q_row[3] or 0) if len(q_row) > 3 else 0
+            dscp_val = (tos_val & 0xFF) >> 2
+            total_qos_bytes += q_bytes
+            if dscp_val not in dscp_buckets:
+                dscp_buckets[dscp_val] = {
+                    "dscp": dscp_val,
+                    "dscp_label": format_dscp_label(tos_val),
+                    "total_bytes": 0,
+                    "total_packets": 0,
+                    "flow_count": 0,
+                }
+            dscp_buckets[dscp_val]["total_bytes"] += q_bytes
+            dscp_buckets[dscp_val]["total_packets"] += q_pkts
+            dscp_buckets[dscp_val]["flow_count"] += q_flows
+
+        sorted_dscp = sorted(dscp_buckets.values(), key=lambda x: x["total_bytes"], reverse=True)
+        for item in sorted_dscp:
+            pct = (item["total_bytes"] / total_qos_bytes * 100.0) if total_qos_bytes > 0 else 0.0
+            qos_rows.append({
+                "dscp": item["dscp"],
+                "dscp_label": item["dscp_label"],
+                "total_bytes": item["total_bytes"],
+                "formatted_bytes": format_bytes(item["total_bytes"]),
+                "total_packets": item["total_packets"],
+                "formatted_packets": f"{item['total_packets']:,}",
+                "flow_count": item["flow_count"],
+                "formatted_flows": f"{item['flow_count']:,}",
+                "percentage": pct,
+            })
+    except Exception as exc:
+        logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
+
+    # 4. Security Anomaly Telemetry (TCP SYN scans & RST bursts)
+    anomaly_stmt = (
+        select(
+            FlowMinuteRollup.protocol,
+            FlowMinuteRollup.tcp_flags,
+            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
+            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
+        )
+        .where(
+            FlowMinuteRollup.exporter_id.in_(exporter_ids),
+            FlowMinuteRollup.bucket >= start_dt,
+            FlowMinuteRollup.bucket <= end_dt,
+            FlowMinuteRollup.protocol == 6,
+        )
+        .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
+    )
+    syn_scan_count = 0
+    syn_scan_bytes = 0
+    rst_burst_count = 0
+    rst_burst_bytes = 0
+    try:
+        anomaly_res = await db.execute(anomaly_stmt)
+        raw_anomalies = anomaly_res.all() if anomaly_res else []
+        for a_row in raw_anomalies:
+            if len(a_row) < 3:
+                continue
+            flags = int(a_row[1] or 0)
+            cnt = int(a_row[2] or 0)
+            b_val = int(a_row[3] or 0) if len(a_row) > 3 else 0
+
+            # SYN ONLY: SYN set (0x02) and not ACK (0x10)
+            if (flags & 0x02) and not (flags & 0x10):
+                syn_scan_count += cnt
+                syn_scan_bytes += b_val
+            # TCP RST: RST set (0x04) and not FIN (0x01)
+            elif (flags & 0x04) and not (flags & 0x01):
+                rst_burst_count += cnt
+                rst_burst_bytes += b_val
+    except Exception as exc:
+        logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
+
+    total_anomaly_count = syn_scan_count + rst_burst_count
+    anomaly_summary = {
+        "total_count": total_anomaly_count,
+        "syn_scan_count": syn_scan_count,
+        "syn_scan_bytes": format_bytes(syn_scan_bytes),
+        "rst_burst_count": rst_burst_count,
+        "rst_burst_bytes": format_bytes(rst_burst_bytes),
+        "has_anomalies": total_anomaly_count > 0,
+    }
+
+    # 5. Traffic Zone Breakdown (East-West vs North-South)
+    zone_stmt = (
+        select(
+            FlowMinuteRollup.src_ip,
+            FlowMinuteRollup.dst_ip,
+            FlowMinuteRollup.src_endpoint_id,
+            FlowMinuteRollup.dst_endpoint_id,
+            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
+        )
+        .where(
+            FlowMinuteRollup.exporter_id.in_(exporter_ids),
+            FlowMinuteRollup.bucket >= start_dt,
+            FlowMinuteRollup.bucket <= end_dt,
+        )
+        .group_by(
+            FlowMinuteRollup.src_ip,
+            FlowMinuteRollup.dst_ip,
+            FlowMinuteRollup.src_endpoint_id,
+            FlowMinuteRollup.dst_endpoint_id,
+        )
+    )
+    zone_sums = {
+        "East-West (Internal)": {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
+        "North-South Egress": {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
+        "North-South Ingress": {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
+        "External / Transit": {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
+    }
+
+    def _is_internal(ip_val: str, ep_val: Optional[Any]) -> bool:
+        if ep_val is not None:
+            return True
+        try:
+            return ipaddress.ip_address(ip_val).is_private
+        except Exception:
+            return False
+
+    zone_rows = []
+    try:
+        zone_res = await db.execute(zone_stmt)
+        raw_zones = zone_res.all() if zone_res else []
+        total_zone_bytes = 0
+        for z_row in raw_zones:
+            if len(z_row) < 5:
+                continue
+            s_ip = str(z_row[0] or "")
+            d_ip = str(z_row[1] or "")
+            s_ep = z_row[2]
+            d_ep = z_row[3]
+            z_b = int(z_row[4] or 0)
+            z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
+
+            src_int = _is_internal(s_ip, s_ep)
+            dst_int = _is_internal(d_ip, d_ep)
+
+            if src_int and dst_int:
+                z_key = "East-West (Internal)"
+            elif src_int and not dst_int:
+                z_key = "North-South Egress"
+            elif not src_int and dst_int:
+                z_key = "North-South Ingress"
+            else:
+                z_key = "External / Transit"
+
+            zone_sums[z_key]["bytes"] += z_b
+            zone_sums[z_key]["flows"] += z_f
+            total_zone_bytes += z_b
+
+        for z_name, z_data in zone_sums.items():
+            pct = (z_data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0
+            zone_rows.append({
+                "zone": z_name,
+                "description": z_data["desc"],
+                "total_bytes": z_data["bytes"],
+                "formatted_bytes": format_bytes(z_data["bytes"]),
+                "flow_count": z_data["flows"],
+                "formatted_flows": f"{z_data['flows']:,}",
+                "percentage": pct,
+            })
+    except Exception as exc:
+        logger.debug("Failed or skipped Zone rollup in report compiler: %s", exc)
+        for z_name, z_data in zone_sums.items():
+            zone_rows.append({
+                "zone": z_name,
+                "description": z_data["desc"],
+                "total_bytes": 0,
+                "formatted_bytes": "0 B",
+                "flow_count": 0,
+                "formatted_flows": "0",
+                "percentage": 0.0,
+            })
+
     return {
         "exporters": exporter_rows,
         "interfaces": interface_rows,
         "conversations": conversation_rows,
+        "qos_classes": qos_rows,
+        "anomalies": anomaly_summary,
+        "traffic_zones": zone_rows,
     }
 
 
@@ -495,4 +702,7 @@ async def compile_master_report_data(
         "exporters": bandwidth_data["exporters"],
         "interfaces": bandwidth_data["interfaces"],
         "conversations": bandwidth_data["conversations"],
+        "qos_classes": bandwidth_data.get("qos_classes", []),
+        "anomalies": bandwidth_data.get("anomalies", {}),
+        "traffic_zones": bandwidth_data.get("traffic_zones", []),
     }

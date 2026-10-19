@@ -171,9 +171,106 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 6pt; text-align: center; color: #64748b; font-size: 7.5pt;">
+<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 6pt; text-align: center; color: #64748b; font-size: 7.5pt; margin-bottom: 10pt;">
   No forensic conversations recorded for this timeframe.
 </div>
 {% endif %}
+
+<!-- Section 5: Traffic Engineering, QoS & Threat Telemetry -->
+<div class="section-title-row font-display">
+  <div class="section-title" style="color: #0369a1;">5. Traffic Engineering, DiffServ QoS & Security Telemetry</div>
+</div>
+
+{% if qos_classes and qos_classes|length > 0 %}
+<table>
+  <thead>
+    <tr>
+      <th>DSCP Class</th>
+      <th>Service Designation</th>
+      <th class="text-right">Volume</th>
+      <th class="text-right">Packets</th>
+      <th class="text-right">Flows</th>
+      <th class="text-right">% Share</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for qos in qos_classes %}
+    <tr>
+      <td class="font-mono" style="font-weight: 700;">DSCP {{ qos.dscp }}</td>
+      <td>{{ qos.dscp_label }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ qos.formatted_bytes }}</td>
+      <td class="text-right font-mono tnum">{{ qos.formatted_packets }}</td>
+      <td class="text-right font-mono tnum">{{ qos.formatted_flows }}</td>
+      <td class="text-right font-mono tnum" style="color: #7c3aed; font-weight: 700;">{{ "%.1f"|format(qos.percentage) }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if traffic_zones and traffic_zones|length > 0 %}
+<table>
+  <thead>
+    <tr>
+      <th>Traffic Zone</th>
+      <th>Routing Topology</th>
+      <th class="text-right">Volume</th>
+      <th class="text-right">Observed Flows</th>
+      <th class="text-right">% Share</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for z in traffic_zones %}
+    <tr>
+      <td style="font-weight: 700;">{{ z.zone }}</td>
+      <td class="font-mono text-muted">{{ z.description }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ z.formatted_bytes }}</td>
+      <td class="text-right font-mono tnum">{{ z.formatted_flows }}</td>
+      <td class="text-right font-mono tnum" style="color: #2563eb; font-weight: 700;">{{ "%.1f"|format(z.percentage) }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Security Telemetry Vector</th>
+      <th>Detection Mechanism</th>
+      <th class="text-center">Incident Bursts</th>
+      <th class="text-right">Observed Volume</th>
+      <th class="text-center">Threat Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="font-weight: 700;">TCP SYN Scans / Probes</td>
+      <td class="font-mono text-muted">SYN flag set without ACK (Half-Open Port Scan)</td>
+      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.syn_scan_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.syn_scan_bytes if anomalies else '0 B' }}</td>
+      <td class="text-center">
+        {% if anomalies and anomalies.syn_scan_count > 0 %}
+          <span class="pill pill-down">SUSPICIOUS PROBE</span>
+        {% else %}
+          <span class="pill pill-up">CLEAR</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td style="font-weight: 700;">TCP Connection Resets (RST)</td>
+      <td class="font-mono text-muted">RST flag set without FIN (Refused / Aborted)</td>
+      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.rst_burst_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.rst_burst_bytes if anomalies else '0 B' }}</td>
+      <td class="text-center">
+        {% if anomalies and anomalies.rst_burst_count > 0 %}
+          <span class="pill pill-unstable">RESET BURSTS</span>
+        {% else %}
+          <span class="pill pill-up">CLEAR</span>
+        {% endif %}
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 {% endblock %}

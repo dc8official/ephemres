@@ -499,9 +499,31 @@
 
           <!-- Flow Bandwidth Chart -->
           <div v-if="flowSubView === 'bandwidth'" class="table-card p-4">
-            <div class="section-header">
-              <span class="font-bold text-base">Node Flow Bandwidth ({{ flowMode === 'exporter' ? 'Exported Transit' : 'Participant Traffic' }})</span>
-              <span class="badge-window tnum">{{ flowWindow }} Window</span>
+            <div class="section-header section-header-split">
+              <div>
+                <span class="font-bold text-base">Node Flow Bandwidth ({{ flowMode === 'exporter' ? 'Exported Transit' : 'Participant Traffic' }})</span>
+                <span class="badge-window tnum ml-2">{{ flowWindow }} Window</span>
+              </div>
+              <div class="header-controls">
+                <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
+                  <button
+                    class="btn-pill btn-pill-sm"
+                    :class="{ active: nodeChartMetricMode === 'bps' }"
+                    @click="nodeChartMetricMode = 'bps'"
+                    title="Throughput in bits per second"
+                  >
+                    Throughput (bps)
+                  </button>
+                  <button
+                    class="btn-pill btn-pill-sm"
+                    :class="{ active: nodeChartMetricMode === 'pps' }"
+                    @click="nodeChartMetricMode = 'pps'"
+                    title="Packet rate in packets per second"
+                  >
+                    Packet Rate (pps)
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="flow-chart-box">
               <LineChart
@@ -562,31 +584,87 @@
           <div class="table-card">
             <div class="section-header p-4">
               <span class="font-bold text-base">Forensic Node Conversations</span>
-              <span class="text-muted text-xs">Granular 1-minute rollup pairs</span>
+              <span class="text-muted text-xs">Granular 1-minute rollup pairs with packet physics &amp; threat telemetry</span>
             </div>
             <div class="table-responsive">
-              <table class="dense-table">
+              <table class="dense-table" aria-label="Forensic Node Conversations Table">
                 <thead>
                   <tr>
-                    <th>Source IP</th>
-                    <th>Destination IP</th>
+                    <th>Source Host / IP</th>
+                    <th>Destination Host / IP</th>
                     <th>Protocol</th>
-                    <th>Port</th>
+                    <th>Service Port</th>
+                    <th>Packet Physics &amp; Profile</th>
+                    <th>Flags &amp; QoS</th>
                     <th class="text-right">Volume</th>
-                    <th class="text-right">Flows</th>
+                    <th class="text-right">Burst Count</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="(fc, idx) in nodeConversations" :key="idx">
-                    <td class="tnum font-mono">{{ fc.src_ip }}</td>
-                    <td class="tnum font-mono">{{ fc.dst_ip }}</td>
+                    <td>
+                      <span class="tnum font-mono">{{ fc.src_ip }}</span>
+                      <span v-if="fc.src_hostname" class="text-muted text-xs block">({{ fc.src_hostname }})</span>
+                    </td>
+                    <td>
+                      <span class="tnum font-mono">{{ fc.dst_ip }}</span>
+                      <span v-if="fc.dst_hostname" class="text-muted text-xs block">({{ fc.dst_hostname }})</span>
+                    </td>
                     <td><span class="status-pill status-unknown">{{ fc.protocol }}</span></td>
-                    <td class="tnum font-mono">{{ fc.dst_port }}</td>
+                    <td>
+                      <span class="service-port-badge" :class="getPortBadgeClass(fc.dst_port)">
+                        {{ formatPortLabel(fc.dst_port, fc.protocol) }}
+                      </span>
+                    </td>
+                    <td>
+                      <div class="physics-profile-cell">
+                        <span class="badge-profile" :class="getTrafficProfileBadgeClass(fc.traffic_profile)">
+                          {{ fc.traffic_profile || 'Interactive' }}
+                        </span>
+                        <div class="packet-physics-meta text-xs text-muted tnum font-mono">
+                          <span>{{ fc.avg_packet_size || 0 }} B/pkt</span> · 
+                          <span>{{ fc.packets_per_flow || 0 }} pkts/fl</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div class="metadata-badge-group">
+                        <span
+                          v-if="fc.protocol === 'TCP' && fc.tcp_flags_labels && fc.tcp_flags_labels.length > 0"
+                          class="badge-tcp-flags font-mono"
+                          :title="`TCP Flags: ${fc.tcp_flags_labels.join(', ')} (0x${(fc.tcp_flags || 0).toString(16).padStart(2, '0')})`"
+                        >
+                          {{ fc.tcp_flags_labels.join(' ') }}
+                        </span>
+                        <span
+                          v-if="fc.anomaly_hint === 'SYN_ONLY'"
+                          class="badge-anomaly badge-syn-only"
+                          title="Anomaly: SYN-only packets observed without ACK (potential port scan)"
+                        >
+                          SYN ONLY
+                        </span>
+                        <span
+                          v-else-if="fc.anomaly_hint === 'TCP_RST'"
+                          class="badge-anomaly badge-tcp-rst"
+                          title="Anomaly: Connection reset (RST) observed"
+                        >
+                          RST
+                        </span>
+                        <span
+                          v-if="fc.dscp > 0"
+                          class="badge-dscp"
+                          :class="{ 'badge-dscp-ef': fc.dscp === 46, 'badge-dscp-af': fc.dscp_label && fc.dscp_label.includes('AF') }"
+                          :title="`ToS: 0x${(fc.tos || 0).toString(16).padStart(2, '0')} · DSCP: ${fc.dscp} (${fc.dscp_label})`"
+                        >
+                          {{ fc.dscp_label }}
+                        </span>
+                      </div>
+                    </td>
                     <td class="text-right tnum font-bold">{{ formatBytes(fc.total_bytes) }}</td>
-                    <td class="text-right tnum text-muted">{{ fc.flow_count }}</td>
+                    <td class="text-right tnum text-muted">{{ formatNumber(fc.flow_count) }}</td>
                   </tr>
                   <tr v-if="nodeConversations.length === 0">
-                    <td colspan="6" class="text-center text-muted p-4">No active conversations found for this node.</td>
+                    <td colspan="8" class="text-center text-muted p-4">No active conversations found for this node in the selected {{ flowWindow }} window.</td>
                   </tr>
                 </tbody>
               </table>
@@ -849,6 +927,7 @@ const flowWindow = ref('1h')
 const loadingFlow = ref(false)
 const flowSeriesPoints = shallowRef([])
 const nodeConversations = shallowRef([])
+const nodeChartMetricMode = ref('bps')
 
 const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
@@ -868,23 +947,33 @@ async function loadFlowTelemetry() {
   loadingFlow.value = true
   try {
     const epId = endpoint.value.id
+    const isExporter = flowMode.value === 'exporter' || endpoint.value.device_role === 'FLOW_EXPORTER'
     const res = await getTrafficSeries(
       flowWindow.value,
-      flowMode.value === 'exporter' ? epId : null,
-      flowMode.value === 'participant' ? epId : null,
+      isExporter ? epId : null,
+      !isExporter ? epId : null,
       selectedCorrelatedInterfaceIdx.value
     )
     if (res.data?.data?.points) {
       flowSeriesPoints.value = res.data.data.points
     }
-    const talkersRes = await getTopTalkers(flowWindow.value, 20, epId)
+    const talkersRes = await getTopTalkers(
+      flowWindow.value,
+      50,
+      !isExporter ? epId : null,
+      isExporter ? epId : null
+    )
     if (talkersRes.data?.data?.top_conversations) {
       const epIp = String(endpoint.value.ip_address).split('/')[0].trim()
-      nodeConversations.value = talkersRes.data.data.top_conversations.filter(
-        (c) => c.src_ip === epIp || c.dst_ip === epIp
-      )
+      if (isExporter) {
+        nodeConversations.value = talkersRes.data.data.top_conversations
+      } else {
+        nodeConversations.value = talkersRes.data.data.top_conversations.filter(
+          (c) => c.src_ip === epIp || c.dst_ip === epIp || !c.src_ip
+        )
+      }
     }
-    if (flowMode.value === 'exporter' || endpoint.value.device_role === 'FLOW_EXPORTER') {
+    if (isExporter) {
       try {
         const ifRes = await getInterfaceTelemetry(epId, flowWindow.value)
         if (ifRes.data?.data?.interfaces) {
@@ -906,6 +995,32 @@ const flowChartData = computed(() => {
     const d = new Date(p.timestamp)
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   })
+
+  if (nodeChartMetricMode.value === 'pps') {
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'Ingress (pps)',
+          data: flowSeriesPoints.value.map((p) => p.ingress_pps || 0),
+          borderColor: '#10b981',
+          backgroundColor: 'rgba(16, 185, 129, 0.25)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'Egress (pps)',
+          data: flowSeriesPoints.value.map((p) => p.egress_pps || 0),
+          borderColor: '#0ea5e9',
+          backgroundColor: 'rgba(14, 165, 233, 0.25)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+        },
+      ],
+    }
+  }
 
   return {
     labels,
@@ -932,7 +1047,7 @@ const flowChartData = computed(() => {
   }
 })
 
-const flowChartOptions = {
+const flowChartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   animation: false,
@@ -945,17 +1060,73 @@ const flowChartOptions = {
         color: '#888',
         font: { family: 'JetBrains Mono', size: 11 },
         callback: (val) => {
-          if (!val || val <= 0) return '0 bps'
-          if (val >= 1e6) return `${(val / 1e6).toFixed(1)} Mbps`
-          if (val >= 1e3) return `${(val / 1e3).toFixed(0)} kbps`
-          return `${Math.round(val)} bps`
+          if (!val || val <= 0) return nodeChartMetricMode.value === 'pps' ? '0 pps' : '0 bps'
+          if (nodeChartMetricMode.value === 'pps') return formatPps(val)
+          return formatBps(val)
         },
       },
     },
   },
   plugins: {
     legend: { position: 'top', labels: { color: '#888', font: { size: 11 } } },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => {
+          if (nodeChartMetricMode.value === 'pps') {
+            return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
+          }
+          return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
+        },
+      },
+    },
   },
+}))
+
+function formatPps(pps) {
+  if (!pps || pps <= 0) return '0 pps'
+  if (pps >= 1e6) return `${(pps / 1e6).toFixed(2)} Mpps`
+  if (pps >= 1e3) return `${(pps / 1e3).toFixed(1)} kpps`
+  return `${Math.round(pps)} pps`
+}
+
+function formatNumber(num) {
+  if (!num) return '0'
+  return new Intl.NumberFormat().format(num)
+}
+
+function formatPortLabel(port, proto) {
+  const p = Number(port)
+  switch (p) {
+    case 443: return '443 / HTTPS'
+    case 80: return '80 / HTTP'
+    case 53: return '53 / DNS'
+    case 22: return '22 / SSH'
+    case 123: return '123 / NTP'
+    case 161: return '161 / SNMP'
+    case 2055: return '2055 / NetFlow'
+    case 4739: return '4739 / IPFIX'
+    default: return `${port}`
+  }
+}
+
+function getPortBadgeClass(port) {
+  const p = Number(port)
+  if (p === 443 || p === 80) return 'port-web'
+  if (p === 53) return 'port-dns'
+  if (p === 22) return 'port-ssh'
+  if (p === 2055 || p === 4739) return 'port-telemetry'
+  return 'port-generic'
+}
+
+function getTrafficProfileBadgeClass(profile) {
+  switch (profile) {
+    case 'Bulk Transfer': return 'badge-profile-bulk'
+    case 'SYN Scan / Probe': return 'badge-profile-syn'
+    case 'Reset / Refused': return 'badge-profile-rst'
+    case 'Micro-Flow / Control': return 'badge-profile-micro'
+    case 'Real-Time / VoIP': return 'badge-profile-voip'
+    default: return 'badge-profile-interactive'
+  }
 }
 
 function formatBytes(bytes) {
@@ -2741,5 +2912,224 @@ h2 {
   background: var(--bg-surface-selected);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
+}
+
+/* Section header split */
+.section-header-split {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Metric Mode Switcher Pills */
+.metric-mode-pills {
+  display: flex;
+  background: var(--bg-surface-selected);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+  gap: 2px;
+}
+
+.btn-pill {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-pill:hover {
+  color: var(--text-primary);
+}
+
+.btn-pill.active {
+  background: var(--bg-surface, #ffffff);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+html.dark .btn-pill.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.btn-pill-sm {
+  padding: 2px 8px;
+  font-size: 0.7rem;
+}
+
+/* Service Port Badges */
+.service-port-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+.port-web {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.port-dns {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.port-ssh {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.port-telemetry {
+  background: rgba(139, 92, 246, 0.12);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.port-generic {
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+/* Physics & Profiles */
+.physics-profile-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.badge-profile {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  width: fit-content;
+}
+
+.badge-profile-bulk {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.badge-profile-syn {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-profile-rst {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-profile-micro {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+
+.badge-profile-voip {
+  background: rgba(6, 182, 212, 0.15);
+  color: #06b6d4;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+}
+
+.badge-profile-interactive {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.packet-physics-meta {
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+/* Forensic L3/L4 Telemetry & Anomaly Badges */
+.metadata-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge-tcp-flags {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.badge-anomaly {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.badge-syn-only {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-tcp-rst {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-dscp {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  background: rgba(139, 92, 246, 0.12);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.badge-dscp-ef {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+  font-weight: 700;
+}
+
+.badge-dscp-af {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  border-color: rgba(59, 130, 246, 0.4);
 }
 </style>
