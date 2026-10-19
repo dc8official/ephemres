@@ -330,3 +330,30 @@ def test_bandwidth_overview_unmatched_zset_and_fallback(mock_get_store, client):
     mock_store_fallback.scard.assert_awaited_with("flow:unmatched:set")
 
 
+def test_bandwidth_map_exporter_with_cidr_suffix(client):
+    """Verify map_flow_exporter successfully accepts an exporter IP containing a CIDR netmask (/32)."""
+    test_client, mock_session = client
+
+    target_id = uuid4()
+    mock_endpoint = MagicMock()
+    mock_endpoint.id = target_id
+    mock_endpoint.hostname = "edge-core-01"
+    mock_endpoint.ip_address = "192.168.1.1"
+    mock_endpoint.flow_exporter_ips = ["10.10.10.1"]
+
+    mock_scalar = MagicMock()
+    mock_scalar.scalar_one_or_none.return_value = mock_endpoint
+    mock_session.execute.return_value = mock_scalar
+
+    payload = {"endpoint_id": str(target_id)}
+    # Pass 172.16.200.1/32
+    resp = test_client.post("/api/v1/bandwidth/exporters/172.16.200.1%2F32/map", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert "Successfully mapped exporter IP" in data["data"]["message"]
+    assert "172.16.200.1" in mock_endpoint.flow_exporter_ips
+    assert mock_session.commit.awaited
+
+
+

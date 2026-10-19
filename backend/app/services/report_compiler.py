@@ -624,7 +624,9 @@ async def compile_bandwidth_report_data(
         if ep_val is not None:
             return True
         try:
-            clean_ip = str(ip_val).split("/")[0].strip()
+            clean_ip = str(ip_val or "").split("/")[0].strip()
+            if not clean_ip:
+                return False
             return ipaddress.ip_address(clean_ip).is_private
         except Exception:
             return False

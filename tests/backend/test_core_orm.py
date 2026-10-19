@@ -502,3 +502,9 @@ def test_select_subquery_in_expression_compilation():
     neg_sql = neg_expr.compile()
     assert neg_sql == '"endpoints"."id" NOT IN (SELECT "flow_minute_rollups"."exporter_id" FROM "flow_minute_rollups")'
 
+    sub_expr = Endpoint.id.in_(select(FlowMinuteRollup.exporter_id).subquery("recent_exporters"))
+    assert sub_expr.compile() == '"endpoints"."id" IN (SELECT "flow_minute_rollups"."exporter_id" FROM "flow_minute_rollups")'
+
+    scalar_expr = Endpoint.id.in_(select(FlowMinuteRollup.exporter_id).scalar_subquery())
+    assert scalar_expr.compile() == '"endpoints"."id" IN (SELECT "flow_minute_rollups"."exporter_id" FROM "flow_minute_rollups")'
+

@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote
 from uuid import UUID
 
 from app.core.asgi import APIRouter, Depends, HTTPException, Query, status
@@ -916,7 +917,9 @@ async def get_applications_breakdown(
             if ep_val is not None:
                 return True
             try:
-                clean_ip = str(ip_val).split("/")[0].strip()
+                clean_ip = str(ip_val or "").split("/")[0].strip()
+                if not clean_ip:
+                    return False
                 return ipaddress.ip_address(clean_ip).is_private
             except Exception:
                 return False
@@ -1143,7 +1146,7 @@ async def enroll_flow_exporter(
     Admin-protected 1-click enrollment for discovered NetFlow/IPFIX exporters.
     Creates an endpoint with device_role='FLOW_EXPORTER' and monitoring_enabled=False.
     """
-    clean_ip = payload.ip_address.strip()
+    clean_ip = payload.ip_address.strip().split("/")[0].strip()
     try:
         ipaddress.ip_address(clean_ip)
     except ValueError:
@@ -1222,7 +1225,7 @@ async def map_unmatched_exporter(
     """
     One-click binds an unmatched exporter IP to an existing endpoint's flow_exporter_ips.
     """
-    clean_ip = ip.strip()
+    clean_ip = unquote(ip).strip().split("/")[0].strip()
     try:
         ipaddress.ip_address(clean_ip)
     except ValueError:

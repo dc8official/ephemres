@@ -578,7 +578,7 @@ class InExpression(SQLElement):
         e_sql = compile_operand(self.expr, ctx)
         col_type = getattr(self.expr, "type", None)
 
-        if isinstance(self.target, (Select, Subquery)):
+        if isinstance(self.target, (Select, Subquery, ScalarSubquery)):
             if hasattr(self.target, "compile_subquery_sql"):
                 sub_sql = self.target.compile_subquery_sql(ctx)
             elif isinstance(self.target, Select):
@@ -826,6 +826,9 @@ class ScalarSubquery(SQLElement):
         ctx = ctx or CompileContext()
         sql = self.select_stmt.compile_core(ctx)
         return f"({sql})"
+
+    def compile_subquery_sql(self, ctx: CompileContext) -> str:
+        return self.select_stmt.compile_core(ctx)
 
 
 class CTE(SQLElement):

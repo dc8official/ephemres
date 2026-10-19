@@ -1011,9 +1011,11 @@ async function loadFlowTelemetry() {
       if (isExporter) {
         nodeConversations.value = talkersRes.data.data.top_conversations
       } else {
-        nodeConversations.value = talkersRes.data.data.top_conversations.filter(
-          (c) => c.src_ip === epIp || c.dst_ip === epIp || !c.src_ip
-        )
+        nodeConversations.value = talkersRes.data.data.top_conversations.filter((c) => {
+          const s = String(c.src_ip || '').split('/')[0].trim()
+          const d = String(c.dst_ip || '').split('/')[0].trim()
+          return s === epIp || d === epIp || !c.src_ip
+        })
       }
     }
     if (isExporter) {
