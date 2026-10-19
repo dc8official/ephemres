@@ -937,9 +937,16 @@ const isDarkMode = ref(true)
 const activePerspective = ref('icmp')
 const flowMode = ref('exporter')
 const flowWindow = ref('1h')
+// Flow Telemetry & Conversation Forensics State:
+// Stores time-series points, peer conversations, and triage filter query for this endpoint.
 const loadingFlow = ref(false)
 const flowSeriesPoints = shallowRef([])
 const nodeConversations = shallowRef([])
+
+// Real-time live triage search filter:
+// Matches across remote IPs, hostnames, destination ports, protocols,
+// packet physics profiles ('Bulk Transfer', 'Real-Time / VoIP', 'Micro-Flow'),
+// DiffServ DSCP labels ('EF (VoIP)', 'AF41 (Video)'), and security anomalies ('SYN ONLY', 'RST').
 const nodeConversationFilter = ref('')
 const filteredNodeConversations = computed(() => {
   const q = nodeConversationFilter.value.trim().toLowerCase()
@@ -959,6 +966,10 @@ const filteredNodeConversations = computed(() => {
     )
   })
 })
+
+// Metric mode toggle for endpoint bandwidth chart:
+// - 'bps': Standard bandwidth throughput (bits/sec).
+// - 'pps': Packet rate (packets/sec) for detecting packet flooding or bursty micro-bursts.
 const nodeChartMetricMode = ref('bps')
 
 const interfaceTelemetry = shallowRef([])

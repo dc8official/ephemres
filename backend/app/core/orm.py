@@ -1098,11 +1098,26 @@ class PostgreSQLDDLCompiler:
             sd = col.server_default
             sd_sql = sd.text_str if isinstance(sd, TextClause) else (sd.compile() if isinstance(sd, SQLElement) else str(sd))
             sd_clean = sd_sql.strip()
-            # Quote unquoted string literals to prevent PostgreSQL from treating them as column references
+
+            # PostgreSQL Syntax Protection:
+            # In PostgreSQL DDL, an unquoted identifier in DEFAULT (e.g., DEFAULT FLOW_EXPORTER)
+            # is parsed by the PostgreSQL query planner as a column reference rather than a string literal,
+            # triggering: "ERROR: cannot use column reference in DEFAULT expression".
+            # We detect unquoted alphanumeric string literals and wrap them in single quotes, while exempting:
+            # - Already single- or double-quoted literals ('...' or "...")
+            # - SQL boolean and null literals (TRUE, FALSE, NULL)
+            # - Standard parameterless SQL temporal/session functions (CURRENT_TIMESTAMP, CURRENT_DATE, etc.)
+            # - Function calls and cast expressions containing '(' or '::'
+            # - Numeric constants (integers and floats)
+            sql_keywords = (
+                "true", "false", "null",
+                "current_timestamp", "current_date", "current_time",
+                "localtime", "localtimestamp", "current_user", "session_user", "user"
+            )
             if (
                 not (sd_clean.startswith("'") and sd_clean.endswith("'"))
                 and not (sd_clean.startswith('"') and sd_clean.endswith('"'))
-                and sd_clean.lower() not in ("true", "false", "null")
+                and sd_clean.lower() not in sql_keywords
                 and "(" not in sd_clean
                 and "::" not in sd_clean
             ):
@@ -1164,6 +1179,12 @@ class CreateTable:
                 name_clause = f'CONSTRAINT "{c.name}" ' if c.name else ""
                 lines.append(f"    {name_clause}CHECK ({c.sqltext})")
             elif isinstance(c, ForeignKeyConstraint):
+                # Table-level FOREIGN KEY constraint compilation:
+                # Converts SQLAlchemy/native ForeignKeyConstraint specifications into valid PostgreSQL DDL.
+                # In PostgreSQL, table-level foreign keys require:
+                #   FOREIGN KEY ("local_col1", "local_col2") REFERENCES "target_table" ("remote_col1", "remote_col2")
+                # We decompose strings formatted as "target_table.remote_col" or Column objects into
+                # quoted target table and quoted target column identifiers.
                 loc = ", ".join(f'"{col.strip(chr(34))}"' for col in c.columns)
                 target_table = None
                 target_cols = []

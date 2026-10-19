@@ -6,6 +6,11 @@ from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 
 class BandwidthOverview(BaseModel):
+    """Real-time 5-minute snapshot of network flow telemetry across all active exporters.
+
+    Provides fleet-wide ingress/egress bit rates, packet rates (pps), mean packet physics,
+    exporter counts, and detected security anomaly counts (half-open SYN scans or TCP RST bursts).
+    """
     total_ingress_bps: float
     total_egress_bps: float
     active_exporters_count: int
@@ -20,6 +25,11 @@ class BandwidthOverview(BaseModel):
 
 
 class TrafficSeriesPoint(BaseModel):
+    """Single time-bucket interval point for traffic time-series charts.
+
+    Tracks dual-mode throughput: bit rate (bps) for bandwidth capacity planning,
+    and packet rate (pps) + flow rate (flows/sec) for PPS exhaustion and DDoS detection.
+    """
     timestamp: str
     ingress_bps: float
     egress_bps: float
@@ -31,6 +41,7 @@ class TrafficSeriesPoint(BaseModel):
 
 
 class TrafficSeriesResponse(BaseModel):
+    """Time-series query response encapsulating window metadata and data points."""
     window: str
     points: List[TrafficSeriesPoint]
 
@@ -38,6 +49,7 @@ class TrafficSeriesResponse(BaseModel):
 
 
 class TopTalkerItem(BaseModel):
+    """Aggregated volume and packet statistics for an individual network host endpoint."""
     endpoint_id: Optional[UUID] = None
     ip_address: str
     hostname: Optional[str] = None
@@ -51,40 +63,50 @@ class TopTalkerItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# RFC 793 (Transmission Control Protocol) standard 6 control bits + RFC 3168 ECN bits.
+# Used for bitwise decomposition of observed TCP flag bitmasks in NetFlow / IPFIX records.
 TCP_FLAG_MAP: List[Tuple[int, str]] = [
-    (0x01, "FIN"),
-    (0x02, "SYN"),
-    (0x04, "RST"),
-    (0x08, "PSH"),
-    (0x10, "ACK"),
-    (0x20, "URG"),
-    (0x40, "ECE"),
-    (0x80, "CWR"),
+    (0x01, "FIN"),  # Finished: sender has finished sending data
+    (0x02, "SYN"),  # Synchronize sequence numbers (connection initiation)
+    (0x04, "RST"),  # Reset the connection (abrupt termination / port closed)
+    (0x08, "PSH"),  # Push function: push buffered data to receiver application
+    (0x10, "ACK"),  # Acknowledgment field is significant
+    (0x20, "URG"),  # Urgent pointer field is significant
+    (0x40, "ECE"),  # ECN-Echo (RFC 3168): network congestion signaled
+    (0x80, "CWR"),  # Congestion Window Reduced (RFC 3168)
 ]
 
+# RFC 2474 (Differentiated Services Field), RFC 2597 (Assured Forwarding), RFC 3246 (Expedited Forwarding).
+# Maps 6-bit DSCP codepoints (bits 0-5 of IPv4 ToS / IPv6 Traffic Class) to standard human-readable classes.
 DSCP_CLASS_MAP: Dict[int, str] = {
-    0: "Best Effort (CS0)",
-    8: "Scavenger (CS1)",
-    10: "AF11",
-    16: "CS2",
-    18: "AF21",
-    24: "CS3",
-    26: "AF31",
-    32: "CS4",
-    34: "AF41 (Video)",
-    40: "CS5",
-    46: "EF (VoIP)",
-    48: "CS6 (Network Ctrl)",
-    56: "CS7",
+    0: "Best Effort (CS0)",       # Default routing / unclassified traffic
+    8: "Scavenger (CS1)",         # Low-priority background bulk transfers
+    10: "AF11",                   # Assured Forwarding Class 1, low drop precedence
+    16: "CS2",                    # High-throughput data / operations management
+    18: "AF21",                   # Assured Forwarding Class 2, low drop precedence
+    24: "CS3",                    # Call signaling (SIP, H.323)
+    26: "AF31",                   # Assured Forwarding Class 3, low drop precedence
+    32: "CS4",                    # Real-time interactive streaming video
+    34: "AF41 (Video)",           # Assured Forwarding Class 4 (multimedia conferencing)
+    40: "CS5",                    # Broadcast video / critical control
+    46: "EF (VoIP)",              # Expedited Forwarding (RFC 3246): low-loss, low-latency voice
+    48: "CS6 (Network Ctrl)",     # Network Control (BGP, OSPF routing protocol traffic)
+    56: "CS7",                    # Reserved for critical infrastructure management
 }
 
 
 def format_tcp_flags(mask: int) -> List[str]:
+    """Decomposes an 8-bit TCP control bitmask into human-readable flag tokens (RFC 793/3168)."""
     m = mask or 0
     return [name for bit, name in TCP_FLAG_MAP if m & bit]
 
 
 def format_dscp_label(tos: int) -> str:
+    """Extracts the 6-bit DSCP codepoint from the 8-bit IPv4 ToS / IPv6 Traffic Class byte (RFC 2474)
+
+    and maps it to its standard DiffServ class name.
+    Formula: dscp = (tos & 0xFF) >> 2 (the upper 6 bits represent DSCP; lower 2 bits represent ECN).
+    """
     dscp = ((tos or 0) & 0xFF) >> 2
     return DSCP_CLASS_MAP.get(dscp, f"DSCP {dscp}")
 
@@ -96,20 +118,46 @@ def derive_traffic_profile(
     dscp: int,
     dst_port: int,
 ) -> str:
+    """Classifies network conversation traffic profile from observed packet physics and QoS markings.
+
+    Heuristic Precedence:
+    1. Security Anomalies:
+       - Half-open SYN scans or probes (`SYN_ONLY`).
+       - Connection resets or rejected attempts (`TCP_RST`).
+    2. Bulk Transfer:
+       - High MTU frame occupancy (`avg_packet_size >= 1100` bytes) with sustained
+         packet sequence (`packets_per_flow >= 10`). Typical of file transfers, backups, or large downloads.
+    3. Real-Time / VoIP:
+       - RFC 3246 Expedited Forwarding (`dscp == 46` / 0x2E).
+       - Standard SIP / RTP signaling and media ports (5060, 5061, 16384).
+       - Checked BEFORE micro-flow heuristics to ensure small VoIP audio frames (e.g., G.711 / G.729
+         at 60-120 B/pkt) are correctly attributed to voice/telephony rather than generic control traffic.
+    4. Micro-Flow / Control:
+       - Lightweight keepalives, health checks, or handshakes with small payload (`0 < avg_packet_size <= 120`)
+         and low packet count (`0 < packets_per_flow <= 3`).
+       - Strictly requires non-zero physics (`> 0`) to prevent unmeasured or zero-packet flows from false classification.
+    5. Interactive:
+       - Standard client-server transactions, web browsing, REST API requests, or general unclassified flows.
+    """
     if anomaly_hint == "SYN_ONLY":
         return "SYN Scan / Probe"
     elif anomaly_hint == "TCP_RST":
         return "Reset / Refused"
     elif avg_packet_size >= 1100 and packets_per_flow >= 10:
         return "Bulk Transfer"
-    elif avg_packet_size <= 120 and packets_per_flow <= 3:
-        return "Micro-Flow / Control"
     elif dscp == 46 or dst_port in (5060, 5061, 16384):
         return "Real-Time / VoIP"
+    elif 0 < avg_packet_size <= 120 and 0 < packets_per_flow <= 3:
+        return "Micro-Flow / Control"
     return "Interactive"
 
 
 class TopConversationItem(BaseModel):
+    """Enriched conversation item capturing peer communication, packet physics, and QoS/security metadata.
+
+    Includes packet physics (avg_packet_size, packets_per_flow), derived traffic_profile classification,
+    DiffServ DSCP class tagging, and security anomaly detection (SYN_ONLY, TCP_RST).
+    """
     src_ip: str
     dst_ip: str
     src_hostname: Optional[str] = None
@@ -133,6 +181,7 @@ class TopConversationItem(BaseModel):
 
 
 class TopTalkersResponse(BaseModel):
+    """Aggregated endpoint talkers and peer conversations for a selected time window."""
     top_endpoints: List[TopTalkerItem]
     top_conversations: List[TopConversationItem]
 
@@ -140,6 +189,7 @@ class TopTalkersResponse(BaseModel):
 
 
 class ApplicationDistributionItem(BaseModel):
+    """Protocol and destination port share of overall fleet traffic."""
     protocol_name: str
     port: int
     service_label: str
@@ -150,6 +200,7 @@ class ApplicationDistributionItem(BaseModel):
 
 
 class QoSDistributionItem(BaseModel):
+    """Differentiated Services (DiffServ) DSCP class traffic distribution across bytes and packets."""
     dscp: int
     dscp_label: str
     total_bytes: int
@@ -161,6 +212,13 @@ class QoSDistributionItem(BaseModel):
 
 
 class TrafficZoneItem(BaseModel):
+    """Directional traffic categorization based on endpoint topology and RFC 1918 private addressing:
+
+    - East-West (Internal): Lateral communication between two known/private endpoints.
+    - North-South Ingress: Inbound traffic from external sources to internal endpoints.
+    - North-South Egress: Outbound traffic from internal endpoints to external destinations.
+    - External / Transit: Multi-hop external traffic traversing monitored exporters.
+    """
     zone: str
     total_bytes: int
     flow_count: int
@@ -170,6 +228,7 @@ class TrafficZoneItem(BaseModel):
 
 
 class ApplicationDistributionResponse(BaseModel):
+    """Composite distribution response containing service applications, QoS classes, and traffic zones."""
     applications: List[ApplicationDistributionItem]
     qos_classes: List[QoSDistributionItem] = Field(default_factory=list)
     traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)

@@ -470,7 +470,10 @@ async def compile_bandwidth_report_data(
             "pct_of_transit": pct,
         })
 
-    # 3. Fleet-Wide DSCP QoS Distribution
+    # 3. Fleet-Wide DSCP QoS Distribution (RFC 2474 / RFC 3246)
+    # Extracts the 6-bit DiffServ Codepoint (DSCP) from the 8-bit IPv4 ToS / IPv6 Traffic Class
+    # byte via: dscp = (tos & 0xFF) >> 2. Aggregates byte volume, packet volume, and flow counts
+    # across standard QoS traffic classes (Best Effort CS0, Assured Forwarding AF*, Voice EF).
     qos_stmt = (
         select(
             FlowMinuteRollup.tos,
@@ -529,7 +532,10 @@ async def compile_bandwidth_report_data(
     except Exception as exc:
         logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
 
-    # 4. Security Anomaly Telemetry (TCP SYN scans & RST bursts)
+    # 4. Security Anomaly Telemetry (RFC 793 TCP Control Bits Analysis)
+    # Identifies forensic security incidents from flow control flags:
+    # - SYN Scan / Probe: SYN flag (0x02) asserted WITHOUT ACK (0x10), characteristic of half-open port scanning.
+    # - TCP RST Burst: RST flag (0x04) asserted WITHOUT FIN (0x01), characteristic of refused/rejected connections.
     anomaly_stmt = (
         select(
             FlowMinuteRollup.protocol,
@@ -559,11 +565,11 @@ async def compile_bandwidth_report_data(
             cnt = int(a_row[2] or 0)
             b_val = int(a_row[3] or 0) if len(a_row) > 3 else 0
 
-            # SYN ONLY: SYN set (0x02) and not ACK (0x10)
+            # SYN ONLY (0x02 & ~0x10): Half-open connection initiation without completion
             if (flags & 0x02) and not (flags & 0x10):
                 syn_scan_count += cnt
                 syn_scan_bytes += b_val
-            # TCP RST: RST set (0x04) and not FIN (0x01)
+            # TCP RST (0x04 & ~0x01): Connection reset without graceful close
             elif (flags & 0x04) and not (flags & 0x01):
                 rst_burst_count += cnt
                 rst_burst_bytes += b_val
@@ -580,7 +586,12 @@ async def compile_bandwidth_report_data(
         "has_anomalies": total_anomaly_count > 0,
     }
 
-    # 5. Traffic Zone Breakdown (East-West vs North-South)
+    # 5. Traffic Zone Breakdown (East-West vs North-South Perimeter)
+    # Categorizes flows into perimeter boundary crossings versus internal lateral movement:
+    # - East-West: Both source and destination reside within private subnets (RFC 1918) or managed endpoints.
+    # - North-South Ingress: External internet sources entering internal monitored infrastructure.
+    # - North-South Egress: Internal monitored endpoints communicating out to public internet destinations.
+    # - External / Transit: Multi-hop traffic between external peers traversing edge routers.
     zone_stmt = (
         select(
             FlowMinuteRollup.src_ip,

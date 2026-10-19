@@ -1068,6 +1068,10 @@ const overview = ref({
   anomaly_flows_count: 0,
 })
 
+// Throughput Metric Display Modes:
+// - 'bps': Standard capacity planning throughput in bits per second (converted from bytes).
+// - 'pps': Packet rate in packets per second; essential for detecting PPS exhaustion attacks and hardware NIC limits.
+// - 'fps': Flow rate in active flows per second; reflects connection churn and state table stress.
 const chartMetricMode = ref('bps') // 'bps', 'pps', 'fps'
 const analyticsTab = ref('apps') // 'apps', 'qos', 'zones'
 
@@ -1081,14 +1085,16 @@ const applicationStats = shallowRef([])
 const qosClasses = shallowRef([])
 const trafficZones = shallowRef([])
 
-// Interactive Cross-Filtering & Triage State
+// Multi-Dimensional Cross-Filtering & Triage State:
+// Allows operators to click an endpoint IP, service port, or DSCP class badge
+// to dynamically filter the active peer conversation table down to the exact offending flows.
 const selectedIpFilter = ref(null)
 const selectedPortFilter = ref(null)
 const selectedDscpFilter = ref(null)
 const selectedDscpLabel = ref('')
 const conversationQuickFilter = ref('all') // 'all', 'anomalies', 'qos', 'bulk'
 
-// Top conversations search filter (UI-09)
+// Top conversations live triage search filter (UI-09)
 const conversationFilter = ref('')
 
 const anomalyConversationsCount = computed(() => {
@@ -1107,6 +1113,7 @@ const bulkConversationsCount = computed(() => {
   ).length
 })
 
+// Unified conversation filtration pipeline combining cross-filters, quick triage pills, and text search:
 const filteredConversations = computed(() => {
   let list = topConversations.value
 

@@ -138,6 +138,38 @@ def test_bandwidth_applications(client):
     assert app_item["service_label"] == "HTTPS"
 
 
+def test_bandwidth_applications_30d_window_daily_rollup(client):
+    """
+    Verifies that requesting the 30-day window routes cleanly to FlowDailyRollup
+    without raising AttributeError on missing src_endpoint_id / src_ip attributes.
+    """
+    test_client, mock_session = client
+
+    mock_app_row = (6, 443, 85000000)
+    mock_qos_row = (184, 85000000, 75000, 120)  # EF (VoIP)
+    mock_res_apps = MagicMock()
+    mock_res_apps.all.return_value = [mock_app_row]
+    mock_res_qos = MagicMock()
+    mock_res_qos.all.return_value = [mock_qos_row]
+
+    # FlowDailyRollup skips the zone query; executes app query then qos query
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_qos]
+
+    resp = test_client.get("/api/v1/bandwidth/applications?window=30d")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert len(data["data"]["applications"]) == 1
+    assert len(data["data"]["qos_classes"]) == 1
+    assert data["data"]["qos_classes"][0]["dscp_label"] == "EF (VoIP)"
+    # Traffic zones are safely zeroed out without runtime attribute errors
+    assert len(data["data"]["traffic_zones"]) == 4
+    for z in data["data"]["traffic_zones"]:
+        assert z["total_bytes"] == 0
+        assert z["percentage"] == 0.0
+
+
+
 def test_bandwidth_map_exporter(client):
     test_client, mock_session = client
 

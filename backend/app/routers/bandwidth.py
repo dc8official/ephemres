@@ -144,11 +144,14 @@ def _get_window_delta(window: str) -> datetime.timedelta:
 def _select_rollup_model_and_bucket_seconds(
     window: str, endpoint_id: Optional[UUID] = None
 ) -> Tuple[Any, float]:
-    """
-    Selects the optimal hypertable or continuous aggregate model and bucket interval.
-    1h, 6h -> FlowMinuteRollup (60s)
-    24h, 7d -> FlowHourlyRollup (3600s)
-    30d, 1y -> FlowDailyRollup (86400s) or FlowHourlyRollup if endpoint_id filtered
+    """Selects the optimal hypertable or continuous aggregate ORM model and bucket duration (seconds)
+
+    aligned with TimescaleDB continuous aggregate policies:
+    - 1h, 6h: FlowMinuteRollup (60s buckets, full IP/interface/ToS/flag resolution, retained 7 days).
+    - 24h, 7d: FlowHourlyRollup (3600s buckets, endpoint-correlated aggregation, retained 30 days).
+    - 30d, 1y: FlowDailyRollup (86400s buckets, protocol/port compaction, retained 365 days).
+      Note: If endpoint_id filtering is requested for 30d/1y, fall back to FlowHourlyRollup since
+      FlowDailyRollup compresses away individual endpoint keys to optimize disk usage.
     """
     w = window.lower().strip()
     if w in ("1h", "6h"):
@@ -168,8 +171,13 @@ async def get_bandwidth_overview(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Fleet-wide real-time Ingress/Egress bps, active exporter count, and unmatched candidates.
+    """Fleet-wide real-time Ingress/Egress throughput, packet rates, and forensic anomalies.
+
+    Aggregates flow telemetry over the trailing 5-minute rolling window:
+    - Ingress/Egress bit rates (bps): (bytes * 8.0) / 300.0.
+    - Ingress/Egress packet rates (pps): packets / 300.0.
+    - Mean packet physics (avg_packet_size): total_bytes / total_packets.
+    - Security anomalies: TCP SYN scans (half-open probes) and TCP RST bursts (rejected connections).
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     five_min_ago = now - datetime.timedelta(minutes=5)
@@ -740,10 +748,19 @@ async def get_applications_breakdown(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns protocol and service port volume distribution, QoS/DSCP class breakdown,
+    """Returns protocol and service port volume distribution, QoS/DSCP class breakdown,
+
     and directional Traffic Zone breakdown.
-    Dynamically routes to hypertable or continuous aggregates based on window.
+
+    Analytics Pipeline:
+    1. Service Port Breakdown: Top 15 (protocol, dst_port) combinations mapped to standard service names.
+    2. QoS Class Compliance (RFC 2474 / 3246): 6-bit DSCP codepoint extraction from the ToS/Traffic Class
+       byte, grouping byte volume, packet counts, and flow counts across CS0-CS7, AF11-AF41, and EF.
+    3. Directional Traffic Zones:
+       - East-West (Internal): Lateral communication between two monitored/RFC 1918 private endpoints.
+       - North-South Ingress: External internet sources sending traffic to internal cluster endpoints.
+       - North-South Egress: Internal cluster endpoints sending traffic to external destinations.
+       - External / Transit: Monitored router transit flows between unmanaged external peers.
     """
     delta = _get_window_delta(window)
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -905,7 +922,9 @@ async def get_applications_breakdown(
 
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
-    else:
+    elif hasattr(model, "src_endpoint_id"):
+        # Medium-term aggregation tier (FlowHourlyRollup): individual IP addresses are pruned,
+        # but correlated src_endpoint_id and dst_endpoint_id are preserved.
         zone_stmt = (
             select(
                 model.src_endpoint_id,
@@ -928,6 +947,11 @@ async def get_applications_breakdown(
             z_b = int(z_row[2] or 0)
             z_f = int(z_row[3] or 0) if len(z_row) > 3 else 0
 
+            # Endpoint topology classification:
+            # - Both known endpoints: East-West lateral mesh traffic.
+            # - Source known, destination unknown: North-South egress out of cluster.
+            # - Source unknown, destination known: North-South ingress into cluster.
+            # - Neither known: External perimeter transit.
             if s_ep is not None and d_ep is not None:
                 z_key = "East-West (Internal)"
             elif s_ep is not None and d_ep is None:
@@ -939,6 +963,13 @@ async def get_applications_breakdown(
 
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
+    else:
+        # Long-term aggregation tier (FlowDailyRollup):
+        # To maintain high compaction across 365-day storage windows, FlowDailyRollup compresses
+        # away individual IP and endpoint telemetry. Traffic zones cannot be resolved at the daily
+        # rollup level without expensive raw joins, so zone distributions remain zeroed rather than
+        # failing with an AttributeError.
+        pass
 
     total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
     traffic_zones: List[TrafficZoneItem] = []

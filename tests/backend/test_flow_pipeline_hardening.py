@@ -560,20 +560,25 @@ def test_derive_traffic_profile_classification():
     assert derive_traffic_profile(None, 1450, 12.0, 0, 443) == "Bulk Transfer"
     assert derive_traffic_profile(None, 1100, 10.0, 0, 80) == "Bulk Transfer"
 
-    # 3. Micro-Flow / Control (avg_packet_size <= 120 and packets_per_flow <= 3)
-    assert derive_traffic_profile(None, 80, 2.0, 0, 80) == "Micro-Flow / Control"
-    assert derive_traffic_profile(None, 120, 3.0, 0, 443) == "Micro-Flow / Control"
-
-    # 4. Real-Time / VoIP (dscp == 46 or dst_port in (5060, 5061, 16384))
+    # 3. Real-Time / VoIP precedence (dscp == 46 or dst_port in (5060, 5061, 16384))
+    # Must NOT be shadowed by Micro-Flow when small VoIP audio frames (e.g. G.711 / G.729 at 60-120 B/pkt) occur
+    assert derive_traffic_profile(None, 80, 2.0, 46, 12345) == "Real-Time / VoIP"
+    assert derive_traffic_profile(None, 100, 1.0, 0, 5060) == "Real-Time / VoIP"
     assert derive_traffic_profile(None, 500, 5.0, 46, 12345) == "Real-Time / VoIP"
     assert derive_traffic_profile(None, 200, 5.0, 0, 5060) == "Real-Time / VoIP"
     assert derive_traffic_profile(None, 200, 5.0, 0, 5061) == "Real-Time / VoIP"
     assert derive_traffic_profile(None, 200, 5.0, 0, 16384) == "Real-Time / VoIP"
 
-    # 5. Default: Interactive
+    # 4. Micro-Flow / Control (0 < avg_packet_size <= 120 and 0 < packets_per_flow <= 3)
+    assert derive_traffic_profile(None, 80, 2.0, 0, 80) == "Micro-Flow / Control"
+    assert derive_traffic_profile(None, 120, 3.0, 0, 443) == "Micro-Flow / Control"
+
+    # 5. Default / Fallback: Interactive
     assert derive_traffic_profile(None, 500, 6.0, 0, 443) == "Interactive"
     assert derive_traffic_profile(None, 1200, 5.0, 0, 443) == "Interactive"  # high bytes but low pkts/fl
     assert derive_traffic_profile(None, 200, 20.0, 0, 443) == "Interactive"  # many pkts but medium size
+    # Zero-packet / unmeasured flows must fall through to Interactive (not misclassified as Micro-Flow)
+    assert derive_traffic_profile(None, 0, 0.0, 0, 80) == "Interactive"
 
 
 def test_flow_workbench_enriched_schemas():
