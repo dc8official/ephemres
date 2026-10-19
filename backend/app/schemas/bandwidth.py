@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,6 +11,10 @@ class BandwidthOverview(BaseModel):
     active_exporters_count: int
     unmatched_exporters_count: int
     total_flows_count: int
+    total_ingress_pps: float = 0.0
+    total_egress_pps: float = 0.0
+    avg_packet_size: int = 0
+    anomaly_flows_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -19,6 +23,9 @@ class TrafficSeriesPoint(BaseModel):
     timestamp: str
     ingress_bps: float
     egress_bps: float
+    ingress_pps: float = 0.0
+    egress_pps: float = 0.0
+    flows_per_sec: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -38,6 +45,8 @@ class TopTalkerItem(BaseModel):
     ingress_bytes: int
     egress_bytes: int
     flow_count: int
+    total_packets: int = 0
+    avg_packet_size: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -80,6 +89,26 @@ def format_dscp_label(tos: int) -> str:
     return DSCP_CLASS_MAP.get(dscp, f"DSCP {dscp}")
 
 
+def derive_traffic_profile(
+    anomaly_hint: Optional[str],
+    avg_packet_size: int,
+    packets_per_flow: float,
+    dscp: int,
+    dst_port: int,
+) -> str:
+    if anomaly_hint == "SYN_ONLY":
+        return "SYN Scan / Probe"
+    elif anomaly_hint == "TCP_RST":
+        return "Reset / Refused"
+    elif avg_packet_size >= 1100 and packets_per_flow >= 10:
+        return "Bulk Transfer"
+    elif avg_packet_size <= 120 and packets_per_flow <= 3:
+        return "Micro-Flow / Control"
+    elif dscp == 46 or dst_port in (5060, 5061, 16384):
+        return "Real-Time / VoIP"
+    return "Interactive"
+
+
 class TopConversationItem(BaseModel):
     src_ip: str
     dst_ip: str
@@ -89,6 +118,10 @@ class TopConversationItem(BaseModel):
     dst_port: int
     total_bytes: int
     flow_count: int
+    total_packets: int = 0
+    avg_packet_size: int = 0
+    packets_per_flow: float = 0.0
+    traffic_profile: str = "Standard"
     tcp_flags: int = 0
     tcp_flags_labels: List[str] = Field(default_factory=list)
     tos: int = 0
@@ -116,8 +149,30 @@ class ApplicationDistributionItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class QoSDistributionItem(BaseModel):
+    dscp: int
+    dscp_label: str
+    total_bytes: int
+    total_packets: int
+    flow_count: int
+    percentage: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TrafficZoneItem(BaseModel):
+    zone: str
+    total_bytes: int
+    flow_count: int
+    percentage: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ApplicationDistributionResponse(BaseModel):
     applications: List[ApplicationDistributionItem]
+    qos_classes: List[QoSDistributionItem] = Field(default_factory=list)
+    traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

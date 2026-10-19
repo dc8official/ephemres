@@ -186,7 +186,7 @@
       </div>
     </div>
 
-    <!-- Top KPI Metric Strip -->
+    <!-- Top KPI Metric Strip (5 Cards) -->
     <div class="kpi-grid">
       <div class="kpi-card">
         <div class="kpi-label">Total Ingress Rate</div>
@@ -195,7 +195,9 @@
             {{ formatBps(overview.total_ingress_bps) }}
           </span>
         </div>
-        <div class="kpi-subtext">5-min network moving average</div>
+        <div class="kpi-subtext">
+          <span class="font-mono tnum">{{ formatPps(overview.total_ingress_pps) }}</span> packet rate (5m avg)
+        </div>
       </div>
 
       <div class="kpi-card">
@@ -205,7 +207,23 @@
             {{ formatBps(overview.total_egress_bps) }}
           </span>
         </div>
-        <div class="kpi-subtext">5-min network moving average</div>
+        <div class="kpi-subtext">
+          <span class="font-mono tnum">{{ formatPps(overview.total_egress_pps) }}</span> packet rate (5m avg)
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Packet Physics (Avg Size)</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value tnum text-accent">
+            {{ overview.avg_packet_size || 0 }} <span class="kpi-unit">B/pkt</span>
+          </span>
+        </div>
+        <div class="kpi-subtext">
+          <span class="badge-packet-profile" :class="getPacketProfileClass(overview.avg_packet_size)">
+            {{ getPacketProfileLabel(overview.avg_packet_size) }}
+          </span>
+        </div>
       </div>
 
       <div class="kpi-card">
@@ -216,27 +234,68 @@
           </span>
           <span class="kpi-denom">/ {{ totalEndpointsCount }} nodes</span>
         </div>
-        <div class="kpi-subtext">Cisco, Juniper, Fortinet, Mikrotik</div>
+        <div class="kpi-subtext">Cisco, Juniper, Fortinet, Linux</div>
       </div>
 
       <div class="kpi-card">
-        <div class="kpi-label">Total Monitored Flows</div>
+        <div class="kpi-label">Monitored Flows &amp; Anomalies</div>
         <div class="kpi-value-row">
           <span class="kpi-value tnum">
             {{ formatNumber(overview.total_flows_count) }}
           </span>
         </div>
-        <div class="kpi-subtext">Aggregated conversation bursts</div>
+        <div class="kpi-subtext">
+          <span
+            v-if="overview.anomaly_flows_count"
+            class="badge-anomaly-kpi"
+            title="SYN/RST scan or reset bursts in last 5m"
+          >
+            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} bursts
+          </span>
+          <span v-else class="text-success text-xs">✓ Normal flow profile</span>
+        </div>
       </div>
     </div>
 
     <!-- Main Section: Stacked Area Traffic Chart -->
     <div class="chart-section table-card">
-      <div class="section-header">
-        <div class="section-title">
-          Aggregate Bandwidth Profile (Ingress vs. Egress)
+      <div class="section-header section-header-split">
+        <div>
+          <div class="section-title">
+            {{ chartTitle }}
+          </div>
+          <span class="section-hint">{{ selectedWindow }} aggregated series</span>
         </div>
-        <span class="badge-window tnum">{{ selectedWindow }} Window</span>
+        <div class="chart-header-actions">
+          <!-- Metric Mode Switcher Pills -->
+          <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
+            <button
+              class="btn-pill btn-pill-sm"
+              :class="{ active: chartMetricMode === 'bps' }"
+              @click="chartMetricMode = 'bps'"
+              title="Throughput in bits per second"
+            >
+              Throughput (bps)
+            </button>
+            <button
+              class="btn-pill btn-pill-sm"
+              :class="{ active: chartMetricMode === 'pps' }"
+              @click="chartMetricMode = 'pps'"
+              title="Packet rate in packets per second"
+            >
+              Packet Rate (pps)
+            </button>
+            <button
+              class="btn-pill btn-pill-sm"
+              :class="{ active: chartMetricMode === 'fps' }"
+              @click="chartMetricMode = 'fps'"
+              title="Flow burst rate in flows per second"
+            >
+              Flow Rate (fps)
+            </button>
+          </div>
+          <span class="badge-window tnum">{{ selectedWindow }} Window</span>
+        </div>
       </div>
       <div class="chart-container">
         <LineChart
@@ -340,27 +399,38 @@
       </div>
     </div>
 
-    <!-- Secondary Grid: Top Talkers & Application Donut -->
+    <!-- Secondary Grid: Top Talkers & Telemetry Breakdown Workbench -->
     <div class="secondary-grid">
-      <!-- Top Talkers Leaderboard -->
+      <!-- Top Talkers Leaderboard with Click-to-Filter -->
       <div class="table-card talkers-panel">
-        <div class="section-header">
-          <div class="section-title">Top Communicating Endpoints</div>
-          <span class="section-hint">Ranked by volume</span>
+        <div class="section-header section-header-split">
+          <div>
+            <div class="section-title">Top Communicating Endpoints</div>
+            <span class="section-hint">Ranked by volume · Click row to filter conversations</span>
+          </div>
+          <div v-if="selectedIpFilter" class="active-filter-badge">
+            <span class="badge-active-filter">Filtered: {{ selectedIpFilter }}</span>
+            <button class="btn-clear-filter" @click="selectedIpFilter = null" title="Clear filter">✕</button>
+          </div>
         </div>
         <div class="table-responsive">
-          <table class="dense-table" aria-label="Top Talkers Table">
+          <table class="dense-table interactive-table" aria-label="Top Talkers Table">
             <thead>
               <tr>
                 <th>Target Node</th>
                 <th class="text-right">Ingress</th>
                 <th class="text-right">Egress</th>
                 <th class="text-right">Total Bytes</th>
-                <th class="text-right">Flows</th>
+                <th class="text-right">Flows / Physics</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="t in topEndpoints" :key="t.ip_address">
+              <tr
+                v-for="t in topEndpoints"
+                :key="t.ip_address"
+                :class="{ 'row-selected': selectedIpFilter === t.ip_address, 'cursor-pointer': true }"
+                @click="toggleEndpointFilter(t.ip_address)"
+              >
                 <td>
                   <div class="node-cell">
                     <span class="node-host font-bold">{{ t.hostname || t.ip_address }}</span>
@@ -370,7 +440,10 @@
                 <td class="text-right tnum ingress-text">{{ formatBytes(t.ingress_bytes) }}</td>
                 <td class="text-right tnum egress-text">{{ formatBytes(t.egress_bytes) }}</td>
                 <td class="text-right tnum font-bold">{{ formatBytes(t.total_bytes) }}</td>
-                <td class="text-right tnum text-muted">{{ formatNumber(t.flow_count) }}</td>
+                <td class="text-right tnum text-muted">
+                  <div>{{ formatNumber(t.flow_count) }}</div>
+                  <span class="text-xs text-muted block font-mono">{{ t.avg_packet_size || 0 }} B/pkt</span>
+                </td>
               </tr>
               <tr v-if="topEndpoints.length === 0">
                 <td colspan="5" class="text-center text-muted">No talker statistics in this window.</td>
@@ -380,39 +453,201 @@
         </div>
       </div>
 
-      <!-- Application / Protocol Donut -->
-      <div class="table-card donut-panel">
-        <div class="section-header">
-          <div class="section-title">Application Distribution</div>
-          <span class="section-hint">Layer 4 / Service Port</span>
+      <!-- Multi-Tab Telemetry Breakdown Card -->
+      <div class="table-card breakdown-panel">
+        <div class="section-header section-header-split">
+          <div class="breakdown-tabs" role="tablist">
+            <button
+              class="tab-btn"
+              :class="{ active: analyticsTab === 'apps' }"
+              @click="analyticsTab = 'apps'"
+              role="tab"
+            >
+              L4 Apps
+            </button>
+            <button
+              class="tab-btn"
+              :class="{ active: analyticsTab === 'qos' }"
+              @click="analyticsTab = 'qos'"
+              role="tab"
+            >
+              QoS / DSCP
+              <span v-if="qosClasses.length > 0" class="tab-badge">{{ qosClasses.length }}</span>
+            </button>
+            <button
+              class="tab-btn"
+              :class="{ active: analyticsTab === 'zones' }"
+              @click="analyticsTab = 'zones'"
+              role="tab"
+            >
+              Traffic Zones
+            </button>
+          </div>
+          <span class="section-hint text-xs">
+            {{ analyticsTab === 'apps' ? 'Layer 4 / Service Port' : (analyticsTab === 'qos' ? 'DiffServ Classes' : 'Perimeter vs Internal') }}
+          </span>
         </div>
-        <div class="donut-container">
-          <DoughnutChart
-            v-if="donutData.labels.length > 0"
-            :data="donutData"
-            :options="donutOptions"
-          />
-          <div v-else class="no-chart-data">No application telemetry available.</div>
+
+        <!-- Tab 1: L4 Apps -->
+        <div v-if="analyticsTab === 'apps'" class="tab-content">
+          <div class="donut-container">
+            <DoughnutChart
+              v-if="donutData.labels.length > 0"
+              :data="donutData"
+              :options="donutOptions"
+            />
+            <div v-else class="no-chart-data">No application telemetry available.</div>
+          </div>
+          <div v-if="applicationStats.length > 0" class="apps-quick-list">
+            <div
+              v-for="app in applicationStats.slice(0, 6)"
+              :key="app.dst_port"
+              class="app-chip cursor-pointer"
+              :class="{ active: selectedPortFilter === app.dst_port }"
+              @click="togglePortFilter(app.dst_port)"
+              :title="`Filter conversations on port ${app.dst_port}`"
+            >
+              <span class="service-port-badge" :class="getPortBadgeClass(app.dst_port)">
+                {{ formatPortLabel(app.dst_port, app.protocol) }}
+              </span>
+              <span class="app-chip-bytes tnum">{{ formatBytes(app.total_bytes) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: QoS / DSCP Breakdown -->
+        <div v-else-if="analyticsTab === 'qos'" class="tab-content qos-content">
+          <div v-if="qosClasses.length > 0" class="breakdown-list">
+            <div
+              v-for="qos in qosClasses"
+              :key="qos.dscp"
+              class="breakdown-item cursor-pointer"
+              :class="{ 'item-selected': selectedDscpFilter === qos.dscp }"
+              @click="toggleDscpFilter(qos.dscp, qos.dscp_label)"
+              :title="`Filter conversations by ${qos.dscp_label} (DSCP ${qos.dscp})`"
+            >
+              <div class="breakdown-row-top">
+                <span
+                  class="badge-dscp"
+                  :class="{ 'badge-dscp-ef': qos.dscp === 46, 'badge-dscp-af': qos.dscp_label && qos.dscp_label.includes('AF') }"
+                >
+                  {{ qos.dscp_label }}
+                </span>
+                <span class="breakdown-pct tnum font-bold">{{ qos.percentage.toFixed(1) }}%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill fill-qos" :style="{ width: `${Math.min(100, qos.percentage)}%` }"></div>
+              </div>
+              <div class="breakdown-meta tnum text-muted text-xs">
+                <span>{{ formatBytes(qos.total_bytes) }}</span>
+                <span>{{ formatNumber(qos.total_packets) }} pkts · {{ formatNumber(qos.flow_count) }} flows</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="no-chart-data">No QoS/DSCP telemetry recorded in this window.</div>
+        </div>
+
+        <!-- Tab 3: Traffic Zones Breakdown -->
+        <div v-else-if="analyticsTab === 'zones'" class="tab-content zones-content">
+          <div v-if="trafficZones.length > 0" class="breakdown-list">
+            <div
+              v-for="zone in trafficZones"
+              :key="zone.zone"
+              class="breakdown-item"
+            >
+              <div class="breakdown-row-top">
+                <span class="zone-badge" :class="getZoneBadgeClass(zone.zone)">
+                  <span class="zone-icon">{{ getZoneIcon(zone.zone) }}</span> {{ zone.zone }}
+                </span>
+                <span class="breakdown-pct tnum font-bold">{{ zone.percentage.toFixed(1) }}%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" :class="getZoneFillClass(zone.zone)" :style="{ width: `${Math.min(100, zone.percentage)}%` }"></div>
+              </div>
+              <div class="breakdown-meta tnum text-muted text-xs">
+                <span>{{ formatBytes(zone.total_bytes) }}</span>
+                <span>{{ formatNumber(zone.flow_count) }} flows</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="no-chart-data">No traffic zone classifications recorded in this window.</div>
         </div>
       </div>
     </div>
 
-    <!-- Full Width: Top Conversations Table -->
+    <!-- Full Width: Top Forensic Conversations Table -->
     <div class="table-card conversations-panel">
       <div class="section-header section-header-split">
         <div>
           <div class="section-title">Top Forensic Conversations (IP-to-IP Pairs)</div>
-          <span class="section-hint">Forensic tier granularity</span>
+          <span class="section-hint">Forensic tier granularity with packet physics profiling</span>
         </div>
-        <div class="conversation-filter-box">
-          <input 
-            v-model="conversationFilter" 
-            class="conversation-search-input" 
-            placeholder="Search IP, hostname, or port..." 
-            aria-label="Filter conversations"
-          />
+        <div class="conversations-top-actions">
+          <!-- Quick Triage Pills -->
+          <div class="triage-pills" role="group" aria-label="Conversation Triage Filters">
+            <button
+              class="btn-pill btn-pill-sm"
+              :class="{ active: conversationQuickFilter === 'all' }"
+              @click="conversationQuickFilter = 'all'"
+            >
+              All ({{ topConversations.length }})
+            </button>
+            <button
+              class="btn-pill btn-pill-sm pill-anomalies"
+              :class="{ active: conversationQuickFilter === 'anomalies' }"
+              @click="conversationQuickFilter = 'anomalies'"
+            >
+              Anomalies ({{ anomalyConversationsCount }})
+            </button>
+            <button
+              class="btn-pill btn-pill-sm pill-qos"
+              :class="{ active: conversationQuickFilter === 'qos' }"
+              @click="conversationQuickFilter = 'qos'"
+            >
+              QoS Tagged ({{ qosConversationsCount }})
+            </button>
+            <button
+              class="btn-pill btn-pill-sm pill-bulk"
+              :class="{ active: conversationQuickFilter === 'bulk' }"
+              @click="conversationQuickFilter = 'bulk'"
+            >
+              Bulk Transfers ({{ bulkConversationsCount }})
+            </button>
+          </div>
+          <div class="conversation-filter-box">
+            <input 
+              v-model="conversationFilter" 
+              class="conversation-search-input" 
+              placeholder="Search IP, port, profile..." 
+              aria-label="Filter conversations"
+            />
+          </div>
         </div>
       </div>
+
+      <!-- Active Cross-Filters Ribbon -->
+      <div
+        v-if="selectedIpFilter || selectedPortFilter || selectedDscpFilter"
+        class="filter-chips-row"
+      >
+        <span class="filter-chips-label">Active Cross-Filters:</span>
+        <span v-if="selectedIpFilter" class="filter-chip">
+          Node: <strong class="font-mono tnum">{{ selectedIpFilter }}</strong>
+          <button class="btn-chip-remove" @click="selectedIpFilter = null">✕</button>
+        </span>
+        <span v-if="selectedPortFilter" class="filter-chip">
+          Port: <strong class="font-mono tnum">{{ selectedPortFilter }}</strong>
+          <button class="btn-chip-remove" @click="selectedPortFilter = null">✕</button>
+        </span>
+        <span v-if="selectedDscpFilter !== null" class="filter-chip">
+          QoS: <strong class="font-mono tnum">{{ selectedDscpLabel || `DSCP ${selectedDscpFilter}` }}</strong>
+          <button class="btn-chip-remove" @click="selectedDscpFilter = null; selectedDscpLabel = ''">✕</button>
+        </span>
+        <button class="btn-clear-all-chips" @click="clearCrossFilters">
+          Clear All Filters
+        </button>
+      </div>
+
       <div class="table-responsive">
         <table class="dense-table" aria-label="Top Conversations Table">
           <thead>
@@ -421,6 +656,7 @@
               <th>Destination IP</th>
               <th>Protocol</th>
               <th>Service Port</th>
+              <th>Packet Physics &amp; Profile</th>
               <th>Flags &amp; QoS</th>
               <th class="text-right">Volume</th>
               <th class="text-right">Burst Count</th>
@@ -443,6 +679,17 @@
                 <span class="service-port-badge" :class="getPortBadgeClass(c.dst_port)">
                   {{ formatPortLabel(c.dst_port, c.protocol) }}
                 </span>
+              </td>
+              <td>
+                <div class="physics-profile-cell">
+                  <span class="badge-profile" :class="getTrafficProfileBadgeClass(c.traffic_profile)">
+                    {{ c.traffic_profile || 'Interactive' }}
+                  </span>
+                  <div class="packet-physics-meta text-xs text-muted tnum font-mono">
+                    <span>{{ c.avg_packet_size || 0 }} B/pkt</span> · 
+                    <span>{{ c.packets_per_flow || 0 }} pkts/fl</span>
+                  </div>
+                </div>
               </td>
               <td>
                 <div class="metadata-badge-group">
@@ -481,8 +728,8 @@
               <td class="text-right tnum text-muted">{{ formatNumber(c.flow_count) }}</td>
             </tr>
             <tr v-if="filteredConversations.length === 0">
-              <td colspan="7" class="text-center text-muted">
-                {{ topConversations.length === 0 ? 'No conversations recorded in this window.' : 'No conversations matching current search filter.' }}
+              <td colspan="8" class="text-center text-muted">
+                {{ topConversations.length === 0 ? 'No conversations recorded in this window.' : 'No conversations matching current filters.' }}
               </td>
             </tr>
           </tbody>
@@ -812,10 +1059,17 @@ const enrollError = ref(null)
 const overview = ref({
   total_ingress_bps: 0,
   total_egress_bps: 0,
+  total_ingress_pps: 0,
+  total_egress_pps: 0,
+  avg_packet_size: 0,
   active_exporters_count: 0,
   unmatched_exporters_count: 0,
   total_flows_count: 0,
+  anomaly_flows_count: 0,
 })
+
+const chartMetricMode = ref('bps') // 'bps', 'pps', 'fps'
+const analyticsTab = ref('apps') // 'apps', 'qos', 'zones'
 
 const totalEndpointsCount = ref(0)
 const availableEndpoints = shallowRef([])
@@ -824,13 +1078,70 @@ const unmatchedExporters = shallowRef([])
 const topEndpoints = shallowRef([])
 const topConversations = shallowRef([])
 const applicationStats = shallowRef([])
+const qosClasses = shallowRef([])
+const trafficZones = shallowRef([])
+
+// Interactive Cross-Filtering & Triage State
+const selectedIpFilter = ref(null)
+const selectedPortFilter = ref(null)
+const selectedDscpFilter = ref(null)
+const selectedDscpLabel = ref('')
+const conversationQuickFilter = ref('all') // 'all', 'anomalies', 'qos', 'bulk'
 
 // Top conversations search filter (UI-09)
 const conversationFilter = ref('')
+
+const anomalyConversationsCount = computed(() => {
+  return topConversations.value.filter(
+    (c) => c.anomaly_hint === 'SYN_ONLY' || c.anomaly_hint === 'TCP_RST'
+  ).length
+})
+
+const qosConversationsCount = computed(() => {
+  return topConversations.value.filter((c) => Number(c.dscp) > 0).length
+})
+
+const bulkConversationsCount = computed(() => {
+  return topConversations.value.filter(
+    (c) => c.traffic_profile === 'Bulk Transfer' || (c.avg_packet_size && c.avg_packet_size >= 1100)
+  ).length
+})
+
 const filteredConversations = computed(() => {
-  if (!conversationFilter.value.trim()) return topConversations.value
+  let list = topConversations.value
+
+  // Cross-Filter by Endpoint Node IP
+  if (selectedIpFilter.value) {
+    const ip = selectedIpFilter.value
+    list = list.filter((c) => c.src_ip === ip || c.dst_ip === ip)
+  }
+
+  // Cross-Filter by Destination Service Port
+  if (selectedPortFilter.value !== null) {
+    const port = Number(selectedPortFilter.value)
+    list = list.filter((c) => Number(c.dst_port) === port)
+  }
+
+  // Cross-Filter by DSCP
+  if (selectedDscpFilter.value !== null) {
+    const dscp = Number(selectedDscpFilter.value)
+    list = list.filter((c) => Number(c.dscp) === dscp)
+  }
+
+  // Quick Triage Filter
+  if (conversationQuickFilter.value === 'anomalies') {
+    list = list.filter((c) => c.anomaly_hint === 'SYN_ONLY' || c.anomaly_hint === 'TCP_RST')
+  } else if (conversationQuickFilter.value === 'qos') {
+    list = list.filter((c) => Number(c.dscp) > 0)
+  } else if (conversationQuickFilter.value === 'bulk') {
+    list = list.filter(
+      (c) => c.traffic_profile === 'Bulk Transfer' || (c.avg_packet_size && c.avg_packet_size >= 1100)
+    )
+  }
+
+  if (!conversationFilter.value.trim()) return list
   const q = conversationFilter.value.toLowerCase().trim()
-  return topConversations.value.filter((c) => {
+  return list.filter((c) => {
     return (
       (c.src_ip && c.src_ip.toLowerCase().includes(q)) ||
       (c.dst_ip && c.dst_ip.toLowerCase().includes(q)) ||
@@ -840,6 +1151,7 @@ const filteredConversations = computed(() => {
       (c.protocol && c.protocol.toLowerCase().includes(q)) ||
       (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
       (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
+      (c.traffic_profile && c.traffic_profile.toLowerCase().includes(q)) ||
       (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
     )
   })
@@ -1031,6 +1343,26 @@ async function saveInterfaces() {
   }
 }
 
+// Chart Title & Multi-Mode Metric Computeds
+const chartTitle = computed(() => {
+  const matched = selectedInterfaceIdx.value !== null
+    ? interfaceList.value.find(i => i.interface_idx === selectedInterfaceIdx.value)
+    : null
+  const ifName = matched
+    ? (matched.alias?.name || matched.name || `Interface #${selectedInterfaceIdx.value}`)
+    : (selectedInterfaceIdx.value !== null ? `Interface #${selectedInterfaceIdx.value}` : null)
+
+  if (ifName) {
+    if (chartMetricMode.value === 'pps') return `${ifName} Packet Rate Telemetry`
+    if (chartMetricMode.value === 'fps') return `${ifName} Flow Rate Telemetry`
+    return `${ifName} Interface Telemetry (Isolated)`
+  }
+
+  if (chartMetricMode.value === 'pps') return 'Packet Rate Telemetry (pps)'
+  if (chartMetricMode.value === 'fps') return 'Flow Burst Rate Telemetry (fps)'
+  return 'Aggregated Flow Throughput'
+})
+
 // Chart Data
 const seriesPoints = shallowRef([])
 
@@ -1040,15 +1372,76 @@ const chartData = computed(() => {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   })
 
-  const inData = seriesPoints.value.map((p) => p.ingress_bps)
-  const outData = seriesPoints.value.map((p) => p.egress_bps)
-
   const matched = selectedInterfaceIdx.value !== null
     ? interfaceList.value.find(i => i.interface_idx === selectedInterfaceIdx.value)
     : null
   const ifDisplayName = matched
     ? (matched.alias?.name || matched.name || `Interface #${selectedInterfaceIdx.value}`)
     : `Interface #${selectedInterfaceIdx.value}`
+
+  if (chartMetricMode.value === 'pps') {
+    const inData = seriesPoints.value.map((p) => p.ingress_pps || 0)
+    const outData = seriesPoints.value.map((p) => p.egress_pps || 0)
+    const inLabel = selectedInterfaceIdx.value !== null
+      ? `${ifDisplayName} Ingress (pps)`
+      : 'Ingress (pps)'
+    const outLabel = selectedInterfaceIdx.value !== null
+      ? `${ifDisplayName} Egress (pps)`
+      : 'Egress (pps)'
+
+    return {
+      labels,
+      datasets: [
+        {
+          label: inLabel,
+          data: inData,
+          borderColor: '#10b981',
+          backgroundColor: 'rgba(16, 185, 129, 0.25)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
+        },
+        {
+          label: outLabel,
+          data: outData,
+          borderColor: '#0ea5e9',
+          backgroundColor: 'rgba(14, 165, 233, 0.25)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
+        },
+      ],
+    }
+  }
+
+  if (chartMetricMode.value === 'fps') {
+    const flowData = seriesPoints.value.map((p) => p.flows_per_sec || 0)
+    const label = selectedInterfaceIdx.value !== null
+      ? `${ifDisplayName} Flow Rate (fps)`
+      : 'Flow Rate (fps)'
+
+    return {
+      labels,
+      datasets: [
+        {
+          label,
+          data: flowData,
+          borderColor: '#8b5cf6',
+          backgroundColor: 'rgba(139, 92, 246, 0.25)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
+        },
+      ],
+    }
+  }
+
+  // Default: 'bps'
+  const inData = seriesPoints.value.map((p) => p.ingress_bps)
+  const outData = seriesPoints.value.map((p) => p.egress_bps)
 
   const inLabel = selectedInterfaceIdx.value !== null
     ? `${ifDisplayName} Ingress (bps)`
@@ -1105,7 +1498,11 @@ const chartOptions = computed(() => {
         ticks: {
           color: textColor,
           font: { family: 'JetBrains Mono', size: 11 },
-          callback: (val) => formatBps(val),
+          callback: (val) => {
+            if (chartMetricMode.value === 'pps') return formatPps(val)
+            if (chartMetricMode.value === 'fps') return `${val} fps`
+            return formatBps(val)
+          },
         },
         grid: { color: gridColor },
       },
@@ -1117,7 +1514,11 @@ const chartOptions = computed(() => {
       },
       tooltip: {
         callbacks: {
-          label: (ctx) => `${ctx.dataset.label}: ${formatBps(ctx.raw)}`,
+          label: (ctx) => {
+            if (chartMetricMode.value === 'pps') return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
+            if (chartMetricMode.value === 'fps') return `${ctx.dataset.label}: ${ctx.raw} fps`
+            return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
+          },
         },
       },
     },
@@ -1187,6 +1588,88 @@ function formatNumber(num) {
   return new Intl.NumberFormat().format(num)
 }
 
+function formatPps(pps) {
+  if (!pps || pps <= 0) return '0 pps'
+  if (pps >= 1e6) return `${(pps / 1e6).toFixed(2)} Mpps`
+  if (pps >= 1e3) return `${(pps / 1e3).toFixed(1)} kpps`
+  return `${Math.round(pps)} pps`
+}
+
+function getPacketProfileLabel(avgBytes) {
+  const b = Number(avgBytes) || 0
+  if (b >= 1100) return 'Bulk / Jumbo MTU'
+  if (b <= 150) return 'Control / Micro-Flows'
+  return 'Mixed / Standard MTU'
+}
+
+function getPacketProfileClass(avgBytes) {
+  const b = Number(avgBytes) || 0
+  if (b >= 1100) return 'profile-bulk'
+  if (b <= 150) return 'profile-micro'
+  return 'profile-mixed'
+}
+
+function getTrafficProfileBadgeClass(profile) {
+  switch (profile) {
+    case 'Bulk Transfer': return 'badge-profile-bulk'
+    case 'SYN Scan / Probe': return 'badge-profile-syn'
+    case 'Reset / Refused': return 'badge-profile-rst'
+    case 'Micro-Flow / Control': return 'badge-profile-micro'
+    case 'Real-Time / VoIP': return 'badge-profile-voip'
+    default: return 'badge-profile-interactive'
+  }
+}
+
+function getZoneBadgeClass(zone) {
+  if (!zone) return 'badge-zone-default'
+  if (zone.includes('East-West')) return 'badge-zone-eastwest'
+  if (zone.includes('Ingress')) return 'badge-zone-ingress'
+  if (zone.includes('Egress')) return 'badge-zone-egress'
+  return 'badge-zone-external'
+}
+
+function getZoneFillClass(zone) {
+  if (!zone) return 'fill-default'
+  if (zone.includes('East-West')) return 'fill-eastwest'
+  if (zone.includes('Ingress')) return 'fill-ingress'
+  if (zone.includes('Egress')) return 'fill-egress'
+  return 'fill-external'
+}
+
+function getZoneIcon(zone) {
+  if (!zone) return '•'
+  if (zone.includes('East-West')) return '⇄'
+  if (zone.includes('Ingress')) return '↓'
+  if (zone.includes('Egress')) return '↑'
+  return '🌐'
+}
+
+function toggleEndpointFilter(ip) {
+  selectedIpFilter.value = selectedIpFilter.value === ip ? null : ip
+}
+
+function togglePortFilter(port) {
+  selectedPortFilter.value = selectedPortFilter.value === port ? null : port
+}
+
+function toggleDscpFilter(dscp, label) {
+  if (selectedDscpFilter.value === dscp) {
+    selectedDscpFilter.value = null
+    selectedDscpLabel.value = ''
+  } else {
+    selectedDscpFilter.value = dscp
+    selectedDscpLabel.value = label || `DSCP ${dscp}`
+  }
+}
+
+function clearCrossFilters() {
+  selectedIpFilter.value = null
+  selectedPortFilter.value = null
+  selectedDscpFilter.value = null
+  selectedDscpLabel.value = ''
+  conversationQuickFilter.value = 'all'
+}
+
 function openMappingModal(ip) {
   selectedUnmatchedIp.value = ip
   targetEndpointId.value = availableEndpoints.value.length > 0 ? availableEndpoints.value[0].id : null
@@ -1224,8 +1707,8 @@ async function refreshData() {
     const [ovRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
       getBandwidthOverview(),
       getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value),
-      getTopTalkers(selectedWindow.value, 10, null, expId),
-      getApplicationDistribution(selectedWindow.value),
+      getTopTalkers(selectedWindow.value, 25, null, expId),
+      getApplicationDistribution(selectedWindow.value, expId),
       getFlowExporters(),
       getEndpoints(),
       expId ? getInterfaceTelemetry(expId, selectedWindow.value) : Promise.resolve({ data: { data: { interfaces: [] } } }),
@@ -1241,8 +1724,10 @@ async function refreshData() {
       topEndpoints.value = talkersRes.data.data.top_endpoints || []
       topConversations.value = talkersRes.data.data.top_conversations || []
     }
-    if (appRes.data?.data?.applications) {
-      applicationStats.value = appRes.data.data.applications
+    if (appRes.data?.data) {
+      applicationStats.value = appRes.data.data.applications || []
+      qosClasses.value = appRes.data.data.qos_classes || []
+      trafficZones.value = appRes.data.data.traffic_zones || []
     }
     if (expRes.data?.data) {
       unmatchedExporters.value = expRes.data.data.unmatched || []
@@ -2033,4 +2518,443 @@ html.dark .unmatched-scope-badge {
 .interface-config-row .preset-col { width: 170px; }
 .interface-config-row .speed-col { width: 100px; }
 .interface-config-row .remove-col { width: 36px; display: flex; align-items: flex-end; }
+
+/* Flow Analytics Workbench UI Enhancements */
+.kpi-unit {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.text-accent {
+  color: var(--accent-primary, #3b82f6);
+}
+
+.badge-packet-profile {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.profile-bulk {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.profile-micro {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.profile-mixed {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.badge-anomaly-kpi {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.chart-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.metric-mode-pills {
+  display: flex;
+  background: var(--bg-surface-selected);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+  gap: 2px;
+}
+
+.btn-pill-sm {
+  font-size: 0.6875rem;
+  padding: 3px 8px;
+}
+
+.active-filter-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.badge-active-filter {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.btn-clear-filter {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0 4px;
+}
+
+.btn-clear-filter:hover {
+  color: var(--text-primary);
+}
+
+/* Multi-Tab Breakdown Panel */
+.breakdown-panel {
+  padding: 16px;
+}
+
+.breakdown-tabs {
+  display: flex;
+  background: var(--bg-surface-selected);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+  gap: 2px;
+}
+
+.tab-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+}
+
+.tab-btn.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow);
+}
+
+.tab-badge {
+  background: rgba(99, 102, 241, 0.2);
+  color: #818cf8;
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.apps-quick-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.app-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface-hover);
+  border: 1px solid var(--border-color);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  transition: all 0.15s ease;
+}
+
+.app-chip:hover {
+  border-color: var(--accent-primary, #3b82f6);
+}
+
+.app-chip.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: #3b82f6;
+}
+
+.app-chip-bytes {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.breakdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.breakdown-item {
+  background: var(--bg-surface-hover);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 6px);
+  padding: 8px 12px;
+  transition: all 0.15s ease;
+}
+
+.breakdown-item.cursor-pointer:hover {
+  border-color: var(--accent-primary, #3b82f6);
+}
+
+.breakdown-item.item-selected {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: #6366f1;
+}
+
+.breakdown-row-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.breakdown-pct {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+}
+
+.progress-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: var(--border-color, rgba(255, 255, 255, 0.1));
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.fill-qos {
+  background: linear-gradient(90deg, #8b5cf6, #ec4899);
+}
+
+.fill-eastwest {
+  background: #3b82f6;
+}
+
+.fill-ingress {
+  background: #10b981;
+}
+
+.fill-egress {
+  background: #f59e0b;
+}
+
+.fill-external {
+  background: #6b7280;
+}
+
+.breakdown-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Zone Badges */
+.zone-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.badge-zone-eastwest {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.badge-zone-ingress {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-zone-egress {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badge-zone-external {
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+/* Forensic Conversations Workbench Styling */
+.conversations-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.triage-pills {
+  display: flex;
+  background: var(--bg-surface-selected);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+  gap: 2px;
+}
+
+.triage-pills .pill-anomalies.active {
+  color: #ef4444;
+}
+
+.triage-pills .pill-qos.active {
+  color: #8b5cf6;
+}
+
+.triage-pills .pill-bulk.active {
+  color: #10b981;
+}
+
+.filter-chips-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--bg-surface-hover);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px dashed var(--border-color);
+  flex-wrap: wrap;
+}
+
+.filter-chips-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--text-primary);
+}
+
+.btn-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  line-height: 1;
+}
+
+.btn-chip-remove:hover {
+  color: #ef4444;
+}
+
+.btn-clear-all-chips {
+  border: none;
+  background: transparent;
+  color: var(--accent-primary, #3b82f6);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  margin-left: auto;
+}
+
+.btn-clear-all-chips:hover {
+  text-decoration: underline;
+}
+
+.physics-profile-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.badge-profile {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  width: fit-content;
+}
+
+.badge-profile-bulk {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.badge-profile-syn {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-profile-rst {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-profile-micro {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+
+.badge-profile-voip {
+  background: rgba(6, 182, 212, 0.15);
+  color: #06b6d4;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+}
+
+.badge-profile-interactive {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.packet-physics-meta {
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
 </style>

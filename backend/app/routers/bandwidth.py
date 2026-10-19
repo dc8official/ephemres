@@ -32,12 +32,15 @@ from app.schemas.bandwidth import (
     InterfaceTelemetryItem,
     InterfaceTelemetryResponse,
     MapExporterRequest,
+    QoSDistributionItem,
     TopConversationItem,
     TopTalkerItem,
     TopTalkersResponse,
     TrafficSeriesPoint,
     TrafficSeriesResponse,
+    TrafficZoneItem,
     UnmatchedExporterItem,
+    derive_traffic_profile,
     format_dscp_label,
     format_tcp_flags,
 )
@@ -200,12 +203,50 @@ async def get_bandwidth_overview(
                 )
             )
         ).label("active_exporters"),
+        func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (FlowMinuteRollup.dst_endpoint_id.is_not(None), FlowMinuteRollup.packets),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("ingress_packets"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (FlowMinuteRollup.src_endpoint_id.is_not(None), FlowMinuteRollup.packets),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("egress_packets"),
     ).where(FlowMinuteRollup.bucket >= five_min_ago)
 
     res = await db.execute(stmt)
     row = res.one_or_none()
 
-    if row and len(row) >= 5:
+    total_packets = 0
+    ingress_packets = 0
+    egress_packets = 0
+
+    if row and len(row) >= 8:
+        total_bytes = int(row[0] or 0)
+        ingress_bytes = int(row[1] or 0)
+        egress_bytes = int(row[2] or 0)
+        total_flows = int(row[3] or 0)
+        active_exporters = int(row[4] or 0)
+        total_packets = int(row[5] or 0)
+        ingress_packets = int(row[6] or 0)
+        egress_packets = int(row[7] or 0)
+        if ingress_bytes == 0 and egress_bytes == 0 and total_bytes > 0:
+            ingress_bytes = total_bytes // 2
+            egress_bytes = total_bytes - ingress_bytes
+        if ingress_packets == 0 and egress_packets == 0 and total_packets > 0:
+            ingress_packets = total_packets // 2
+            egress_packets = total_packets - ingress_packets
+    elif row and len(row) >= 5:
         total_bytes = int(row[0] or 0)
         ingress_bytes = int(row[1] or 0)
         egress_bytes = int(row[2] or 0)
@@ -223,9 +264,37 @@ async def get_bandwidth_overview(
     else:
         total_bytes = ingress_bytes = egress_bytes = total_flows = active_exporters = 0
 
-    # Calculate average bps over 300 seconds
+    # Calculate average bps and pps over 300 seconds
     ingress_bps = (float(ingress_bytes) * 8.0) / 300.0 if ingress_bytes > 0 else 0.0
     egress_bps = (float(egress_bytes) * 8.0) / 300.0 if egress_bytes > 0 else 0.0
+    total_ingress_pps = round(float(ingress_packets) / 300.0, 2) if ingress_packets > 0 else 0.0
+    total_egress_pps = round(float(egress_packets) / 300.0, 2) if egress_packets > 0 else 0.0
+    avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
+
+    # Calculate anomaly flows count over 5-minute window (TCP SYN scan or RST bursts)
+    stmt_anomaly = (
+        select(
+            FlowMinuteRollup.protocol,
+            FlowMinuteRollup.tcp_flags,
+            func.sum(FlowMinuteRollup.flow_count),
+        )
+        .where(
+            FlowMinuteRollup.bucket >= five_min_ago,
+            FlowMinuteRollup.protocol == 6,
+        )
+        .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
+    )
+    anomaly_flows_count = 0
+    try:
+        res_anomaly = await db.execute(stmt_anomaly)
+        for a_row in res_anomaly.all():
+            a_flags = int(a_row[1] or 0)
+            a_cnt = int(a_row[2] or 0)
+            # SYN_ONLY (0x02 and not 0x10) or TCP_RST (0x04 and not 0x01)
+            if ((a_flags & 0x02) and not (a_flags & 0x10)) or ((a_flags & 0x04) and not (a_flags & 0x01)):
+                anomaly_flows_count += a_cnt
+    except Exception as exc:
+        logger.debug("Failed to calculate anomaly flow count: %s", exc)
 
     # Fetch unmatched count from FastStore
     unmatched_count = 0
@@ -243,6 +312,10 @@ async def get_bandwidth_overview(
             active_exporters_count=active_exporters,
             unmatched_exporters_count=unmatched_count,
             total_flows_count=total_flows,
+            total_ingress_pps=total_ingress_pps,
+            total_egress_pps=total_egress_pps,
+            avg_packet_size=avg_packet_size,
+            anomaly_flows_count=anomaly_flows_count,
         )
     )
 
@@ -272,6 +345,9 @@ async def get_traffic_series(
                 FlowInterfaceMinuteRollup.bucket,
                 func.coalesce(func.sum(FlowInterfaceMinuteRollup.in_bytes), 0).label("in_bytes"),
                 func.coalesce(func.sum(FlowInterfaceMinuteRollup.out_bytes), 0).label("out_bytes"),
+                func.coalesce(func.sum(FlowInterfaceMinuteRollup.in_packets), 0).label("in_pkts"),
+                func.coalesce(func.sum(FlowInterfaceMinuteRollup.out_packets), 0).label("out_pkts"),
+                func.coalesce(func.sum(FlowInterfaceMinuteRollup.flow_count), 0).label("flow_count"),
             )
             .where(
                 FlowInterfaceMinuteRollup.exporter_id == exporter_id,
@@ -290,15 +366,26 @@ async def get_traffic_series(
             bucket_time = row[0]
             in_bytes = int(row[1] or 0)
             eg_bytes = int(row[2] or 0)
+            in_pkts = int(row[3] or 0) if len(row) > 3 else 0
+            eg_pkts = int(row[4] or 0) if len(row) > 4 else 0
+            flows_cnt = int(row[5] or 0) if len(row) > 5 else 0
+
             # Each row in FlowInterfaceMinuteRollup represents a 1-minute bucket (60 seconds)
             in_bps = (float(in_bytes) * 8.0) / 60.0
             eg_bps = (float(eg_bytes) * 8.0) / 60.0
+            in_pps = round(float(in_pkts) / 60.0, 2)
+            eg_pps = round(float(eg_pkts) / 60.0, 2)
+            flows_per_sec = round(float(flows_cnt) / 60.0, 2)
+
             iso_str = bucket_time.astimezone(datetime.timezone.utc).isoformat()
             points.append(
                 TrafficSeriesPoint(
                     timestamp=iso_str,
                     ingress_bps=round(in_bps, 2),
                     egress_bps=round(eg_bps, 2),
+                    ingress_pps=in_pps,
+                    egress_pps=eg_pps,
+                    flows_per_sec=flows_per_sec,
                 )
             )
 
@@ -326,6 +413,12 @@ async def get_traffic_series(
         egress_calc = func.sum(
             case((model.src_endpoint_id == endpoint_id, model.bytes), else_=0)
         )
+        ingress_pkt_calc = func.sum(
+            case((model.dst_endpoint_id == endpoint_id, model.packets), else_=0)
+        )
+        egress_pkt_calc = func.sum(
+            case((model.src_endpoint_id == endpoint_id, model.packets), else_=0)
+        )
     elif hasattr(model, "src_endpoint_id"):
         ingress_calc = func.sum(
             case((model.dst_endpoint_id.is_not(None), model.bytes), else_=0)
@@ -333,9 +426,17 @@ async def get_traffic_series(
         egress_calc = func.sum(
             case((model.src_endpoint_id.is_not(None), model.bytes), else_=0)
         )
+        ingress_pkt_calc = func.sum(
+            case((model.dst_endpoint_id.is_not(None), model.packets), else_=0)
+        )
+        egress_pkt_calc = func.sum(
+            case((model.src_endpoint_id.is_not(None), model.packets), else_=0)
+        )
     else:
         ingress_calc = func.sum(model.bytes) / 2
         egress_calc = func.sum(model.bytes) / 2
+        ingress_pkt_calc = func.sum(model.packets) / 2
+        egress_pkt_calc = func.sum(model.packets) / 2
 
     stmt = (
         select(
@@ -343,6 +444,10 @@ async def get_traffic_series(
             func.coalesce(func.sum(model.bytes), 0).label("total_bytes"),
             func.coalesce(ingress_calc, 0).label("ingress_bytes"),
             func.coalesce(egress_calc, 0).label("egress_bytes"),
+            func.coalesce(func.sum(model.packets), 0).label("total_packets"),
+            func.coalesce(ingress_pkt_calc, 0).label("ingress_packets"),
+            func.coalesce(egress_pkt_calc, 0).label("egress_packets"),
+            func.coalesce(func.sum(model.flow_count), 0).label("flow_count"),
         )
         .where(*filters)
         .group_by(model.bucket)
@@ -356,29 +461,45 @@ async def get_traffic_series(
     for row in rows:
         bucket_time = row[0]
         byte_sum = int(row[1] or 0)
-        if len(row) >= 4:
-            in_bytes = int(row[2] or 0)
-            eg_bytes = int(row[3] or 0)
-            # If there is transit traffic not captured by monitored endpoint attribution:
-            transit_bytes = max(0, byte_sum - (in_bytes + eg_bytes))
-            if transit_bytes > 0:
-                in_bytes += transit_bytes // 2
-                eg_bytes += (transit_bytes - transit_bytes // 2)
-            elif in_bytes == 0 and eg_bytes == 0 and byte_sum > 0:
-                in_bytes = byte_sum // 2
-                eg_bytes = byte_sum - in_bytes
-        else:
+        in_bytes = int(row[2] or 0) if len(row) > 2 else 0
+        eg_bytes = int(row[3] or 0) if len(row) > 3 else 0
+        pkt_sum = int(row[4] or 0) if len(row) > 4 else 0
+        in_pkts = int(row[5] or 0) if len(row) > 5 else 0
+        eg_pkts = int(row[6] or 0) if len(row) > 6 else 0
+        flows_cnt = int(row[7] or 0) if len(row) > 7 else 0
+
+        # If there is transit traffic not captured by monitored endpoint attribution:
+        transit_bytes = max(0, byte_sum - (in_bytes + eg_bytes))
+        if transit_bytes > 0:
+            in_bytes += transit_bytes // 2
+            eg_bytes += (transit_bytes - transit_bytes // 2)
+        elif in_bytes == 0 and eg_bytes == 0 and byte_sum > 0:
             in_bytes = byte_sum // 2
             eg_bytes = byte_sum - in_bytes
 
+        transit_pkts = max(0, pkt_sum - (in_pkts + eg_pkts))
+        if transit_pkts > 0:
+            in_pkts += transit_pkts // 2
+            eg_pkts += (transit_pkts - transit_pkts // 2)
+        elif in_pkts == 0 and eg_pkts == 0 and pkt_sum > 0:
+            in_pkts = pkt_sum // 2
+            eg_pkts = pkt_sum - in_pkts
+
         in_bps = (float(in_bytes) * 8.0) / bucket_seconds
         eg_bps = (float(eg_bytes) * 8.0) / bucket_seconds
+        in_pps = round(float(in_pkts) / bucket_seconds, 2)
+        eg_pps = round(float(eg_pkts) / bucket_seconds, 2)
+        flows_per_sec = round(float(flows_cnt) / bucket_seconds, 2)
+
         iso_str = bucket_time.astimezone(datetime.timezone.utc).isoformat()
         points.append(
             TrafficSeriesPoint(
                 timestamp=iso_str,
                 ingress_bps=round(in_bps, 2),
                 egress_bps=round(eg_bps, 2),
+                ingress_pps=in_pps,
+                egress_pps=eg_pps,
+                flows_per_sec=flows_per_sec,
             )
         )
 
@@ -390,7 +511,7 @@ async def get_traffic_series(
 @router.get("/top-talkers", response_model=APIResponse)
 async def get_top_talkers(
     window: str = Query(default="1h"),
-    limit: int = Query(default=10, ge=1, le=50),
+    limit: int = Query(default=25, ge=1, le=200),
     endpoint_id: Optional[UUID] = Query(default=None),
     exporter_id: Optional[UUID] = Query(default=None),
     current_user: dict = Depends(get_current_user),
@@ -423,6 +544,7 @@ async def get_top_talkers(
             model.src_endpoint_id,
             func.sum(model.bytes).label("egress_bytes"),
             func.sum(model.flow_count).label("egress_flows"),
+            func.coalesce(func.sum(model.packets), 0).label("egress_packets"),
         )
         .where(*ep_filters)
         .group_by(model.src_ip, model.src_endpoint_id)
@@ -436,6 +558,7 @@ async def get_top_talkers(
             model.dst_endpoint_id,
             func.sum(model.bytes).label("ingress_bytes"),
             func.sum(model.flow_count).label("ingress_flows"),
+            func.coalesce(func.sum(model.packets), 0).label("ingress_packets"),
         )
         .where(*ep_filters)
         .group_by(model.dst_ip, model.dst_endpoint_id)
@@ -452,7 +575,8 @@ async def get_top_talkers(
         ep_id = row[1]
         eg_b = int(row[2] or 0)
         eg_f = int(row[3] or 0)
-        egress_map[ip_str] = {"ep_id": ep_id, "bytes": eg_b, "flows": eg_f}
+        eg_p = int(row[4] or 0) if len(row) > 4 else 0
+        egress_map[ip_str] = {"ep_id": ep_id, "bytes": eg_b, "flows": eg_f, "packets": eg_p}
 
     ingress_map: Dict[str, Dict[str, Any]] = {}
     for row in ingress_res.all():
@@ -460,17 +584,20 @@ async def get_top_talkers(
         ep_id = row[1]
         in_b = int(row[2] or 0)
         in_f = int(row[3] or 0)
-        ingress_map[ip_str] = {"ep_id": ep_id, "bytes": in_b, "flows": in_f}
+        in_p = int(row[4] or 0) if len(row) > 4 else 0
+        ingress_map[ip_str] = {"ep_id": ep_id, "bytes": in_b, "flows": in_f, "packets": in_p}
 
     all_ips = set(egress_map.keys()) | set(ingress_map.keys())
     merged_candidates: List[Dict[str, Any]] = []
     for ip_str in all_ips:
-        eg = egress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0})
-        ing = ingress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0})
+        eg = egress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0, "packets": 0})
+        ing = ingress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0, "packets": 0})
         eg_bytes = eg["bytes"]
         in_bytes = ing["bytes"]
         tot_bytes = eg_bytes + in_bytes
         tot_flows = eg["flows"] + ing["flows"]
+        tot_pkts = eg["packets"] + ing["packets"]
+        avg_pkt_sz = int(tot_bytes // tot_pkts) if tot_pkts > 0 else 0
         ep_id = eg["ep_id"] or ing["ep_id"]
         merged_candidates.append({
             "ip": ip_str,
@@ -479,6 +606,8 @@ async def get_top_talkers(
             "egress_bytes": eg_bytes,
             "total_bytes": tot_bytes,
             "flow_count": tot_flows,
+            "total_packets": tot_pkts,
+            "avg_packet_size": avg_pkt_sz,
         })
 
     merged_candidates.sort(key=lambda x: x["total_bytes"], reverse=True)
@@ -504,6 +633,8 @@ async def get_top_talkers(
                 ingress_bytes=c["ingress_bytes"],
                 egress_bytes=c["egress_bytes"],
                 flow_count=c["flow_count"],
+                total_packets=c["total_packets"],
+                avg_packet_size=c["avg_packet_size"],
             )
         )
 
@@ -529,6 +660,7 @@ async def get_top_talkers(
             func.sum(FlowMinuteRollup.flow_count).label("total_flows"),
             func.bit_or(FlowMinuteRollup.tcp_flags).label("tcp_flags_mask"),
             func.max(FlowMinuteRollup.tos).label("max_tos"),
+            func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
         )
         .where(*conv_filters)
         .group_by(
@@ -548,10 +680,11 @@ async def get_top_talkers(
         d_ip = row[1]
         proto_id = row[2]
         port = row[3]
-        b_sum = row[4]
-        f_sum = row[5]
+        b_sum = int(row[4] or 0)
+        f_sum = int(row[5] or 0)
         tcp_flags = int(row[6] or 0) if len(row) > 6 else 0
         tos = int(row[7] or 0) if len(row) > 7 else 0
+        tot_packets = int(row[8] or 0) if len(row) > 8 else 0
 
         proto_name = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
         flags_labels = format_tcp_flags(tcp_flags) if proto_name == "TCP" else []
@@ -567,14 +700,22 @@ async def get_top_talkers(
             elif (tcp_flags & 0x04) and not (tcp_flags & 0x01):
                 anomaly_hint = "TCP_RST"
 
+        avg_pkt_size = int(b_sum // tot_packets) if tot_packets > 0 else 0
+        pkts_per_flow = round(float(tot_packets) / float(f_sum), 1) if f_sum > 0 else 0.0
+        traffic_prof = derive_traffic_profile(anomaly_hint, avg_pkt_size, pkts_per_flow, dscp_val, int(port))
+
         top_conversations.append(
             TopConversationItem(
                 src_ip=str(s_ip),
                 dst_ip=str(d_ip),
                 protocol=proto_name,
                 dst_port=int(port),
-                total_bytes=int(b_sum or 0),
-                flow_count=int(f_sum or 0),
+                total_bytes=b_sum,
+                flow_count=f_sum,
+                total_packets=tot_packets,
+                avg_packet_size=avg_pkt_size,
+                packets_per_flow=pkts_per_flow,
+                traffic_profile=traffic_prof,
                 tcp_flags=tcp_flags,
                 tcp_flags_labels=flags_labels,
                 tos=tos,
@@ -594,26 +735,41 @@ async def get_top_talkers(
 @router.get("/applications", response_model=APIResponse)
 async def get_applications_breakdown(
     window: str = Query(default="1h"),
+    exporter_id: Optional[UUID] = Query(default=None),
+    endpoint_id: Optional[UUID] = Query(default=None),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Returns protocol and service port volume distribution for donut chart.
+    Returns protocol and service port volume distribution, QoS/DSCP class breakdown,
+    and directional Traffic Zone breakdown.
     Dynamically routes to hypertable or continuous aggregates based on window.
     """
     delta = _get_window_delta(window)
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
 
-    model, _ = _select_rollup_model_and_bucket_seconds(window)
+    model, _ = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
 
+    app_filters = [model.bucket >= start_time]
+    if exporter_id is not None:
+        app_filters.append(model.exporter_id == exporter_id)
+    if endpoint_id is not None and hasattr(model, "src_endpoint_id"):
+        app_filters.append(
+            or_(
+                model.src_endpoint_id == endpoint_id,
+                model.dst_endpoint_id == endpoint_id,
+            )
+        )
+
+    # 1. Top 15 (protocol, dst_port) Application Services
     stmt = (
         select(
             model.protocol,
             model.dst_port,
             func.sum(model.bytes).label("total_bytes"),
         )
-        .where(model.bucket >= start_time)
+        .where(*app_filters)
         .group_by(model.protocol, model.dst_port)
         .order_by(func.sum(model.bytes).desc())
         .limit(15)
@@ -640,7 +796,176 @@ async def get_applications_breakdown(
             )
         )
 
-    return APIResponse.success(data=ApplicationDistributionResponse(applications=apps))
+    # 2. QoS / DSCP Breakdown
+    qos_stmt = (
+        select(
+            model.tos,
+            func.coalesce(func.sum(model.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(model.packets), 0).label("total_packets"),
+            func.coalesce(func.sum(model.flow_count), 0).label("flow_count"),
+        )
+        .where(*app_filters)
+        .group_by(model.tos)
+    )
+    qos_res = await db.execute(qos_stmt)
+    dscp_buckets: Dict[int, Dict[str, Any]] = {}
+    total_qos_bytes = 0
+    for q_row in qos_res.all():
+        if len(q_row) < 2:
+            continue
+        tos_val = int(q_row[0] or 0)
+        q_bytes = int(q_row[1] or 0)
+        q_pkts = int(q_row[2] or 0) if len(q_row) > 2 else 0
+        q_flows = int(q_row[3] or 0) if len(q_row) > 3 else 0
+        dscp_val = (tos_val & 0xFF) >> 2
+        total_qos_bytes += q_bytes
+        if dscp_val not in dscp_buckets:
+            dscp_buckets[dscp_val] = {
+                "dscp": dscp_val,
+                "dscp_label": format_dscp_label(tos_val),
+                "total_bytes": 0,
+                "total_packets": 0,
+                "flow_count": 0,
+            }
+        dscp_buckets[dscp_val]["total_bytes"] += q_bytes
+        dscp_buckets[dscp_val]["total_packets"] += q_pkts
+        dscp_buckets[dscp_val]["flow_count"] += q_flows
+
+    qos_classes: List[QoSDistributionItem] = []
+    sorted_dscp = sorted(dscp_buckets.values(), key=lambda x: x["total_bytes"], reverse=True)
+    for item in sorted_dscp:
+        pct = (item["total_bytes"] / total_qos_bytes * 100.0) if total_qos_bytes > 0 else 0.0
+        qos_classes.append(
+            QoSDistributionItem(
+                dscp=item["dscp"],
+                dscp_label=item["dscp_label"],
+                total_bytes=item["total_bytes"],
+                total_packets=item["total_packets"],
+                flow_count=item["flow_count"],
+                percentage=round(pct, 2),
+            )
+        )
+
+    # 3. Traffic Zone Breakdown (East-West, North-South, External)
+    zone_sums = {
+        "East-West (Internal)": {"bytes": 0, "flows": 0},
+        "North-South Egress": {"bytes": 0, "flows": 0},
+        "North-South Ingress": {"bytes": 0, "flows": 0},
+        "External / Transit": {"bytes": 0, "flows": 0},
+    }
+
+    if hasattr(model, "src_ip"):
+        zone_stmt = (
+            select(
+                model.src_ip,
+                model.dst_ip,
+                model.src_endpoint_id,
+                model.dst_endpoint_id,
+                func.sum(model.bytes).label("total_bytes"),
+                func.sum(model.flow_count).label("flow_count"),
+            )
+            .where(*app_filters)
+            .group_by(
+                model.src_ip,
+                model.dst_ip,
+                model.src_endpoint_id,
+                model.dst_endpoint_id,
+            )
+        )
+        zone_res = await db.execute(zone_stmt)
+
+        def _is_internal(ip_val: str, ep_val: Optional[Any]) -> bool:
+            if ep_val is not None:
+                return True
+            try:
+                return ipaddress.ip_address(ip_val).is_private
+            except Exception:
+                return False
+
+        for z_row in zone_res.all():
+            if len(z_row) < 5:
+                continue
+            s_ip = str(z_row[0])
+            d_ip = str(z_row[1])
+            s_ep = z_row[2]
+            d_ep = z_row[3]
+            z_b = int(z_row[4] or 0)
+            z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
+
+            src_int = _is_internal(s_ip, s_ep)
+            dst_int = _is_internal(d_ip, d_ep)
+            if src_int and dst_int:
+                z_key = "East-West (Internal)"
+            elif src_int and not dst_int:
+                z_key = "North-South Egress"
+            elif not src_int and dst_int:
+                z_key = "North-South Ingress"
+            else:
+                z_key = "External / Transit"
+
+            zone_sums[z_key]["bytes"] += z_b
+            zone_sums[z_key]["flows"] += z_f
+    else:
+        zone_stmt = (
+            select(
+                model.src_endpoint_id,
+                model.dst_endpoint_id,
+                func.sum(model.bytes).label("total_bytes"),
+                func.sum(model.flow_count).label("flow_count"),
+            )
+            .where(*app_filters)
+            .group_by(
+                model.src_endpoint_id,
+                model.dst_endpoint_id,
+            )
+        )
+        zone_res = await db.execute(zone_stmt)
+        for z_row in zone_res.all():
+            if len(z_row) < 3:
+                continue
+            s_ep = z_row[0]
+            d_ep = z_row[1]
+            z_b = int(z_row[2] or 0)
+            z_f = int(z_row[3] or 0) if len(z_row) > 3 else 0
+
+            if s_ep is not None and d_ep is not None:
+                z_key = "East-West (Internal)"
+            elif s_ep is not None and d_ep is None:
+                z_key = "North-South Egress"
+            elif s_ep is None and d_ep is not None:
+                z_key = "North-South Ingress"
+            else:
+                z_key = "External / Transit"
+
+            zone_sums[z_key]["bytes"] += z_b
+            zone_sums[z_key]["flows"] += z_f
+
+    total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
+    traffic_zones: List[TrafficZoneItem] = []
+    for z_name in [
+        "East-West (Internal)",
+        "North-South Egress",
+        "North-South Ingress",
+        "External / Transit",
+    ]:
+        data = zone_sums[z_name]
+        pct = (data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0
+        traffic_zones.append(
+            TrafficZoneItem(
+                zone=z_name,
+                total_bytes=data["bytes"],
+                flow_count=data["flows"],
+                percentage=round(pct, 2),
+            )
+        )
+
+    return APIResponse.success(
+        data=ApplicationDistributionResponse(
+            applications=apps,
+            qos_classes=qos_classes,
+            traffic_zones=traffic_zones,
+        )
+    )
 
 
 @router.get("/exporters", response_model=APIResponse)

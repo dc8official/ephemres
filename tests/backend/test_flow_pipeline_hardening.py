@@ -15,7 +15,14 @@ from app.routers.bandwidth import router as bandwidth_router
 from app.schemas.bandwidth import (
     format_dscp_label,
     format_tcp_flags,
+    derive_traffic_profile,
+    BandwidthOverview,
+    TrafficSeriesPoint,
+    TopTalkerItem,
     TopConversationItem,
+    QoSDistributionItem,
+    TrafficZoneItem,
+    ApplicationDistributionResponse,
 )
 from monitoring.flow.aggregator import (
     FlowAggregator,
@@ -542,3 +549,186 @@ def test_schema_helpers_flags_and_dscp():
     assert format_dscp_label(40) == "AF11"
     assert format_dscp_label(136) == "AF41 (Video)"
     assert format_dscp_label(4) == "DSCP 1"
+
+
+def test_derive_traffic_profile_classification():
+    # 1. Anomaly priority
+    assert derive_traffic_profile("SYN_ONLY", 60, 1.0, 0, 443) == "SYN Scan / Probe"
+    assert derive_traffic_profile("TCP_RST", 1400, 20.0, 0, 80) == "Reset / Refused"
+
+    # 2. Bulk Transfer (avg_packet_size >= 1100 and packets_per_flow >= 10)
+    assert derive_traffic_profile(None, 1450, 12.0, 0, 443) == "Bulk Transfer"
+    assert derive_traffic_profile(None, 1100, 10.0, 0, 80) == "Bulk Transfer"
+
+    # 3. Micro-Flow / Control (avg_packet_size <= 120 and packets_per_flow <= 3)
+    assert derive_traffic_profile(None, 80, 2.0, 0, 80) == "Micro-Flow / Control"
+    assert derive_traffic_profile(None, 120, 3.0, 0, 443) == "Micro-Flow / Control"
+
+    # 4. Real-Time / VoIP (dscp == 46 or dst_port in (5060, 5061, 16384))
+    assert derive_traffic_profile(None, 500, 5.0, 46, 12345) == "Real-Time / VoIP"
+    assert derive_traffic_profile(None, 200, 5.0, 0, 5060) == "Real-Time / VoIP"
+    assert derive_traffic_profile(None, 200, 5.0, 0, 5061) == "Real-Time / VoIP"
+    assert derive_traffic_profile(None, 200, 5.0, 0, 16384) == "Real-Time / VoIP"
+
+    # 5. Default: Interactive
+    assert derive_traffic_profile(None, 500, 6.0, 0, 443) == "Interactive"
+    assert derive_traffic_profile(None, 1200, 5.0, 0, 443) == "Interactive"  # high bytes but low pkts/fl
+    assert derive_traffic_profile(None, 200, 20.0, 0, 443) == "Interactive"  # many pkts but medium size
+
+
+def test_flow_workbench_enriched_schemas():
+    overview = BandwidthOverview(
+        total_ingress_bps=1000.0,
+        total_egress_bps=2000.0,
+        total_ingress_pps=15.5,
+        total_egress_pps=25.0,
+        avg_packet_size=512,
+        active_exporters_count=2,
+        unmatched_exporters_count=0,
+        total_flows_count=100,
+        anomaly_flows_count=4,
+    )
+    assert overview.total_ingress_pps == 15.5
+    assert overview.total_egress_pps == 25.0
+    assert overview.avg_packet_size == 512
+    assert overview.anomaly_flows_count == 4
+
+    point = TrafficSeriesPoint(
+        timestamp="2026-10-18T20:00:00Z",
+        ingress_bps=5000.0,
+        egress_bps=8000.0,
+        ingress_pps=12.5,
+        egress_pps=20.0,
+        flows_per_sec=3.2,
+    )
+    assert point.ingress_pps == 12.5
+    assert point.egress_pps == 20.0
+    assert point.flows_per_sec == 3.2
+
+    talker = TopTalkerItem(
+        ip_address="192.168.1.50",
+        ingress_bytes=60_000,
+        egress_bytes=40_000,
+        total_bytes=100_000,
+        flow_count=10,
+        total_packets=200,
+        avg_packet_size=500,
+    )
+    assert talker.total_packets == 200
+    assert talker.avg_packet_size == 500
+
+    conv = TopConversationItem(
+        src_ip="10.0.0.1",
+        dst_ip="10.0.0.2",
+        protocol="TCP",
+        dst_port=443,
+        total_bytes=50_000,
+        flow_count=5,
+        total_packets=100,
+        avg_packet_size=500,
+        packets_per_flow=20.0,
+        traffic_profile="Interactive",
+    )
+    assert conv.total_packets == 100
+    assert conv.avg_packet_size == 500
+    assert conv.packets_per_flow == 20.0
+    assert conv.traffic_profile == "Interactive"
+
+    qos_item = QoSDistributionItem(
+        dscp=46,
+        dscp_label="EF (VoIP)",
+        total_bytes=10_000,
+        total_packets=50,
+        flow_count=5,
+        percentage=75.5,
+    )
+    assert qos_item.dscp == 46
+    assert qos_item.percentage == 75.5
+
+    zone_item = TrafficZoneItem(
+        zone="East-West (Internal)",
+        total_bytes=25_000,
+        flow_count=12,
+        percentage=60.0,
+    )
+    assert zone_item.zone == "East-West (Internal)"
+    assert zone_item.percentage == 60.0
+
+    app_resp = ApplicationDistributionResponse(
+        applications=[],
+        qos_classes=[qos_item],
+        traffic_zones=[zone_item],
+    )
+    assert len(app_resp.qos_classes) == 1
+    assert len(app_resp.traffic_zones) == 1
+
+
+def test_applications_qos_and_traffic_zones_integration(api_client):
+    client, mock_session = api_client
+
+    # 1. Applications query result: (protocol, dst_port, total_bytes)
+    m_apps = MagicMock()
+    m_apps.all.return_value = [
+        (6, 443, 600_000),
+        (17, 53, 400_000),
+    ]
+
+    # 2. QoS query result: (tos, total_bytes, total_packets, flow_count)
+    # ToS 184 = DSCP 46 (EF)
+    # ToS 0 = DSCP 0 (CS0)
+    m_qos = MagicMock()
+    m_qos.all.return_value = [
+        (184, 750_000, 750, 75),
+        (0, 250_000, 250, 25),
+    ]
+
+    # 3. Zones query result: (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
+    ep1_id = uuid4()
+    ep2_id = uuid4()
+    m_zones = MagicMock()
+    m_zones.all.return_value = [
+        # Internal to internal -> East-West (Internal)
+        ("192.168.1.10", "192.168.1.20", ep1_id, ep2_id, 500_000, 50),
+        # Internal to public -> North-South Egress
+        ("192.168.1.10", "8.8.8.8", ep1_id, None, 300_000, 30),
+        # Public to internal -> North-South Ingress
+        ("1.1.1.1", "192.168.1.20", None, ep2_id, 200_000, 20),
+    ]
+
+    mock_session.execute.side_effect = [m_apps, m_qos, m_zones]
+
+    exp_id = uuid4()
+    res = client.get(f"/api/v1/bandwidth/applications?window=1h&exporter_id={exp_id}")
+    assert res.status_code == 200
+    data = res.json()["data"]
+
+    # Applications check
+    apps = data["applications"]
+    assert len(apps) == 2
+    assert apps[0]["service_label"] == "HTTPS"
+    assert apps[0]["total_bytes"] == 600_000
+
+    # QoS check
+    qos = data["qos_classes"]
+    assert len(qos) == 2
+    assert qos[0]["dscp"] == 46
+    assert qos[0]["dscp_label"] == "EF (VoIP)"
+    assert qos[0]["total_bytes"] == 750_000
+    assert qos[0]["percentage"] == 75.0
+    assert qos[1]["dscp"] == 0
+    assert qos[1]["percentage"] == 25.0
+
+    # Zones check
+    zones = data["traffic_zones"]
+    assert len(zones) == 4
+    zone_names = [z["zone"] for z in zones]
+    assert "East-West (Internal)" in zone_names
+    assert "North-South Egress" in zone_names
+    assert "North-South Ingress" in zone_names
+    assert "External / Transit" in zone_names
+
+    ew_zone = next(z for z in zones if z["zone"] == "East-West (Internal)")
+    assert ew_zone["total_bytes"] == 500_000
+    assert ew_zone["percentage"] == 50.0
+
+
