@@ -18,12 +18,13 @@ REMOVED_DEPENDENCIES = {
     "icmplib",
     "dateutil",
     "argon2",
+    "cryptography",
 }
 
 
 def test_no_removed_dependencies_in_source_tree():
     project_root = Path(__file__).resolve().parents[2]
-    source_dirs = [project_root / "backend", project_root / "monitoring"]
+    source_dirs = [project_root / "backend", project_root / "monitoring", project_root / "tests"]
 
     violations = []
 

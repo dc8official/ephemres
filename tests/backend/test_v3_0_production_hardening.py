@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,7 @@ from app.services.auth_service import is_session_active
 from app.services.diagnostics import is_local_subnet_destination
 from app.services.event_broker import PostgresEventBroker
 from app.services.session_store import PostgresSessionStore, RedisSessionStore
-from monitoring.synthetic import _sync_ssl_probe
+from monitoring.synthetic import _parse_der_cert_not_after, _sync_ssl_probe
 
 
 class TestPhase1BrokerAndStorageFoundations(unittest.TestCase):
@@ -58,8 +59,43 @@ class TestPhase1BrokerAndStorageFoundations(unittest.TestCase):
         self.loop.run_until_complete(_run())
 
 
+# Self-signed P-256 certs for CN=internal.service.local (openssl req -x509 -outform DER).
+# notAfter 2030-06-01 is encoded as UTCTime; 2051-01-01 as GeneralizedTime (RFC 5280 4.1.2.5).
+DER_CERT_NOT_AFTER_2030 = base64.b64decode(
+    "MIIBmDCCAT2gAwIBAgIUb8Q9oMHG1858YI/ChOu8alLvmgIwCgYIKoZIzj0EAwIwITEfMB0GA1UE"
+    "AwwWaW50ZXJuYWwuc2VydmljZS5sb2NhbDAeFw0yNTAxMDEwMDAwMDBaFw0zMDA2MDEwMDAwMDBa"
+    "MCExHzAdBgNVBAMMFmludGVybmFsLnNlcnZpY2UubG9jYWwwWTATBgcqhkjOPQIBBggqhkjOPQMB"
+    "BwNCAASLE1UzjkziO5mTMWbkH1kTeiG7rM8qyEdVC4s9Yb9bGX22kJ2JYsykZiWktaEHCft5Xrql"
+    "NQfcFtDkqs1ndaUmo1MwUTAdBgNVHQ4EFgQUGsnkWyB1PXeR/s3PSsePx7TpUlIwHwYDVR0jBBgw"
+    "FoAUGsnkWyB1PXeR/s3PSsePx7TpUlIwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBG"
+    "AiEA+xt/U5JMrJbcS4AKC7qp1H7981hADkt7I+ZeyI1q7IsCIQD5ucRjp74VZg4H21l7NCaKvF19"
+    "i1KCN4pcn3GU4O58Ew=="
+)
+DER_CERT_NOT_AFTER_2051 = base64.b64decode(
+    "MIIBmjCCAT+gAwIBAgIURxe/nHyHY8miNciTIDDmlkV3LOEwCgYIKoZIzj0EAwIwITEfMB0GA1UE"
+    "AwwWaW50ZXJuYWwuc2VydmljZS5sb2NhbDAgFw0yNTAxMDEwMDAwMDBaGA8yMDUxMDEwMTAwMDAw"
+    "MFowITEfMB0GA1UEAwwWaW50ZXJuYWwuc2VydmljZS5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49"
+    "AwEHA0IABBuQT6cTD8UvM7Vl+tQVo70IrhMZa5WCHyJ6utTNoel3kSELdNnBxpalXEpXb8+ze+zW"
+    "hh238rsV7SdFAAoozZajUzBRMB0GA1UdDgQWBBSVTmjKGV6IkDgEK9cFYvVulEPuHDAfBgNVHSME"
+    "GDAWgBSVTmjKGV6IkDgEK9cFYvVulEPuHDAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kA"
+    "MEYCIQDtpBDyyY1nWvluC7jbVcCZn4jXor/wTtr+stfIPXhuCwIhAIp/GAwc+hxVoweuGmokPyy7"
+    "bcQx+GEfzVR1gW97M/mH"
+)
+
+
 class TestPhase2SSLBinaryDERProbe(unittest.TestCase):
     """Test SSL probe binary DER certificate fallback under CERT_NONE."""
+
+    def test_parse_der_cert_not_after_utc_and_generalized_time(self) -> None:
+        """Test the pure-stdlib DER parser extracts notAfter for both X.509 time encodings."""
+        self.assertEqual(
+            _parse_der_cert_not_after(DER_CERT_NOT_AFTER_2030),
+            datetime(2030, 6, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            _parse_der_cert_not_after(DER_CERT_NOT_AFTER_2051),
+            datetime(2051, 1, 1, tzinfo=timezone.utc),
+        )
 
     def test_ssl_probe_cert_none_binary_form(self) -> None:
         """Test _sync_ssl_probe falls back to binary DER certificate when verify_mode is CERT_NONE."""
@@ -69,7 +105,7 @@ class TestPhase2SSLBinaryDERProbe(unittest.TestCase):
             mock_ssock = MagicMock()
             # CERT_NONE returns empty dict for binary_form=False
             mock_ssock.getpeercert.side_effect = lambda binary_form=False: (
-                b"mock_der_bytes" if binary_form else {}
+                DER_CERT_NOT_AFTER_2030 if binary_form else {}
             )
             mock_ssock.__enter__.return_value = mock_ssock
 
@@ -77,15 +113,10 @@ class TestPhase2SSLBinaryDERProbe(unittest.TestCase):
             mock_ctx_inst.wrap_socket.return_value = mock_ssock
             mock_ctx.return_value = mock_ctx_inst
 
-            mock_x509_cert = MagicMock()
-            mock_x509_cert.not_valid_after_utc = datetime(2030, 6, 1, tzinfo=timezone.utc)
-
-            with patch("cryptography.x509.load_der_x509_certificate", return_value=mock_x509_cert) as mock_load:
-                res = _sync_ssl_probe("internal.service.local", port=443)
-                self.assertTrue(res["success"])
-                self.assertIsNotNone(res["expires_at"])
-                self.assertGreater(res["days_until_expiry"], 100)
-                mock_load.assert_called_once_with(b"mock_der_bytes")
+            res = _sync_ssl_probe("internal.service.local", port=443)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["expires_at"], "2030-06-01T00:00:00+00:00")
+            self.assertGreater(res["days_until_expiry"], 100)
 
 
 class TestPhase4ReportsHardening(unittest.TestCase):

@@ -5,7 +5,6 @@ import ipaddress
 import logging
 import socket
 import ssl
-import sys
 import time
 import urllib.parse
 import urllib.request
@@ -404,24 +403,14 @@ def _sync_ssl_probe(
             pass
 
     if expiry_dt is None and bin_cert:
-        if "cryptography.x509" in sys.modules:
-            try:
-                mod = sys.modules["cryptography.x509"]
-                fn = getattr(mod, "load_der_x509_certificate", None)
-                if callable(fn):
-                    c = fn(bin_cert)
-                    expiry_dt = getattr(c, "not_valid_after_utc", getattr(c, "not_valid_after", None))
-            except Exception:
-                pass
-        if expiry_dt is None:
-            try:
-                expiry_dt = _parse_der_cert_not_after(bin_cert)
-            except Exception as parse_err:
-                logger.warning(
-                    "Failed to parse DER certificate for %s: %s",
-                    host,
-                    parse_err,
-                )
+        try:
+            expiry_dt = _parse_der_cert_not_after(bin_cert)
+        except Exception as parse_err:
+            logger.warning(
+                "Failed to parse DER certificate for %s: %s",
+                host,
+                parse_err,
+            )
 
     latency_val = round(handshake_latency_ms, 2) if handshake_latency_ms is not None else None
     if expiry_dt is None:
