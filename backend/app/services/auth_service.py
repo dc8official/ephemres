@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class ScryptPasswordHasher:
     """
     Zero-dependency password hasher backed by OpenSSL hashlib.scrypt.
-    Format: $scrypt$n=16384,r=8,p=1$<salt_b64>$<hash_b64>
+    Format: $scrypt$n=131072,r=8,p=1$<salt_b64>$<hash_b64> (older n=16384 hashes verify and are re-hashed on login)
     """
 
     N = 2**17

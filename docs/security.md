@@ -39,7 +39,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
                                                 ▼
                                    ┌─────────────────────────┐
                                    │   Nginx Reverse Proxy   │ (Port 80 / 443)
-                                   │ SSL/TLS 1.3 Termination │
+                                   │ TLS 1.2/1.3 Termination │
                                    └────────────┬────────────┘
                                                 │
                        ┌────────────────────────┼────────────────────────┐
@@ -61,7 +61,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Service Component | Port(s) | Binding Scope | Security Hardening Controls |
 | :--- | :--- | :--- | :--- |
-| **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Enforces TLS 1.2+, HSTS, Content Security Policy, and proxies internal API traffic. |
+| **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Terminates TLS 1.2/1.3, sets `X-Frame-Options`, `X-Content-Type-Options` and `Referrer-Policy`, and proxies internal API traffic. HSTS is added by `ephemres-api` (see §9D); no Content-Security-Policy is set. |
 | **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
 | **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
@@ -133,7 +133,7 @@ In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`)
 * **Forced Initial Password Reset:** Newly provisioned user accounts (`ADMIN` or `VIEWER`) must change their temporary password upon first login before accessing system telemetry.
 
 ### C. Password Hashing
-* **Password Hashing**: Passwords are hashed using Python's native OpenSSL-backed **`hashlib.scrypt`** (`$scrypt$n=16384,r=8,p=1$`, 16-byte cryptographic salt, 64-byte derived key) verified in constant time via `hmac.compare_digest`. Legacy `$argon2id$` hashes from pre-`v3.3.2v` backups are automatically invalidated and flagged for password reset during cross-version restore.
+* **Password Hashing**: Passwords are hashed using Python's native OpenSSL-backed **`hashlib.scrypt`** (`$scrypt$n=131072,r=8,p=1$`, 16-byte cryptographic salt, 64-byte derived key) verified in constant time via `hmac.compare_digest`. Hashes created with the earlier `n=16384` cost still verify and are transparently re-hashed at the stronger cost on the user's next successful login. Legacy `$argon2id$` hashes from pre-`v3.3.2v` backups are automatically invalidated and flagged for password reset during cross-version restore.
 * Plaintext passwords are never logged or stored.
 
 ---
@@ -188,19 +188,36 @@ Every generated PDF byte stream is hashed prior to transmission:
 * `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
 * Daemons do not possess `sudo` or root privileges.
 
-### B. Linux Capability Isolation (`CAP_NET_RAW`)
-* Raw socket creation for ICMP echo requests (ping) typically requires root privileges.
-* Instead of running daemons as root or marking Python setuid-root, Ephemres isolates the capability strictly to the Python interpreter using Linux file capabilities:
-  ```bash
-  setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)
-  ```
-* This grants packet crafting rights strictly for network diagnostics without granting file system, memory, or administrative OS rights.
+### B. Linux Capability Grants (`CAP_NET_RAW`)
+* Raw socket creation for ICMP echo requests (ping) and traceroute normally requires root privileges.
+* The systemd units grant only the capabilities each daemon needs, via `AmbientCapabilities` and a matching `CapabilityBoundingSet`:
 
-### C. Systemd Sandboxing Directives
-The production unit files (`deploy/ephemres-api.service`, `deploy/ephemres-engine.service`, and `deploy/ephemres-flowd.service`) enforce system-level isolation:
-* `ProtectSystem=full`: Mounts `/usr`, `/boot`, and `/etc` read-only for daemon processes.
-* `PrivateTmp=true`: Allocates isolated, private `/tmp` directories inaccessible to other system users.
-* `NoNewPrivileges=true`: Prevents child processes from gaining elevated privileges via setuid binaries.
+  | Unit | Capabilities |
+  | :--- | :--- |
+  | `ephemres-engine` | `CAP_NET_RAW` |
+  | `ephemres-flowd` | `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE` |
+  | `ephemres-api` | none granted by the unit (no `CapabilityBoundingSet`) |
+
+* In addition, `deploy/install.sh` sets a file capability on the resolved virtualenv interpreter and on `traceroute`:
+  ```bash
+  setcap cap_net_raw+ep "$(readlink -f /opt/ephemres/venv/bin/python3)"
+  setcap cap_net_raw+ep "$(command -v traceroute)"
+  ```
+  > [!WARNING]
+  > A virtualenv's `python3` is a symlink to the system interpreter (for example `/usr/bin/python3.12`), so this file capability applies to **every** process that runs that interpreter on the host, not only Ephemres. The units above already grant `CAP_NET_RAW` to the daemons that need it; on hosts where other users can run Python, consider removing the interpreter file capability (`setcap -r "$(readlink -f /opt/ephemres/venv/bin/python3)"`).
+
+### C. Systemd Service Isolation
+The production unit files (`deploy/ephemres-api.service`, `deploy/ephemres-engine.service`, and `deploy/ephemres-flowd.service`) currently apply:
+* `User=ephemres` / `Group=ephemres`: daemons never run as root.
+* `RuntimeDirectory=ephemres` with `RuntimeDirectoryMode=0700`: a private runtime directory under `/run/ephemres`.
+* `Type=notify` with `WatchdogSec=45`: systemd restarts a daemon that stops sending watchdog heartbeats.
+
+Filesystem sandboxing directives (`ProtectSystem=`, `PrivateTmp=`, `NoNewPrivileges=`) are **not** enabled in the shipped units. Note that `NoNewPrivileges=true` would also stop the file capabilities in §9B from taking effect, so it can only be added together with relying solely on the units' ambient capabilities.
+
+### D. HTTP Strict Transport Security (HSTS)
+* `ephemres-api` adds `Strict-Transport-Security: max-age=31536000; includeSubDomains` to its responses when `[security] hsts_enabled = true` in `/etc/ephemres/config.toml`. The shipped config template enables it; the built-in default when the key is absent is `false`.
+* The same flag marks the session cookie `Secure`.
+* Static frontend assets are served directly by Nginx, which does not add HSTS in the shipped `deploy/nginx.conf.template`; add `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;` to the TLS server block to cover them.
 
 ---
 
@@ -227,7 +244,7 @@ Ephemres enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), s
 
 When deploying Ephemres in production, ensure the following hardening steps are verified:
 
-- [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates and HSTS enabled.
+- [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates, `[security] hsts_enabled = true` in `config.toml`, and (optionally) an HSTS `add_header` in the Nginx TLS server block for static assets.
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
 - [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/dev/shm/ephemres_faststore*`) are owned by `ephemres:ephemres` (`0600`).
 - [ ] **Admin Password Changed:** Verify the default administrator password was changed upon initial login.

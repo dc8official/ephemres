@@ -105,20 +105,22 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   ```
 
 ### B. User Account Temporarily Locked Out (HTTP 403)
-* **Cause**: 5 consecutive failed login attempts from a single IP within a 15-minute window trigger an IP-scoped security lockout.
+* **Cause**: Repeated failed logins for one username from one client IP (5 by default; set **Lockout Threshold** under **Admin Settings → Security & Discovery**) trigger a 15-minute lockout scoped to that `IP:username` pair. The failure counter resets after 30 minutes without further failures.
 * **Fix**:
-  - Wait 15 minutes for the automated sliding lockout window to expire.
-  - Or reset the user's password directly from the server CLI:
-    ```bash
-    sudo /opt/ephemres/deploy/reset-admin-password.sh <username> <new_password>
-    ```
+  - Wait 15 minutes for the lockout to expire, or log in from a different client IP.
+  - If the locked account is `admin` and the password is unknown, reset it from the server CLI (see §2C).
 
 ### C. Forgot Admin Password / Out-of-Band Recovery
+`reset-admin-password.sh` always resets the built-in **`admin`** account; it takes the new password as its only (optional) argument. Do not pass a username: it would become the password.
 * **Fix**:
   ```bash
-  cd /opt/ephemres/deploy
-  sudo ./reset-admin-password.sh <username> <new_password>
+  # Set a specific password
+  sudo /opt/ephemres/deploy/reset-admin-password.sh '<new_password>'
+
+  # Or run without arguments and press Enter at the prompt to auto-generate a random password
+  sudo /opt/ephemres/deploy/reset-admin-password.sh
   ```
+  The `admin` account must change the password at the next login. To reset any other user, sign in as an administrator and use **Admin Settings → User Governance → Reset Password**.
 
 ### D. TimescaleDB Chunk Compression Verification
 * **Check Compression Status**:

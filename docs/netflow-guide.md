@@ -35,7 +35,7 @@ Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-inter
                                         v
 +-------------------------------------------------------------------------------+
 |                    TIMESCALEDB MULTI-TIER ROLLUPS                             |
-|  - flow_minute_rollups (Hypertable: 1-day chunk, 1d compression, 7d retain)  |
+|  - flow_minute_rollups (Hypertable: 1-day chunk, 1d compression, 90d retain) |
 |  - flow_hourly_rollups (Continuous Aggregate: 30-day retention)               |
 |  - flow_daily_rollups  (Continuous Aggregate: 365-day retention)              |
 +-------------------------------------------------------------------------------+

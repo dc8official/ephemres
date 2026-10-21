@@ -84,8 +84,8 @@ Stores 1-minute directional ingress and egress interface-level traffic metrics i
 * `flow_count` (`INTEGER`, Default: 0, Not Null) — Number of discrete flow records evaluated for this interface.
 * *Indexes & Policies*:
   - Primary key: `(bucket, exporter_id, interface_idx)`
-  - Daily chunk interval with 7-day retention policy.
-  - Columnar compression segmented by `exporter_id, interface_idx` and ordered by `bucket DESC`.
+  - Daily chunk interval with 7-day retention policy (migration `0012`).
+  - No columnar compression policy is configured on this table.
 
 ### `alert_channels`
 Stores notification destinations and credentials with AES-256-GCM encryption.
@@ -121,7 +121,7 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 | Tier | Storage Engine | Retention | Granularity | Compression / Aggregation | Use Case |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1** | FastStore Shared-Memory Stream (`stream:netflow:raw` in `/dev/shm`) | 2 Hours | Flow Record | Sliding in-memory buffer (`MAXLEN ~100000`) | Real-time forensic packet/flow inspection, live anomaly triage. |
-| **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 7 Days | 1 Minute | Uncompressed for 24h, native columnar compression after 1 day (85%+ disk savings) | Short-term forensic queries, detailed talker attribution, interface throughput. |
+| **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 90 Days / 7 Days | 1 Minute | `flow_minute_rollups`: native columnar compression after 1 day (85%+ disk savings). `flow_interface_minute_rollups`: uncompressed | Short-term forensic queries, detailed talker attribution, interface throughput. |
 | **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`) | 30 Days | 1 Hour | Materialized View with auto-refresh policy (`start_offset: 3d`, `end_offset: 1h`) | Weekly / monthly capacity trends, application mix shifts, bandwidth forecasting. |
 | **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View with auto-refresh policy (`start_offset: 7d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
 
@@ -129,7 +129,7 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 
 ## 4. TimescaleDB Columnar Compression & Retention Policies
 
-### A. Telemetry Events Compression (7-Day Policy)
+### A. Telemetry Events Compression & Retention
 ```sql
 ALTER TABLE endpoint_events SET (
     timescaledb.compress,
@@ -138,8 +138,12 @@ ALTER TABLE endpoint_events SET (
 );
 
 SELECT add_compression_policy('endpoint_events', INTERVAL '7 days', if_not_exists => true);
-SELECT add_retention_policy('endpoint_events', INTERVAL '90 days', if_not_exists => true);
+SELECT add_retention_policy('endpoint_events', INTERVAL '730 days', if_not_exists => true);
 ```
+Migration `0010` installs the 730-day retention policy. At startup, `ephemres-engine` aligns it with `[monitoring] retention_days` in `/etc/ephemres/config.toml` (default `730`, allowed range 30–3650), replacing the policy only when the value differs.
+
+> [!WARNING]
+> Lowering `retention_days` makes TimescaleDB drop `endpoint_events` chunks older than the new window at the next policy run. Those SLA and state-transition records cannot be recovered without a backup.
 
 ### B. Flow Minute Rollups Compression & Retention
 `flow_minute_rollups` is chunked in 1-day intervals. After 1 day, chunks are converted to TimescaleDB's hybrid columnar format, yielding over **85% disk space savings**:
@@ -162,8 +166,8 @@ ALTER TABLE flow_minute_rollups SET (
 -- Compress chunks older than 24 hours
 SELECT add_compression_policy('flow_minute_rollups', INTERVAL '1 day', if_not_exists => TRUE);
 
--- Automatically purge raw minute rollups after 7 days
-SELECT add_retention_policy('flow_minute_rollups', INTERVAL '7 days', if_not_exists => TRUE);
+-- Automatically purge raw minute rollups after 90 days (migration 0010; 0008 originally set 7 days)
+SELECT add_retention_policy('flow_minute_rollups', INTERVAL '90 days', if_not_exists => TRUE);
 ```
 
 ---

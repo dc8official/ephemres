@@ -84,7 +84,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **FastStore Stream Shock-Absorber (`stream:netflow:raw`):** Ingested flows are buffered into in-RAM FastStore Streams using `XADD` with sliding window trimming (`MAXLEN ~100000`). A memory circuit breaker monitors host memory usage (>85%) and applies exponential backoff or sampling adjustments to safeguard host stability.
 * **4-Tier Hierarchical Storage Lifecycle:**
   1. *Tier 1 (Real-Time Raw Buffer):* FastStore Stream (`stream:netflow:raw`), sliding 2-hour retention for real-time forensic inspection.
-  2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 7 days via `drop_chunks`.
+  2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
   3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups`, refreshed every hour, retained for 30 days.
   4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups`, refreshed daily, retained for 365 days for long-term capacity planning.
 
@@ -101,7 +101,7 @@ At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 13 
 | **`app.core.schema`** | Pure-Stdlib Type Validation & Serialization | Replaces `pydantic`. Implements `SchemaModel`, `Field`, `validator`, `field_validator`, `model_validator`, `ConfigDict`, and `to_camel` using stdlib `typing`, `inspect`, and `re`. |
 | **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/dev/shm` SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
 | **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0012` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
-| **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`, `$scrypt$n=16384,r=8,p=1$`) with constant-time verification (`hmac.compare_digest`) and AES-256-GCM symmetric encryption. Legacy `$argon2id$` hashes from `v3.1.35s`–`v3.3.1n` are reset to temporary scrypt passwords with `must_change_password = TRUE` during upgrade via `app.reset_legacy_passwords`. |
+| **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`, `$scrypt$n=131072,r=8,p=1$`) with constant-time verification (`hmac.compare_digest`) and AES-256-GCM symmetric encryption. Legacy `$argon2id$` hashes from `v3.1.35s`–`v3.3.1n` are reset to temporary scrypt passwords with `must_change_password = TRUE` during upgrade via `app.reset_legacy_passwords`. |
 | **`app.core.der`** | Native ASN.1 DER Certificate Parser | Replaces `cryptography.x509`. Pure-stdlib ASN.1 DER parser reading X.509 certificate validity dates (`notBefore`, `notAfter`) and Subject Alternative Names directly from binary TLS socket handshakes. |
 | **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
 | **`app.core.logging`** | Structured Rotating File & Stream Logger | Pure-stdlib structured logging system configuring RFC 3339 timestamps, dual console/file sinks, and bounded file rotation (`RotatingFileHandler`). |
@@ -309,7 +309,7 @@ flowchart TD
     subgraph Storage_Tiers["4-Tier Hierarchical Storage Lifecycle"]
         CIRCUIT -->|XADD (MAXLEN ~100k)| TIER1["Tier 1: FastStore In-RAM Stream (/dev/shm, 2h TTL)"]
         
-        TIER1 -->|Rollup Worker (60s Batch)| TIER2["Tier 2: TimescaleDB flow_minute_rollups (7d Retention)"]
+        TIER1 -->|Rollup Worker (60s Batch)| TIER2["Tier 2: TimescaleDB flow_minute_rollups (90d Retention)"]
         TIER2 -.->|After 1 Day| TIER2_COMP["TimescaleDB Columnar Compression (85%+ Savings)"]
         
         TIER2 -->|Continuous Aggregate| TIER3["Tier 3: flow_hourly_rollups (30d Retention)"]
