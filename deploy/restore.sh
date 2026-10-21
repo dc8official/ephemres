@@ -37,8 +37,8 @@ fi
 
 INSTALL_DIR="/opt/ephemres"
 BACKUP_FILE=""
-ADMIN_PASS=""
-OLD_SECRET_KEY=""
+ADMIN_PASS="${EPHEMRES_RESTORE_ADMIN_PASSWORD:-}"
+OLD_SECRET_KEY="${OLD_SECRET_KEY:-}"
 SKIP_TELEMETRY=""
 DRY_RUN=""
 
@@ -178,10 +178,11 @@ fi
 
 # 5. Execute Restore Engine
 echo -e "\n${BLUE}[INFO] Executing schema-aware database restoration...${NC}"
+# Secrets go to the restore engine through its environment, not argv: argv is world-readable
+# in the process list (/proc/<pid>/cmdline), the environment only to root and the same user.
+EPHEMRES_RESTORE_ADMIN_PASSWORD="${ADMIN_PASS}" OLD_SECRET_KEY="${OLD_SECRET_KEY}" \
 PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend:.:backend" "${PYTHON_BIN}" -m app.core.restore \
     --backup-file "${BACKUP_FILE}" \
-    ${ADMIN_PASS:+--admin-password "${ADMIN_PASS}"} \
-    ${OLD_SECRET_KEY:+--old-secret-key "${OLD_SECRET_KEY}"} \
     ${SKIP_TELEMETRY} \
     ${DRY_RUN}
 

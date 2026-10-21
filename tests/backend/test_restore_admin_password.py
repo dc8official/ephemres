@@ -91,3 +91,20 @@ async def test_supplied_password_applies_to_existing_admin_when_backup_has_none(
     assert len(updates) == 1
     assert "\"username\" = 'admin'" in updates[0][0]
     assert verify_password("operator-chosen", updates[0][1][0])
+
+
+@pytest.mark.anyio
+async def test_supplied_password_not_reported_applied_when_no_admin_exists(tmp_path):
+    conn = MockDbConnection(USERS_SCHEMA)
+    original_execute = conn.execute
+
+    async def execute_with_status(query, *args):
+        result = await original_execute(query, *args)
+        # asyncpg reports the affected row count in the command status.
+        return "UPDATE 0" if query.startswith('UPDATE "users"') else result
+
+    conn.execute = execute_with_status
+    summary = await reconcile_and_restore_database(
+        conn=conn, backup_path=_dump(tmp_path, [("noc1", hash_password("x"))]), admin_password="operator-chosen"
+    )
+    assert summary["admin_password_applied"] is False

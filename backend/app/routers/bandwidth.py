@@ -148,7 +148,7 @@ def _select_rollup_model_and_bucket_seconds(
     """Selects the optimal hypertable or continuous aggregate ORM model and bucket duration (seconds)
 
     aligned with TimescaleDB continuous aggregate policies:
-    - 1h, 6h: FlowMinuteRollup (60s buckets, full IP/interface/ToS/flag resolution, retained 7 days).
+    - 1h, 6h: FlowMinuteRollup (60s buckets, full IP/interface/ToS/flag resolution, retained 90 days).
     - 24h, 7d: FlowHourlyRollup (3600s buckets, endpoint-correlated aggregation, retained 30 days).
     - 30d, 1y: FlowDailyRollup (86400s buckets, protocol/port compaction, retained 365 days).
       Note: If endpoint_id filtering is requested for 30d/1y, fall back to FlowHourlyRollup since
@@ -781,7 +781,11 @@ def _rollup_window_filters(
     return filters
 
 
+# flow_minute_rollups retention (migration 0010); the QoS fallback never reads further back.
+_MINUTE_ROLLUP_RETENTION = datetime.timedelta(days=90)
+
 # (table, column) -> exists; schema only changes through migrations, which restart the API.
+# The cache is per worker, so rebuilding a continuous aggregate also needs an API restart.
 _TABLE_COLUMN_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
@@ -792,7 +796,8 @@ async def _db_table_has_column(db: AsyncSession, table: str, column: str) -> boo
         res = await db.execute(
             text(
                 "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = :table AND column_name = :column LIMIT 1"
+                "WHERE table_schema = current_schema() "
+                "AND table_name = :table AND column_name = :column LIMIT 1"
             ),
             {"table": table, "column": column},
         )
@@ -866,11 +871,15 @@ async def get_applications_breakdown(
     # 2. QoS / DSCP Breakdown
     # On TimescaleDB the hourly/daily tiers are continuous aggregates that migration 0013 could
     # not extend with `tos`; fall back to the 1-minute tier (90-day retention) for ToS data.
+    # The response reports the tier and start actually used, since a 1y window then only gets
+    # 90 days of QoS data next to 365 days of application data.
     qos_model = model
     qos_filters = app_filters
+    qos_start = start_time
     if model is not FlowMinuteRollup and not await _db_table_has_column(db, model.__tablename__, "tos"):
         qos_model = FlowMinuteRollup
-        qos_filters = _rollup_window_filters(qos_model, start_time, exporter_id, endpoint_id)
+        qos_start = max(start_time, now - _MINUTE_ROLLUP_RETENTION)
+        qos_filters = _rollup_window_filters(qos_model, qos_start, exporter_id, endpoint_id)
     qos_stmt = (
         select(
             qos_model.tos,
@@ -1054,6 +1063,8 @@ async def get_applications_breakdown(
         data=ApplicationDistributionResponse(
             applications=apps,
             qos_classes=qos_classes,
+            qos_source=qos_model.__tablename__,
+            qos_window_start=qos_start,
             traffic_zones=traffic_zones,
         )
     )

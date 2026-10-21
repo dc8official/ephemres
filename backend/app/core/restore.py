@@ -536,10 +536,20 @@ async def _fetch_all(conn: Any, sql: str, *args: Any) -> List[Dict[str, Any]]:
     return results
 
 
-async def _execute_sql(conn: Any, sql: str, *args: Any) -> None:
-    """Helper to execute non-returning SQL."""
+async def _execute_sql(conn: Any, sql: str, *args: Any) -> Any:
+    """Helper to execute non-returning SQL. Returns the driver's status (asyncpg: e.g. "UPDATE 1")."""
     if hasattr(conn, "execute"):
-        await conn.execute(sql, *args)
+        return await conn.execute(sql, *args)
+    return None
+
+
+def _status_rowcount(status: Any) -> Optional[int]:
+    """Row count from an asyncpg command status such as "UPDATE 3"; None if not reported."""
+    if isinstance(status, str):
+        tail = status.rsplit(" ", 1)[-1]
+        if tail.isdigit():
+            return int(tail)
+    return None
 
 
 async def _execute_batch(conn: Any, sql: str, args_list: List[List[Any]]) -> None:
@@ -858,12 +868,15 @@ async def reconcile_and_restore_database(
 
         if admin_password and not summary["admin_password_applied"]:
             # Backup had no admin row: apply the supplied password to the target's existing admin.
-            await _execute_sql(
+            status = await _execute_sql(
                 conn,
                 'UPDATE "users" SET "password_hash" = $1, "must_change_password" = TRUE WHERE "username" = \'admin\';',
                 hash_password(admin_password),
             )
-            summary["admin_password_applied"] = True
+            if _status_rowcount(status) == 0:
+                logger.warning("[restore] --admin-password not applied: no 'admin' user in the backup or the target database.")
+            else:
+                summary["admin_password_applied"] = True
 
         if temporary_passwords:
             summary["temporary_password_users"] = len(temporary_passwords)
@@ -1111,8 +1124,9 @@ def main() -> None:
         "--admin-password",
         default=None,
         help="New password for the admin account (must be changed at first login). "
-        "If omitted, a backed-up $scrypt$ admin password is kept and a legacy admin hash "
-        "gets a random temporary password in the reset report.",
+        "Prefer the EPHEMRES_RESTORE_ADMIN_PASSWORD environment variable, which other users "
+        "cannot read from the process list. If neither is set, a backed-up $scrypt$ admin "
+        "password is kept and a legacy admin hash gets a random temporary password in the reset report.",
     )
     parser.add_argument(
         "--old-secret-key",
@@ -1163,7 +1177,7 @@ def main() -> None:
             summary = await reconcile_and_restore_database(
                 conn=conn,
                 backup_path=backup_path,
-                admin_password=args.admin_password,
+                admin_password=args.admin_password or os.environ.get("EPHEMRES_RESTORE_ADMIN_PASSWORD") or None,
                 old_secret_key=old_secret,
                 skip_telemetry=args.skip_telemetry,
                 dry_run=args.dry_run,

@@ -345,7 +345,7 @@ Updates runtime parameters (requires `Admin` role).
   - `flow_sampling_multiplier` (int, >= 1, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
 
 ### `POST /settings/flow/preflight`
-Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory stream write capabilities and UDP socket binding prior to enabling passive flow ingestion. Returns backward-compatible status metrics:
+Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory stream write capabilities and UDP socket binding prior to enabling passive flow ingestion. The UDP check binds the configured `flow.bind_host` and ports exactly as the collector would; ports held by an active `ephemres-flowd` are not reported as conflicts. Returns backward-compatible status metrics:
 - **Response:** `200 OK`
   ```json
   {
@@ -508,6 +508,7 @@ Retrieves the highest-volume communicating endpoints and discrete IP conversatio
 
 ### `GET /bandwidth/applications`
 Returns protocol and service port volume distribution for donut/pie charts.
+`qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_minute_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
 - **Response:** `200 OK`
@@ -530,7 +531,11 @@ Returns protocol and service port volume distribution for donut/pie charts.
           "total_bytes": 314572800,
           "percentage": 30.0
         }
-      ]
+      ],
+      "qos_classes": [],
+      "qos_source": "flow_minute_rollups",
+      "qos_window_start": "2026-07-23T12:00:00Z",
+      "traffic_zones": []
     },
     "meta": null,
     "error": null

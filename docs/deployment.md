@@ -91,7 +91,9 @@ Ephemres includes an automated schema-reconciling restore engine (`deploy/restor
 # Interactive restore (prompts for a new admin password; leave blank to keep the one in the backup)
 sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz
 
-# Non-interactive restore that also sets a new admin password (forced change at first login)
+# Non-interactive restore that also sets a new admin password (forced change at first login).
+# Note: a password given with --admin-password is visible to other local users in the process list
+# while the restore runs; use the interactive prompt where that matters.
 sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz \
   --admin-password 'NewSecureAdminPassword123!'
 ```

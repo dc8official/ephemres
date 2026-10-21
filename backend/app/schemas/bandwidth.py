@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_validator
@@ -231,6 +232,10 @@ class ApplicationDistributionResponse(BaseModel):
     """Composite distribution response containing service applications, QoS classes, and traffic zones."""
     applications: List[ApplicationDistributionItem]
     qos_classes: List[QoSDistributionItem] = Field(default_factory=list)
+    # Rollup table and window start the QoS breakdown was read from. These differ from the
+    # applications query when the hourly/daily tier lacks `tos` (TimescaleDB continuous aggregates).
+    qos_source: Optional[str] = None
+    qos_window_start: Optional[datetime] = None
     traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

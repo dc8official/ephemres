@@ -316,10 +316,9 @@ sudo -u postgres pg_dump -d netmon -F p | sudo tee /var/backups/ephemres/manual_
 
 ### Restoring from a Backup File (Automated Cross-Version Engine)
 ```bash
-# Execute the automated cross-version restoration utility
+# Execute the automated cross-version restoration utility (prompts for the new admin password)
 sudo bash /opt/ephemres/deploy/restore.sh \
-  --backup-file /var/backups/ephemres/<backup_file_name>.sql \
-  --admin-password "<temporary_admin_password>"
+  --backup-file /var/backups/ephemres/<backup_file_name>.sql
 ```
 
 ### Emergency Platform Verification Checklist

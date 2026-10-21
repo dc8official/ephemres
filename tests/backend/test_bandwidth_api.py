@@ -182,6 +182,36 @@ def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
     qos_sql = str(mock_session.execute.call_args_list[2].args[0])
     expected_table = "flow_daily_rollups" if daily_has_tos else "flow_minute_rollups"
     assert expected_table in qos_sql
+    assert data["data"]["qos_source"] == expected_table
+    bandwidth._TABLE_COLUMN_CACHE.clear()
+
+
+def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
+    """A 1y window falling back to flow_minute_rollups only has 90 days of ToS data; say so."""
+    import datetime
+
+    from app.routers import bandwidth
+
+    test_client, mock_session = client
+    bandwidth._TABLE_COLUMN_CACHE.clear()
+
+    mock_res_apps = MagicMock()
+    mock_res_apps.all.return_value = [(6, 443, 1000)]
+    mock_res_column = MagicMock()
+    mock_res_column.scalar.return_value = None
+    mock_res_qos = MagicMock()
+    mock_res_qos.all.return_value = [(0, 1000, 10, 1)]
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_column, mock_res_qos]
+
+    resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["qos_source"] == "flow_minute_rollups"
+    qos_start = datetime.datetime.fromisoformat(data["qos_window_start"].replace("Z", "+00:00"))
+    age = datetime.datetime.now(datetime.timezone.utc) - qos_start
+    assert datetime.timedelta(days=89) < age <= datetime.timedelta(days=90, minutes=1)
+    column_check_sql = str(mock_session.execute.call_args_list[1].args[0])
+    assert "current_schema()" in column_check_sql
     bandwidth._TABLE_COLUMN_CACHE.clear()
 
 

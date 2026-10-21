@@ -51,15 +51,16 @@ sudo bash /opt/ephemres/deploy/restore.sh [BACKUP_FILE] [OPTIONS]
 | Flag | Description | Default |
 | :--- | :--- | :--- |
 | `--backup-file <path>` | Path to plaintext `.sql` or gzipped `.sql.gz` backup archive | Auto-detected / Interactive prompt |
-| `--admin-password <pass>` | New password for the `admin` account, which must be changed at first login. Applied whatever the backup's era (see step 5 below) | Interactive prompt; leave blank to keep the backed-up admin password |
-| `--old-secret-key <key>` | Previous `SECRET_KEY` for re-encrypting alert channel webhooks | Auto-detected from `.env.bak` |
+| `--admin-password <pass>` | New password for the `admin` account, which must be changed at first login. Applied whatever the backup's era (see step 5 below). A value on the command line is visible to other local users in the process list; prefer the prompt or `EPHEMRES_RESTORE_ADMIN_PASSWORD` | Interactive prompt; leave blank to keep the backed-up admin password |
+| `--old-secret-key <key>` | Previous `SECRET_KEY` for re-encrypting alert channel webhooks (or set `OLD_SECRET_KEY`) | Auto-detected from `.env.bak` |
 | `--skip-telemetry` | Skip historical hypertable metrics for fast configuration restore | `false` |
 | `--dry-run` | Parse and validate backup without committing changes to PostgreSQL | `false` |
 
 ### Step-by-Step Restoration Procedure
 ```bash
 # 1. Execute the automated restore runner
-sudo bash /opt/ephemres/deploy/restore.sh --backup-file /var/backups/ephemres/ephemres_backup_20261015_120000.sql --admin-password "TempAdminSecure123!"
+#    (prompts for the new admin password with hidden input; leave blank to keep the backed-up one)
+sudo bash /opt/ephemres/deploy/restore.sh --backup-file /var/backups/ephemres/ephemres_backup_20261015_120000.sql
 
 # 2. Verify platform service status
 sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
@@ -130,9 +131,11 @@ python3 -m app.core.migrator upgrade head
 
 ### Step 5: Restore Data Using Schema Engine
 ```bash
+# Optional: new admin password (hidden input, kept out of the process list); skip to keep the backed-up one
+read -rs -p "New admin password: " EPHEMRES_RESTORE_ADMIN_PASSWORD && export EPHEMRES_RESTORE_ADMIN_PASSWORD
 python3 -m app.core.restore \
-    --backup-file "/var/backups/ephemres/ephemres_backup_YYYYMMDD_HHMMSS.sql" \
-    --admin-password "admin"
+    --backup-file "/var/backups/ephemres/ephemres_backup_YYYYMMDD_HHMMSS.sql"
+unset EPHEMRES_RESTORE_ADMIN_PASSWORD
 ```
 
 ### Step 6: Clear FastStore In-RAM Shared Memory
