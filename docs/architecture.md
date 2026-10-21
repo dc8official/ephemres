@@ -2,7 +2,7 @@
 
 Ephemres v3.3.2.v is engineered around a **Vertical Integration Architecture** — a decoupled, asynchronous, high-performance monitoring platform built entirely on pure Python Standard Library primitives, native Linux kernel sockets, and TimescaleDB/PostgreSQL storage. 
 
-By replacing 13 third-party runtime frameworks with 13 in-tree standard library engines (`backend/app/core/`), v3.3.2.v achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust multi-protocol network observability.
+By replacing 13 third-party runtime frameworks with 12 in-tree standard library engines (`backend/app/core/`), v3.3.2.v achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust multi-protocol network observability.
 
 ---
 
@@ -10,14 +10,14 @@ By replacing 13 third-party runtime frameworks with 13 in-tree standard library 
 
 ### 1. Data Access & Repository Layer
 * **Native Async ORM (`app.core.orm`):** All database interactions are mediated by zero-dependency strongly typed declarative models inheriting from `DeclarativeBase` (`backend/app/models/`). SQL statements are dynamically compiled into dialect-specific parameterized queries and executed directly over `asyncpg` without SQLAlchemy reflection overhead or mapper delay.
-* **Repository Pattern:** Domain business logic is strictly decoupled from persistence through dedicated repositories (`EndpointRepository`, `EventRepository`, `IncidentRepository`, `UserRepository`, `SettingRepository`, `FlowRepository`).
-* **SQL-Level Pagination:** All listing endpoints enforce SQL `LIMIT` and `OFFSET` queries at the database engine tier, preventing memory bloat across multi-thousand-device fleets.
+* **Repository Pattern:** Hot query paths live in repositories under `backend/app/repositories/` (`BaseRepository`, `EndpointRepository`, `AuthRepository`, `ReportRepository`); other routers and services, such as bandwidth and settings, query through `app.core.orm` directly.
+* **SQL-Level Pagination:** Paginated listings (endpoints, events, incidents, alert history) apply `LIMIT`/`OFFSET` in SQL; the CSV export streams with keyset pagination.
 * **Native Schema Engine (`app.core.schema`):** API request validation, response serialization, and system configuration parsing are powered by `SchemaModel` without Pydantic Rust binary dependencies.
 
 ### 2. Concurrency Sweeper & Timing Budget (The Poller)
-* **Cycle Timing Budget (5 pings @ 8.0s):** Monitoring probes are tuned to execute 5 pings with an 8.0-second timeout, guaranteeing probe pass completion in ~32 seconds.
-* **28-Second Headroom Window:** Leaves 28 seconds of idle headroom before the minute boundary, eliminating thundering herds and connection pool contention.
-* **Startup Jitter:** Workers inject 0–2000ms randomized offset at cycle initialization to disperse network bursts.
+* **Cycle Timing Budget (5 pings @ 8.0s):** Each sweep sends `ping_count` probes (default 5) spaced `ping_interval_seconds` apart (default 8.0s), each waiting up to 2.0s for its reply. A sweep typically takes ~32s and at most `count × 2s + (count − 1) × interval` = 42s with the defaults.
+* **Cycle Headroom:** The cycle is a fixed 60 seconds. At startup the engine rejects any configured ping plan whose worst-case sweep exceeds 55s (leaving at least 5s for the database write and slot realignment), logs an error, and falls back to 5 pings @ 8.0s.
+* **Deterministic Slot Staggering:** Each endpoint is assigned a fixed second within the minute (`UUID mod 60`) and every cycle starts on that slot, so sweeps spread evenly across the minute instead of all firing at once. There is no random jitter.
 * **Dynamic In-Memory Registry:** `EndpointRegistry` maintains a thread-safe, concurrent registry allowing sub-minute endpoint additions, updates, and removals with zero engine downtime.
 
 ### 3. Dual-Driver Storage Architecture
@@ -39,12 +39,15 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **Structured Event Envelopes:** Emits strongly typed JSON events on every monitoring transition (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`).
 * **Connection Heartbeat:** Emits a 15-second heartbeat comment (`: heartbeat\n\n`) to keep reverse-proxy connections (Nginx, Traefik, HAProxy) alive.
 
-### 5. Multi-Protocol Synthetic Monitoring & SSRF Defense
+### 5. Multi-Protocol Synthetic Probes & SSRF Defense
+> [!NOTE]
+> The probe implementations below exist in `monitoring/synthetic.py` (`run_tcp_probe`, `run_http_probe`, `run_ssl_probe`), but **they are not yet scheduled by `ephemres-engine`, configurable through the API, or shown in the UI**. Endpoint health today is ICMP-only.
+
 * **Synthetic Probes:**
   - `TCP_PORT`: Validates service port reachability and TCP 3-way handshake latency.
   - `HTTP_STATUS`: Validates HTTP/HTTPS response codes and round-trip time.
   - `SSL_EXPIRY`: Inspects remote TLS certificates and computes days until expiration.
-* **Socket-Level SSRF Protection:** Pre-connection DNS inspection blocks loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets, and cloud metadata (`169.254.169.254`, `169.254.0.0/16`) targets at the socket layer.
+* **Probe Target Restrictions:** Probe targets are resolved and the connection is pinned to the validated IP. Loopback (`127.0.0.0/8`, `::1`), link-local and cloud metadata (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`), and `0.0.0.0/8` are rejected. RFC 1918 private addresses are **allowed**, because probing internal appliances is the purpose of synthetic monitoring. (Outbound alert webhooks use the stricter `app.core.http_client` policy, which also rejects private ranges.)
 
 ### 6. High-Fidelity Route Diagnostics & RCA Engine
 * **High-Fidelity Traceroute:** Uses `traceroute -n -q 2 -w 3 -m 30 -I` with `CAP_NET_RAW` capability for accurate ICMP route tracing and multi-probe latency parsing.
@@ -67,7 +70,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
   3. `AlertDispatcher` pulls from the queue and applies multi-layer filtering:
      - **Scope Filter:** Evaluates target scope (`all` vs. explicit endpoint UUIDs) and severity bitmasks.
      - **RCA Cascade Suppression:** Suppresses individual downstream endpoint notifications when an upstream parent node generates an active `RCA_INCIDENT`.
-     - **Flapping Cooldown:** Suppresses alerts if an endpoint exhibits $\ge 3$ state changes within a 10-minute sliding window (max 1 alert per 5 minutes per endpoint/severity).
+     - **Flapping & Rate Limits:** An endpoint with $\ge 4$ state transitions in a sliding 10-minute window is treated as flapping: deliveries are skipped and logged as `THROTTLED` until the window drops below 4. Independently, each (channel, endpoint, severity) combination sends at most one alert per 5 minutes.
      - **Cryptographic & SSRF Defense:** Derives AES-256-GCM decryption keys via HKDF-SHA256 (`app.core.crypto`) and validates outbound destination IPs against loopback and cloud metadata ranges using `app.core.http_client`.
      - **Polyglot Formatters:** Adapts payload to Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), or SMTP TLS 1.2+ MIME.
      - **Delivery Audit Logging:** Persists asynchronous results, HTTP response codes, and round-trip latencies into `alert_delivery_logs`.
@@ -75,13 +78,13 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 ### 9. Network Flow Telemetry Ingestion Pipeline (`ephemres-flowd`)
 * **Autonomous Ingestion Daemon:** `ephemres-flowd` runs as an independent `systemd` daemon completely isolated from `ephemres-engine` and `ephemres-api`. Even under massive multi-gigabit traffic bursts, ICMP polling and REST API responsiveness remain completely unperturbed.
 * **Async Datagram Sockets & Buffer Allocation:** Listens on UDP port 2055 (NetFlow v5/v9) and UDP port 4739 (IPFIX) with a 4MB kernel receive buffer (`SO_RCVBUF = 4 * 1024 * 1024`), eliminating UDP packet drops under high-pps microbursts.
-* **Zero-Allocation Binary Decoders:** High-throughput `struct.unpack_from` byte-slice parsers with dynamic template caching (1,800s TTL) for NetFlow v9 and IPFIX options/flow records. Orphan data records received before templates are buffered in an in-memory ring buffer (up to 2,000 records) and flushed once the template arrives.
+* **Zero-Allocation Binary Decoders:** High-throughput `struct.unpack_from` byte-slice parsers with dynamic template caching (1,800s TTL) for NetFlow v9 and IPFIX options/flow records. Data FlowSets that arrive before their template are buffered per `(exporter, source/observation domain)` in a bounded ring buffer (100 FlowSets, 10-second TTL) and decoded once the template arrives.
 * **Dual-Role $\mathcal{O}(1)$ In-Memory Correlator:**
   - Maintains pre-indexed hash maps for sub-microsecond matching without SQL queries.
-  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. Unknown exporter IPs are registered into a FastStore sliding set (`netflow:unmatched_exporters`) with a 24-hour TTL, triggering the Unmatched Exporter Discovery Banner in the UI.
+  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. Unknown exporter IPs are recorded in FastStore (rate-limited to one write per IP every 10 seconds) as a `flow:unmatched:<ip>` key with a 15-minute TTL, a member of `flow:unmatched:set`, and a `flow:unmatched:zset` sorted set pruned to the last 24 hours (capped at 1,000 IPs). These drive the Unmatched Exporter Discovery Banner in the UI.
   - **Traffic Participant Resolution:** Resolves source and destination IPs against monitored inventory endpoints to attribute traffic to internal infrastructure vs. external internet.
 * **Port Normalization & Cardinality Shield:** Normalizes ephemeral client ports (1024–65535) unless recognized as well-known server services (e.g. 8080, 8443, 3306, 5432, 6379, 9200) into a single aggregate representation. This prevents high-entropy ephemeral client ports from exploding TimescaleDB hypertable B-tree index sizes.
-* **FastStore Stream Shock-Absorber (`stream:netflow:raw`):** Ingested flows are buffered into in-RAM FastStore Streams using `XADD` with sliding window trimming (`MAXLEN ~100000`). A memory circuit breaker monitors host memory usage (>85%) and applies exponential backoff or sampling adjustments to safeguard host stability.
+* **FastStore Stream Shock-Absorber (`stream:netflow:raw`):** Ingested flows are buffered into in-RAM FastStore Streams using `XADD` with sliding window trimming (`MAXLEN ~100000`). A circuit breaker checks FastStore's reported memory use against `[flow] buffer_memory_limit_mb` (default 512 MB); above 85% it drops the pending aggregation buffer and logs an error rather than letting the store grow unbounded.
 * **4-Tier Hierarchical Storage Lifecycle:**
   1. *Tier 1 (Real-Time Raw Buffer):* FastStore Stream (`stream:netflow:raw`), sliding 2-hour retention for real-time forensic inspection.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
@@ -92,7 +95,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 
 ## 10. Layer 0 Core Foundation (Zero-Dependency Engines)
 
-At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 13 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
+At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 12 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
 
 | Module | Engine Functionality | Technical Mechanics & Stdlib Primitives |
 | :--- | :--- | :--- |
@@ -100,16 +103,18 @@ At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 13 
 | **`app.core.orm`** | Native Async Object-Relational Mapper | Replaces `sqlalchemy`. Pure-stdlib async ORM over `asyncpg`: `DeclarativeBase`, `Column`, SQL type compilation, relationship loading, Unit-of-Work `AsyncSession`, and query compilers (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`, `or_`). |
 | **`app.core.schema`** | Pure-Stdlib Type Validation & Serialization | Replaces `pydantic`. Implements `SchemaModel`, `Field`, `validator`, `field_validator`, `model_validator`, `ConfigDict`, and `to_camel` using stdlib `typing`, `inspect`, and `re`. |
 | **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/dev/shm` SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
-| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0012` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
-| **`app.core.crypto`** | Pure-Stdlib Cryptographic Engine | Replaces `argon2-cffi` and `cryptography`. Implements Scrypt key derivation (`hashlib.scrypt`, `$scrypt$n=131072,r=8,p=1$`) with constant-time verification (`hmac.compare_digest`) and AES-256-GCM symmetric encryption. Legacy `$argon2id$` hashes from `v3.1.35s`–`v3.3.1n` are reset to temporary scrypt passwords with `must_change_password = TRUE` during upgrade via `app.reset_legacy_passwords`. |
-| **`app.core.der`** | Native ASN.1 DER Certificate Parser | Replaces `cryptography.x509`. Pure-stdlib ASN.1 DER parser reading X.509 certificate validity dates (`notBefore`, `notAfter`) and Subject Alternative Names directly from binary TLS socket handshakes. |
+| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0013` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
+| **`app.core.crypto`** | Secret Encryption Engine | Replaces `cryptography` for secrets at rest. AES-256-GCM encryption of alert-channel credentials (`ENC:v1:` envelope) with pure-Python HKDF-SHA256 key derivation and legacy-salt fallback decryption. The AES-GCM primitive is called through `ctypes` from the system OpenSSL `libcrypto` (already required by Python's `ssl`/`hashlib`); no Python package is involved. Password hashing is separate: scrypt (`hashlib.scrypt`, `$scrypt$n=131072,r=8,p=1$`, constant-time `hmac.compare_digest`) lives in `app.services.auth_service.ScryptPasswordHasher`, replacing `argon2-cffi`. |
 | **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
-| **`app.core.logging`** | Structured Rotating File & Stream Logger | Pure-stdlib structured logging system configuring RFC 3339 timestamps, dual console/file sinks, and bounded file rotation (`RotatingFileHandler`). |
 | **`app.core.http_client`** | Socket-Level SSRF-Immune HTTP Client | Replaces `httpx`. Asynchronous raw socket HTTP/1.1 client (`asyncio.open_connection`, `ssl`) performing pre-connection DNS validation against RFC 1918, RFC 3927 (cloud metadata `169.254.169.254`), and loopback IPs. |
 | **`app.core.netlink`** | Pure Linux Kernel RTNETLINK Engine | Replaces `psutil`. Pure Linux kernel Netlink binary parser (`AF_NETLINK`, `NETLINK_ROUTE`, `RTM_GETADDR`) and `/proc` stat readers for asynchronous interface and system telemetry. |
 | **`app.core.pdf`** | Direct PostScript/PDF Binary Emitter | Replaces `weasyprint`, `cairo`, `pango`, and `pypdf`. Generates vector-styled executive compliance reports, tables, typography matrices, and Base64 logos without external shared libraries. |
 | **`app.core.template`** | Zero-Dependency Template Compiler | Replaces `jinja2` and `markupsafe`. Supports template inheritance (`{% extends %}`, `{% block %}`), loops, conditionals, and context-aware HTML escaping using pure stdlib regex and AST parsing. |
 | **`app.core.watchdog`** | Linux Systemd Watchdog Supervisor | Pure-stdlib `systemd` watchdog notification client using `sd_notify` protocol over Unix domain datagram sockets (`AF_UNIX`). |
+
+Two smaller stdlib helpers live outside `app.core`:
+* **X.509 expiry parsing** (`monitoring/synthetic.py`, `_parse_der_cert_not_after`): a minimal ASN.1 DER reader that extracts the certificate `notAfter` date for `SSL_EXPIRY` probes when the TLS handshake is unverified. It replaces `cryptography.x509` for that one purpose and does not parse `notBefore` or Subject Alternative Names.
+* **Logging** (`backend/app/logging_config.py`, `setup_logging`): stdlib `logging` with a console handler and size-bounded `RotatingFileHandler`s (10 MB × 5 per service, plus a shared `error.log`), timestamps formatted `%Y-%m-%d %H:%M:%S` in server local time.
 
 ---
 
@@ -133,7 +138,7 @@ flowchart TD
 
     subgraph API_Layer["Native API Service Layer (ephemres-api)"]
         B["Native ASGI 3.0 Engine (EphemresApp)"]
-        AUTH["Scrypt & Session Guard (app.core.crypto)"]
+        AUTH["Scrypt & Session Guard (app.services.auth_service)"]
         REPO["Repository Layer (Decoupled Queries)"]
     end
 
@@ -143,7 +148,7 @@ flowchart TD
         CORE_SCHEMA["app.core.schema (SchemaModel Validation)"]
         CORE_FASTSTORE["app.core.faststore (/dev/shm SQLite WAL)"]
         CORE_MIGRATOR["app.core.migrator (Direct asyncpg DDL)"]
-        CORE_CRYPTO["app.core.crypto (Scrypt & AES-256-GCM)"]
+        CORE_CRYPTO["app.core.crypto (AES-256-GCM + HKDF)"]
         CORE_HTTP["app.core.http_client (SSRF-Immune Sockets)"]
         CORE_NETLINK["app.core.netlink (RTNETLINK & /proc)"]
         CORE_PDF["app.core.pdf (Direct PDF Vector Emitter)"]
@@ -162,7 +167,7 @@ flowchart TD
     subgraph Monitoring_Core["Monitoring & Diagnostic Engines (ephemres-engine)"]
         ENG["Monitoring Sweeper (5 pings @ 8s / 28s Headroom)"]
         REG["Dynamic EndpointRegistry"]
-        SYN["Synthetic Probes (TCP / HTTP / SSL + SSRF)"]
+        SYN["Synthetic Probes (TCP / HTTP / SSL, not yet scheduled)"]
         TR["High-Fidelity Traceroute & L2 Auto-Bypass"]
         RCA["RCA Topology & Inference Engine"]
     end
@@ -191,7 +196,7 @@ flowchart TD
     B --> F_STREAM
 
     ENG --> REG
-    ENG --> SYN
+    ENG -.->|not yet wired| SYN
     ENG -.->|Triggers on Drop| TR
     TR -.->|Informs| RCA
     ENG --> REPO
@@ -228,8 +233,8 @@ flowchart TD
             MASTER{"alerting_enabled?"}
             SCOPE{"Target Scope & Severity Match?"}
             RCA_SUPP{"Upstream RCA Active?"}
-            FLAP_SUPP{"Flapping (<5m Cooldown)?"}
-            SSRF_CRYPTO["SSRF DNS Pinning & Scrypt/AES Decrypt (app.core.crypto)"]
+            FLAP_SUPP{"Flapping (>=4 in 10m) / 5m Rate Limit?"}
+            SSRF_CRYPTO["SSRF DNS Pinning & AES-256-GCM Decrypt (app.core.crypto)"]
             FORMATTER["Polyglot Formatters (Teams / Discord / Slack / SMTP)"]
             DISPATCH_CALL["Async Socket HTTP Client (app.core.http_client)"]
 
@@ -285,7 +290,7 @@ flowchart TD
 
         subgraph Parser_Internals["Decoder & Template Engine"]
             TMPL_CACHE["Template Cache (1,800s TTL)"]
-            RING_BUF["Orphan Data Set Ring Buffer (2,000 pkts)"]
+            RING_BUF["Orphan Data Set Ring Buffer (100 FlowSets, 10s TTL)"]
             NORM["Ephemeral Port Normalizer (>1024 to single bucket)"]
             DECODER --> TMPL_CACHE
             DECODER --> RING_BUF
@@ -295,14 +300,14 @@ flowchart TD
         subgraph Correlator["Dual-Role In-Memory Correlator (O(1))"]
             EXP_MAP["Exporter Index (Primary IP + flow_exporter_ips)"]
             PART_MAP["Traffic Participant Index (Monitored Endpoints)"]
-            UNMATCHED["FastStore Set: netflow:unmatched_exporters (24h TTL)"]
+            UNMATCHED["FastStore: flow:unmatched:* (15m keys, 24h zset)"]
             
             NORM --> EXP_MAP
             NORM --> PART_MAP
             EXP_MAP -.->|Unmapped IP| UNMATCHED
         end
 
-        CIRCUIT["Memory Circuit Breaker (>85% Host Memory)"]
+        CIRCUIT["Circuit Breaker (>85% of buffer_memory_limit_mb)"]
         NORM --> CIRCUIT
     end
 

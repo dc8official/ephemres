@@ -29,8 +29,8 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `hostname` (`VARCHAR(255)`, Not Null)
 * `ip_address` (`INET`, Unique, Not Null)
 * `device_type` (`VARCHAR(100)`, Not Null: `ROUTER`, `SWITCH`, `SERVER`, `GATEWAY`, `ENDPOINT`, etc.)
-* `device_role` (`VARCHAR(30)`, Default: `'ACTIVE_HOST'`, Not Null) — Hierarchical role within topology DAG (`ROOT_GATEWAY`, `AGGREGATION`, `ACCESS`, `ACTIVE_HOST`).
-* `location` / `site` (`VARCHAR(255)`)
+* `device_role` (`VARCHAR(30)`, Default: `'ACTIVE_HOST'`, Not Null) — Monitoring/flow role, enforced by check constraint `ck_endpoints_device_role`: `ACTIVE_HOST` (ICMP-monitored host), `FLOW_EXPORTER` (passive flow exporter, not pinged), `HYBRID_GATEWAY` (monitored and exporting flows), `L2_SWITCH`. Cross-version restores map legacy names (`STANDARD`, `ROOT_GATEWAY`, `AGGREGATION`, `EDGE_ROUTER`, `CORE_SWITCH`, `ACCESS`, …) onto these four.
+* `location` (`VARCHAR(255)`, Nullable)
 * `description` (`TEXT`, Nullable)
 * `monitoring_enabled` (`BOOLEAN`, Default: `true`, Not Null)
 * `endpoint_status` (`VARCHAR(20)`, Default: `'ACTIVE'`, Not Null)
@@ -39,21 +39,27 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `enable_rca` (`BOOLEAN`, Default: `true`, Not Null)
 * `enable_scheduled_discovery` (`BOOLEAN`, Default: `true`, Not Null)
 * `is_l2_segment` (`BOOLEAN`, Default: `false`, Not Null)
-* `manual_parent_id` (`UUID`, Foreign Key to `endpoints.id`, Nullable)
+* `manual_parent_id` (`UUID`, Foreign Key to `endpoints.id` `ON DELETE SET NULL`, Nullable)
+* `created_by` (`UUID`, Foreign Key to `users.id`, Nullable)
+* `created_at` / `updated_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null) and `deleted_at` (`TIMESTAMPTZ`, Nullable; soft delete)
 * `flow_exporter_ips` (`INET[]`, Default: `'{}'::inet[]`, Not Null) — Secondary exporter IP addresses aliased to this endpoint. Indexed via GIN index `idx_endpoints_flow_exporter_ips` for high-speed array containment queries (`flow_exporter_ips @> ARRAY['192.168.1.1'::inet]`).
 * `flow_interface_aliases` (`JSONB`, Default: `'{}'::jsonb`, Not Null) — Key-value dictionary mapping SNMP interface indexes (`ifIndex`) to human-readable labels and operational speeds (e.g. `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`).
 
 ### `endpoint_events` (TimescaleDB Hypertable)
-Stores high-frequency 1-minute ICMP and synthetic probe telemetry results.
-* `id` (`UUID`, Default: `gen_random_uuid()`)
-* `endpoint_id` (`UUID`, Indexed, Foreign Key to `endpoints.id`)
-* `start_time` (`TIMESTAMPTZ`, Partition Key, Not Null)
-* `operational_state` (`VARCHAR(20)`: `UP`, `DOWN`)
-* `detailed_state` (`VARCHAR(30)`: `UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`)
-* `packet_loss_percent` (`NUMERIC(5, 2)`)
-* `avg_rtt_ms` (`NUMERIC(10, 3)`)
-* `min_rtt_ms` (`NUMERIC(10, 3)`)
-* `max_rtt_ms` (`NUMERIC(10, 3)`)
+Stores state periods: one row per confirmed state, extended while the state persists (`end_time`, `duration_seconds`, `monitoring_cycle_count`) and closed when the state changes.
+* `id` (`UUID`, Default: `gen_random_uuid()`, Not Null)
+* `endpoint_id` (`UUID`, Foreign Key to `endpoints.id`, Not Null)
+* `operational_state` (`VARCHAR(20)`, Not Null: `UP`, `DOWN`)
+* `detailed_state` (`VARCHAR(30)`, Not Null: `UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`)
+* `success_count` / `failed_count` (`SMALLINT`, Not Null) — Replies received / probes lost in the most recent cycle.
+* `health_score` (`NUMERIC(5, 2)`, Not Null) — `success_count / total × 100`.
+* `avg_rtt_ms` (`NUMERIC(10, 2)`, Nullable) — Mean RTT of received replies.
+* `is_split_event` (`BOOLEAN`, Default: `false`, Not Null) — Row created by splitting a long-running period (e.g. at the 24-hour rollover).
+* `start_time` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null)
+* `end_time` (`TIMESTAMPTZ`, Nullable — `NULL` while the period is open)
+* `duration_seconds` (`BIGINT`, Nullable)
+* `monitoring_cycle_count` (`INTEGER`, Default: `1`, Not Null) — Cycles aggregated into this period.
+* `created_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null)
 
 ### `flow_minute_rollups` (TimescaleDB Hypertable)
 Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow v9, and IPFIX.
@@ -68,6 +74,8 @@ Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow
 * `bytes` (`BIGINT`, Default: 0, Not Null) — Total bytes transferred in the 1-minute window.
 * `packets` (`BIGINT`, Default: 0, Not Null) — Total packets transferred.
 * `flow_count` (`INTEGER`, Default: 1, Not Null) — Number of discrete flow records aggregated into this rollup.
+* `tcp_flags` (`SMALLINT`, Default: 0, Not Null) — Bitwise OR of the TCP flags seen across the aggregated flows (migration `0013`).
+* `tos` (`SMALLINT`, Default: 0, Not Null) — Highest IP ToS/DSCP byte seen (migration `0013`). Migration `0013` also tries to add both columns to `flow_hourly_rollups` and `flow_daily_rollups`, but on TimescaleDB those are continuous aggregates (see §5), which cannot be altered this way, so the columns exist there only on installs without TimescaleDB.
 * *Indexes*:
   - `idx_flow_minute_src_dst_endpoint` (`bucket`, `src_endpoint_id`, `dst_endpoint_id`)
   - `idx_flow_minute_exporter_bucket` (`exporter_id`, `bucket`)
@@ -91,7 +99,7 @@ Stores 1-minute directional ingress and egress interface-level traffic metrics i
 Stores notification destinations and credentials with AES-256-GCM encryption.
 * `id` (`UUID`, Primary Key)
 * `name` (`VARCHAR(100)`, Not Null)
-* `channel_type` (`VARCHAR(50)`: `TEAMS`, `DISCORD`, `SLACK`, `EMAIL`, `WEBHOOK`)
+* `channel_type` (`VARCHAR(50)`: `TEAMS`, `DISCORD`, `SLACK`, `EMAIL_SMTP`, `GENERIC_WEBHOOK`)
 * `is_enabled` (`BOOLEAN`, Default: `true`, Not Null)
 * `config` (`TEXT`, Not Null) — AES-256-GCM encrypted JSON payload containing webhook URLs, SMTP passwords, tokens, etc.
 * `endpoint_ids` (`JSONB`, Default: `'[]'::jsonb`, Not Null) — Target endpoint UUID filtering (empty list indicates all fleet endpoints).
@@ -103,14 +111,16 @@ Stores notification destinations and credentials with AES-256-GCM encryption.
 ### `alert_delivery_logs`
 Audit log of all outbound dispatch attempts.
 * `id` (`UUID`, Primary Key)
-* `channel_id` (`UUID`, Foreign Key to `alert_channels.id`, Nullable)
+* `channel_id` (`UUID`, Foreign Key to `alert_channels.id` `ON DELETE CASCADE`, Not Null, Indexed)
+* `channel_name` (`VARCHAR(100)`, Not Null) — Snapshot of the channel name at dispatch time.
+* `endpoint_id` (`UUID`, Nullable, Indexed) and `endpoint_name` (`VARCHAR(100)`, Not Null)
 * `event_type` (`VARCHAR(50)`, Not Null)
-* `endpoint_id` (`UUID`, Nullable)
-* `status` (`VARCHAR(20)`: `DELIVERED`, `FAILED`, `SUPPRESSED`)
-* `response_code` (`INTEGER`, Nullable)
-* `latency_ms` (`NUMERIC(8, 2)`, Nullable)
-* `error_message` (`TEXT`, Nullable)
-* `created_at` (`TIMESTAMPTZ`, Default: `now()`)
+* `status` (`VARCHAR(20)`, Not Null: `DELIVERED`, `FAILED`, `THROTTLED`)
+* `status_code` (`INTEGER`, Nullable) — HTTP status (or SMTP outcome) returned by the destination.
+* `retry_count` (`INTEGER`, Default: 0, Not Null)
+* `response_message` (`TEXT`, Nullable) — Truncated response body or error detail.
+* `latency_ms` (`INTEGER`, Nullable)
+* `timestamp` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed)
 
 ---
 
@@ -232,21 +242,41 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_retention_policy('flow_daily_rollups', INTERVAL '365 days', if_not_exists => TRUE);
 ```
 
-### Historical Baseline View Repair (`node_historical_baselines`)
-TimescaleDB continuous aggregates require grouping by `time_bucket()` on the partition column and disallow non-monotonic expressions such as `EXTRACT(dow FROM start_time)`. 
-
-To maintain the 168-hour weekly statistical profile without violating continuous aggregate invariants or causing migration failures, `node_historical_baselines` is defined as a robust standard view (or refreshed materialized view):
+### Historical Baseline View (`node_historical_baselines`)
+TimescaleDB continuous aggregates must group by `time_bucket()` on the partition column and cannot contain non-monotonic expressions such as `EXTRACT(dow FROM start_time)`. Migration `0009` therefore builds the 168-slot (day-of-week × hour) latency profile in two layers when TimescaleDB is available:
 
 ```sql
-CREATE VIEW node_historical_baselines AS
+-- 1. Continuous aggregate: hourly RTT statistics per endpoint
+CREATE MATERIALIZED VIEW node_historical_baselines_cagg
+WITH (timescaledb.continuous) AS
 SELECT
     endpoint_id,
-    EXTRACT(dow FROM start_time)::INTEGER AS day_of_week,
-    EXTRACT(hour FROM start_time)::INTEGER AS hour_of_day,
-    AVG(avg_rtt_ms)::FLOAT AS historical_mean,
-    STDDEV(avg_rtt_ms)::FLOAT AS historical_stddev
+    time_bucket('1 hour', start_time) AS bucket,
+    AVG(avg_rtt_ms)::FLOAT AS hourly_mean,
+    STDDEV(avg_rtt_ms)::FLOAT AS hourly_stddev
 FROM endpoint_events
 WHERE avg_rtt_ms IS NOT NULL
-GROUP BY endpoint_id, EXTRACT(dow FROM start_time), EXTRACT(hour FROM start_time);
+GROUP BY endpoint_id, time_bucket('1 hour', start_time)
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy(
+    'node_historical_baselines_cagg',
+    start_offset => INTERVAL '28 days',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE
+);
+
+-- 2. Plain view folding the hourly buckets into the weekly profile read by baseline_service.py
+CREATE OR REPLACE VIEW node_historical_baselines AS
+SELECT
+    endpoint_id,
+    EXTRACT(dow FROM bucket)::INTEGER AS day_of_week,
+    EXTRACT(hour FROM bucket)::INTEGER AS hour_of_day,
+    AVG(hourly_mean)::FLOAT AS historical_mean,
+    AVG(hourly_stddev)::FLOAT AS historical_stddev
+FROM node_historical_baselines_cagg
+GROUP BY endpoint_id, EXTRACT(dow FROM bucket), EXTRACT(hour FROM bucket);
 ```
-This guarantees that Z-score anomaly detection functions correctly across all deployment environments (whether running vanilla PostgreSQL or TimescaleDB).
+
+Without TimescaleDB (or if creating the continuous aggregate fails), `node_historical_baselines` is instead a plain view computing the same columns directly from `endpoint_events`. Either way, `baseline_service.py` reads the same schema, and the engine uses `historical_mean` / `historical_stddev` for the `μ + 3σ` latency check described in [SLA Calculation Methodology](sla-calculation.md).

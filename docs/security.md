@@ -22,7 +22,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 13 zero-dependency engines. |
+| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 12 zero-dependency engines. |
 | **v3.3.0** | Feature & Ingestion Release | **Supported (Frozen Snapshot)** | Supported frozen production snapshot with Flow Exporter & Interface Telemetry. |
 | **v3.1.35s** | Enterprise LTS Release | **Supported (Frozen Snapshot)** | Supported frozen long-term maintenance track. |
 | **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.2.v`. |
@@ -123,12 +123,12 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 ### A. JWT in Secure HttpOnly Cookies
 * **XSS Defense:** Authentication tokens are stored inside browser `HttpOnly`, `SameSite=Lax`, and `Secure` (in HTTPS production) cookies. Malicious client-side JavaScript cannot read session tokens.
 * **Cryptographic JTI Enforcement:** Every issued token carries a cryptographically unique UUID `jti` (JWT ID). Tokens lacking a valid `jti` claim are rejected immediately.
-* **Sliding Inactivity Window:** User sessions expire after 120 minutes of inactivity, sliding forward on active requests.
+* **Session Lifetime:** Access tokens expire `session_timeout` minutes after login (default 120). The value comes from **Admin Settings → Security & Discovery**, falling back to `[security] session_timeout_minutes` in `config.toml`.
 
 ### B. Distributed Multi-Worker Session Governance
 In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
 * **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`) rather than volatile single-worker process memory.
-* **Concurrent Device Quota (Max 2 Sessions):** Accounts are restricted to 2 concurrent active devices. A third login automatically evicts the oldest session via FIFO retirement.
+* **Concurrent Device Quota:** Accounts are limited to `[security] max_active_sessions_per_user` concurrent sessions (default 2, range 1–10). A further login evicts the oldest session (FIFO).
 * **Instantaneous Session Revocation:** Changing an account password or clicking "Sign Out Everywhere" immediately deletes active session records from the datastore, revoking access across all workers in real time.
 * **Forced Initial Password Reset:** Newly provisioned user accounts (`ADMIN` or `VIEWER`) must change their temporary password upon first login before accessing system telemetry.
 
@@ -150,7 +150,7 @@ When determining the client's real IP address for audit logs and security polici
 * Direct external requests attempting to spoof `X-Forwarded-For: 127.0.0.1` are rejected, preventing bypass of brute-force shields and IP audit spoofing.
 
 ### B. IP-Scoped Brute-Force Lockouts
-* **Threshold:** 5 consecutive failed login attempts within 15 minutes trigger a temporary 15-minute account lockout.
+* **Threshold:** After `lockout_threshold` failed attempts (default 5; **Admin Settings → Security & Discovery**) the `IP:username` pair is locked for 15 minutes. The failure counter resets after 30 minutes without further failures.
 * **NAT / VPN Isolation:** Lockout keys are scoped by `f"{client_ip}:{username}"`. If an external attacker attempts to brute force an administrator account, only the attacker's IP is locked out; legitimate administrators on corporate networks remain unaffected.
 
 ---
@@ -174,7 +174,8 @@ When determining the client's real IP address for audit logs and security polici
 ### D. Zero-Dependency Binary PDF Emitter (`app.core.pdf`)
 Ephemres eliminates external HTML-to-PDF rendering engines (`WeasyPrint`, `wkhtmltopdf`, headless browsers) and their associated Local File Inclusion (LFI) / SSRF attack surface.
 * Executive SLA reports are compiled directly into raw **PDF 1.4 binary streams** in memory using `app.core.pdf`.
-* Organization logos are validated strictly in-memory as binary PNG or JPEG byte headers and embedded directly as native PDF `/Subtype /Image` XObjects—no external URLs, stylesheets, or filesystem paths are ever fetched during report generation.
+* Organization logos are accepted only as PNG or JPEG data URIs (the declared type and the file's magic bytes must match) and embedded directly as native PDF `/Subtype /Image` XObjects.
+* Resource loading during report generation (`app.core.pdf`) allows `data:` URIs, plus local files only inside `backend/app/templates/reports/` and `frontend/src/assets/`; `http`, `https`, `ftp`, and any other scheme are refused, as is any path outside those two directories.
 
 ### E. Cryptographic Integrity Verification (`X-Report-SHA256`)
 Every generated PDF byte stream is hashed prior to transmission:

@@ -8,8 +8,8 @@ Welcome to the Ephemres Network Monitoring Platform v3.3.2.v user guide. This do
 
 Ephemres v3.3.2.v provides enterprise-grade session protection:
 * **Browser Password Autofill:** The login page supports native browser credential managers (Chrome, Edge, Safari, Firefox, Bitwarden, 1Password) for 1-click authentication.
-* **Sliding 2-Hour Inactivity Timeout:** Sessions slide forward on active requests. If idle for 120 minutes, sessions expire automatically.
-* **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions (managed via FIFO rotation).
+* **Session Timeout:** Sessions expire after the configured session timeout (default 120 minutes; **Admin Settings → Security & Discovery**), after which you are asked to log in again.
+* **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions by default (configurable by the operator); a further login signs out the oldest session.
 * **IP-Scoped Lockouts:** Brute-force protection isolates failed attempts by `<Client_IP>:<Username>`, ensuring legitimate users on other networks are never locked out.
 * **Forced Initial Password Reset:** First-time logins require setting a secure replacement password before platform access is granted.
 
@@ -49,8 +49,7 @@ Visualizes the parent-child network hierarchy with crossing-free routing:
 
 Clicking any endpoint opens its detailed forensic view with an accessible perspective switcher:
 * **Tab 1: Health & Diagnostics:**
-  - **24-Hour Telemetry Graphs:** Interactive latency and packet loss curves with TimescaleDB continuous aggregate baselines.
-  - **Multi-Protocol Synthetic Metrics:** View TCP connect latency, HTTP response codes, and SSL certificate expiration remaining days.
+  - **24-Hour Telemetry Graphs:** Interactive ICMP latency and packet loss curves with TimescaleDB continuous aggregate baselines.
   - **High-Fidelity Traceroutes:** View hop-by-hop latency breakdowns and identify failure transit boundaries.
 * **Tab 2: Flow Telemetry & Bandwidth:**
   - **Endpoint Traffic Volume:** Ingress vs. Egress stacked bandwidth curves specific to this device.
@@ -87,7 +86,7 @@ Microsoft Teams supports two integration patterns:
 ### Discord Webhooks Setup
 1. In Discord, navigate to **Server Settings** -> **Integrations** -> **Webhooks** -> **New Webhook**.
 2. Select your channel and click **Copy Webhook URL**.
-3. In Ephemres, select provider `Discord`, paste the URL, and select desired severities (`DOWN`, `UNSTABLE`). Notifications render with color-coded sidebars.
+3. In Ephemres, select provider `Discord`, paste the URL, and select desired severities (`DOWN`, `RECOVERED`). Notifications render with color-coded sidebars.
 
 ### Slack Block Kit Setup
 1. In Slack, create an **Incoming Webhook** in your Slack App administration console.

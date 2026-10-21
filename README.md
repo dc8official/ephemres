@@ -4,7 +4,7 @@
 
 A high-precision, decoupled network telemetry and autonomous monitoring platform combining active multi-protocol health probing with passive high-volume network flow ingestion (NetFlow v5, NetFlow v9, and IPFIX) and per-interface throughput/utilization telemetry. Engineered for continuous endpoint verification, sub-second route diagnostics, adaptive statistical alerting, automated root-cause analysis (RCA), real-time Server-Sent Events (SSE), in-RAM accelerated storage, enterprise multi-channel incident dispatch, and dynamic topology visualization with crossing-free layout routing.
 
-Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **13 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform now runs on the pure Python Standard Library plus just two lightweight production drivers: `uvicorn` (ASGI HTTP server) and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver).
+Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **12 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform now runs on the pure Python Standard Library plus just two lightweight production drivers: `uvicorn` (ASGI HTTP server) and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver).
 
 ---
 
@@ -26,9 +26,7 @@ Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integra
 │   • faststore.py   In-RAM /dev/shm SQLite WAL engine with Redis async API      │
 │   • migrator.py    Native async TimescaleDB/PostgreSQL DDL migration engine    │
 │   • crypto.py      Pure-stdlib Scrypt key derivation & constant-time validation│
-│   • der.py         Pure-stdlib ASN.1 DER X.509 certificate & SAN parser        │
 │   • restore.py     Cross-version database backup restoration engine            │
-│   • logging.py     Structured rotating file & stream logging engine            │
 │   • http_client.py RFC-compliant SSRF-hardened async HTTP socket client        │
 │   • netlink.py     Pure Linux RTNETLINK binary parser & /proc diagnostics      │
 │   • pdf.py         Pure-stdlib PostScript/PDF binary document generator        │
@@ -65,8 +63,8 @@ Beginning in **Version 3.3.2.v**, Ephemres transitions to a **Vertically Integra
 5. **ManageEngine-Style Per-Interface Telemetry:** Real-time link utilization tracking against provisioned speeds (10M to 100G+), single-direction attribution, bounds rejection, and 1-click exporter enrollment at `/bandwidth`.
 6. **Enterprise Alerting Subsystem:** Independent background task pool pushing state transitions and RCA incidents across Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), Generic Webhooks, and direct hardened SMTP Email with socket-level SSRF defense, Scrypt encryption at rest, flapping cooldown, and cascade suppression.
 7. **Native Async ORM (`app.core.orm`):** Zero-dependency data access layer supporting declarative models, column constraints, relationship navigation, transactional sessions, and query compilation (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`) directly over `asyncpg`.
-8. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all 12 platform revisions sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
-9. **5-Ping @ 8.0s Concurrency Sweeper:** Active monitoring sweep configured with a spacious **28-second headroom window** before the minute boundary and 0–2000ms randomized startup jitter, completely eliminating connection pool contention and thundering herds.
+8. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all platform revisions (currently `0001`–`0013`) sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
+9. **5-Ping @ 8.0s Concurrency Sweeper:** Each endpoint sends 5 pings 8.0s apart (2.0s reply timeout) once per 60-second cycle: about 32s of sweep, 42s worst case, leaving headroom before its next slot. Endpoints are staggered across the minute by a fixed per-endpoint second offset derived from their UUID, spreading load and avoiding thundering herds. Ping count and interval are configurable in `[monitoring]`.
 10. **High-Fidelity Route Diagnostics:** Upgraded traceroute engine (`traceroute -n -q 2 -w 3 -m 30 -I`) with multi-probe latency parsing, raw ICMP capability isolation (`CAP_NET_RAW`), and Layer-2 subnet auto-bypass.
 11. **Real-Time Server-Sent Events (SSE):** Asynchronous event broker streaming telemetry envelopes (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`) and 15-second heartbeat keep-alives via `GET /api/v1/events/stream`.
 12. **Pure-Stdlib PDF Compliance Engine (`app.core.pdf`):** PostScript/PDF binary emitter compiling executive compliance reports (Availability/SLA, Bandwidth/Capacity, Master Dossier) with corporate branding, Base64 logos, and zero external binary dependencies.
@@ -80,7 +78,7 @@ For complete architectural references, operational runbooks, and developer guide
 
 * **[v3.3.2.v Release Notes](docs/release-notes/v3.3.2.v.md):** Complete release notes detailing the 6 stages of the Vertical Integration Architecture.
 * **[Changelog & Technical Evolution](docs/changelog.md):** Complete evolutionary matrix and milestone chronicle from Version 1.0 to Version 3.3.2.v.
-* **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 13 native core engines, data pipelines, and concurrency sweeper.
+* **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 12 native core engines, data pipelines, and concurrency sweeper.
 * **[Developer Guide](docs/developer-guide.md):** Guidelines for contributing with `app.core.orm`, `app.core.schema`, `app.core.asgi`, and `FastStoreClient`.
 * **[Deployment & Operations Guide](docs/deployment.md):** Production deployment runbook, `/dev/shm` shared memory tuning, and zero-Redis service supervision.
 * **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9 and IPFIX setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), and interface metrics.

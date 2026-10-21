@@ -4,7 +4,7 @@
 
 | Version | Supported | Security Notes |
 | :--- | :--- | :--- |
-| **v3.3.2.v** | :white_check_mark: | Active production standard (Vertical Integration Architecture & 13 zero-dependency core engines) |
+| **v3.3.2.v** | :white_check_mark: | Active production standard (Vertical Integration Architecture & 12 zero-dependency core engines) |
 | **v3.3.0** | :white_check_mark: | Supported frozen snapshot (Flow Exporter & Interface Telemetry) |
 | **v3.1.35s** | :white_check_mark: | Supported frozen snapshot (Enterprise LTS maintenance track) |
 | **v3.3.1n** | :x: | Transitional rebranding release — superseded by `v3.3.2.v` |

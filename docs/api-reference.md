@@ -5,22 +5,41 @@ Ephemres v3.3.2.v exposes a RESTful and Server-Sent Events (SSE) API built on th
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
 
+## Response Envelope
+Most JSON endpoints wrap their payload in a common envelope (`app.schemas.APIResponse`):
+```json
+{ "status": "success", "data": { "...": "..." }, "meta": null, "error": null }
+```
+* `status` is `"success"` or `"error"`.
+* `meta` carries pagination details (`total`, `page`, `page_size`, `total_pages`) on list endpoints, otherwise `null`.
+* On failure, `error` is `{"code": "...", "message": "..."}`. HTTP errors raised by route validation and authentication (`401`, `403`, `404`, `422`, …) return `{"detail": "..."}` instead.
+
+Exceptions: `GET /health/liveness`, `GET /health/readiness`, streaming responses (SSE, CSV, PDF), and the examples below that show a bare object.
+
 ---
 
 ## 1. System & Real-Time Events
 
 ### `GET /api/v1/version`
-Returns the current platform version metadata.
+Returns the current platform version metadata (no authentication required).
 - **Response:** `200 OK`
   ```json
   {
-    "status": "ok",
-    "version": "3.3.2.v"
+    "status": "success",
+    "data": { "version": "3.3.2.v", "platform": "Ephemres v3.3.2.v" },
+    "meta": null,
+    "error": null
   }
   ```
 
 ### `GET /api/v1/health`
-Performs system health check (database connection, monitoring engine status). Returns `{"status": "ok", "version": "3.3.2.v"}`.
+Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.2.v"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
+
+### `GET /api/v1/health/liveness` (also `/health/liveness`)
+Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.2.v"}`.
+
+### `GET /api/v1/health/readiness` (also `/health/readiness`)
+Readiness probe that runs `SELECT 1` against PostgreSQL and pings FastStore when it is enabled. Returns `200` with `"status": "ready"` or `503` with `"status": "degraded"`, plus per-dependency `database` and `redis` (FastStore) objects with `status` and `error`.
 
 ### `GET /api/v1/events/stream`
 Connects to the real-time Server-Sent Events (SSE) telemetry stream.
@@ -56,25 +75,37 @@ Updates the authenticated user's password.
 ## 3. Endpoints Management (`/endpoints`)
 
 ### `GET /endpoints`
-Lists all monitored endpoints with SQL-level pagination and filtering.
+Lists monitored endpoints with their current state, 24-hour uptime, and latest RTT.
 - **Query Params:**
-  - `page` (int, default: 1): Page number.
-  - `page_size` (int, default: 50): Number of items per page.
-  - `status` (string, optional): Filter by state (`UP`, `UNSTABLE`, `DOWN`, `UNKNOWN`).
-  - `site` (string, optional): Filter by location.
+  - `status` (string, optional): `ACTIVE`, `DISABLED`, `MONITORED`, or `UNMONITORED` (case-insensitive; any other value returns `400`).
+  - `page` (int ≥ 1, optional) and `page_size` (int 1–500, optional): SQL-level pagination. Supplying either enables it (`page_size` defaults to 50, `page` to 1); omitting both returns every endpoint.
 - **Response Envelope:**
   ```json
   {
-    "items": [...],
-    "total_count": 120,
-    "page": 1,
-    "page_size": 50,
-    "total_pages": 3
+    "status": "success",
+    "data": [
+      {
+        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "hostname": "core-sw-01",
+        "ip_address": "10.0.0.1",
+        "device_type": "SWITCH",
+        "endpoint_status": "ACTIVE",
+        "current_operational_state": "UP",
+        "current_detailed_state": "UP",
+        "current_health_score": 100.0,
+        "avg_rtt_ms": 1.42,
+        "uptime_percentage_24h": 99.95,
+        "last_seen": "2026-10-21T08:00:32Z"
+      }
+    ],
+    "meta": { "total": 1, "page": 1, "page_size": 1, "total_pages": 1 }
   }
   ```
+  > [!NOTE]
+  > `meta` currently always describes only the rows returned (`total` = row count, `page` = 1, `total_pages` = 1), even when `page`/`page_size` are supplied.
 
 ### `POST /endpoints`
-Onboards a new endpoint for monitoring with optional synthetic probe configuration.
+Onboards a new endpoint for ICMP monitoring.
 - **Request Body:**
   ```json
   {
@@ -82,27 +113,38 @@ Onboards a new endpoint for monitoring with optional synthetic probe configurati
     "ip_address": "192.168.10.1",
     "device_type": "ROUTER",
     "location": "Main Datacenter",
-    "is_l2_segment": false,
+    "description": "Edge router for the web tier",
+    "monitoring_enabled": true,
+    "allow_incident_trace": true,
     "allow_topology_discovery": true,
-    "probe_type": "HTTP_STATUS",
-    "probe_port": 443,
-    "probe_url": "https://service.internal/health",
-    "probe_expected_status": 200
+    "enable_rca": true,
+    "enable_scheduled_discovery": true,
+    "is_l2_segment": false,
+    "flow_exporter_ips": ["10.255.255.1"],
+    "flow_interface_aliases": {"1": "WAN-Fiber"},
+    "manual_parent_id": null
   }
   ```
+- `ip_address`, `hostname`, and `device_type` are required; `ip_address` must be a valid IPv4/IPv6 address and is unique. `device_type` is free text (e.g. `ROUTER`, `SWITCH`, `SERVER`, `FIREWALL`).
+- `device_role` is not set here: new endpoints are `ACTIVE_HOST`. Flow exporters are created or converted through `POST /bandwidth/exporters/enroll`.
+- Synthetic TCP/HTTP/SSL probe settings are not part of this API (see the note in [Architecture §5](architecture.md)).
 
 ### `GET /endpoints/{id}`
-Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`) for a specific endpoint.
+Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000}}`) for a specific endpoint.
+
+### `GET /endpoints/{id}/traces`
+Returns the 10 most recent diagnostic traceroutes for the endpoint.
+
+### `GET /endpoints/{id}/rca`
+Returns root-cause analysis incidents recorded for the endpoint.
+
+### `POST /endpoints/{id}/refresh-baseline`
+Re-runs baseline route discovery for the endpoint (requires `Admin` role).
 
 ### `PATCH /endpoints/{id}`
 Updates configuration flags or properties for an endpoint. Synchronizes changes directly with the in-memory `EndpointRegistry` and flow correlator routing table.
-- **Request Body:** Accepts optional fields:
-  - `hostname` (string)
-  - `ip_address` (string)
-  - `device_type` (string: `ENDPOINT`, `TRANSIT_ROUTER`, `L2_SEGMENT`, `FIREWALL`, `SWITCH`)
-  - `location` (string)
-  - `flow_exporter_ips` (array of strings, e.g. `["192.168.100.1", "10.0.0.254"]`): Secondary exporter IP addresses aliased to this endpoint.
-  - `flow_interface_aliases` (object, e.g. `{"1": "WAN-Fiber", "2": "LAN-Trunk"}`): Mapping SNMP `ifIndex` to human-readable labels.
+- **Request Body:** Accepts any subset of: `hostname`, `device_type`, `location`, `description`, `monitoring_enabled`, `allow_incident_trace`, `allow_topology_discovery`, `enable_rca`, `enable_scheduled_discovery`, `is_l2_segment`, `flow_exporter_ips` (array of IP strings), `flow_interface_aliases` (object mapping `ifIndex` to a label, e.g. `{"1": "WAN-Fiber"}`), `manual_parent_id` (UUID or `null`), and `endpoint_status` (`ACTIVE` or `DISABLED`).
+- `ip_address` cannot be changed after creation; delete and re-create the endpoint instead.
 
 ### `DELETE /endpoints/{id}`
 Removes an endpoint from monitoring and deregisters it from the polling engine.
@@ -112,33 +154,38 @@ Removes an endpoint from monitoring and deregisters it from the polling engine.
 ## 4. Topology & RCA (`/topology`)
 
 ### `GET /topology`
-Retrieves the complete L2/L3 parent-child adjacency DAG map computed with Sugiyama barycenter crossing reduction.
+Retrieves the parent-child topology DAG (nodes with state and hop level, plus edges). The crossing-free hierarchical layout is computed in the browser by vis-network; the API returns graph data only.
 - **Response:** `200 OK` returning an object containing arrays of `nodes` and `edges`.
+
+### `POST /topology/rebuild`
+Rebuilds the in-memory topology DAG from the database (requires `Admin` role).
+
+### `POST /topology/discover-all`
+Queues background traceroute discovery for all active endpoints that are currently `UP`, run sequentially with a 500 ms delay between targets (requires `Admin` role).
 
 ---
 
 ## 5. Reports & Telemetry (`/reports`)
 
+### `GET /reports/fleet-summary`
+Fleet-wide SLA and state summary for a time window.
+- **Query Params:** `start_date`, `end_date` (required, ISO 8601).
+
 ### `GET /reports/uptime/{endpoint_id}`
 Retrieves SLA uptime availability percentage and state distribution metrics.
-- **Query Params:** `start_date`, `end_date`.
+- **Query Params:** `start_date`, `end_date` (required).
+
+### `GET /reports/incidents/{endpoint_id}`
+Retrieves paginated outage incidents (DOWN periods) for an endpoint.
+- **Query Params:** `start_date`, `end_date` (required), `page` (default 1), `page_size` (default 50, max 200).
 
 ### `GET /reports/events/{endpoint_id}`
 Retrieves paginated historical state transition events.
-- **Query Params:** `start_date`, `end_date`, `page`, `page_size`.
+- **Query Params:** `start_date`, `end_date` (required), `page` (default 1), `page_size` (max 1500; `size` is accepted as an alias).
 
-### `GET /reports/rtt-trend/{endpoint_id}`
-Retrieves time-series latency curves against historical continuous aggregate baselines.
-
-### `GET /reports/timeline/{endpoint_id}`
-Retrieves state transition timeline entries.
-
-### `GET /reports/audit-logs`
-Retrieves paginated administrative audit logs (requires `Admin` role).
-
-### `POST /reports/telemetry/export-batch` (Alias: `POST /reports/telemetry/export/batch`)
-Streams a sanitised CSV containing bulk telemetry data across multiple endpoints using deterministic keyset pagination.
-- **Access Control:** Requires `Operator` or `Admin` role (`403 Forbidden` for `Viewer`).
+### `POST /api/v1/telemetry/export/batch`
+Streams a sanitized CSV containing bulk telemetry data across multiple endpoints using deterministic keyset pagination. Note the path: this route is mounted at `/api/v1/telemetry`, not under `/reports`.
+- **Access Control:** Any authenticated user (exports are read-only).
 - **Request Body:**
   ```json
   {
@@ -165,7 +212,7 @@ Streams a sanitised CSV containing bulk telemetry data across multiple endpoints
 
 ### `POST /reports/pdf`
 Compiles and streams an executive-ready, immutable ISO A4 PDF report with air-gapped SSRF protection and cryptographic header verification.
-- **Access Control:** Requires `Operator` or `Admin` role (`403 Forbidden` for `Viewer`).
+- **Access Control:** Any authenticated user (exports are read-only).
 - **Request Body:**
   ```json
   {
@@ -177,7 +224,7 @@ Compiles and streams an executive-ready, immutable ISO A4 PDF report with air-ga
   }
   ```
 - **Parameters:**
-  - `template_type` (str): `"a"` (Availability & SLA Matrix), `"b"` (Bandwidth & Interface Capacity), or `"master"` (Template C: Combined Master Audit Dossier).
+  - `template_type` (str, case-insensitive): `"a"` / `"availability"` (Availability & SLA Matrix), `"b"` / `"bandwidth"` (Bandwidth & Interface Capacity), or `"c"` / `"master"` (Combined Master Audit Dossier). Any other value returns `400`.
   - `endpoint_ids` (list[UUID]): List of target endpoint UUIDs to compile into the report.
   - `start_date` (datetime): UTC start boundary.
   - `end_date` (datetime): UTC end boundary.
@@ -187,7 +234,7 @@ Compiles and streams an executive-ready, immutable ISO A4 PDF report with air-ga
   - `Content-Disposition: attachment; filename="<generated-report-name>.pdf"`
   - `X-Report-SHA256: <64-character-sha256-hexdigest>`
 - **Security & Immutability:**
-  - Air-gapped rendering: Disallows all external network schemas (`http://`, `https://`, `ftp://`) and whitelists local filesystem access strictly to authorized template/asset paths.
+  - Air-gapped rendering: refuses every network scheme (`http://`, `https://`, `ftp://`, …); local files are readable only under `backend/app/templates/reports/` and `frontend/src/assets/`; images may also come from inline `data:` URIs.
   - Native binary PDF 1.4 compilation: Generated directly by `app.core.pdf` with cryptographic checksum verification via the `X-Report-SHA256` response header.
 
 ---
@@ -220,7 +267,7 @@ Creates a new notification channel. Credentials and webhook URLs are encrypted a
 - **Filtering Fields:**
   - `endpoint_ids` (array of UUID strings, default `[]`): Restricts delivery to specific endpoints. If empty, all endpoints are included.
   - `subnet_filters` (array of CIDR strings, default `[]`): Restricts delivery to endpoints whose IP addresses match the specified CIDR subnets (e.g. `["10.0.0.0/16"]`).
-  - `severity_filters` (array of strings, default `["DOWN", "RECOVERED"]`): Triggering states (`"DOWN"`, `"RECOVERED"` / `"UP"`, `"UNSTABLE"`).
+  - `severity_filters` (array of strings, default `["DOWN", "RECOVERED"]`): Matched against the event's operational state. Effective values are `"DOWN"` and `"RECOVERED"` (or its synonym `"UP"`); detailed states such as `UP-UNSTABLE` are not matched separately.
 
 ### `GET /alerts/channels/{id}`
 Retrieves channel details by ID with masked secrets.
@@ -237,13 +284,14 @@ Executes an immediate live diagnostic test alert probe to verify destination rea
 - **Response:**
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "success": true,
       "status_code": 200,
       "message": "Test alert delivered successfully."
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -302,7 +350,7 @@ Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory st
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "redis_connected": true,
       "redis_version": "7.0.15",
@@ -315,7 +363,8 @@ Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory st
       "ready": true,
       "message": "Flow preflight passed successfully."
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -324,7 +373,7 @@ Retrieves corporate organization profile and report branding settings. Available
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "company_name": "Acme Corporation",
       "department": "Network Operations Center (NOC)",
@@ -346,7 +395,7 @@ Updates corporate organization branding and PDF report headers/footers (requires
   }
   ```
 - **Validation Constraints:**
-  - `logo_data`: Must be a valid Base64 data URI (`data:image/...`), max length 2,000,000 characters (~1 MB image file).
+  - `logo_data`: A base64 `data:image/png` or `data:image/jpeg` URI whose bytes match the declared type (SVG is rejected because PDF reports cannot embed it); max length 2,000,000 characters (~1.5 MB decoded). An empty string clears the logo.
   - `company_name`: String, max 150 characters.
   - `department`: String, max 150 characters.
   - `report_footer`: String, max 255 characters.
@@ -383,7 +432,7 @@ Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps)
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "total_ingress_bps": 45210340.50,
       "total_egress_bps": 41732622.00,
@@ -391,7 +440,8 @@ Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps)
       "unmatched_exporters_count": 1,
       "total_flows_count": 128450
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -404,7 +454,7 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "window": "1h",
       "points": [
@@ -415,7 +465,8 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
         }
       ]
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -427,7 +478,7 @@ Retrieves the highest-volume communicating endpoints and discrete IP conversatio
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "top_endpoints": [
         {
@@ -451,7 +502,8 @@ Retrieves the highest-volume communicating endpoints and discrete IP conversatio
         }
       ]
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -462,7 +514,7 @@ Returns protocol and service port volume distribution for donut/pie charts.
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "applications": [
         {
@@ -481,7 +533,8 @@ Returns protocol and service port volume distribution for donut/pie charts.
         }
       ]
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -490,7 +543,7 @@ Lists all configured flow exporters with interface aliases, along with detected 
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "exporters": [
         {
@@ -509,7 +562,8 @@ Lists all configured flow exporters with interface aliases, along with detected 
         }
       ]
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
 
@@ -525,10 +579,25 @@ One-click binds an unmatched exporter IP to an existing endpoint's `flow_exporte
 - **Response:** `200 OK`
   ```json
   {
-    "success": true,
+    "status": "success",
     "data": {
       "message": "Successfully mapped exporter IP 172.16.50.1 to core-gw-01."
     },
-    "message": "Request processed successfully."
+    "meta": null,
+    "error": null
   }
   ```
+
+### `POST /bandwidth/exporters/enroll`
+Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` role). To attach the IP to an endpoint that already exists, use `POST /bandwidth/exporters/{ip}/map` instead.
+- **Request Body:** `{"ip_address": "10.255.255.1", "hostname": "edge-fw-01", "description": "optional", "device_role": "FLOW_EXPORTER"}`. A blank `hostname` becomes `flow-exporter-<ip>`. `device_role` defaults to `FLOW_EXPORTER` and must be one of the four values in `ck_endpoints_device_role`.
+- The new endpoint has `device_type = "Router"`, `monitoring_enabled = false` (no ICMP polling), and `flow_exporter_ips = [ip_address]`.
+- **Errors:** `400` for an invalid IP; `409` if an endpoint with the same IP or hostname already exists.
+
+### `GET /bandwidth/interfaces`
+Per-interface ingress/egress throughput and utilization for one exporter.
+- **Query Params:** `exporter_id` (UUID, required), `window` (default `1h`; same values as the other bandwidth endpoints).
+
+### `PUT /bandwidth/endpoints/{id}/interfaces`
+Replaces an exporter's interface names and link speeds (requires `Admin` role).
+- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000.

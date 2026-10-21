@@ -19,16 +19,14 @@ Ephemres v3.3.2.v operates on a strict **zero-dependency runtime foundation**. A
 ephemres/
 ├── backend/
 │   ├── app/
-│   │   ├── core/           # Layer 0: 13 Pure-Stdlib Infrastructure Engines
+│   │   ├── core/           # Layer 0: 12 Pure-Stdlib Infrastructure Engines
 │   │   │   ├── asgi.py         # Native ASGI 3.0 router, dependency injection, SSE
 │   │   │   ├── orm.py          # Native Async ORM compiled directly over asyncpg
 │   │   │   ├── schema.py       # Pure-stdlib SchemaModel validation & serialization
 │   │   │   ├── faststore.py    # In-RAM /dev/shm SQLite WAL cache, pub/sub & streams
-│   │   │   ├── migrator.py     # Native async migration engine (0001-0012)
+│   │   │   ├── migrator.py     # Native async migration engine (0001-0013)
 │   │   │   ├── crypto.py       # Scrypt key derivation & AES-256-GCM encryption
-│   │   │   ├── der.py          # ASN.1 DER parser for X.509 certs & TLS SAN extraction
 │   │   │   ├── restore.py      # Cross-version database backup restoration engine
-│   │   │   ├── logging.py      # Structured rotating file & stream logger
 │   │   │   ├── http_client.py  # Asynchronous socket HTTP client with SSRF defense
 │   │   │   ├── netlink.py      # Linux kernel RTNETLINK & /proc stat readers
 │   │   │   ├── pdf.py          # Direct binary PDF 1.4 vector emitter
@@ -39,8 +37,9 @@ ephemres/
 │   │   ├── repositories/   # Data access repositories
 │   │   ├── routers/        # HTTP & SSE endpoints (app.core.asgi)
 │   │   ├── services/       # Domain business logic & alert dispatchers
+│   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
-│   ├── migrations/         # Migration versions (0001-0012)
+│   ├── migrations/         # Migration versions (0001-0013)
 │   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
@@ -53,7 +52,7 @@ ephemres/
 ## 3. Local Environment Setup
 
 ### Prerequisites
-1. **Python 3.10+**
+1. **Python 3.11+** (`app.config` uses the stdlib `tomllib` module)
 2. **PostgreSQL 14+ with TimescaleDB**
 3. **Node.js 18+ and npm**
 4. **Linux with `/dev/shm`** (or any POSIX OS; FastStore gracefully falls back to system temporary directories if `/dev/shm` is unavailable)
@@ -67,15 +66,15 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 ```
 
 ### 3.2 Backend Setup
-1. **Virtual Environment & Dependencies:**
+1. **Virtual Environment & Dependencies** (from the repository root):
    ```bash
-   cd backend
-   python3 -m venv venv
-   source venv/bin/activate
+   python3 -m venv .venv
+   source .venv/bin/activate
    pip install --upgrade pip
-   pip install -r requirements.txt
+   pip install -r backend/requirements-dev.txt
+   cd backend
    ```
-   *(Notice that dependency installation finishes in seconds because there are only 2 lightweight packages!)*
+   `requirements-dev.txt` installs the two runtime packages from `requirements.txt` (`uvicorn`, `asyncpg`) plus the test tools (`pytest`, `anyio`). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
 
 2. **Environment Configuration:**
    Copy `.env.example` to `.env` and configure your credentials:
@@ -175,11 +174,11 @@ async def list_endpoints(db: AsyncSession = Depends(get_db)):
 ```
 
 ### 4.4 In-RAM Caching & Messaging (`app.core.faststore`)
-Use `FastStoreClient`:
+Use `FastStoreClient` (an in-process SQLite store with a Redis-style API; `host`/`port` arguments are accepted for compatibility and ignored, and `db` selects the shared-memory database file):
 ```python
-from app.core.faststore import get_faststore_client
+from app.core.faststore import FastStoreClient
 
-store = get_faststore_client()
+store = FastStoreClient(db=0, decode_responses=True)
 await store.set("my_key", "value", ex=300)
 val = await store.get("my_key")
 
@@ -188,13 +187,13 @@ await store.publish("events_channel", json_payload)
 ```
 
 ### 4.5 SSRF-Immune HTTP Client (`app.core.http_client`)
-All outbound webhooks and HTTP calls must use `AsyncHttpClient`:
+All outbound webhooks and HTTP calls must use the SSRF-safe client from `create_ssrf_safe_client()`. It resolves and validates the destination IP at connection time and refuses redirects:
 ```python
-from app.core.http_client import AsyncHttpClient
+from app.core.http_client import create_ssrf_safe_client
 
-client = AsyncHttpClient(timeout=5.0)
-response = await client.post("https://webhook.site/...", json={"status": "alert"})
-status_code = response.status_code
+async with create_ssrf_safe_client(timeout=5.0) as client:
+    response = await client.post("https://hooks.example.com/...", json={"status": "alert"})
+    status_code = response.status_code
 ```
 
 ---
@@ -203,7 +202,7 @@ status_code = response.status_code
 
 Always verify that all tests pass before opening a Pull Request:
 ```bash
-# Run unit & integration test suite from workspace root
-./backend/venv/bin/pytest tests/
+# Run the unit & integration test suite from the repository root
+.venv/bin/python -m pytest
 ```
-All 371+ tests must complete with 0 failures.
+All tests must pass with 0 failures. `pytest.ini` sets `pythonpath = .` and `testpaths = tests`; `tests/backend/test_no_removed_deps.py` fails if any source or test file imports a removed framework.
