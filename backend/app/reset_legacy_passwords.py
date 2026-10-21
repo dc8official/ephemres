@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Optional, Any
 from app.core.orm import text
+from app.core.restore import default_reset_report_path, write_password_reset_report
 from app.database import AsyncSessionLocal
 from app.services.auth_service import hash_password, generate_readable_password
 
@@ -17,7 +18,7 @@ async def reset_legacy_passwords(session: Optional[Any] = None, report_path: Opt
     Returns the count of users reset.
     """
     if report_path is None:
-        report_path = os.environ.get("EPHEMRES_RESET_REPORT", "/opt/ephemres/legacy_password_resets.txt")
+        report_path = default_reset_report_path()
 
     async def _execute_reset(db: Any) -> int:
         res = await db.execute(
@@ -53,25 +54,10 @@ async def reset_legacy_passwords(session: Optional[Any] = None, report_path: Opt
 
         await db.commit()
 
-        dir_path = os.path.dirname(report_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-
-        fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.chmod(report_path, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                for username, temp_password in resets:
-                    f.write(f"{username}\t{temp_password}\n")
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
+        written_path = write_password_reset_report(report_path, resets)
 
         count = len(resets)
-        print(f"{count} users had legacy password hashes and were assigned temporary passwords. Report: {report_path}")
+        print(f"{count} users had legacy password hashes and were assigned temporary passwords. Report: {written_path}")
         return count
 
     if session is not None:

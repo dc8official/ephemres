@@ -1,5 +1,6 @@
 import io
 import os
+import asyncio
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,7 +14,7 @@ from app.database import get_db
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.system_setting import AppSetting
-from app.routers.auth import get_current_user, require_admin, require_operator_or_admin
+from app.routers.auth import get_current_user, require_admin
 from app.routers.reports import router as reports_router
 from app.routers.settings import router as settings_router
 from app.core.pdf import NativePdfReader as PdfReader, render_pdf_async, secure_url_fetcher
@@ -478,50 +479,13 @@ async def test_compile_master_report_data():
 # 4. RBAC Authorization & Security Access Control Tests
 # =====================================================================
 
-def test_reports_pdf_rbac_viewer_rejected():
-    """VIEWER role must receive 403 Forbidden when requesting PDF generation."""
-    mock_viewer = {
-        "id": str(uuid4()),
-        "username": "guest_viewer",
-        "role": "VIEWER",
-        "is_active": True,
-    }
-
-    mock_session = AsyncMock()
-
-    async def override_get_db():
-        yield mock_session
-
-    async def override_require_operator_or_admin():
-        from app.core.asgi import HTTPException
-        if mock_viewer["role"].upper() not in ("ADMIN", "OPERATOR"):
-            raise HTTPException(status_code=403, detail="Operator or Administrator role required.")
-        return mock_viewer
-
-    test_app.dependency_overrides[get_db] = override_get_db
-    test_app.dependency_overrides[require_operator_or_admin] = override_require_operator_or_admin
-
-    with TestClient(test_app) as client:
-        payload = {
-            "template_type": "availability",
-            "endpoint_ids": [str(uuid4())],
-            "start_date": "2026-09-01T00:00:00Z",
-            "end_date": "2026-09-02T00:00:00Z",
-            "include_rca": True,
-        }
-        res = client.post("/reports/pdf", json=payload)
-        assert res.status_code == 403
-        assert "Operator or Administrator role required" in res.json()["detail"]
-
-    test_app.dependency_overrides.clear()
-
-
-def test_reports_pdf_rbac_operator_allowed():
-    """OPERATOR role is permitted to generate and download PDF reports."""
+@pytest.mark.parametrize("role", ["ADMIN", "VIEWER", "OPERATOR"])
+def test_reports_pdf_allowed_for_any_authenticated_role(role):
+    """PDF reports are read-only: every authenticated role (incl. legacy OPERATOR from restores) may generate them."""
     mock_operator = {
         "id": str(uuid4()),
-        "username": "noc_operator",
-        "role": "OPERATOR",
+        "username": f"{role.lower()}_user",
+        "role": role,
         "is_active": True,
     }
 
@@ -530,11 +494,11 @@ def test_reports_pdf_rbac_operator_allowed():
     async def override_get_db():
         yield mock_session
 
-    async def override_require_operator_or_admin():
+    async def override_get_current_user():
         return mock_operator
 
     test_app.dependency_overrides[get_db] = override_get_db
-    test_app.dependency_overrides[require_operator_or_admin] = override_require_operator_or_admin
+    test_app.dependency_overrides[get_current_user] = override_get_current_user
 
     ep_id = uuid4()
     mock_ep = Endpoint(
@@ -723,3 +687,18 @@ async def test_report_compiler_traffic_zones_with_cidr_masks():
     assert zones["North-South Ingress"]["total_bytes"] == 200000
     assert zones["External / Transit"]["total_bytes"] == 10000
 
+
+
+@pytest.mark.parametrize("role", ["ADMIN", "VIEWER", "OPERATOR"])
+def test_batch_csv_export_allowed_for_any_authenticated_role(role):
+    """Telemetry CSV export is read-only, so no role is rejected before streaming starts."""
+    from app.core.asgi import StreamingResponse
+    from app.routers.reports import BatchExportRequest, batch_export_telemetry
+
+    request = BatchExportRequest(
+        endpoint_ids=[uuid4()],
+        start_time=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    response = asyncio.run(batch_export_telemetry(request=request, current_user={"id": str(uuid4()), "role": role}))
+    assert isinstance(response, StreamingResponse)

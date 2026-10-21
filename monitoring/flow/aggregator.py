@@ -58,8 +58,15 @@ class FlowAggregator:
         flush_interval_seconds: float = 10.0,
         *,
         redis_client: Any = None,
+        memory_limit_mb: Optional[int] = None,
     ):
         self.store = store_client if store_client is not None else redis_client
+        # Circuit-breaker ceiling for the FastStore buffer (config.toml flow.buffer_memory_limit_mb).
+        if memory_limit_mb is None:
+            from app.config import settings
+
+            memory_limit_mb = getattr(getattr(settings, "flow", None), "buffer_memory_limit_mb", 512)
+        self.memory_limit_bytes = int(memory_limit_mb) * 1024 * 1024
         self.correlator = correlator
         self.db_factory = db_session_factory
         self.flush_interval = flush_interval_seconds
@@ -104,13 +111,13 @@ class FlowAggregator:
                 logger.warning("Error creating consumer group: %s", e)
 
     async def _check_circuit_breaker(self) -> bool:
-        """Returns True if memory usage is within safe bounds (<85%), False if tripped."""
+        """Returns True if FastStore usage is within 85% of flow.buffer_memory_limit_mb, False if tripped."""
         if not self.store:
             return True
         try:
             info = await self.store.info("memory")
             used = int(info.get("used_memory", 0))
-            maxmem = int(info.get("maxmemory", 0))
+            maxmem = self.memory_limit_bytes
             if maxmem > 0 and (used / maxmem) > 0.85:
                 logger.error(
                     "Circuit Breaker TRIPPED: FastStore memory utilization at %.1f%% (>85%%). Dropping buffer.",

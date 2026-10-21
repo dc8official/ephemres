@@ -1695,7 +1695,7 @@ class Insert(SQLElement):
         # Conflict clause
         if self._on_conflict_update:
             idx_els, set_dict = self._on_conflict_update
-            idx_sql = f"({', '.join(f'\"{c}\"' for c in idx_els)})" if idx_els else ""
+            idx_sql = "(" + ", ".join(f'"{c}"' for c in idx_els) + ")" if idx_els else ""
             set_parts: List[str] = []
             for k, v in set_dict.items():
                 v_sql = v.compile(ctx) if isinstance(v, SQLElement) else ctx.add_param(v, getattr(model_cols.get(k), "type", None))
@@ -1703,7 +1703,7 @@ class Insert(SQLElement):
             parts.append(f"ON CONFLICT {idx_sql} DO UPDATE SET {', '.join(set_parts)}")
         elif self._on_conflict_nothing is not None:
             idx_els = self._on_conflict_nothing
-            idx_sql = f"({', '.join(f'\"{c}\"' for c in idx_els)})" if idx_els else ""
+            idx_sql = "(" + ", ".join(f'"{c}"' for c in idx_els) + ")" if idx_els else ""
             parts.append(f"ON CONFLICT {idx_sql} DO NOTHING")
 
         # RETURNING

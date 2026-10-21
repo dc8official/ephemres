@@ -105,6 +105,8 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
                 "protocol": protocol,
                 "bytes": scaled_bytes,
                 "packets": scaled_packets,
+                # Header carried a sampling interval and counters are already scaled by it.
+                "header_sampled": sampling_interval > 0,
                 "tcp_flags": tcp_flags,
                 "tos": tos,
                 "input_if": input_if,

@@ -70,7 +70,7 @@
           <!-- Right Column: Logo Upload & Live Preview -->
           <div class="logo-upload-section">
             <label class="setting-label">Corporate Logo</label>
-            <p class="setting-hint">Recommended format: Transparent PNG, SVG, or high-DPI JPG (max 1 MB).</p>
+            <p class="setting-hint">Recommended format: Transparent PNG or high-DPI JPG (max 1 MB). PDF reports cannot embed SVG.</p>
 
             <div class="logo-preview-box">
               <div v-if="form.logoData" class="logo-active-view">
@@ -87,7 +87,7 @@
               <input 
                 type="file" 
                 ref="fileInputRef" 
-                accept="image/png,image/jpeg,image/svg+xml" 
+                accept="image/png,image/jpeg" 
                 style="display: none;" 
                 @change="handleFileUpload" 
               />
@@ -151,8 +151,8 @@ function handleFileUpload(event) {
   const file = event.target.files?.[0]
   if (!file) return
 
-  if (!file.type.match(/^image\/(png|jpeg|svg\+xml)$/)) {
-    toastMessage.value = 'Invalid file format. Please upload a PNG, JPG, or SVG image.'
+  if (!file.type.match(/^image\/(png|jpeg)$/)) {
+    toastMessage.value = 'Invalid file format. Please upload a PNG or JPG image.'
     toastType.value = 'error'
     return
   }

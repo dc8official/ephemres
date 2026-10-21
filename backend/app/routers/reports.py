@@ -22,7 +22,7 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.repositories.endpoint_repo import EndpointRepository
 from app.repositories.report_repo import ReportRepository
-from app.routers.auth import get_current_user, get_current_user_sse, require_operator_or_admin
+from app.routers.auth import get_current_user, get_current_user_sse
 from app.schemas import (
     APIResponse,
     EventRecord,
@@ -709,12 +709,12 @@ class PdfReportRequest(BaseModel):
 @router.post("/pdf")
 async def generate_pdf_report(
     request: PdfReportRequest,
-    current_user: dict = Depends(require_operator_or_admin),
+    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Asynchronously compiles network telemetry and renders an immutable, print-ready PDF audit report.
-    Permission: Strictly Operators and Admins (VIEWER accounts are rejected with 403 Forbidden).
+    Permission: any authenticated user (reports are read-only).
     """
     valid_map = {
         "a": "availability",
@@ -854,13 +854,7 @@ async def batch_export_telemetry(
     request: BatchExportRequest,
     current_user: dict = Depends(get_current_user_sse),
 ):
-    role = str(current_user.get("role", "")).upper()
-    if role not in ("ADMIN", "OPERATOR"):
-        raise HTTPException(
-            status_code=403,
-            detail="Operator or Administrator role required for telemetry export.",
-        )
-
+    # Any authenticated user may export: telemetry export is read-only.
     logger.info(
         "Starting batch telemetry CSV streaming export for %d endpoints (user: %s)",
         len(request.endpoint_ids),

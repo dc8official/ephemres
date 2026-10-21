@@ -15,6 +15,7 @@ from app.config import settings
 from app.database import AsyncSessionLocal, check_database_connection
 from app.logging_config import setup_logging
 from app.core.watchdog import start_systemd_watchdog
+from app.services.runtime_settings import get_runtime_settings, start_runtime_settings_refresh_task
 from monitoring.flow.aggregator import FlowAggregator
 from monitoring.flow.collector import FlowCollector
 from monitoring.flow.correlator import FlowCorrelator
@@ -59,10 +60,14 @@ async def run_flow_daemon() -> None:
         )
         sys.exit(1)
 
+    # Admin UI settings (ports, sampling multiplier) override config.toml; refreshed periodically.
+    runtime_settings_task = await start_runtime_settings_refresh_task(AsyncSessionLocal, interval_seconds=30)
+    rt = get_runtime_settings()
+
     flow_cfg = getattr(settings, "flow", None)
     bind_host = getattr(flow_cfg, "bind_host", "0.0.0.0") if flow_cfg else "0.0.0.0"
-    netflow_port = getattr(flow_cfg, "netflow_port", 2055) if flow_cfg else 2055
-    ipfix_port = getattr(flow_cfg, "ipfix_port", 4739) if flow_cfg else 4739
+    netflow_port = rt.flow_netflow_port
+    ipfix_port = rt.flow_ipfix_port
 
     correlator = FlowCorrelator(AsyncSessionLocal, store_client=store_client)
     collector = FlowCollector(
@@ -98,6 +103,7 @@ async def run_flow_daemon() -> None:
 
     logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
     watchdog_task.cancel()
+    runtime_settings_task.cancel()
     try:
         await watchdog_task
     except asyncio.CancelledError:

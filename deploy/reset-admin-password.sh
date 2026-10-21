@@ -32,10 +32,7 @@ NEW_PASS="${1:-}"
 if [ -z "$NEW_PASS" ]; then
     read -s -p "Enter new admin password (leave blank to auto-generate): " NEW_PASS
     echo ""
-    if [ -z "$NEW_PASS" ]; then
-        NEW_PASS="admin"
-        echo "Defaulting new admin password to: $NEW_PASS"
-    fi
+    # Blank input: leave NEW_PASS empty so app.seed_admin generates and prints a random password.
 fi
 
 RUN_USER="ephemres"
@@ -67,5 +64,10 @@ echo ""
 echo "--------------------------------------------------------"
 echo "  Updated Admin Credentials"
 echo "  Username: admin"
-echo "  Password: $NEW_PASS"
+if [ -n "$NEW_PASS" ]; then
+    echo "  Password: $NEW_PASS"
+else
+    echo "  Password: (auto-generated; shown in the [seed] line above)"
+fi
+echo "  You will be required to change it at first login."
 echo "--------------------------------------------------------"

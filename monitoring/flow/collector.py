@@ -8,6 +8,7 @@ import socket
 import struct
 from typing import Any, List, Optional
 
+from app.services.runtime_settings import get_runtime_settings
 from monitoring.flow.ipfix_parser import IPFIXParser
 from monitoring.flow.v5_parser import parse_v5_packet
 from monitoring.flow.v9_parser import V9Parser
@@ -109,6 +110,15 @@ class FlowCollector:
             return
 
         if flows:
+            # Admin-configured sampling multiplier for exporters that don't report their own rate
+            # (NetFlow v9 / IPFIX, and v5 packets with a zero sampling interval).
+            multiplier = get_runtime_settings().flow_sampling_multiplier
+            if multiplier > 1:
+                for f in flows:
+                    if not f.get("header_sampled"):
+                        f["bytes"] = int(f.get("bytes", 0) or 0) * multiplier
+                        f["packets"] = int(f.get("packets", 0) or 0) * multiplier
+
             if len(self._queue) >= MAX_QUEUE_SIZE:
                 logger.warning(
                     "FlowCollector: in-memory queue full (%d items). Dropping %d incoming flows due to backpressure.",

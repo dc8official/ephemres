@@ -34,6 +34,7 @@ from app.services.diagnostics import (
     start_discovery_worker,
 )
 from app.services.driver_manager import driver_manager
+from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.topology import topology_manager
@@ -56,6 +57,11 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await baseline_cache.refresh_from_db(db)
         await topology_manager.full_rebuild(db)
+
+    # Admin-editable runtime settings; SYSTEM_SETTINGS_SYNC pushes changes, the loop is a safety net.
+    runtime_settings_task = await start_runtime_settings_refresh_task(
+        AsyncSessionLocal, interval_seconds=60
+    )
 
     # Start inter-process telemetry relay (syncs broker events to topology RAM and browser SSE)
     await telemetry_relay.start()
@@ -84,6 +90,7 @@ async def lifespan(app: FastAPI):
     yield
     watchdog_task.cancel()
     settings_sync_task.cancel()
+    runtime_settings_task.cancel()
     await alert_dispatcher.stop()
     await telemetry_relay.stop()
     refresh_task.cancel()

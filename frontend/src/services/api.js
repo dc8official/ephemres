@@ -198,28 +198,6 @@ export function getAvailabilityReport(id, startDate, endDate) {
   })
 }
 
-export function getRttTrend(id, startDate, endDate) {
-  return api.get(`/reports/rtt-trend/${id}`, {
-    params: {
-      start_date: startDate,
-      end_date: endDate,
-    },
-  })
-}
-
-export function getTransitionTimeline(id, startDate, endDate) {
-  return api.get(`/reports/timeline/${id}`, {
-    params: {
-      start_date: startDate,
-      end_date: endDate,
-    },
-  })
-}
-
-export function getAuditLogs(params = {}) {
-  return api.get('/reports/audit-logs', { params })
-}
-
 export function exportBatchTelemetry(endpointIds, startTime, endTime, columns = null) {
   const payload = {
     endpoint_ids: endpointIds,

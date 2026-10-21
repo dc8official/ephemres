@@ -43,7 +43,7 @@ class SessionStore(ABC):
 
     @abstractmethod
     async def record_failed_attempt(
-        self, client_ip: str, username: str, max_attempts: int = 5, lockout_seconds: int = 900
+        self, client_ip: str, username: str, max_attempts: Optional[int] = None, lockout_seconds: int = 900
     ) -> None:
         pass
 
@@ -195,7 +195,7 @@ class PostgresSessionStore(SessionStore):
                 logger.error("PostgresSessionStore.invalidate_all_user_sessions error: %s", e)
 
     async def record_failed_attempt(
-        self, client_ip: str, username: str, max_attempts: int = 5, lockout_seconds: int = 900
+        self, client_ip: str, username: str, max_attempts: Optional[int] = None, lockout_seconds: int = 900
     ) -> None:
         from app.services.auth_service import record_failed_attempt as sync_record
         sync_record(client_ip, username)
@@ -289,8 +289,12 @@ class FastStoreSessionStore(SessionStore):
         return f"auth:failed:{ip}:{user}", f"auth:locked:{ip}:{user}"
 
     async def record_failed_attempt(
-        self, client_ip: str, username: str, max_attempts: int = 5, lockout_seconds: int = 900
+        self, client_ip: str, username: str, max_attempts: Optional[int] = None, lockout_seconds: int = 900
     ) -> None:
+        if max_attempts is None:
+            from app.services.runtime_settings import get_runtime_settings
+
+            max_attempts = get_runtime_settings().lockout_threshold
         failed_key, locked_key = self._get_lockout_keys(client_ip, username)
         try:
             count = await self.store.incr(failed_key)

@@ -20,6 +20,8 @@ from monitoring.state_machine import EndpointState, StateMachine
 from app.logging_config import setup_logging
 from app.config import settings
 from app.services.driver_manager import driver_manager
+from app.services.retention_policy import sync_event_retention_policy
+from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_systemd_watchdog
 
 logger = setup_logging(
@@ -79,6 +81,43 @@ async def trigger_incident_diagnostic_trace(endpoint_id: UUID, ip_address: str) 
         )
 
 
+CYCLE_SECONDS = 60.0
+PING_TIMEOUT_SECONDS = 2.0
+# Worst-case sweep must leave this much of the cycle free for the DB write and slot realignment.
+MIN_CYCLE_HEADROOM_SECONDS = 5.0
+DEFAULT_PING_COUNT = 5
+DEFAULT_PING_INTERVAL_SECONDS = 8.0
+
+
+def worst_case_sweep_seconds(count: int, interval: float, timeout: float = PING_TIMEOUT_SECONDS) -> float:
+    """Every probe waits up to `timeout` for its reply, with `interval` sleeps between probes."""
+    return count * timeout + max(count - 1, 0) * interval
+
+
+def resolve_ping_plan(count: int, interval: float) -> tuple[int, float]:
+    """Returns the configured (ping_count, ping_interval) or the defaults if they overrun the cycle."""
+    budget = CYCLE_SECONDS - MIN_CYCLE_HEADROOM_SECONDS
+    if worst_case_sweep_seconds(count, interval) > budget:
+        logger.error(
+            "monitoring.ping_count=%d with ping_interval_seconds=%s takes up to %.0fs, exceeding the %.0fs "
+            "budget of the %.0fs cycle. Falling back to %d pings @ %.1fs.",
+            count,
+            interval,
+            worst_case_sweep_seconds(count, interval),
+            budget,
+            CYCLE_SECONDS,
+            DEFAULT_PING_COUNT,
+            DEFAULT_PING_INTERVAL_SECONDS,
+        )
+        return DEFAULT_PING_COUNT, DEFAULT_PING_INTERVAL_SECONDS
+    return count, float(interval)
+
+
+PING_COUNT, PING_INTERVAL_SECONDS = resolve_ping_plan(
+    settings.monitoring.ping_count, settings.monitoring.ping_interval_seconds
+)
+
+
 def _stagger_offset_for_endpoint(endpoint_id: UUID) -> int:
     """Computes deterministic second-slot offset (0-59s) based on endpoint UUID."""
     return int.from_bytes(endpoint_id.bytes[:4], "big") % 60
@@ -118,8 +157,8 @@ async def monitor_endpoint(
             result = await run_ping_cycle(
                 ip_address=ip_address,
                 count=1,
-                interval=8.0,
-                timeout=2.0,
+                interval=PING_INTERVAL_SECONDS,
+                timeout=PING_TIMEOUT_SECONDS,
                 privileged=True,
             )
 
@@ -152,12 +191,12 @@ async def monitor_endpoint(
 
     while True:
         try:
-            # 5 pings @ 8.0s = ~32.0s duration, guaranteeing ~28.0s headroom window before next boundary
+            # Default 5 pings @ 8.0s: ~32s typical, 42s worst case, inside the 60s slot cycle
             result = await run_ping_cycle(
                 ip_address=ip_address,
-                count=5,
-                interval=8.0,
-                timeout=2.0,
+                count=PING_COUNT,
+                interval=PING_INTERVAL_SECONDS,
+                timeout=PING_TIMEOUT_SECONDS,
                 privileged=True,
             )
 
@@ -234,10 +273,20 @@ async def main() -> None:
         await baseline_cache.refresh_from_db(db)
         await db.commit()
 
+    try:
+        async with AsyncSessionLocal() as db:
+            await sync_event_retention_policy(db, settings.monitoring.retention_days)
+    except Exception as e:
+        logger.error("Failed to apply monitoring.retention_days to endpoint_events: %s", e)
+
     await start_baseline_refresh_task(AsyncSessionLocal, interval_seconds=3600)
+    # Admin UI settings used by the engine (Layer-2 auto-bypass for incident traceroutes).
+    runtime_settings_task = await start_runtime_settings_refresh_task(AsyncSessionLocal, interval_seconds=30)
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
 
-    state_machine = StateMachine(confirmation_threshold=3)
+    state_machine = StateMachine(
+        confirmation_threshold=settings.monitoring.state_confirmation_cycles
+    )
 
     try:
         while True:
@@ -298,6 +347,7 @@ async def main() -> None:
 
             await asyncio.sleep(30)
     finally:
+        runtime_settings_task.cancel()
         watchdog_task.cancel()
         try:
             await watchdog_task

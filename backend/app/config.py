@@ -83,8 +83,9 @@ class DatabaseSettings:
 @dataclass
 class MonitoringSettings:
     interval_seconds: int = 60
-    ping_count: int = 10
-    ping_interval_seconds: int = 6
+    # Worst-case sweep (count * 2s timeout + (count - 1) * interval) must fit the 60s cycle; see monitoring/engine.py.
+    ping_count: int = 5
+    ping_interval_seconds: int = 8
     state_confirmation_cycles: int = 3
     retention_days: int = 730
 

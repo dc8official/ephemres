@@ -237,6 +237,14 @@ ev000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000001	UP	HEA
     assert op_row["must_change_password"] is True
     assert str(op_row["role_id"]) == "00000000-0000-0000-0000-000000000002"
 
+    # 2b. The non-admin's temporary password is recorded in a root-only report, not discarded
+    assert summary["temporary_password_users"] == 1
+    report = Path(summary["password_reset_report"])
+    assert report.stat().st_mode & 0o777 == 0o600
+    username, temp_password = report.read_text(encoding="utf-8").strip().split("\t")
+    assert username == "operator1"
+    assert verify_password(temp_password, op_row["password_hash"])
+
     # 3. Verify endpoints row omitted missing v3.3.2v columns (so PostgreSQL defaults apply)
     ep_row = mock_conn.tables["endpoints"][0]
     assert ep_row["hostname"] == "core-switch-01"

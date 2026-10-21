@@ -19,6 +19,7 @@ from app.schemas.auth import (
 )
 import secrets
 from app.services.driver_manager import driver_manager
+from app.services.runtime_settings import get_runtime_settings
 from app.services.auth_service import (
     clear_failed_attempts,
     create_access_token,
@@ -162,7 +163,7 @@ async def login(
         secure=is_secure,
         samesite="lax",
         path="/",
-        max_age=settings.security.session_timeout_minutes * 60,
+        max_age=get_runtime_settings().session_timeout_minutes * 60,
     )
 
     return APIResponse.success(data=response_body)
@@ -280,18 +281,6 @@ async def require_admin(
 ) -> dict:
     if current_user.get("role") != "ADMIN":
         raise HTTPException(status_code=403, detail="Admin access required.")
-    return current_user
-
-
-async def require_operator_or_admin(
-    current_user: dict = Depends(get_current_user),
-) -> dict:
-    role = current_user.get("role")
-    if role not in ("ADMIN", "OPERATOR"):
-        raise HTTPException(
-            status_code=403,
-            detail="Operator or Admin access required to export reports.",
-        )
     return current_user
 
 

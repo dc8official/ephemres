@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import logging
 from typing import Any, Optional
 
@@ -9,12 +11,13 @@ from app.core.orm import select
 from app.core.orm import AsyncSession
 
 from app.config import settings as app_cfg
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.models.system_setting import AppSetting
 from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse
 from app.schemas.bandwidth import FlowPreflightResponse
 from app.services.driver_manager import driver_manager
+from app.services.runtime_settings import refresh_runtime_settings, resolve as resolve_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -167,23 +170,10 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
     elif hasattr(app_cfg, "redis"):
         perf_mode = bool(getattr(app_cfg.redis, "performance_mode", False))
 
-    l2_bypass = True
-    if "l2_auto_bypass" in kv:
-        l2_bypass = kv["l2_auto_bypass"].strip().lower() in ("true", "1", "yes")
-
-    session_timeout = 120
-    if "session_timeout" in kv:
-        try:
-            session_timeout = int(kv["session_timeout"])
-        except ValueError:
-            pass
-
-    lockout_threshold = 5
-    if "lockout_threshold" in kv:
-        try:
-            lockout_threshold = int(kv["lockout_threshold"])
-        except ValueError:
-            pass
+    rt = resolve_runtime_settings(kv)
+    l2_bypass = rt.l2_auto_bypass
+    session_timeout = rt.session_timeout_minutes
+    lockout_threshold = rt.lockout_threshold
 
     alerting_enabled = True
     if "alerting_enabled" in kv:
@@ -195,32 +185,9 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
     elif hasattr(app_cfg, "flow"):
         flow_enabled = bool(getattr(app_cfg.flow, "enabled", False))
 
-    flow_nf_port = 2055
-    if "flow_netflow_port" in kv:
-        try:
-            flow_nf_port = int(kv["flow_netflow_port"])
-        except ValueError:
-            pass
-    elif hasattr(app_cfg, "flow"):
-        flow_nf_port = int(getattr(app_cfg.flow, "netflow_port", 2055))
-
-    flow_ipfix_port = 4739
-    if "flow_ipfix_port" in kv:
-        try:
-            flow_ipfix_port = int(kv["flow_ipfix_port"])
-        except ValueError:
-            pass
-    elif hasattr(app_cfg, "flow"):
-        flow_ipfix_port = int(getattr(app_cfg.flow, "ipfix_port", 4739))
-
-    flow_sampling = 1
-    if "flow_sampling_multiplier" in kv:
-        try:
-            flow_sampling = int(kv["flow_sampling_multiplier"])
-        except ValueError:
-            pass
-    elif hasattr(app_cfg, "flow"):
-        flow_sampling = int(getattr(app_cfg.flow, "sampling_multiplier", 1))
+    flow_nf_port = rt.flow_netflow_port
+    flow_ipfix_port = rt.flow_ipfix_port
+    flow_sampling = rt.flow_sampling_multiplier
 
     return {
         "performance_mode": perf_mode,
@@ -238,6 +205,28 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
         "flow_sampling_multiplier": flow_sampling,
         "flowSamplingMultiplier": flow_sampling,
     }
+
+
+LOGO_MAGIC = {
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/jpeg": b"\xff\xd8",
+    "image/jpg": b"\xff\xd8",
+}
+
+
+def _is_embeddable_logo(data_uri: str) -> bool:
+    """Accepts only base64 PNG/JPEG data URIs whose bytes match the declared type (see app.core.pdf)."""
+    header, sep, payload = data_uri.partition(",")
+    if not sep or not header.startswith("data:") or not header.endswith(";base64"):
+        return False
+    magic = LOGO_MAGIC.get(header[len("data:"):-len(";base64")].lower())
+    if magic is None:
+        return False
+    try:
+        head = base64.b64decode(payload[:16], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return head.startswith(magic)
 
 
 async def _upsert_setting(db: AsyncSession, key: str, value: str) -> None:
@@ -363,6 +352,20 @@ async def update_settings(
 
     await db.commit()
 
+    # Apply admin-editable runtime settings in this worker now and notify the other workers.
+    await refresh_runtime_settings(AsyncSessionLocal)
+    from app.services.settings_sync import broadcast_settings_reload
+
+    await broadcast_settings_reload(action="RUNTIME_RELOAD")
+
+    # ephemres-flowd binds its UDP ports at startup, so a port change needs a restart.
+    ports_changed = (
+        (flow_nf_val is not None and int(flow_nf_val) != current_settings.get("flow_netflow_port"))
+        or (flow_ipfix_val is not None and int(flow_ipfix_val) != current_settings.get("flow_ipfix_port"))
+    )
+    if ports_changed and flow_ingestion_val is None and current_flow_enabled:
+        asyncio.create_task(manage_flow_service(enable=True))
+
     if reinit_driver:
         logger.info("performance_mode updated. Re-initializing storage driver manager...")
         try:
@@ -417,10 +420,13 @@ async def update_organization_settings(
     if payload.logo_data is not None:
         logo_str = payload.logo_data.strip()
         if logo_str:
-            if not logo_str.startswith("data:image/"):
-                raise HTTPException(status_code=400, detail="Logo must be a valid image data URI (PNG, JPG, SVG).")
             if len(logo_str) > 2_000_000:
                 raise HTTPException(status_code=400, detail="Logo image file exceeds maximum allowed size (1 MB).")
+            if not _is_embeddable_logo(logo_str):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Logo must be a base64 PNG or JPEG data URI (PDF reports can only embed PNG and JPEG).",
+                )
         await _upsert_setting(db, "org:logo_data", logo_str)
 
     if payload.company_name is not None:

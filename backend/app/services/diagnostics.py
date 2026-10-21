@@ -429,8 +429,10 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
     """
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # 1. Layer-2 Subnet Auto-Bypass
-    if is_local_subnet_destination(target_ip):
+    # 1. Layer-2 Subnet Auto-Bypass (admin toggle: Settings -> Security & Discovery)
+    from app.services.runtime_settings import get_runtime_settings
+
+    if get_runtime_settings().l2_auto_bypass and is_local_subnet_destination(target_ip):
         logger.info(
             "Layer-2 Auto-Bypass: Destination %s is on local subnet. Registering 1-hop adjacency.",
             target_ip,

@@ -662,6 +662,43 @@ def scan_backup_metadata_and_configs(
     return chunk_to_parent, config_data
 
 
+DEFAULT_RESET_REPORT = "/opt/ephemres/legacy_password_resets.txt"
+
+
+def default_reset_report_path() -> str:
+    return os.environ.get("EPHEMRES_RESET_REPORT", DEFAULT_RESET_REPORT)
+
+
+def write_password_reset_report(report_path: str, resets: List[Tuple[str, str]]) -> str:
+    """Writes `username<TAB>temporary_password` lines to a root-only (0600) file and returns its path.
+
+    If report_path cannot be written, falls back to a new 0600 file in the system temp directory
+    rather than losing the credentials or printing them to logs.
+    """
+    lines = "".join(f"{username}\t{temp_password}\n" for username, temp_password in resets)
+    try:
+        dir_path = os.path.dirname(report_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError as exc:
+        import tempfile
+
+        fd, report_path = tempfile.mkstemp(prefix="ephemres_password_resets_", suffix=".txt")
+        logger.warning("Could not write password reset report (%s); using %s instead.", exc, report_path)
+    try:
+        os.chmod(report_path, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(lines)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    return report_path
+
+
 async def reconcile_and_restore_database(
     conn: Any,
     backup_path: Path | str,
@@ -669,6 +706,7 @@ async def reconcile_and_restore_database(
     old_secret_key: Optional[str] = None,
     skip_telemetry: bool = False,
     dry_run: bool = False,
+    reset_report_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Core execution engine for cross-version database restoration."""
     logger.info("Starting Ephemres database restoration from %s...", backup_path)
@@ -686,6 +724,8 @@ async def reconcile_and_restore_database(
         "legacy_hashes_upgraded": 0,
         "channels_re_encrypted": 0,
         "channels_disabled": 0,
+        "temporary_password_users": 0,
+        "password_reset_report": None,
     }
 
     if dry_run:
@@ -757,6 +797,7 @@ async def reconcile_and_restore_database(
 
         existing_users = await _fetch_all(conn, "SELECT id, username FROM users;")
         target_user_map = {str(r["username"]): str(r["id"]) for r in existing_users}
+        temporary_passwords: List[Tuple[str, str]] = []
 
         for row in rows:
             uname = str(row.get("username", ""))
@@ -782,6 +823,7 @@ async def reconcile_and_restore_database(
                     rand_pass = secrets.token_urlsafe(24)
                     row["password_hash"] = hash_password(rand_pass)
                     row["must_change_password"] = True
+                    temporary_passwords.append((uname, rand_pass))
                 summary["legacy_hashes_upgraded"] += 1
 
             col_names = ", ".join(f'"{c}"' for c in usable)
@@ -801,6 +843,12 @@ async def reconcile_and_restore_database(
 
         summary["user_count"] = len(rows)
         summary["tables_restored"].append("users")
+
+        if temporary_passwords:
+            summary["temporary_password_users"] = len(temporary_passwords)
+            summary["password_reset_report"] = write_password_reset_report(
+                reset_report_path or default_reset_report_path(), temporary_passwords
+            )
 
     # 3. Restore app_settings / system_settings
     settings_table = "app_settings" if "app_settings" in target_schema else "system_settings"
@@ -1109,6 +1157,9 @@ def main() -> None:
             print(f" Secrets Re-enc:     {summary['channels_re_encrypted']} channel secrets")
             if summary['channels_disabled'] > 0:
                 print(f" Channels Disabled:  {summary['channels_disabled']} (undecryptable secrets)")
+            if summary['password_reset_report']:
+                print(f" Temp Passwords:     {summary['temporary_password_users']} non-admin users -> {summary['password_reset_report']}")
+                print("                     Distribute these securely, then delete the file.")
             print("=" * 60)
             if not summary["dry_run"]:
                 print(f" [SUCCESS] Database restored. Admin login password set to '{args.admin_password}'.")

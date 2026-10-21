@@ -170,7 +170,8 @@ fi
 print_header "Step 5: Detecting Python version"
 
 PYTHON_BIN=""
-for ver in 3.13 3.12 3.11 3.10; do
+# Python 3.11 is the floor: app.config imports the stdlib tomllib module.
+for ver in 3.14 3.13 3.12 3.11; do
     if command -v "python$ver" &>/dev/null; then
         PYTHON_BIN="python$ver"
         break
@@ -178,8 +179,8 @@ for ver in 3.13 3.12 3.11 3.10; do
 done
 
 if [ -z "$PYTHON_BIN" ]; then
-    echo "Error: Python 3.10 or higher not found."
-    echo "Install python3.10, python3.11, or python3.12 before running this script."
+    echo "Error: Python 3.11 or higher not found."
+    echo "Install python3.11, python3.12, python3.13, or python3.14 before running this script."
     exit 1
 fi
 

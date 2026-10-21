@@ -66,6 +66,12 @@ async def start_settings_sync_listener(session_factory=AsyncSessionLocal) -> Non
                 sender_pid,
             )
 
+            if action == "RUNTIME_RELOAD":
+                from app.services.runtime_settings import refresh_runtime_settings
+
+                await refresh_runtime_settings(session_factory)
+                continue
+
             if action == "DRIVER_RELOAD":
                 try:
                     await driver_manager.initialize()

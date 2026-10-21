@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from app.config import settings
+from app.services.runtime_settings import get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +508,7 @@ def create_access_token(
         "role": role_name,
         "jti": session_id,
         "iat": now_utc,
-        "exp": now_utc + timedelta(minutes=settings.security.session_timeout_minutes),
+        "exp": now_utc + timedelta(minutes=get_runtime_settings().session_timeout_minutes),
     }
     return jwt_encode(
         payload,
@@ -603,7 +604,7 @@ def record_failed_attempt(
     entry = _failed_attempts.get(key, {"count": 0})
     entry["count"] = entry.get("count", 0) + 1
     entry["last_attempt"] = now
-    if entry["count"] >= 5:
+    if entry["count"] >= get_runtime_settings().lockout_threshold:
         entry["locked_until"] = now + timedelta(minutes=15)
     _failed_attempts[key] = entry
 
