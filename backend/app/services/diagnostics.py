@@ -701,11 +701,15 @@ async def start_diagnostic_cleanup_task(
     """
 
     async def _cleanup_loop():
+        from app.services.scheduler_leader import scheduler_leader
+
         while True:
             try:
-                async with db_session_factory() as db:
-                    await cleanup_old_diagnostic_traces(db, retention_days=14)
-                    await db.commit()
+                # Every API worker runs this loop; only the elected one purges.
+                if scheduler_leader.is_leader:
+                    async with db_session_factory() as db:
+                        await cleanup_old_diagnostic_traces(db, retention_days=14)
+                        await db.commit()
             except asyncio.CancelledError:
                 break
             except Exception as e:

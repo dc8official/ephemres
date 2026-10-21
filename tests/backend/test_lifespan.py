@@ -38,7 +38,9 @@ async def test_app_lifespan_startup_and_shutdown():
          patch("app.main.start_baseline_refresh_task", new_callable=AsyncMock) as mock_refresh, \
          patch("app.main.start_discovery_worker", new_callable=AsyncMock) as mock_discovery, \
          patch("app.main.start_midnight_discovery_worker", new_callable=AsyncMock) as mock_midnight, \
-         patch("app.main.start_diagnostic_cleanup_task", new_callable=AsyncMock) as mock_cleanup:
+         patch("app.main.start_diagnostic_cleanup_task", new_callable=AsyncMock) as mock_cleanup, \
+         patch("app.main.scheduler_leader.start", new_callable=AsyncMock) as mock_leader_start, \
+         patch("app.main.scheduler_leader.stop", new_callable=AsyncMock) as mock_leader_stop:
 
         dummy_task1 = asyncio.create_task(asyncio.sleep(10))
         dummy_task2 = asyncio.create_task(asyncio.sleep(10))
@@ -55,6 +57,8 @@ async def test_app_lifespan_startup_and_shutdown():
             # Assert background tasks were initiated
             assert not dummy_task1.cancelled()
 
+        mock_leader_start.assert_awaited_once()
+        mock_leader_stop.assert_awaited_once()
         # After exiting lifespan, cleanup/cancel should have been triggered
         assert dummy_task1.cancelling() > 0 or dummy_task1.cancelled()
         assert dummy_task2.cancelling() > 0 or dummy_task2.cancelled()

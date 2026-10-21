@@ -383,6 +383,13 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
                     seconds_until_midnight = 86400
                 await asyncio.sleep(seconds_until_midnight)
 
+                # Every API worker runs this loop; only the elected one enqueues the fleet.
+                from app.services.scheduler_leader import scheduler_leader
+
+                if not scheduler_leader.is_leader:
+                    logger.debug("Midnight reached; scheduled discovery runs on the leader worker.")
+                    continue
+
                 logger.info("Midnight reached. Triggering scheduled baseline discovery.")
                 async with db_session_factory() as db:
                     await enqueue_scheduled_discovery(db)

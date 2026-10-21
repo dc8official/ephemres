@@ -37,6 +37,7 @@ from app.services.driver_manager import driver_manager
 from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
+from app.services.scheduler_leader import scheduler_leader
 from app.services.topology import topology_manager
 
 # Initialize dual console and rotating file logging
@@ -78,6 +79,8 @@ async def lifespan(app: FastAPI):
     refresh_task = await start_baseline_refresh_task(
         AsyncSessionLocal, interval_seconds=3600
     )
+    # Elect the worker that runs cluster-wide schedules (midnight discovery, diagnostic cleanup).
+    await scheduler_leader.start()
     discovery_task = await start_discovery_worker(AsyncSessionLocal)
     midnight_task = await start_midnight_discovery_worker(AsyncSessionLocal)
     cleanup_task = await start_diagnostic_cleanup_task(
@@ -97,6 +100,7 @@ async def lifespan(app: FastAPI):
     discovery_task.cancel()
     midnight_task.cancel()
     cleanup_task.cancel()
+    await scheduler_leader.stop()
     logger.info("Ephemres v3.3.2.v platform shutting down cleanly.")
 
 
@@ -245,7 +249,8 @@ async def health_readiness():
     except Exception as exc:
         db_ok = False
         db_err = "Database connection failed"
-        logger.error("Readiness check: database connectivity failure: %s", exc, exc_info=True)
+        # One line per failed probe, no traceback: probes repeat every few seconds while down.
+        logger.warning("Readiness check: database connectivity failure: %s", exc)
 
     redis_ok = True
     redis_err = None
@@ -260,7 +265,7 @@ async def health_readiness():
         except Exception as exc:
             redis_ok = False
             redis_err = "Redis connection failed"
-            logger.error("Readiness check: redis connectivity failure: %s", exc, exc_info=True)
+            logger.warning("Readiness check: redis connectivity failure: %s", exc)
 
     is_ready = db_ok and (not settings.redis.enabled or redis_ok)
     status_code = (
