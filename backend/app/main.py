@@ -31,7 +31,6 @@ from app.services.diagnostics import (
     start_discovery_worker,
 )
 from app.services.driver_manager import driver_manager
-from app.services.systemd_watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.topology import topology_manager
 
@@ -74,12 +73,10 @@ async def lifespan(app: FastAPI):
     cleanup_task = await start_diagnostic_cleanup_task(
         AsyncSessionLocal, interval_seconds=86400
     )
-    watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     logger.info(
         "LNMP v3.1.35s started successfully with Enterprise Alerting, Dual-Storage, Cluster Settings Sync & Zero-Trust SSRF Protection."
     )
     yield
-    watchdog_task.cancel()
     settings_sync_task.cancel()
     await alert_dispatcher.stop()
     await telemetry_relay.stop()
