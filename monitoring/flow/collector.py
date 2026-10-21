@@ -183,8 +183,9 @@ class FlowCollector:
             await self.flush()
 
     def _create_socket(self, port: int) -> socket.socket:
+        # No SO_REUSEADDR: UDP has no TIME_WAIT to work around, and on Linux it would let any other
+        # local process that also sets it bind the same port and receive the unicast flow datagrams.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             # Set 4MB socket receive buffer
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)

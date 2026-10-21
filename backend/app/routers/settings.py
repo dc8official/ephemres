@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import socket
 from typing import Any, Optional
 
 from app.core.asgi import APIRouter, Depends, HTTPException
@@ -81,6 +82,43 @@ async def manage_flow_service(enable: bool) -> tuple[bool, str]:
 
     logger.debug("Could not automatically %s %s via systemctl: %s", action, service_name, last_err)
     return False, last_err
+
+
+async def _flow_daemon_active() -> bool:
+    """True if ephemres-flowd (or legacy netmon-flowd) is active according to systemd."""
+    for service_name in ("ephemres-flowd", "netmon-flowd"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "is-active", "--quiet", service_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            if await proc.wait() == 0:
+                return True
+        except Exception as exc:
+            logger.debug("Could not query %s state via systemctl: %s", service_name, exc)
+    return False
+
+
+async def _udp_port_conflicts(bind_host: str, ports: tuple[int, ...]) -> list[int]:
+    """UDP ports the flow collector could not bind on `bind_host` right now.
+
+    Probes the exact address the collector binds, without SO_REUSEADDR (which would let the probe
+    bind alongside an existing listener and hide every conflict). Ports held while the flow daemon
+    is active are its own, so they are not reported.
+    """
+    conflicts = []
+    for port in ports:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind((bind_host, port))
+        except OSError:
+            conflicts.append(port)
+        finally:
+            sock.close()
+    if conflicts and await _flow_daemon_active():
+        return []
+    return conflicts
 
 
 class SettingsUpdate(BaseModel):
@@ -460,7 +498,6 @@ async def update_organization_settings(
 
 
 async def _run_redis_flow_check() -> FlowPreflightResponse:
-    import socket
 
     # 1. Linux Kernel Socket Receive Buffer (rmem_max) check
     rmem_val = None
@@ -476,17 +513,8 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
     # 2. UDP Ports bind availability check
     netflow_p = getattr(app_cfg.flow, "netflow_port", 2055)
     ipfix_p = getattr(app_cfg.flow, "ipfix_port", 4739)
-    flow_bind = getattr(app_cfg.flow, "bind_host", "127.0.0.1")
-    check_host = "127.0.0.1" if flow_bind == "0.0.0.0" else flow_bind
-    port_conflicts = []
-    for p in (netflow_p, ipfix_p):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((check_host, p))
-            s.close()
-        except OSError:
-            port_conflicts.append(p)
+    flow_bind = getattr(app_cfg.flow, "bind_host", "0.0.0.0")
+    port_conflicts = await _udp_port_conflicts(flow_bind, (netflow_p, ipfix_p))
     udp_ports_ok = len(port_conflicts) == 0
 
     fs_cfg = getattr(app_cfg, "faststore", getattr(app_cfg, "redis", None))

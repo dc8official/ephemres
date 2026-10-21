@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -220,6 +221,13 @@ class FlowSettings:
     def __post_init__(self) -> None:
         self.enabled = _coerce_bool(self.enabled)
         self.bind_host = str(self.bind_host).strip() or "0.0.0.0"
+        try:
+            # The collector opens AF_INET sockets, so only an IPv4 literal can be bound.
+            ipaddress.IPv4Address(self.bind_host)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Invalid IPv4 address for flow.bind_host: {self.bind_host!r}"
+            ) from exc
         self.netflow_port = _coerce_int(self.netflow_port, "flow.netflow_port", ge=1, le=65535)
         self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
         self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
