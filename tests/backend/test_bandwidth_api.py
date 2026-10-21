@@ -140,12 +140,18 @@ def test_bandwidth_applications(client):
     assert app_item["service_label"] == "HTTPS"
 
 
-def test_bandwidth_applications_30d_window_daily_rollup(client):
+@pytest.mark.parametrize("daily_has_tos", [True, False])
+def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
     """
     Verifies that requesting the 30-day window routes cleanly to FlowDailyRollup
-    without raising AttributeError on missing src_endpoint_id / src_ip attributes.
+    without raising AttributeError on missing src_endpoint_id / src_ip attributes,
+    and that QoS falls back to flow_minute_rollups when the daily continuous
+    aggregate has no `tos` column (TimescaleDB installs).
     """
+    from app.routers import bandwidth
+
     test_client, mock_session = client
+    bandwidth._TABLE_COLUMN_CACHE.clear()
 
     mock_app_row = (6, 443, 85000000)
     mock_qos_row = (184, 85000000, 75000, 120)  # EF (VoIP)
@@ -154,8 +160,11 @@ def test_bandwidth_applications_30d_window_daily_rollup(client):
     mock_res_qos = MagicMock()
     mock_res_qos.all.return_value = [mock_qos_row]
 
-    # FlowDailyRollup skips the zone query; executes app query then qos query
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_qos]
+    mock_res_column = MagicMock()
+    mock_res_column.scalar.return_value = 1 if daily_has_tos else None
+
+    # FlowDailyRollup skips the zone query; executes app query, `tos` column check, then qos query
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_column, mock_res_qos]
 
     resp = test_client.get("/api/v1/bandwidth/applications?window=30d")
     assert resp.status_code == 200
@@ -169,6 +178,11 @@ def test_bandwidth_applications_30d_window_daily_rollup(client):
     for z in data["data"]["traffic_zones"]:
         assert z["total_bytes"] == 0
         assert z["percentage"] == 0.0
+
+    qos_sql = str(mock_session.execute.call_args_list[2].args[0])
+    expected_table = "flow_daily_rollups" if daily_has_tos else "flow_minute_rollups"
+    assert expected_table in qos_sql
+    bandwidth._TABLE_COLUMN_CACHE.clear()
 
 
 

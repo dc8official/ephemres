@@ -512,3 +512,15 @@ def test_reports_sla_excludes_flow_exporter(client):
         assert data["data"]["active_endpoints_count"] == 1
         assert data["data"]["total_endpoints_count"] == 2
         assert data["data"]["fleet_sla"] == 100.0
+
+
+def test_enroll_flow_exporter_rejects_non_exporter_role(client):
+    """An invalid device_role is a 422 validation error, not an IntegrityError from the DB check constraint."""
+    test_client, mock_session = client
+    resp = test_client.post(
+        "/api/v1/bandwidth/exporters/enroll",
+        json={"ip_address": "192.168.100.2", "hostname": "edge-02", "device_role": "ROUTER"},
+    )
+    assert resp.status_code == 422
+    mock_session.execute.assert_not_called()
+    mock_session.add.assert_not_called()

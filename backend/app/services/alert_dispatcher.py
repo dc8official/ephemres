@@ -550,7 +550,7 @@ class AlertDispatcher:
                 event_type=event_type,
                 status="THROTTLED",
                 status_code=None,
-                response_message="Suppressed: Endpoint is flapping (>= 4 transitions in 10 minutes). Alerts quarantined for 15 minutes.",
+                response_message="Suppressed: Endpoint is flapping (>= 4 transitions in the last 10 minutes). Alerts resume once the 10-minute window holds fewer than 4.",
             )
             return
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
@@ -311,7 +311,9 @@ class EnrollExporterRequest(BaseModel):
     ip_address: str
     hostname: str
     description: Optional[str] = None
-    device_role: str = "FLOW_EXPORTER"
+    # Exporter roles listed by GET /bandwidth/exporters; validated here so a bad value is a 422,
+    # not an IntegrityError from ck_endpoints_device_role.
+    device_role: Literal["FLOW_EXPORTER", "HYBRID_GATEWAY"] = "FLOW_EXPORTER"
 
 
 class MapExporterRequest(BaseModel):

@@ -228,12 +228,21 @@ async def list_endpoints(
             "uptime_percentage_24h": uptime_percentage,
         })
 
-    meta = PaginationMeta(
-        total=len(rows),
-        page=1,
-        page_size=max(1, len(rows)),
-        total_pages=1,
-    )
+    if calc_page is not None and calc_page_size is not None:
+        total = await repo.count_listed(status=clean_status)
+        meta = PaginationMeta(
+            total=total,
+            page=calc_page,
+            page_size=calc_page_size,
+            total_pages=max(1, -(-total // calc_page_size)),
+        )
+    else:
+        meta = PaginationMeta(
+            total=len(rows),
+            page=1,
+            page_size=max(1, len(rows)),
+            total_pages=1,
+        )
     return APIResponse.success(data=data, meta=meta)
 
 

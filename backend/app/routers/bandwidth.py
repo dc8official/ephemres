@@ -4,7 +4,7 @@ import datetime
 import ipaddress
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 from uuid import UUID
 
@@ -762,6 +762,44 @@ async def get_top_talkers(
     )
 
 
+def _rollup_window_filters(
+    model: Any,
+    start_time: datetime.datetime,
+    exporter_id: Optional[UUID],
+    endpoint_id: Optional[UUID],
+) -> List[Any]:
+    filters = [model.bucket >= start_time]
+    if exporter_id is not None:
+        filters.append(model.exporter_id == exporter_id)
+    if endpoint_id is not None and hasattr(model, "src_endpoint_id"):
+        filters.append(
+            or_(
+                model.src_endpoint_id == endpoint_id,
+                model.dst_endpoint_id == endpoint_id,
+            )
+        )
+    return filters
+
+
+# (table, column) -> exists; schema only changes through migrations, which restart the API.
+_TABLE_COLUMN_CACHE: Dict[Tuple[str, str], bool] = {}
+
+
+async def _db_table_has_column(db: AsyncSession, table: str, column: str) -> bool:
+    """True if `column` exists on `table` (or continuous-aggregate view) in the live database."""
+    key = (table, column)
+    if key not in _TABLE_COLUMN_CACHE:
+        res = await db.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :table AND column_name = :column LIMIT 1"
+            ),
+            {"table": table, "column": column},
+        )
+        _TABLE_COLUMN_CACHE[key] = res.scalar() is not None
+    return _TABLE_COLUMN_CACHE[key]
+
+
 @router.get("/applications", response_model=APIResponse)
 async def get_applications_breakdown(
     window: str = Query(default="1h"),
@@ -789,17 +827,7 @@ async def get_applications_breakdown(
     start_time = now - delta
 
     model, _ = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
-
-    app_filters = [model.bucket >= start_time]
-    if exporter_id is not None:
-        app_filters.append(model.exporter_id == exporter_id)
-    if endpoint_id is not None and hasattr(model, "src_endpoint_id"):
-        app_filters.append(
-            or_(
-                model.src_endpoint_id == endpoint_id,
-                model.dst_endpoint_id == endpoint_id,
-            )
-        )
+    app_filters = _rollup_window_filters(model, start_time, exporter_id, endpoint_id)
 
     # 1. Top 15 (protocol, dst_port) Application Services
     stmt = (
@@ -836,15 +864,22 @@ async def get_applications_breakdown(
         )
 
     # 2. QoS / DSCP Breakdown
+    # On TimescaleDB the hourly/daily tiers are continuous aggregates that migration 0013 could
+    # not extend with `tos`; fall back to the 1-minute tier (90-day retention) for ToS data.
+    qos_model = model
+    qos_filters = app_filters
+    if model is not FlowMinuteRollup and not await _db_table_has_column(db, model.__tablename__, "tos"):
+        qos_model = FlowMinuteRollup
+        qos_filters = _rollup_window_filters(qos_model, start_time, exporter_id, endpoint_id)
     qos_stmt = (
         select(
-            model.tos,
-            func.coalesce(func.sum(model.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(model.packets), 0).label("total_packets"),
-            func.coalesce(func.sum(model.flow_count), 0).label("flow_count"),
+            qos_model.tos,
+            func.coalesce(func.sum(qos_model.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(qos_model.packets), 0).label("total_packets"),
+            func.coalesce(func.sum(qos_model.flow_count), 0).label("flow_count"),
         )
-        .where(*app_filters)
-        .group_by(model.tos)
+        .where(*qos_filters)
+        .group_by(qos_model.tos)
     )
     qos_res = await db.execute(qos_stmt)
     dscp_buckets: Dict[int, Dict[str, Any]] = {}

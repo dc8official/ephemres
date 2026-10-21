@@ -46,6 +46,27 @@ class EndpointRepository(BaseRepository[Endpoint]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    @staticmethod
+    def _list_filters(status: Optional[str]) -> list[Any]:
+        """Filters shared by list_with_stats and count_listed: hide deleted rows, apply `status`.
+
+        ACTIVE / DISABLED match endpoint_status; MONITORED / UNMONITORED match monitoring_enabled.
+        """
+        filters: list[Any] = [Endpoint.endpoint_status != "DELETED"]
+        if status == "MONITORED":
+            filters.append(Endpoint.monitoring_enabled == True)  # noqa: E712
+        elif status == "UNMONITORED":
+            filters.append(Endpoint.monitoring_enabled == False)  # noqa: E712
+        elif status is not None:
+            filters.append(Endpoint.endpoint_status == status)
+        return filters
+
+    async def count_listed(self, status: Optional[str] = None) -> int:
+        """Total endpoints matching the list filters, ignoring pagination."""
+        stmt = select(func.count(Endpoint.id)).where(*self._list_filters(status))
+        result = await self.session.execute(stmt)
+        return int(result.scalar() or 0)
+
     async def list_with_stats(
         self,
         status: Optional[str] = None,
@@ -129,12 +150,9 @@ class EndpointRepository(BaseRepository[Endpoint]):
             .outerjoin(
                 up_counts_sub, Endpoint.id == up_counts_sub.c.endpoint_id
             )
-            .where(Endpoint.endpoint_status != "DELETED")
+            .where(*self._list_filters(status))
             .order_by(Endpoint.hostname.asc())
         )
-
-        if status is not None:
-            stmt = stmt.where(Endpoint.endpoint_status == status)
 
         if isinstance(page, int) and isinstance(page_size, int):
             offset = (page - 1) * page_size

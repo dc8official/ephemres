@@ -77,7 +77,7 @@ Updates the authenticated user's password.
 ### `GET /endpoints`
 Lists monitored endpoints with their current state, 24-hour uptime, and latest RTT.
 - **Query Params:**
-  - `status` (string, optional): `ACTIVE`, `DISABLED`, `MONITORED`, or `UNMONITORED` (case-insensitive; any other value returns `400`).
+  - `status` (string, optional, case-insensitive): `ACTIVE` / `DISABLED` filter on `endpoint_status`; `MONITORED` / `UNMONITORED` filter on `monitoring_enabled`. Any other value returns `400`.
   - `page` (int ≥ 1, optional) and `page_size` (int 1–500, optional): SQL-level pagination. Supplying either enables it (`page_size` defaults to 50, `page` to 1); omitting both returns every endpoint.
 - **Response Envelope:**
   ```json
@@ -101,8 +101,7 @@ Lists monitored endpoints with their current state, 24-hour uptime, and latest R
     "meta": { "total": 1, "page": 1, "page_size": 1, "total_pages": 1 }
   }
   ```
-  > [!NOTE]
-  > `meta` currently always describes only the rows returned (`total` = row count, `page` = 1, `total_pages` = 1), even when `page`/`page_size` are supplied.
+  When paginated, `meta.total` is the number of endpoints matching the filter across all pages and `total_pages = ceil(total / page_size)`. Without pagination, `meta` describes the full list (`page` = 1, `total_pages` = 1).
 
 ### `POST /endpoints`
 Onboards a new endpoint for ICMP monitoring.
@@ -590,7 +589,7 @@ One-click binds an unmatched exporter IP to an existing endpoint's `flow_exporte
 
 ### `POST /bandwidth/exporters/enroll`
 Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` role). To attach the IP to an endpoint that already exists, use `POST /bandwidth/exporters/{ip}/map` instead.
-- **Request Body:** `{"ip_address": "10.255.255.1", "hostname": "edge-fw-01", "description": "optional", "device_role": "FLOW_EXPORTER"}`. A blank `hostname` becomes `flow-exporter-<ip>`. `device_role` defaults to `FLOW_EXPORTER` and must be one of the four values in `ck_endpoints_device_role`.
+- **Request Body:** `{"ip_address": "10.255.255.1", "hostname": "edge-fw-01", "description": "optional", "device_role": "FLOW_EXPORTER"}`. A blank `hostname` becomes `flow-exporter-<ip>`. `device_role` is `FLOW_EXPORTER` (default) or `HYBRID_GATEWAY`; any other value returns `422`.
 - The new endpoint has `device_type = "Router"`, `monitoring_enabled = false` (no ICMP polling), and `flow_exporter_ips = [ip_address]`.
 - **Errors:** `400` for an invalid IP; `409` if an endpoint with the same IP or hostname already exists.
 
