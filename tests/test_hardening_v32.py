@@ -840,7 +840,11 @@ def test_health_readiness_masks_sensitive_exception_details():
     """
     from app.main import app
     client = TestClient(app)
-    with patch("app.main.AsyncSessionLocal") as mock_session_local:
+    failing_redis = AsyncMock()
+    failing_redis.ping.side_effect = Exception("AUTH failed: redis password secret123")
+    with patch("app.main.AsyncSessionLocal") as mock_session_local, \
+         patch("app.main.settings.redis.enabled", True), \
+         patch("app.main.driver_manager.get_redis_client", return_value=failing_redis):
         mock_session = AsyncMock()
         mock_session.execute.side_effect = Exception("password authentication failed for user ephemres_super: secret123")
         mock_session_local.return_value.__aenter__.return_value = mock_session
@@ -853,6 +857,7 @@ def test_health_readiness_masks_sensitive_exception_details():
         assert body["ready"] is False
         assert body["database"]["status"] == "error"
         assert body["database"]["error"] == "Database connection failed"
+        assert body["redis"]["error"] == "Redis connection failed"
         assert "secret123" not in resp.text
         assert "password" not in resp.text
 

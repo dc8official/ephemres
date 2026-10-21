@@ -238,7 +238,8 @@ async def health_readiness():
     except Exception as exc:
         db_ok = False
         db_err = "Database connection failed"
-        logger.error("Readiness check: database connectivity failure: %s", exc, exc_info=True)
+        # One line per failed probe, no traceback: probes repeat every few seconds while down.
+        logger.warning("Readiness check: database connectivity failure: %s", exc)
 
     redis_ok = True
     redis_err = None
@@ -253,7 +254,7 @@ async def health_readiness():
         except Exception as exc:
             redis_ok = False
             redis_err = "Redis connection failed"
-            logger.error("Readiness check: redis connectivity failure: %s", exc, exc_info=True)
+            logger.warning("Readiness check: redis connectivity failure: %s", exc)
 
     is_ready = db_ok and (not settings.redis.enabled or redis_ok)
     status_code = (

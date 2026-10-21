@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, Type
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -110,6 +111,14 @@ class FlowSettings(BaseModel):
     buffer_memory_limit_mb: int = Field(default=512, ge=64)
 
     model_config = ConfigDict(extra="ignore")
+
+    @field_validator("bind_host")
+    @classmethod
+    def _validate_bind_host(cls, v: str) -> str:
+        # The collector opens AF_INET sockets, so only an IPv4 literal can be bound.
+        v = str(v).strip() or "0.0.0.0"
+        ipaddress.IPv4Address(v)
+        return v
 
 
 def resolve_config_file() -> Optional[Path]:
