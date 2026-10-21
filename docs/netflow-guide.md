@@ -59,7 +59,11 @@ To ensure maximum telemetry fidelity, eliminate bursty traffic artifacts, and pr
 * **Recommended Setting:** Every `60 seconds` or every `1,000 packets`.
 * **Operational Rationale:** Unlike NetFlow v5 which features a static 48-byte record structure, NetFlow v9 and IPFIX decouple flow schemas using dynamic templates. If an exporting router reboots or switches supervisors without immediately sending template definitions, the collector cannot decode data flowsets. Although Ephemres maintains an in-memory template cache with a 1,800-second TTL and buffers orphan flowsets, configuring a 60-second template refresh interval guarantees zero orphan data drops and instant cold-start recovery.
 
-### 2.4 Persistent Export Source IP (`Loopback0`)
+### 2.4 Export ToS / DSCP for QoS Analytics
+* **Recommended Setting:** Include the IPv4 Type-of-Service byte in every exported record: NetFlow v9 field type **5** (`SRC_TOS`) or IPFIX Information Element **5** (`ipClassOfService`). NetFlow v5 always carries it.
+* **Operational Rationale:** The QoS / DSCP breakdown on the Bandwidth dashboard, the endpoint flow view, and PDF reports is computed from this field only. Exporters whose template omits it are counted as DSCP 0 (`CS0` / best effort), so the QoS panels show everything as best effort. Check your platform's flow-record or template options for a ToS/DSCP field; the Cisco example below adds `match ipv4 tos`.
+
+### 2.5 Persistent Export Source IP (`Loopback0`)
 * **Recommended Setting:** Always bind the exporter source address to a stable virtual interface:
   * Cisco: `source Loopback0`
   * Juniper: `inline-jflow { source-address <Loopback0_IP>; }`
@@ -93,9 +97,9 @@ sudo ufw allow from 192.168.0.0/16 to any port 4739 proto udp comment 'IPFIX Ing
 
 ---
 
-## 3. Router & Device Configuration Examples
+## 4. Router & Device Configuration Examples
 
-### 3.1 Cisco IOS-XE (Flexible NetFlow - NetFlow v9)
+### 4.1 Cisco IOS-XE (Flexible NetFlow - NetFlow v9)
 
 ```cisco
 ! 1. Define Flow Record
@@ -103,6 +107,7 @@ flow record EPHEMRES-FLOW-RECORD
  match ipv4 source address
  match ipv4 destination address
  match ipv4 protocol
+ match ipv4 tos
  match transport source-port
  match transport destination-port
  match interface input
@@ -136,7 +141,7 @@ interface GigabitEthernet0/0/0
 
 ---
 
-### 3.2 Juniper Junos (inline-jflow - IPFIX)
+### 4.2 Juniper Junos (inline-jflow - IPFIX)
 
 ```junos
 services {
@@ -192,7 +197,7 @@ interfaces {
 
 ---
 
-### 3.3 Fortinet FortiOS (NetFlow v9)
+### 4.3 Fortinet FortiOS (NetFlow v9)
 
 ```fortios
 config system netflow
@@ -214,7 +219,7 @@ end
 
 ---
 
-### 3.4 Mikrotik RouterOS v7 (Traffic Flow - NetFlow v9)
+### 4.4 Mikrotik RouterOS v7 (Traffic Flow - NetFlow v9)
 
 ```routeros
 /ip traffic-flow
@@ -226,7 +231,7 @@ add dst-address=192.168.1.10 port=2055 version=9
 
 ---
 
-### 3.5 Linux Host / Server (softflowd)
+### 4.5 Linux Host / Server (softflowd)
 
 Install `softflowd` to export NetFlow directly from a Linux gateway or hypervisor:
 
@@ -239,7 +244,7 @@ sudo softflowd -i eth0 -n 192.168.1.10:2055 -v 9 -m 8192 -t maxlife=60s
 
 ---
 
-### 3.6 pfSense / OPNsense Firewall (softflowd)
+### 4.6 pfSense / OPNsense Firewall (softflowd)
 
 On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided via the high-performance `softflowd` service:
 
@@ -272,7 +277,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 
 ---
 
-## 4. Enabling Flow Telemetry in Ephemres
+## 5. Enabling Flow Telemetry in Ephemres
 
 1. Log in to the Ephemres Web Interface as an **Administrator**.
 2. Navigate to **System Settings** -> **Tab 2: Performance & Telemetry Engine**.
@@ -289,7 +294,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 
 ---
 
-## 5. Exporter IP Mapping & Alias Management
+## 6. Exporter IP Mapping & Alias Management
 
 When network devices export flows from loopback interfaces, secondary management subnets, or CARP VIPs, Ephemres's automatic correlator tracks them as **Unmatched Exporters**:
 
@@ -303,12 +308,12 @@ When network devices export flows from loopback interfaces, secondary management
 
 ---
 
-## 6. Verification & Troubleshooting
+## 7. Verification & Troubleshooting
 
 ### Check Daemon Health
 ```bash
 sudo systemctl status ephemres-flowd
-sudo journalctl -u ephemres-flowd -f --no-tail
+sudo journalctl -u ephemres-flowd -n 100 -f
 ```
 
 ### Verify Packet Reception

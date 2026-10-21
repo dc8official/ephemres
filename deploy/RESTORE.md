@@ -40,7 +40,7 @@ ls -lht /var/backups/ephemres/ /var/backups/netmon/ 2>/dev/null || true
 
 ## 3. Workflow A: Automated Cross-Version Restoration (Recommended)
 
-The automated script [`deploy/restore.sh`](file:///opt/ephemres/deploy/restore.sh) orchestrates the Python restoration engine (`app.core.restore`), safely resolving schema drift, hypertable chunk mappings, and credential conversions.
+The automated script [`deploy/restore.sh`](restore.sh) orchestrates the Python restoration engine (`app.core.restore`), safely resolving schema drift, hypertable chunk mappings, and credential conversions.
 
 ### Basic Syntax
 ```bash

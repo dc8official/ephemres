@@ -78,7 +78,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **User repeatedly kicked to login page** | `/var/log/ephemres/ephemres-api.log`<br>`journalctl -u ephemres-api` | `Session evicted`, `quota exceeded`, `HTTPException: 401` | Check multi-worker session store sync (Section 2.I). |
 | **Browser shows "Unable to connect" / HTTP 502** | `/var/log/nginx/error.log`<br>`journalctl -u ephemres-api` | `connect() failed (111: Connection refused)`, `Uvicorn running` | Verify Uvicorn socket listening on `127.0.0.1:8000`. |
 | **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Check the unit's `AmbientCapabilities` (Section 2.A). |
-| **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait for 15m window or run `reset-admin-password.sh` (Section 2.B). |
+| **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait 15 minutes for the lockout to expire, or reset `admin` with `reset-admin-password.sh` (Sections 2.B and 2.C). |
 | **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore `/dev/shm` IPC state. |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
 
@@ -305,12 +305,13 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 
 ## 3. Database Disaster Recovery
 
-For complete details on cross-version restorations (including TimescaleDB internal chunk remapping, schema drift reconciliation, and `$argon2id$` to `$scrypt$` credential migrations), refer to the comprehensive [Disaster Recovery Runbook](file:///opt/ephemres/deploy/RESTORE.md).
+For complete details on cross-version restorations (including TimescaleDB internal chunk remapping, schema drift reconciliation, and `$argon2id$` to `$scrypt$` credential migrations), refer to the comprehensive [Disaster Recovery Runbook](../deploy/RESTORE.md).
 
 ### Creating an Immediate Manual Backup
 ```bash
-mkdir -p /var/backups/ephemres
-sudo PGPASSWORD="netmon_secure_password" pg_dump -h 127.0.0.1 -U netmon_user -d netmon -F p -f /var/backups/ephemres/manual_backup_$(date +%Y%m%d_%H%M%S).sql
+sudo mkdir -p /var/backups/ephemres
+# Runs as the local postgres superuser (peer authentication), so no password is needed or exposed
+sudo -u postgres pg_dump -d netmon -F p | sudo tee /var/backups/ephemres/manual_backup_$(date +%Y%m%d_%H%M%S).sql > /dev/null
 ```
 
 ### Restoring from a Backup File (Automated Cross-Version Engine)

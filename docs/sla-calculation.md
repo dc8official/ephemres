@@ -32,20 +32,23 @@ At the conclusion of each 5-ping cycle, `classify_ping_result()` (`monitoring/pi
 
 ## 3. In-Memory Flap Suppression (N=3)
 
-State transitions require **3 consecutive cycles (180 seconds)** of sustained condition before the operational state switches from `UP` to `DOWN` or `DOWN` to `UP`:
+State changes are confirmed on the **detailed** state (`UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`), not just UP/DOWN. A new detailed state must be observed for **N consecutive cycles** (`[monitoring] state_confirmation_cycles`, default 3, i.e. ~3 minutes) before it replaces the confirmed state:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> UP
-    UP --> DOWN_PENDING : 1st cycle 100% loss
-    DOWN_PENDING --> DOWN_PENDING : 2nd cycle 100% loss
-    DOWN_PENDING --> DOWN : 3rd cycle 100% loss (Outage Confirmed)
-    DOWN_PENDING --> UP : Any packet reply (Flap Suppressed)
-    
-    DOWN --> UP_PENDING : 1st cycle packet reply
-    UP_PENDING --> UP_PENDING : 2nd cycle packet reply
-    UP_PENDING --> UP : 3rd cycle packet reply (Recovery Confirmed)
+    [*] --> Confirmed
+    Confirmed --> Confirmed : cycle result = confirmed state (pending cleared)
+    Confirmed --> Pending : cycle result = new state S (count = 1)
+    Pending --> Pending : result = S again (count + 1, while count < N)
+    Pending --> Confirmed : result = S for the Nth time (S becomes the confirmed state)
+    Pending --> Confirmed : result = confirmed state (pending cleared)
+    Pending --> Pending : result = a different state T (pending restarts as T, count = 1)
 ```
+
+Consequences worth knowing:
+* A single good cycle during an outage (or a single bad cycle while healthy) resets the count, so brief flaps never change the recorded state.
+* Because confirmation compares detailed states, an endpoint alternating between `DOWN` and `DOWN-UNSTABLE` restarts the count every cycle and stays in its previous confirmed state until one of them repeats N times.
+* A brand-new endpoint has no confirmed state yet: its first cycle result is recorded directly as the initial state.
 
 ---
 

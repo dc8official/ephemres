@@ -104,6 +104,9 @@ See [`deploy/RESTORE.md`](../deploy/RESTORE.md) for full details on cross-versio
 
 Ephemres configuration is declared in `/etc/ephemres/config.toml`:
 
+> [!NOTE]
+> The default database name `netmon` and role `netmon_user` predate the Ephemres rename and are kept deliberately, so upgrades and cross-version restores keep working against existing databases. Likewise, the FastStore section is still named `[redis]` (`[faststore]` is also accepted), and its `host`/`port` keys are ignored because FastStore is an in-process store.
+
 ```toml
 [database]
 host = "localhost"
