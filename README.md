@@ -95,7 +95,7 @@ For complete architectural references, operational runbooks, and developer guide
 ## 💻 Technical Stack
 
 ### Core Stack
-* **Backend Runtime**: Python 3.12+ (Strict `asyncio` event loop)
+* **Backend Runtime**: Python 3.11+ (Strict `asyncio` event loop)
 * **Web Framework**: Native ASGI (`app.core.asgi` — Zero-Dependency FastAPI/Starlette Replacement)
 * **Validation & Config**: Native Schema Engine (`app.core.schema` & `app.config` — Zero-Dependency Pydantic Replacement)
 * **Database Layer**: PostgreSQL 16 + TimescaleDB (`asyncpg` + `app.core.orm` — Zero-Dependency SQLAlchemy Replacement)
@@ -110,10 +110,11 @@ For complete architectural references, operational runbooks, and developer guide
 ## 🚀 Getting Started (Production Deployment)
 
 ### 1. Host Requirements
-* **Operating System:** Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+, Rocky Linux 9+)
+* **Operating System:** Ubuntu 22.04 / 24.04 LTS or Debian 12+ (x86_64). The installer uses `apt`; RHEL-family distributions are not supported by `install.sh`.
 * **Kernel & Memory:** Linux Kernel 4.x+ with write access to `/dev/shm` (standard POSIX shared memory).
-* **Database:** PostgreSQL 15+ with TimescaleDB extension enabled.
-* **System Packages:** Standard Python 3.12+ and `traceroute`. **No `redis-server`, `libpango`, or C-compilers required.**
+* **Database:** PostgreSQL with TimescaleDB 2. The installer provisions PostgreSQL 16 and TimescaleDB from the official PGDG and Timescale repositories; manual installs need PostgreSQL 14+.
+* **Python:** Python 3.11+. Ubuntu 24.04 (3.12) and Debian 12 (3.11) meet this out of the box; on Ubuntu 22.04 (3.10) install `python3.11` and `python3.11-venv` before running the installer.
+* **System Packages:** `traceroute`, Nginx, Node.js 20 (installed by `install.sh`). **No `redis-server`, `libpango`, or C-compilers required.**
 
 ### 2. Timezone & NTP Time Synchronization
 
@@ -131,7 +132,7 @@ For complete architectural references, operational runbooks, and developer guide
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.2v https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```
@@ -141,10 +142,9 @@ cd /opt/ephemres/deploy
 To upgrade an existing installation to Version 3.3.2.v:
 
 ```bash
-cd /opt/ephemres
-git pull origin v3.3.2v
-sudo ./deploy/upgrade.sh
+sudo bash /opt/ephemres/deploy/upgrade.sh
 ```
+`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. No manual `git pull` is needed.
 
 The upgrade utility automatically:
 1. **Pre-Upgrade Backup:** Dumps a timestamped PostgreSQL SQL backup to `/var/backups/ephemres/`.

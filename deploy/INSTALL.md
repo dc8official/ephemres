@@ -6,7 +6,8 @@ This guide provides direct, step-by-step instructions to install, configure, upg
 
 ## 1. Prerequisites
 
-- **OS:** Ubuntu 22.04 LTS or 24.04 LTS (x86_64), Debian 12+
+- **OS:** Ubuntu 22.04 / 24.04 LTS or Debian 12+ (x86_64). The installer uses `apt`; RHEL-family distributions are not supported by `install.sh`.
+- **Python:** Python 3.11+. Ubuntu 24.04 (3.12) and Debian 12 (3.11) meet this out of the box; on Ubuntu 22.04 (3.10) install `python3.11` and `python3.11-venv` before running the installer.
 - **Privileges:** Root access (`sudo -i`)
 - **Hardware:** 1–2 vCPUs, 2 GB RAM, 10–25 GB SSD
 
@@ -18,9 +19,8 @@ Elevate to root and run the automated installer:
 
 ```bash
 sudo -i
-git clone https://github.com/dc8official/ephemres.git
-cd ephemres/deploy
-chmod +x *.sh
+git clone -b v3.3.2v https://github.com/dc8official/ephemres.git /opt/ephemres
+cd /opt/ephemres/deploy
 ./install.sh
 ```
 
@@ -40,15 +40,9 @@ curl -s http://127.0.0.1:8000/api/v1/health
 To upgrade an existing installation without data loss:
 
 ```bash
-# Option A: From your git clone directory
-cd ~/ephemres/deploy
-sudo ./upgrade.sh
-
-# Option B: Directly inside /opt/ephemres
-cd /opt/ephemres
-sudo git pull
-sudo ./deploy/upgrade.sh
+sudo bash /opt/ephemres/deploy/upgrade.sh
 ```
+`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. No manual `git pull` is needed.
 
 ---
 

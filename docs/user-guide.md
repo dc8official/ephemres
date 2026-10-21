@@ -65,7 +65,7 @@ Administrators can configure platform behavior across five dedicated tabs:
 2. **⚡ Performance & Telemetry:** In-RAM FastStore acceleration toggle (`performance_mode` via `/dev/shm`), live FastStore preflight check, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), sampling rate, and live queue metrics.
 3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session inactivity timeout (minutes), and IP-scoped brute-force lockout threshold.
 4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation.
-5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG, JPEG, SVG up to 2 MB) for branded PDF report generation.
+5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG or JPEG, up to 1 MB) for branded PDF report generation.
 
 ---
 
@@ -141,7 +141,7 @@ Administrators can customize corporate identity settings to brand all compiled P
    - **Company Name:** Displays prominently in the top header of all PDF reports.
    - **Department / Unit:** Identifies the operational unit (e.g. `Network Operations Center (NOC)`).
    - **Report Footer Disclaimer:** Customized confidentiality or compliance notice rendered at the bottom margin of every page.
-   - **Corporate Logo:** Upload a PNG, JPG, or SVG image (max 1 MB / 2 MB Base64 data URI). A real-time preview is rendered instantly.
+   - **Corporate Logo:** Upload a PNG or JPG image (max 1 MB). SVG is not accepted because PDF reports cannot embed it. A real-time preview is rendered instantly.
 3. Click **Save Organization Settings** to apply changes immediately across all future report generations.
 
 ---

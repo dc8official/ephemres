@@ -6,12 +6,12 @@ This guide details the procedures for installing, maintaining, and upgrading the
 
 ## 1. System Requirements
 
-- **OS:** Ubuntu 22.04 LTS or 24.04 LTS (Debian 12+ also supported)
+- **OS:** Ubuntu 22.04 / 24.04 LTS or Debian 12+ (x86_64). The installer uses `apt`; RHEL-family distributions are not supported by `install.sh`.
 - **Hardware (Minimum for Production):** 2 vCPUs, 2 GB RAM, 10–25 GB SSD (edge); 4+ vCPUs, 8 GB RAM, 50 GB+ NVMe (large scale).
 - **Core Dependencies:**
-  - **PostgreSQL 14+ with TimescaleDB**
-  - **Python 3.10+** (with virtual environment)
-  - **Node.js 18+ & npm** (for frontend asset compilation)
+  - **PostgreSQL with TimescaleDB 2**: the installer provisions PostgreSQL 16 and TimescaleDB from the official PGDG and Timescale repositories; manual installs need PostgreSQL 14+.
+  - **Python 3.11+**: Ubuntu 24.04 (3.12) and Debian 12 (3.11) meet this out of the box; on Ubuntu 22.04 (3.10) install `python3.11` and `python3.11-venv` before running the installer.
+  - **Node.js 20 & npm** (installed by `install.sh` from NodeSource; manual builds need Node.js 18+ for Vite 6)
   - **Nginx** (reverse proxy & TLS termination)
   - **Linux `/dev/shm`** (standard in-RAM POSIX shared memory for FastStore SQLite WAL)
 - **Zero External Daemons:** `redis-server` is **NOT** required. FastStore runs entirely in-process in `/dev/shm`.
@@ -45,13 +45,13 @@ The initial installation is fully automated via `install.sh`:
 
 ```bash
 sudo -i
-git clone -b v3.3.2v https://github.com/dc8official/ephemres.git
-cd ephemres/deploy
+git clone -b v3.3.2v https://github.com/dc8official/ephemres.git /opt/ephemres
+cd /opt/ephemres/deploy
 ./install.sh
 ```
 
 **What the installer executes:**
-1. Installs minimal system packages: `python3-pip`, `postgresql-16`, `timescaledb-2-postgresql-16`, `nginx`, `traceroute`, `libcap2-bin`, `nodejs`.
+1. Adds the NodeSource (Node.js 20), PGDG, and Timescale apt repositories, then installs `postgresql-16`, `timescaledb-2-postgresql-16`, `python3-venv`, `python3-pip`, `nginx`, `certbot`, `traceroute`, `libcap2-bin`, and `nodejs`.
 2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
 4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
@@ -66,12 +66,9 @@ cd ephemres/deploy
 To perform an in-place upgrade to v3.3.2.v:
 
 ```bash
-cd ~/ephemres
-git pull origin v3.3.2v
-sudo ./deploy/upgrade.sh
+sudo bash /opt/ephemres/deploy/upgrade.sh
 ```
-
-*(Alternatively, if upgrading directly on the host without a local git clone, you can run `sudo bash /opt/ephemres/deploy/upgrade.sh`)*
+`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. No manual `git pull` is needed.
 
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
