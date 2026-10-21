@@ -51,7 +51,7 @@ sudo bash /opt/ephemres/deploy/restore.sh [BACKUP_FILE] [OPTIONS]
 | Flag | Description | Default |
 | :--- | :--- | :--- |
 | `--backup-file <path>` | Path to plaintext `.sql` or gzipped `.sql.gz` backup archive | Auto-detected / Interactive prompt |
-| `--admin-password <pass>` | Temporary password assigned to the `admin` account when its backed-up hash is a pre-`v3.3.2v` (non-scrypt) hash; ignored otherwise (see step 5 below) | `admin` |
+| `--admin-password <pass>` | New password for the `admin` account, which must be changed at first login. Applied whatever the backup's era (see step 5 below) | Interactive prompt; leave blank to keep the backed-up admin password |
 | `--old-secret-key <key>` | Previous `SECRET_KEY` for re-encrypting alert channel webhooks | Auto-detected from `.env.bak` |
 | `--skip-telemetry` | Skip historical hypertable metrics for fast configuration restore | `false` |
 | `--dry-run` | Parse and validate backup without committing changes to PostgreSQL | `false` |
@@ -76,10 +76,11 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
 2. **Schema Introspection:** Inspects the live PostgreSQL `information_schema` on the target database.
 3. **Hypertable Re-mapping:** Translates internal `_hyper_*_chunk` COPY blocks directly into the parent hypertable targets (`public.endpoint_events`, `public.flow_minute_rollups`, `public.flow_interface_minute_rollups`).
 4. **Column Intersection:** Dynamically intersects backup dump column lists with target table schemas, safely loading available fields while applying database defaults for missing columns.
-5. **Credential Migration** (applies only to accounts whose backed-up hash is not `$scrypt$`, i.e. backups from before `v3.3.2v`):
-   - `admin`: password set to the `--admin-password` value, with `must_change_password = TRUE`.
-   - Every other such account: assigned a random temporary password, with `must_change_password = TRUE`. The usernames and temporary passwords are written to a root-only (`0600`) report, `/opt/ephemres/legacy_password_resets.txt` (override with `EPHEMRES_RESET_REPORT`), and the restore summary prints its path. Distribute the passwords securely, then delete the file.
-   - Accounts that already have `$scrypt$` hashes (backups from `v3.3.2v+`) keep their backed-up passwords, **including `admin`**: in that case `--admin-password` is not applied. If you do not know the backed-up admin password, run `deploy/reset-admin-password.sh` after the restore.
+5. **Credential Migration:**
+   - `admin` with `--admin-password` given (or typed at the prompt): password set to that value with `must_change_password = TRUE`, whatever hash the backup holds. If the backup has no `admin` row, the existing `admin` account in the target database is updated instead.
+   - `admin` without a password: a backed-up `$scrypt$` password is kept unchanged. A legacy (pre-`v3.3.2v`, non-scrypt) admin hash is replaced with a random temporary password, recorded in the report below.
+   - Every other account with a legacy (non-`$scrypt$`) hash: assigned a random temporary password with `must_change_password = TRUE`. Accounts that already have `$scrypt$` hashes keep their backed-up passwords.
+   - Temporary passwords are written to a root-only (`0600`) report, `/opt/ephemres/legacy_password_resets.txt` (override with `EPHEMRES_RESET_REPORT`). The restore summary prints its path and states which of the admin cases above applied. Distribute the passwords securely, then delete the file.
 6. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore*`).
 7. **Daemon Resumption:** Restarts API and engine daemons and runs health verification.
 

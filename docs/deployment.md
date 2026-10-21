@@ -56,7 +56,7 @@ cd ephemres/deploy
 3. Compiles the Vue 3 production bundle (`npm run build`).
 4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
 5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`).
-6. Sets network capabilities: `setcap cap_net_raw+ep $(readlink -f /opt/ephemres/venv/bin/python3)`.
+6. Sets `cap_net_raw+ep` on the `traceroute` binary. The daemons receive `CAP_NET_RAW` from `AmbientCapabilities` in their systemd units; no capability is placed on the Python interpreter.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
 ---
@@ -76,7 +76,7 @@ sudo ./deploy/upgrade.sh
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
-3. **Network Capabilities**: Sets `CAP_NET_RAW` capabilities on the python binary (`/opt/ephemres/venv/bin/python3`) and `traceroute` for unprivileged ICMP discovery.
+3. **Network Capabilities**: Sets `cap_net_raw+ep` on `traceroute`, and removes the host-wide `cap_net_raw` file capability that earlier releases placed on the system Python interpreter (other file capabilities are left untouched). The refreshed unit files grant `CAP_NET_RAW` to the daemons.
 4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.2.v defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, cleans obsolete dependencies from the virtual environment, installs minimal requirements (`uvicorn`, `asyncpg`), and compiles frontend assets.
@@ -91,10 +91,10 @@ sudo ./deploy/upgrade.sh
 Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s`, `v3.3.0`, `v3.3.1n`, or `v3.3.2v+`:
 
 ```bash
-# Interactive restore (prompts for a new Admin password if legacy $argon2id$ hashes are detected)
+# Interactive restore (prompts for a new admin password; leave blank to keep the one in the backup)
 sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz
 
-# Non-interactive / automated restore with explicit admin password reset
+# Non-interactive restore that also sets a new admin password (forced change at first login)
 sudo bash /opt/ephemres/deploy/restore.sh /var/backups/ephemres/ephemres_backup_YYYYMMDD.sql.gz \
   --admin-password 'NewSecureAdminPassword123!'
 ```

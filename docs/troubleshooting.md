@@ -77,7 +77,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **Daemon in crash loop on boot** (`status=1/FAILURE`) | `journalctl -u ephemres-engine -n 100` | `asyncpg.exceptions`, `InternalServerError`, `max_tuples_decompressed` | Check TimescaleDB chunk pruning (Section 2.H). |
 | **User repeatedly kicked to login page** | `/var/log/ephemres/ephemres-api.log`<br>`journalctl -u ephemres-api` | `Session evicted`, `quota exceeded`, `HTTPException: 401` | Check multi-worker session store sync (Section 2.I). |
 | **Browser shows "Unable to connect" / HTTP 502** | `/var/log/nginx/error.log`<br>`journalctl -u ephemres-api` | `connect() failed (111: Connection refused)`, `Uvicorn running` | Verify Uvicorn socket listening on `127.0.0.1:8000`. |
-| **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Re-apply `setcap cap_net_raw+ep` (Section 2.A). |
+| **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Check the unit's `AmbientCapabilities` (Section 2.A). |
 | **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait for 15m window or run `reset-admin-password.sh` (Section 2.B). |
 | **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore `/dev/shm` IPC state. |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
@@ -87,22 +87,23 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 ## 2. Common Issues & Solutions
 
 ### A. ICMP Polling Fails with "Operation Not Permitted" / Raw Socket Permission Denied
-* **Cause**: The `ephemres-engine` daemon requires raw socket capability (`CAP_NET_RAW`) to craft ICMP packets without running as `root`. If Python runs under a virtualenv, the capability must be placed on the real, resolved Python binary target (not a symlink) as well as the traceroute binary.
+* **Cause**: The Ephemres daemons get raw-socket access (`CAP_NET_RAW`) from `AmbientCapabilities=CAP_NET_RAW` in their systemd units, not from a file capability on Python. A locally modified, outdated, or overridden unit file without that line (or running the engine by hand outside systemd) leaves the process without the capability. The engine then falls back to unprivileged ICMP datagram sockets or the system `ping`, and traceroutes fall back to the `traceroute` binary.
 * **Fix**:
   ```bash
-  # Resolve symlinked python binary in virtual environment and grant raw socket access
-  PYTHON_BIN=$(readlink -f /opt/ephemres/venv/bin/python3)
-  sudo setcap cap_net_raw+ep "${PYTHON_BIN}"
-  
-  # Ensure traceroute also retains raw network capabilities
-  sudo setcap cap_net_raw+ep $(command -v traceroute)
-  
-  # Verify capabilities
-  getcap "${PYTHON_BIN}" $(command -v traceroute)
-  
-  # Restart monitoring engine
-  sudo systemctl restart ephemres-engine
+  # Confirm the running unit grants CAP_NET_RAW (expect: AmbientCapabilities=cap_net_raw)
+  systemctl show ephemres-engine -p AmbientCapabilities
+  systemctl show ephemres-api -p AmbientCapabilities
+
+  # If missing, reinstall the shipped unit files and restart
+  sudo cp /opt/ephemres/deploy/ephemres-{api,engine,flowd}.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl restart ephemres-api ephemres-engine
+
+  # The traceroute fallback keeps its own file capability
+  sudo setcap cap_net_raw+ep "$(readlink -f "$(command -v traceroute)")"
+  getcap "$(readlink -f "$(command -v traceroute)")"
   ```
+  Do not `setcap` the Python interpreter: the venv `python3` resolves to the system-wide interpreter, so the capability would apply to every Python process on the host.
 
 ### B. User Account Temporarily Locked Out (HTTP 403)
 * **Cause**: Repeated failed logins for one username from one client IP (5 by default; set **Lockout Threshold** under **Admin Settings → Security & Discovery**) trigger a 15-minute lockout scoped to that `IP:username` pair. The failure counter resets after 30 minutes without further failures.
@@ -330,8 +331,9 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd nginx
 curl -s http://127.0.0.1:8000/api/v1/health | jq .
 curl -s http://127.0.0.1:8000/api/v1/version | jq .
 
-# 3. ICMP raw socket capability check
-getcap $(readlink -f /opt/ephemres/venv/bin/python3) $(command -v traceroute)
+# 3. Raw socket capability check (units grant CAP_NET_RAW; traceroute keeps a file capability)
+systemctl show ephemres-engine ephemres-api -p AmbientCapabilities
+getcap "$(readlink -f "$(command -v traceroute)")"
 
 # 4. FastStore IPC shared memory check
 ls -l /dev/shm/ephemres_faststore*

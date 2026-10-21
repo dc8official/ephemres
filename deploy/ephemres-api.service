@@ -12,6 +12,9 @@ Group=ephemres
 RuntimeDirectory=ephemres
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+# Raw ICMP for in-process traceroute/diagnostics. No CapabilityBoundingSet here: the API calls
+# `sudo -n systemctl ... ephemres-flowd`, and sudo needs CAP_SETUID/CAP_SETGID from the bounding set.
+AmbientCapabilities=CAP_NET_RAW
 WorkingDirectory=/opt/ephemres/backend
 EnvironmentFile=-/etc/ephemres/ephemres.env
 EnvironmentFile=-/opt/ephemres/.env

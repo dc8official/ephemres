@@ -271,12 +271,9 @@ run "Installing Python dependencies" \
     --retries 5 \
     -r "$INSTALL_DIR/backend/requirements.txt"
 
-# Set network capabilities on the virtualenv python binary
-PY3_TARGET="$(readlink -f "$VENV_DIR/bin/python3" 2>/dev/null || true)"
-if [ -n "$PY3_TARGET" ] && [ -f "$PY3_TARGET" ] && command -v setcap &>/dev/null; then
-    run "Setting network raw socket capabilities for Python binary ($PY3_TARGET)" \
-        setcap cap_net_raw+ep "$PY3_TARGET" || true
-fi
+# No file capability on the Python interpreter: the venv python3 resolves to the system-wide
+# interpreter, so setcap there would grant CAP_NET_RAW to every Python process on the host.
+# The systemd units grant CAP_NET_RAW to the Ephemres daemons via AmbientCapabilities instead.
 
 # ============================================================
 print_header "Step 9: Building Vue frontend"

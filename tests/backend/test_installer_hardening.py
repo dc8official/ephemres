@@ -63,3 +63,37 @@ def test_uninstall_script_purge_flag():
     assert "--purge-data" in content
     assert "DROP DATABASE IF EXISTS" in content
     assert "DROP USER IF EXISTS" in content
+
+
+def test_python_interpreter_gets_no_host_wide_file_capability():
+    """The venv python3 resolves to the system interpreter: setcap on it would affect every Python process."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    install_sh = (root / "deploy" / "install.sh").read_text(encoding="utf-8")
+    upgrade_sh = (root / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
+
+    for name, script in (("install.sh", install_sh), ("upgrade.sh", upgrade_sh)):
+        grants = re.findall(r"\bsetcap\s+cap_net_raw\+ep\s+(\S+)", script)
+        assert grants, f"{name}: expected setcap on traceroute"
+        assert all("TRACEROUTE_BIN" in target for target in grants), f"{name}: setcap targets {grants}"
+
+    # upgrade.sh only ever removes the legacy interpreter capability
+    assert 'setcap -r "${PY3_REAL}"' in upgrade_sh
+
+
+def test_daemon_units_grant_net_raw_via_ambient_capabilities():
+    from pathlib import Path
+
+    deploy = Path(__file__).resolve().parents[2] / "deploy"
+    engine = (deploy / "ephemres-engine.service").read_text(encoding="utf-8")
+    api = (deploy / "ephemres-api.service").read_text(encoding="utf-8")
+
+    assert "AmbientCapabilities=CAP_NET_RAW" in engine
+    assert "CapabilityBoundingSet=CAP_NET_RAW" in engine
+    assert "AmbientCapabilities=CAP_NET_RAW" in api
+    # The API runs `sudo -n systemctl ... ephemres-flowd`; a bounding set without CAP_SETUID breaks sudo.
+    import re
+
+    assert not re.search(r"^CapabilityBoundingSet=", api, re.MULTILINE)

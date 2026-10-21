@@ -361,11 +361,19 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         "${VENV_PATH}/bin/pip" install --upgrade pip
         "${VENV_PATH}/bin/pip" install -r "${INSTALL_DIR}/backend/requirements.txt" --upgrade
 
-        # Set network raw capabilities for unprivileged ICMP on virtual environment python3 binary
+        # Earlier releases ran `setcap cap_net_raw+ep` on the resolved venv interpreter, which is the
+        # system-wide Python. The units now grant CAP_NET_RAW via AmbientCapabilities, so remove that
+        # host-wide file capability, but only if it is exactly the one the installer set.
         PY3_REAL="$(readlink -f "${VENV_PATH}/bin/python3" 2>/dev/null || true)"
-        if [[ -n "${PY3_REAL}" ]] && [[ -f "${PY3_REAL}" ]] && command -v setcap &>/dev/null; then
-            echo -e "${GREEN}[INFO] Applying cap_net_raw+ep to Python binary (${PY3_REAL})...${NC}"
-            setcap cap_net_raw+ep "${PY3_REAL}" || true
+        if [[ -n "${PY3_REAL}" ]] && [[ -f "${PY3_REAL}" ]] && command -v getcap &>/dev/null && command -v setcap &>/dev/null; then
+            PY3_CAPS="$(getcap "${PY3_REAL}" 2>/dev/null | awk '{print $NF}')"
+            # libcap >= 2.48 prints "cap_net_raw=ep"; older versions print "= cap_net_raw+ep".
+            if [[ "${PY3_CAPS}" == "cap_net_raw=ep" || "${PY3_CAPS}" == "cap_net_raw+ep" ]]; then
+                echo -e "${GREEN}[INFO] Removing legacy host-wide cap_net_raw file capability from ${PY3_REAL}...${NC}"
+                setcap -r "${PY3_REAL}" || true
+            elif [[ -n "${PY3_CAPS}" ]]; then
+                echo -e "${YELLOW}[WARN] ${PY3_REAL} has file capabilities (${PY3_CAPS}) not set by Ephemres; leaving them unchanged.${NC}"
+            fi
         fi
     else
         echo -e "${YELLOW}[WARN] Virtual environment not found at /opt/ephemres/venv. Skipping pip upgrade.${NC}"

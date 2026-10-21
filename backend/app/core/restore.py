@@ -702,13 +702,18 @@ def write_password_reset_report(report_path: str, resets: List[Tuple[str, str]])
 async def reconcile_and_restore_database(
     conn: Any,
     backup_path: Path | str,
-    admin_password: str = "admin",
+    admin_password: Optional[str] = None,
     old_secret_key: Optional[str] = None,
     skip_telemetry: bool = False,
     dry_run: bool = False,
     reset_report_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Core execution engine for cross-version database restoration."""
+    """Core execution engine for cross-version database restoration.
+
+    admin_password: when given, always becomes the `admin` password (must change at first login).
+    When omitted, a backed-up $scrypt$ admin hash is kept as-is, and a legacy admin hash is
+    replaced by a random temporary password recorded in the password reset report.
+    """
     logger.info("Starting Ephemres database restoration from %s...", backup_path)
     target_schema = await get_target_table_columns(conn)
 
@@ -726,6 +731,8 @@ async def reconcile_and_restore_database(
         "channels_disabled": 0,
         "temporary_password_users": 0,
         "password_reset_report": None,
+        "admin_password_applied": False,
+        "admin_temporary_password": False,
     }
 
     if dry_run:
@@ -813,18 +820,23 @@ async def reconcile_and_restore_database(
             if row.get("role_id") and str(row["role_id"]) in role_id_map:
                 row["role_id"] = role_id_map[str(row["role_id"])]
 
-            # Check password hash transition ($argon2id$ -> $scrypt$)
             if not pwd.startswith("$scrypt$"):
-                if uname == "admin":
-                    row["password_hash"] = hash_password(admin_password)
-                    row["must_change_password"] = True
-                    logger.info("[restore] Reset admin password to $scrypt$ with must_change_password=True.")
-                else:
-                    rand_pass = secrets.token_urlsafe(24)
-                    row["password_hash"] = hash_password(rand_pass)
-                    row["must_change_password"] = True
-                    temporary_passwords.append((uname, rand_pass))
                 summary["legacy_hashes_upgraded"] += 1
+
+            if uname == "admin" and admin_password:
+                # Operator-supplied admin password always wins, whatever hash the backup holds.
+                row["password_hash"] = hash_password(admin_password)
+                row["must_change_password"] = True
+                summary["admin_password_applied"] = True
+                logger.info("[restore] Set admin password to the supplied value with must_change_password=True.")
+            elif not pwd.startswith("$scrypt$"):
+                # Legacy ($argon2id$ etc.) hashes cannot be verified: issue a recorded temporary password.
+                rand_pass = secrets.token_urlsafe(24)
+                row["password_hash"] = hash_password(rand_pass)
+                row["must_change_password"] = True
+                temporary_passwords.append((uname, rand_pass))
+                if uname == "admin":
+                    summary["admin_temporary_password"] = True
 
             col_names = ", ".join(f'"{c}"' for c in usable)
             placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
@@ -843,6 +855,15 @@ async def reconcile_and_restore_database(
 
         summary["user_count"] = len(rows)
         summary["tables_restored"].append("users")
+
+        if admin_password and not summary["admin_password_applied"]:
+            # Backup had no admin row: apply the supplied password to the target's existing admin.
+            await _execute_sql(
+                conn,
+                'UPDATE "users" SET "password_hash" = $1, "must_change_password" = TRUE WHERE "username" = \'admin\';',
+                hash_password(admin_password),
+            )
+            summary["admin_password_applied"] = True
 
         if temporary_passwords:
             summary["temporary_password_users"] = len(temporary_passwords)
@@ -1088,8 +1109,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--admin-password",
-        default="admin",
-        help="Temporary password for admin account (defaults to 'admin')",
+        default=None,
+        help="New password for the admin account (must be changed at first login). "
+        "If omitted, a backed-up $scrypt$ admin password is kept and a legacy admin hash "
+        "gets a random temporary password in the reset report.",
     )
     parser.add_argument(
         "--old-secret-key",
@@ -1162,8 +1185,14 @@ def main() -> None:
                 print("                     Distribute these securely, then delete the file.")
             print("=" * 60)
             if not summary["dry_run"]:
-                print(f" [SUCCESS] Database restored. Admin login password set to '{args.admin_password}'.")
-                print("           First login requires forced password change.")
+                print(" [SUCCESS] Database restored.")
+                if summary["admin_password_applied"]:
+                    print("           Admin password set to the value passed with --admin-password;")
+                    print("           first login requires a forced password change.")
+                elif summary["admin_temporary_password"]:
+                    print(f"           Admin received a temporary password: see {summary['password_reset_report']}")
+                else:
+                    print("           Admin password unchanged (kept from the backup).")
             print("=" * 60 + "\n")
         finally:
             await conn.close()

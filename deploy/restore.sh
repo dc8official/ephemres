@@ -21,7 +21,7 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo ""
     echo "Options:"
     echo "  --backup-file <path>     Path to backup .sql or .sql.gz dump"
-    echo "  --admin-password <pass>  Temporary password for admin account (default: admin)"
+    echo "  --admin-password <pass>  New admin password, forced change at first login (default: keep backed-up password)"
     echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels"
     echo "  --skip-telemetry         Skip restoring hypertable metrics for fast config restore"
     echo "  --dry-run                Simulate restoration without writing changes to database"
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --backup-file <path>     Path to backup .sql or .sql.gz dump"
-            echo "  --admin-password <pass>  Temporary password for admin account (default: admin)"
+            echo "  --admin-password <pass>  New admin password, forced change at first login (default: keep backed-up password)"
             echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels"
             echo "  --skip-telemetry         Skip restoring hypertable metrics for fast config restore"
             echo "  --dry-run                Simulate restoration without writing changes to database"
@@ -148,8 +148,8 @@ fi
 
 # 3. Prompt for Admin Temporary Password
 if [[ -z "${ADMIN_PASS}" ]]; then
-    read -r -p "Enter temporary password for admin user [default: admin]: " INPUT_PASS
-    ADMIN_PASS="${INPUT_PASS:-admin}"
+    read -r -s -p "New admin password (leave blank to keep the password from the backup): " ADMIN_PASS
+    echo ""
 fi
 
 # Locate Python binary
@@ -180,7 +180,7 @@ fi
 echo -e "\n${BLUE}[INFO] Executing schema-aware database restoration...${NC}"
 PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend:.:backend" "${PYTHON_BIN}" -m app.core.restore \
     --backup-file "${BACKUP_FILE}" \
-    --admin-password "${ADMIN_PASS}" \
+    ${ADMIN_PASS:+--admin-password "${ADMIN_PASS}"} \
     ${OLD_SECRET_KEY:+--old-secret-key "${OLD_SECRET_KEY}"} \
     ${SKIP_TELEMETRY} \
     ${DRY_RUN}
@@ -192,8 +192,7 @@ if [[ -z "${DRY_RUN}" ]]; then
     systemctl is-enabled ephemres-flowd &>/dev/null && systemctl restart ephemres-flowd 2>/dev/null || true
     echo -e "${GREEN}==================================================================${NC}"
     echo -e "${GREEN} Restoration Complete! Platform is operational.                   ${NC}"
-    echo -e "${GREEN} Admin credentials: admin / ${ADMIN_PASS}                         ${NC}"
-    echo -e "${GREEN} (Forced password change is enabled for first login).             ${NC}"
+    echo -e "${GREEN} Admin login: see the restore summary above for the password state. ${NC}"
     echo -e "${GREEN}==================================================================${NC}"
 else
     echo -e "${YELLOW}Dry run complete. No database changes were applied.${NC}"

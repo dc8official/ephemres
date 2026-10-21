@@ -186,25 +186,20 @@ Every generated PDF byte stream is hashed prior to transmission:
 
 ### A. Non-Root Daemon Execution
 * `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
-* Daemons do not possess `sudo` or root privileges.
+* The only elevated action available to the service user is a sudoers rule (`/etc/sudoers.d/ephemres`, mode `0440`) allowing `systemctl start|stop|restart ephemres-flowd`, used when an administrator toggles flow ingestion in the Settings UI.
 
 ### B. Linux Capability Grants (`CAP_NET_RAW`)
 * Raw socket creation for ICMP echo requests (ping) and traceroute normally requires root privileges.
-* The systemd units grant only the capabilities each daemon needs, via `AmbientCapabilities` and a matching `CapabilityBoundingSet`:
+* The systemd units grant `CAP_NET_RAW` to each daemon process through `AmbientCapabilities`, so no file capability is placed on the Python interpreter:
 
-  | Unit | Capabilities |
-  | :--- | :--- |
-  | `ephemres-engine` | `CAP_NET_RAW` |
-  | `ephemres-flowd` | `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE` |
-  | `ephemres-api` | none granted by the unit (no `CapabilityBoundingSet`) |
+  | Unit | `AmbientCapabilities` | `CapabilityBoundingSet` |
+  | :--- | :--- | :--- |
+  | `ephemres-engine` | `CAP_NET_RAW` | `CAP_NET_RAW` |
+  | `ephemres-flowd` | `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE` | `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE` |
+  | `ephemres-api` | `CAP_NET_RAW` | not restricted: the flowd `sudo` rule in §9A needs `CAP_SETUID`/`CAP_SETGID` |
 
-* In addition, `deploy/install.sh` sets a file capability on the resolved virtualenv interpreter and on `traceroute`:
-  ```bash
-  setcap cap_net_raw+ep "$(readlink -f /opt/ephemres/venv/bin/python3)"
-  setcap cap_net_raw+ep "$(command -v traceroute)"
-  ```
-  > [!WARNING]
-  > A virtualenv's `python3` is a symlink to the system interpreter (for example `/usr/bin/python3.12`), so this file capability applies to **every** process that runs that interpreter on the host, not only Ephemres. The units above already grant `CAP_NET_RAW` to the daemons that need it; on hosts where other users can run Python, consider removing the interpreter file capability (`setcap -r "$(readlink -f /opt/ephemres/venv/bin/python3)"`).
+* `deploy/install.sh` and `deploy/upgrade.sh` set a file capability only on the dedicated `traceroute` binary (`setcap cap_net_raw+ep "$(command -v traceroute)"`), used as a fallback when in-process raw-socket tracing is unavailable.
+* Releases before this change also ran `setcap cap_net_raw+ep` on the resolved virtualenv interpreter. That interpreter is the system-wide Python (for example `/usr/bin/python3.12`), so the capability applied to every Python process on the host. `deploy/upgrade.sh` now removes it when it is exactly `cap_net_raw` (the value the installer set) and leaves any other file capabilities untouched.
 
 ### C. Systemd Service Isolation
 The production unit files (`deploy/ephemres-api.service`, `deploy/ephemres-engine.service`, and `deploy/ephemres-flowd.service`) currently apply:
