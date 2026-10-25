@@ -376,7 +376,7 @@ async def get_alert_history(
     offset = (page - 1) * page_size
     stmt = (
         select(AlertDeliveryLog)
-        .order_by(AlertDeliveryLog.timestamp.desc())
+        .order_by(AlertDeliveryLog.delivered_at.desc())
         .offset(offset)
         .limit(page_size)
     )
@@ -395,7 +395,7 @@ async def get_alert_history(
             status_code=log.status_code,
             retry_count=log.retry_count,
             response_message=log.response_message,
-            delivered_at=log.timestamp,
+            delivered_at=log.delivered_at,
         )
         for log in logs
     ]

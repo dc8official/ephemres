@@ -93,24 +93,14 @@ class AlertDeliveryLog(Base):
         nullable=True,
     )
 
-    # Network round-trip transmission latency in milliseconds
-    latency_ms: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-
-    # Dispatch timestamp (UTC)
-    timestamp: Mapped[datetime] = mapped_column(
+    # Dispatch timestamp (UTC). The column is `delivered_at` (migration 0007); keep the
+    # attribute name identical, since the ORM uses attribute names as column names.
+    delivered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
         index=True,
     )
-
-    @property
-    def delivered_at(self) -> datetime:
-        """Backward-compatible attribute alias for timestamp."""
-        return self.timestamp
 
     # Relational link to parent alert channel
     channel: Mapped["AlertChannel"] = relationship(  # noqa: F821

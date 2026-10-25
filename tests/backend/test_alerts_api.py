@@ -46,33 +46,23 @@ def test_alert_channel_create_schema():
     assert payload.channel_type == "SLACK"
 
 
-def test_alert_delivery_log_delivered_at_alias():
+def test_alert_delivery_log_model_matches_migration_0007():
+    """The table has delivered_at and no timestamp/latency_ms; selecting absent columns 500s."""
     from app.models.alert_delivery_log import AlertDeliveryLog
-    from datetime import datetime, timezone
-    from uuid import uuid4
 
-    now = datetime.now(timezone.utc)
-    log = AlertDeliveryLog(
-        id=uuid4(),
-        channel_id=uuid4(),
-        channel_name="Test",
-        endpoint_name="router1",
-        event_type="STATE_TRANSITION",
-        status="SUCCESS",
-        timestamp=now,
-    )
-    assert log.timestamp == now
-    assert log.delivered_at == now
+    assert set(AlertDeliveryLog.__table_columns__) == {
+        "id", "channel_id", "channel_name", "endpoint_id", "endpoint_name", "event_type",
+        "status", "status_code", "retry_count", "response_message", "delivered_at",
+    }
 
 
 @pytest.mark.anyio
-async def test_get_alert_history_compilation():
+async def test_get_alert_history_orders_by_delivered_at():
     from app.models.alert_delivery_log import AlertDeliveryLog
     from app.core.orm import select, CompileContext
 
-    stmt = select(AlertDeliveryLog).order_by(AlertDeliveryLog.timestamp.desc()).offset(0).limit(50)
-    ctx = CompileContext()
-    sql = stmt.compile(ctx)
-    assert "ORDER BY" in sql
-    assert "timestamp" in sql
-    assert "DESC" in sql
+    stmt = select(AlertDeliveryLog).order_by(AlertDeliveryLog.delivered_at.desc()).offset(0).limit(50)
+    sql = stmt.compile(CompileContext())
+    assert 'ORDER BY "alert_delivery_logs"."delivered_at" DESC' in sql
+    assert "latency_ms" not in sql
+    assert '"timestamp"' not in sql

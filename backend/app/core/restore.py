@@ -285,8 +285,7 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "status_code": "int4",
             "retry_count": "int4",
             "response_message": "text",
-            "latency_ms": "int4",
-            "timestamp": "timestamptz",
+            "delivered_at": "timestamptz",
         },
         "audit_logs": {
             "id": "uuid",
