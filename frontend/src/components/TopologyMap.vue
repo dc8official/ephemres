@@ -830,7 +830,6 @@ onUnmounted(() => {
   padding: 16px 20px;
   background: var(--bg-surface-selected);
   border-bottom: 1px solid var(--border-color);
-  backdrop-filter: blur(8px);
   z-index: 10;
 }
 
