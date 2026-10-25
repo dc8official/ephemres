@@ -244,7 +244,9 @@ async def get_fleet_summary(
         uptime_seconds = up_sec
         downtime_seconds = down_sec
         role = getattr(ep, "device_role", "ACTIVE_HOST")
-        if role == "FLOW_EXPORTER":
+        # Same rule as the endpoint list: PASSIVE means ICMP monitoring is off, whatever the
+        # device_role. A flow exporter with monitoring enabled reports its probed state.
+        if ep.monitoring_enabled is False:
             op_state = "PASSIVE"
             det_state = "PASSIVE"
             uptime_percentage = 100.0
@@ -272,7 +274,7 @@ async def get_fleet_summary(
 
     active_endpoints_count = sum(
         1 for ep in endpoints
-        if ep.monitoring_enabled and getattr(ep, "device_role", "ACTIVE_HOST") != "FLOW_EXPORTER"
+        if ep.monitoring_enabled
     )
     total_endpoints_count = len(endpoints)
     total_incident_count = sum(e.incident_count for e in endpoint_summaries)
@@ -280,8 +282,7 @@ async def get_fleet_summary(
 
     monitored_for_sla = [
         e for e in endpoint_summaries
-        if getattr(e, "device_role", "ACTIVE_HOST") != "FLOW_EXPORTER"
-        and getattr(e, "monitoring_enabled", True) is not False
+        if getattr(e, "monitoring_enabled", True) is not False
     ]
     fleet_sla = (
         round(

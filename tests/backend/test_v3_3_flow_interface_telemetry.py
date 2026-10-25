@@ -514,6 +514,50 @@ def test_reports_sla_excludes_flow_exporter(client):
         assert data["data"]["fleet_sla"] == 100.0
 
 
+def test_reports_monitored_flow_exporter_reports_probed_state(client):
+    """A flow exporter with ICMP monitoring enabled is not PASSIVE: real state, counted in SLA."""
+    test_client, mock_session = client
+
+    ep_flow = MagicMock()
+    ep_flow.id = uuid4()
+    ep_flow.hostname = "flow-router"
+    ep_flow.ip_address = "10.0.0.2"
+    ep_flow.device_type = "Router"
+    ep_flow.location = "Gateway"
+    ep_flow.description = "Flow Exporter"
+    ep_flow.monitoring_enabled = True
+    ep_flow.endpoint_status = "ACTIVE"
+    ep_flow.device_role = "FLOW_EXPORTER"
+    ep_flow.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    mock_ep_res = MagicMock()
+    mock_ep_res.scalars.return_value.all.return_value = [ep_flow]
+    m_cte = MagicMock()
+    m_cte.mappings.return_value = [
+        {
+            "endpoint_id": str(ep_flow.id),
+            "up_seconds": 12 * 86400,
+            "down_seconds": 12 * 86400,
+            "up_count": 50,
+            "down_count": 50,
+            "incident_count": 3,
+            "latest_operational_state": "DOWN",
+            "latest_detailed_state": "DOWN",
+        }
+    ]
+    mock_session.execute.side_effect = [mock_ep_res, m_cte]
+
+    with patch("app.routers.reports.get_service_gap_intervals", new_callable=AsyncMock, return_value=[]):
+        resp = test_client.get("/api/v1/reports/fleet-summary?start_date=2026-09-01T00:00:00Z&end_date=2026-09-25T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["active_endpoints_count"] == 1
+    summary = data["endpoints"][0]
+    assert summary["operational_state"] == "DOWN"
+    assert summary["incident_count"] == 3
+    assert data["fleet_sla"] < 100.0
+
+
 def test_enroll_flow_exporter_rejects_non_exporter_role(client):
     """An invalid device_role is a 422 validation error, not an IntegrityError from the DB check constraint."""
     test_client, mock_session = client

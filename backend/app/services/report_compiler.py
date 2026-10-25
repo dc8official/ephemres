@@ -217,8 +217,8 @@ async def compile_availability_report_data(
             uptime_seconds=up_sec,
         )
 
-        role = getattr(ep, "device_role", "ACTIVE_HOST")
-        if role == "FLOW_EXPORTER":
+        # PASSIVE means ICMP monitoring is off, whatever the device_role (matches the endpoint list).
+        if ep.monitoring_enabled is False:
             op_state = "PASSIVE"
             uptime_pct = 100.0
             inc_count = 0
