@@ -14,26 +14,6 @@ from app.models.rca_incident import EndpointRCAIncident
 from app.repositories.base import BaseRepository
 
 
-def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
-    """Safely converts input to float; returns default on None, empty string, or invalid numeric representation."""
-    if val is None or val == "":
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-def _safe_int(val: Any, default: int = 0) -> int:
-    """Safely converts input to int; returns default on None, empty string, or invalid representation."""
-    if val is None or val == "":
-        return default
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
-
-
 class EndpointRepository(BaseRepository[Endpoint]):
     """
     Repository for Endpoint querying, creation, updating, and diagnostic relations.
@@ -204,11 +184,11 @@ class EndpointRepository(BaseRepository[Endpoint]):
                 "updated_at": ep.updated_at,
                 "current_operational_state": row.current_operational_state,
                 "current_detailed_state": row.current_detailed_state,
-                "current_health_score": _safe_float(row.current_health_score, 100.0) if _safe_float(row.current_health_score) is not None else 100.0,
-                "avg_rtt_ms": _safe_float(row.avg_rtt_ms),
+                "current_health_score": float(row.current_health_score),
+                "avg_rtt_ms": float(row.avg_rtt_ms) if row.avg_rtt_ms is not None else None,
                 "last_seen": row.last_seen,
-                "uptime_seconds": _safe_int(row.uptime_seconds, 0),
-                "up_events_count": _safe_int(row.up_events_count, 0),
+                "uptime_seconds": int(row.uptime_seconds),
+                "up_events_count": int(row.up_events_count),
             })
         return data
 
@@ -319,11 +299,11 @@ class EndpointRepository(BaseRepository[Endpoint]):
             "updated_at": ep.updated_at,
             "current_operational_state": row.current_operational_state,
             "current_detailed_state": row.current_detailed_state,
-            "current_health_score": _safe_float(row.current_health_score, 100.0) if _safe_float(row.current_health_score) is not None else 100.0,
-            "avg_rtt_ms": _safe_float(row.avg_rtt_ms),
+            "current_health_score": float(row.current_health_score),
+            "avg_rtt_ms": float(row.avg_rtt_ms) if row.avg_rtt_ms is not None else None,
             "last_seen": row.last_seen,
-            "uptime_seconds": _safe_int(row.uptime_seconds, 0),
-            "up_events_count": _safe_int(row.up_events_count, 0),
+            "uptime_seconds": int(row.uptime_seconds),
+            "up_events_count": int(row.up_events_count),
         }
 
     async def create_endpoint(self, **data: Any) -> Endpoint:

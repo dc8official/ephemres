@@ -2758,11 +2758,16 @@ class AsyncSession:
 
         for rec in records:
             rec_dict = dict(rec)
+            rec_values = list(rec.values())
             slot_values: List[Any] = []
             row_mapping: Dict[str, Any] = {}
+            # Index of the slot's first column in the record: a model slot spans all its table
+            # columns, every other slot one column; None once a `"x".*` projection hides the width.
+            rec_offset: Optional[int] = 0
 
             # Populate model or scalar for each entity slot
-            for slot_type, target in entity_slots:
+            for slot_index, (slot_type, target) in enumerate(entity_slots):
+                entity = stmt._select_entities[slot_index]
                 if slot_type == "model":
                     model_cls = target
                     inst = model_cls()
@@ -2794,15 +2799,27 @@ class AsyncSession:
                         users_to_resolve_role.append(inst)
                     elif model_cls.__name__ == "UserSession" and getattr(inst, "user", None) is None:
                         sessions_to_resolve_user.append(inst)
+                    if rec_offset is not None:
+                        rec_offset += len(model_cls.__table_columns__)
                 else:
                     col_name = target
-                    val = rec_dict.get(col_name)
-                    if val is None and isinstance(col_name, str):
-                        val = rec_dict.get(col_name.lower())
-                    if val is None and len(slot_values) < len(rec):
-                        val = list(rec.values())[len(slot_values)]
+                    # A column present by name is authoritative even when it is NULL. Only fall back
+                    # to position when the name is absent (e.g. an unlabeled expression); the slot
+                    # index is not the record index once a model slot has expanded to many columns.
+                    if col_name in rec_dict:
+                        val = rec_dict[col_name]
+                    elif isinstance(col_name, str) and col_name.lower() in rec_dict:
+                        val = rec_dict[col_name.lower()]
+                    elif rec_offset is not None and rec_offset < len(rec_values):
+                        val = rec_values[rec_offset]
+                    else:
+                        val = None
                     slot_values.append(val)
                     row_mapping[col_name] = val
+                    if isinstance(entity, (CTE, Subquery)):
+                        rec_offset = None
+                    elif rec_offset is not None:
+                        rec_offset += 1
 
             # Also add all record keys to mapping for raw lookup access
             for k, v in rec_dict.items():
