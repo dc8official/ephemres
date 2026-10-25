@@ -85,6 +85,8 @@ CYCLE_SECONDS = 60.0
 PING_TIMEOUT_SECONDS = 2.0
 # Worst-case sweep must leave this much of the cycle free for the DB write and slot realignment.
 MIN_CYCLE_HEADROOM_SECONDS = 5.0
+# Re-trace a still-failing endpoint at most this often unless its confirmed state changes.
+INCIDENT_TRACE_COOLDOWN_SECONDS = 900.0
 DEFAULT_PING_COUNT = 5
 DEFAULT_PING_INTERVAL_SECONDS = 8.0
 
@@ -215,13 +217,17 @@ async def monitor_endpoint(
                             current_state, result, db, baseline=baseline
                         )
 
-                    # PER-02: Check operational toggles and bound diagnostic trace queue (max 10 in flight)
+                    # PER-02: Check operational toggles and bound diagnostic trace queue (max 10 in flight).
+                    # One trace per endpoint at a time, and only on a state change or once per cooldown.
                     if result.failed_count > 0:
                         toggles = endpoint_registry.get_toggles(endpoint_id)
                         if toggles.get("allow_incident_trace", True):
-                            if endpoint_registry.has_active_diagnostic_task(endpoint_id):
+                            traced_state = new_state.confirmed_detailed_state
+                            if not endpoint_registry.incident_trace_due(
+                                endpoint_id, traced_state, INCIDENT_TRACE_COOLDOWN_SECONDS
+                            ):
                                 logger.debug(
-                                    "Skipping incident diagnostic trace for %s: diagnostic trace already in-flight",
+                                    "Skipping incident diagnostic trace for %s: in flight or within cooldown",
                                     ip_address,
                                 )
                             else:
@@ -238,6 +244,7 @@ async def monitor_endpoint(
                                     endpoint_registry.register_diagnostic_task(
                                         endpoint_id, task
                                     )
+                                    endpoint_registry.record_incident_trace(endpoint_id, traced_state)
                                 else:
                                     logger.warning(
                                         "Skipping incident diagnostic trace for %s: diagnostic queue full (%d active)",

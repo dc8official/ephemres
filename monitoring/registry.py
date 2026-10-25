@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ class EndpointRegistry:
         self._endpoints: Dict[UUID, MonitoredEndpoint] = {}
         self._running_tasks: Dict[UUID, asyncio.Task] = {}
         self._diagnostic_tasks: Dict[UUID, Set[asyncio.Task]] = {}
+        # endpoint_id -> (time.monotonic() of the last incident trace, detailed state it traced)
+        self._last_incident_trace: Dict[UUID, Tuple[float, str]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -241,6 +244,7 @@ class EndpointRegistry:
 
             # 3. Evict from memory
             self._endpoints.pop(endpoint_id, None)
+            self._last_incident_trace.pop(endpoint_id, None)
 
     def register_diagnostic_task(self, endpoint_id: UUID, task: asyncio.Task) -> None:
         """Tracks in-flight diagnostic tasks for lifetime management."""
@@ -263,6 +267,25 @@ class EndpointRegistry:
         if not tasks:
             return False
         return any(not t.done() for t in tasks)
+
+    def incident_trace_due(self, endpoint_id: UUID, detailed_state: str, cooldown_seconds: float) -> bool:
+        """True if a failing endpoint should get a new incident trace now.
+
+        Not while one is in flight; otherwise when its confirmed state differs from the last traced
+        one, or `cooldown_seconds` have passed. Without this a DOWN endpoint was re-traced on every
+        failed sweep, forever.
+        """
+        if self.has_active_diagnostic_task(endpoint_id):
+            return False
+        last = self._last_incident_trace.get(endpoint_id)
+        if last is None:
+            return True
+        last_at, last_state = last
+        return detailed_state != last_state or time.monotonic() - last_at >= cooldown_seconds
+
+    def record_incident_trace(self, endpoint_id: UUID, detailed_state: str) -> None:
+        """Marks an incident trace as started for `detailed_state` (see incident_trace_due)."""
+        self._last_incident_trace[endpoint_id] = (time.monotonic(), detailed_state)
 
     def get_endpoint(self, endpoint_id: UUID) -> Optional[MonitoredEndpoint]:
         """Retrieves cached endpoint with operational toggles without database locks."""
