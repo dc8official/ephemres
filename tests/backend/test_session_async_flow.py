@@ -55,6 +55,27 @@ async def test_session_async_methods_lifecycle():
     assert user_id not in _active_user_sessions
 
 
+@pytest.mark.anyio
+async def test_invalidate_all_user_sessions_async_with_except_jti():
+    user_id = str(uuid4())
+    jti_keep = "current-session"
+    jti_drop = "other-session"
+    store = driver_manager.get_session_store()
+
+    await register_session_async(user_id, jti_keep, max_sessions=2)
+    await register_session_async(user_id, jti_drop, max_sessions=2)
+
+    assert await store.is_session_active(user_id, jti_keep) is True
+    assert await store.is_session_active(user_id, jti_drop) is True
+
+    # Invalidate all except jti_keep
+    await invalidate_all_user_sessions_async(user_id, except_jti=jti_keep)
+
+    assert await store.is_session_active(user_id, jti_keep) is True
+    assert await store.is_session_active(user_id, jti_drop) is False
+    assert _active_user_sessions.get(user_id) == [jti_keep]
+
+
 def test_login_then_immediate_authenticated_request_200():
     app = EphemresApp()
     user_id = uuid4()

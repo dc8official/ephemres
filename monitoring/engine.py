@@ -219,25 +219,31 @@ async def monitor_endpoint(
                     if result.failed_count > 0:
                         toggles = endpoint_registry.get_toggles(endpoint_id)
                         if toggles.get("allow_incident_trace", True):
-                            active_diag_count = sum(
-                                len(s) for s in endpoint_registry._diagnostic_tasks.values()
-                            )
-                            if active_diag_count < 10:
-                                task = safe_create_task(
-                                    trigger_incident_diagnostic_trace(
-                                        endpoint_id, ip_address
-                                    ),
-                                    "incident_diagnostic_trace",
-                                )
-                                endpoint_registry.register_diagnostic_task(
-                                    endpoint_id, task
+                            if endpoint_registry.has_active_diagnostic_task(endpoint_id):
+                                logger.debug(
+                                    "Skipping incident diagnostic trace for %s: diagnostic trace already in-flight",
+                                    ip_address,
                                 )
                             else:
-                                logger.warning(
-                                    "Skipping incident diagnostic trace for %s: diagnostic queue full (%d active)",
-                                    ip_address,
-                                    active_diag_count,
+                                active_diag_count = sum(
+                                    len(s) for s in endpoint_registry._diagnostic_tasks.values()
                                 )
+                                if active_diag_count < 10:
+                                    task = safe_create_task(
+                                        trigger_incident_diagnostic_trace(
+                                            endpoint_id, ip_address
+                                        ),
+                                        "incident_diagnostic_trace",
+                                    )
+                                    endpoint_registry.register_diagnostic_task(
+                                        endpoint_id, task
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Skipping incident diagnostic trace for %s: diagnostic queue full (%d active)",
+                                        ip_address,
+                                        active_diag_count,
+                                    )
 
                     await db.commit()
 

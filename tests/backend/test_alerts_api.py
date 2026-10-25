@@ -44,3 +44,35 @@ def test_alert_channel_create_schema():
     )
     assert payload.name == "Global NOC Alerts"
     assert payload.channel_type == "SLACK"
+
+
+def test_alert_delivery_log_delivered_at_alias():
+    from app.models.alert_delivery_log import AlertDeliveryLog
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    now = datetime.now(timezone.utc)
+    log = AlertDeliveryLog(
+        id=uuid4(),
+        channel_id=uuid4(),
+        channel_name="Test",
+        endpoint_name="router1",
+        event_type="STATE_TRANSITION",
+        status="SUCCESS",
+        timestamp=now,
+    )
+    assert log.timestamp == now
+    assert log.delivered_at == now
+
+
+@pytest.mark.anyio
+async def test_get_alert_history_compilation():
+    from app.models.alert_delivery_log import AlertDeliveryLog
+    from app.core.orm import select, CompileContext
+
+    stmt = select(AlertDeliveryLog).order_by(AlertDeliveryLog.timestamp.desc()).offset(0).limit(50)
+    ctx = CompileContext()
+    sql = stmt.compile(ctx)
+    assert "ORDER BY" in sql
+    assert "timestamp" in sql
+    assert "DESC" in sql

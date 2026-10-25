@@ -120,7 +120,7 @@
         <!-- Tab 1: ICMP Health & Diagnostics Panel -->
         <div v-show="activePerspective === 'icmp'" id="panel-icmp" role="tabpanel" aria-labelledby="tab-icmp">
           <!-- Flow Exporter Passive Telemetry Banner -->
-          <div v-if="endpoint.device_role === 'FLOW_EXPORTER'" class="passive-exporter-banner">
+          <div v-if="endpoint.device_role === 'FLOW_EXPORTER' && !endpoint.monitoring_enabled" class="passive-exporter-banner">
             <div class="banner-content">
               <i class="pi pi-info-circle banner-icon"></i>
               <div class="banner-body">

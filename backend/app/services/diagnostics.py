@@ -368,6 +368,7 @@ async def _run_raw_icmp_traceroute(
     loop.add_reader(fd, _on_readable)
     hops: list[dict] = []
     seq_counter = 0
+    consecutive_timeouts = 0
 
     try:
         for ttl in range(1, max_hops + 1):
@@ -405,6 +406,13 @@ async def _run_raw_icmp_traceroute(
 
             if reached_target:
                 break
+
+            if hop_ip is None:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= 4:
+                    break
+            else:
+                consecutive_timeouts = 0
     finally:
         try:
             loop.remove_reader(fd)
@@ -463,7 +471,7 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
 
     stdout_str = ""
 
-    # 3. Primary CLI fallback: ICMP traceroute (-I) with 2 probes, 3s timeout
+    # 3. Primary CLI fallback: ICMP traceroute (-I) with 2 probes, 1s wait, max 20 hops
     try:
         proc = await asyncio.create_subprocess_exec(
             "traceroute",
@@ -471,9 +479,9 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
             "-q",
             "2",
             "-w",
-            "3",
+            "1",
             "-m",
-            "30",
+            "20",
             "-I",
             "--",
             target_ip,
@@ -481,7 +489,7 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
             if proc.returncode == 0:
                 stdout_str = stdout.decode("utf-8", errors="ignore")
         except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -503,16 +511,16 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
                 "-q",
                 "2",
                 "-w",
-                "3",
+                "1",
                 "-m",
-                "30",
+                "20",
                 "--",
                 target_ip,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
                 if proc.returncode == 0:
                     stdout_str = stdout.decode("utf-8", errors="ignore")
             except (asyncio.TimeoutError, asyncio.CancelledError):

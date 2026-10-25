@@ -322,7 +322,8 @@ async def change_password(
     hashed = await hash_password_async(clean_new_pass)
 
     await auth_repo.update_password(user_uuid, hashed, must_change_password=False)
-    await invalidate_all_user_sessions_async(str(user_uuid))
+    current_jti = current_user.get("jti")
+    await invalidate_all_user_sessions_async(str(user_uuid), except_jti=current_jti)
     await auth_repo.create_audit_log(
         user_id=user_uuid,
         action="USER:CHANGE_PASSWORD",

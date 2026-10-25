@@ -38,7 +38,7 @@ class SessionStore(ABC):
         pass
 
     @abstractmethod
-    async def invalidate_all_user_sessions(self, user_id: str) -> None:
+    async def invalidate_all_user_sessions(self, user_id: str, except_jti: Optional[str] = None) -> None:
         pass
 
     @abstractmethod
@@ -178,7 +178,7 @@ class PostgresSessionStore(SessionStore):
                 await db.rollback()
                 logger.error("PostgresSessionStore.invalidate_session error: %s", e)
 
-    async def invalidate_all_user_sessions(self, user_id: str) -> None:
+    async def invalidate_all_user_sessions(self, user_id: str, except_jti: Optional[str] = None) -> None:
         try:
             u_uuid = UUID(str(user_id))
         except (ValueError, TypeError):
@@ -186,9 +186,10 @@ class PostgresSessionStore(SessionStore):
 
         async with self.session_factory() as db:
             try:
-                await db.execute(
-                    delete(UserSession).where(UserSession.user_id == u_uuid)
-                )
+                stmt = delete(UserSession).where(UserSession.user_id == u_uuid)
+                if except_jti:
+                    stmt = stmt.where(UserSession.jti != except_jti)
+                await db.execute(stmt)
                 await db.commit()
             except Exception as e:
                 await db.rollback()
@@ -275,10 +276,21 @@ class FastStoreSessionStore(SessionStore):
             logger.error("FastStoreSessionStore.invalidate_session error: %s", e)
             raise
 
-    async def invalidate_all_user_sessions(self, user_id: str) -> None:
+    async def invalidate_all_user_sessions(self, user_id: str, except_jti: Optional[str] = None) -> None:
         key = self._get_key(user_id)
         try:
-            await self.store.delete(key)
+            if except_jti:
+                raw = await self.store.get(key)
+                if raw:
+                    sessions: List[str] = [s for s in json.loads(raw) if s == except_jti]
+                    if sessions:
+                        ttl = await self.store.ttl(key)
+                        ex = max(ttl, 60) if ttl > 0 else 86400
+                        await self.store.set(key, json.dumps(sessions), ex=ex)
+                    else:
+                        await self.store.delete(key)
+            else:
+                await self.store.delete(key)
         except Exception as e:
             logger.error("FastStoreSessionStore.invalidate_all_user_sessions error: %s", e)
             raise

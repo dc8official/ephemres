@@ -75,5 +75,23 @@ class TestEndpointCreationAsync(unittest.TestCase):
         mock_refresh_route.assert_called_once()
 
 
+class TestSafeNumericParsing(unittest.TestCase):
+    def test_safe_float_and_safe_int(self) -> None:
+        from app.repositories.endpoint_repo import _safe_float, _safe_int
+
+        self.assertIsNone(_safe_float(""))
+        self.assertIsNone(_safe_float("   "))
+        self.assertIsNone(_safe_float(None))
+        self.assertEqual(_safe_float("12.34"), 12.34)
+        self.assertEqual(_safe_float(55.5), 55.5)
+        self.assertEqual(_safe_float("not-a-number", default=99.0), 99.0)
+
+        self.assertEqual(_safe_int(""), 0)
+        self.assertEqual(_safe_int(None), 0)
+        self.assertEqual(_safe_int("42"), 42)
+        self.assertEqual(_safe_int(100), 100)
+        self.assertEqual(_safe_int("bad", default=5), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

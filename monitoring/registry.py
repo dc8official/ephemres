@@ -257,6 +257,13 @@ class EndpointRegistry:
 
         task.add_done_callback(_cleanup)
 
+    def has_active_diagnostic_task(self, endpoint_id: UUID) -> bool:
+        """Returns True if there is currently an in-flight diagnostic trace task for this endpoint."""
+        tasks = self._diagnostic_tasks.get(endpoint_id)
+        if not tasks:
+            return False
+        return any(not t.done() for t in tasks)
+
     def get_endpoint(self, endpoint_id: UUID) -> Optional[MonitoredEndpoint]:
         """Retrieves cached endpoint with operational toggles without database locks."""
         return self._endpoints.get(endpoint_id)

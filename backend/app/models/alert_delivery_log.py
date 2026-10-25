@@ -107,6 +107,11 @@ class AlertDeliveryLog(Base):
         index=True,
     )
 
+    @property
+    def delivered_at(self) -> datetime:
+        """Backward-compatible attribute alias for timestamp."""
+        return self.timestamp
+
     # Relational link to parent alert channel
     channel: Mapped["AlertChannel"] = relationship(  # noqa: F821
         "AlertChannel",

@@ -464,29 +464,41 @@ def invalidate_session(user_id: str, jti: Optional[str]) -> None:
         pass
 
 
-async def invalidate_all_user_sessions_async(user_id: str) -> None:
-    """Invalidates all sessions for a user, awaiting backing store."""
+async def invalidate_all_user_sessions_async(user_id: str, except_jti: Optional[str] = None) -> None:
+    """Invalidates all sessions for a user (optionally preserving a specific JTI), awaiting backing store."""
     u_id = str(user_id)
-    _active_user_sessions.pop(u_id, None)
+    if except_jti:
+        if u_id in _active_user_sessions:
+            _active_user_sessions[u_id] = [
+                s for s in _active_user_sessions[u_id] if s == except_jti
+            ]
+    else:
+        _active_user_sessions.pop(u_id, None)
 
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
-        await store.invalidate_all_user_sessions(u_id)
+        await store.invalidate_all_user_sessions(u_id, except_jti=except_jti)
     except Exception:
         logger.exception("Failed to invalidate all sessions for user %s in store", u_id)
 
 
-def invalidate_all_user_sessions(user_id: str) -> None:
+def invalidate_all_user_sessions(user_id: str, except_jti: Optional[str] = None) -> None:
     """Invalidates all sessions for a user (synchronous backward compatibility)."""
     u_id = str(user_id)
-    _active_user_sessions.pop(u_id, None)
+    if except_jti:
+        if u_id in _active_user_sessions:
+            _active_user_sessions[u_id] = [
+                s for s in _active_user_sessions[u_id] if s == except_jti
+            ]
+    else:
+        _active_user_sessions.pop(u_id, None)
 
     try:
         from app.services.driver_manager import driver_manager
         loop = asyncio.get_running_loop()
         store = driver_manager.get_session_store()
-        task = loop.create_task(store.invalidate_all_user_sessions(u_id))
+        task = loop.create_task(store.invalidate_all_user_sessions(u_id, except_jti=except_jti))
         _background_session_tasks.add(task)
         task.add_done_callback(_handle_session_task_done)
     except Exception:

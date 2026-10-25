@@ -25,6 +25,16 @@ from app.services.uptime_calculator import (
 logger = logging.getLogger(__name__)
 
 
+def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    """Safely converts input to float; returns default on None, empty string, or invalid numeric representation."""
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 async def _bg_run_initial_discovery(endpoint_id: UUID, ip_address: str) -> None:
     from app.database import AsyncSessionLocal
     from app.services.baseline_route import refresh_baseline_route
@@ -221,9 +231,7 @@ async def list_endpoints(
             "current_operational_state": row["current_operational_state"],
             "current_detailed_state": row["current_detailed_state"],
             "current_health_score": row["current_health_score"],
-            "avg_rtt_ms": (
-                float(row["avg_rtt_ms"]) if row.get("avg_rtt_ms") is not None else None
-            ),
+            "avg_rtt_ms": _safe_float(row.get("avg_rtt_ms")),
             "last_seen": row["last_seen"],
             "uptime_percentage_24h": uptime_percentage,
         })
@@ -298,9 +306,7 @@ async def get_endpoint(
         "current_operational_state": row["current_operational_state"],
         "current_detailed_state": row["current_detailed_state"],
         "current_health_score": row["current_health_score"],
-        "avg_rtt_ms": (
-            float(row["avg_rtt_ms"]) if row.get("avg_rtt_ms") is not None else None
-        ),
+        "avg_rtt_ms": _safe_float(row.get("avg_rtt_ms")),
         "last_seen": row["last_seen"],
         "uptime_percentage_24h": uptime_percentage,
     }
