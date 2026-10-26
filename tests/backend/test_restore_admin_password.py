@@ -34,6 +34,8 @@ def _dump(tmp_path: Path, users: list[tuple[str, str]]) -> Path:
         )
     lines.append("\\.")
     path = tmp_path / "backup.sql"
+    # Ends like a completed pg_dump; restore refuses dumps without the trailer
+    lines += ["--", "-- PostgreSQL database dump complete", "--"]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 

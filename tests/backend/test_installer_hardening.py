@@ -43,10 +43,15 @@ def test_restore_script_syntax_and_key_parsing():
     proc = subprocess.run(["bash", "-n", str(restore_sh)], capture_output=True, text=True)
     assert proc.returncode == 0, f"bash -n deploy/restore.sh failed:\n{proc.stderr}"
 
-    # 2. Verify quoting fix in SECRET_KEY parsing
+    # 2. The previous SECRET_KEY is discovered by app.core.restore (<backup>.key first, quotes
+    # stripped there); restore.sh must not pass the current install's key off as the old one.
     content = restore_sh.read_text(encoding="utf-8")
-    assert 'tr -d \'"\' | tr -d "\'"' in content or 'tr -d \'"\' | tr -d "\'"' in content
-    assert "tr -d '\"'\\''" not in content
+    assert "SECRET_KEY=" not in content.replace('OLD_SECRET_KEY="', "")
+    assert "/etc/ephemres/ephemres.env;" not in content
+    assert "${ALLOW_INCOMPLETE}" in content
+    # 3. A failed restore still restarts the services before exiting non-zero
+    assert content.index("|| RESTORE_STATUS=$?") < content.index("systemctl restart ephemres-api ephemres-engine")
+    assert content.index("systemctl restart ephemres-api ephemres-engine") < content.index('exit "${RESTORE_STATUS}"')
 
 
 def test_uninstall_script_purge_flag():

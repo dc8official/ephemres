@@ -27,9 +27,16 @@ To solve this, Ephemres provides a dedicated Cross-Version Database Restoration 
 
 Automated pre-upgrade and decommissioning backups are generated in plaintext SQL format at:
 ```bash
-/var/backups/ephemres/ephemres_backup_<YYYYMMDD_HHMMSS>.sql
+/var/backups/ephemres/ephemres_backup_<YYYYMMDD_HHMMSS>.sql                  # upgrade.sh
+/var/backups/ephemres/ephemres_decommission_backup_<YYYYMMDD_HHMMSS>.sql     # uninstall.sh
 ```
 *(Legacy backups from earlier versions may be located in `/var/backups/netmon/` or `/root/`)*
+
+Each backup is only kept once `pg_dump` has finished it (its last lines contain
+`-- PostgreSQL database dump complete`); `uninstall.sh` refuses `--purge-data` when the backup fails,
+unless `--force-purge` is given. Next to each backup, a `<backup>.key` file (`0600`) holds the
+encryption key of the install that made it. Keep the two together: `restore.sh` needs the key to
+re-encrypt alert channel secrets once the old install and its `/etc/ephemres` are gone.
 
 To list all available backups sorted by modification time:
 ```bash
@@ -52,8 +59,9 @@ sudo bash /opt/ephemres/deploy/restore.sh [BACKUP_FILE] [OPTIONS]
 | :--- | :--- | :--- |
 | `--backup-file <path>` | Path to plaintext `.sql` or gzipped `.sql.gz` backup archive | Auto-detected / Interactive prompt |
 | `--admin-password <pass>` | New password for the `admin` account, which must be changed at first login. Applied whatever the backup's era (see step 5 below). A value on the command line is visible to other local users in the process list; prefer the prompt or `EPHEMRES_RESTORE_ADMIN_PASSWORD` | Interactive prompt; leave blank to keep the backed-up admin password |
-| `--old-secret-key <key>` | Previous `SECRET_KEY` for re-encrypting alert channel webhooks (or set `OLD_SECRET_KEY`) | Auto-detected from `.env.bak` |
+| `--old-secret-key <key>` | Previous `SECRET_KEY` for re-encrypting alert channel webhooks (or set `OLD_SECRET_KEY`) | `<backup>.key`, else an earlier netmon install's env files; without a key, encrypted channels are restored disabled |
 | `--skip-telemetry` | Skip historical hypertable metrics for fast configuration restore | `false` |
+| `--allow-incomplete` | Restore a backup that lacks `pg_dump`'s completion trailer (it was cut short; its later tables, including users and endpoints, are missing) | Refused |
 | `--dry-run` | Parse and validate backup without committing changes to PostgreSQL | `false` |
 
 ### Step-by-Step Restoration Procedure
@@ -82,8 +90,9 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
    - `admin` without a password: a backed-up `$scrypt$` password is kept unchanged. A legacy (pre-`v3.3.2v`, non-scrypt) admin hash is replaced with a random temporary password, recorded in the report below.
    - Every other account with a legacy (non-`$scrypt$`) hash: assigned a random temporary password with `must_change_password = TRUE`. Accounts that already have `$scrypt$` hashes keep their backed-up passwords.
    - Temporary passwords are written to a root-only (`0600`) report, `/opt/ephemres/legacy_password_resets.txt` (override with `EPHEMRES_RESET_REPORT`). The restore summary prints its path and states which of the admin cases above applied. Distribute the passwords securely, then delete the file.
-6. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore*`).
-7. **Daemon Resumption:** Restarts API and engine daemons and runs health verification.
+6. **Continuous Aggregate Rebuild:** Refreshes `flow_hourly_rollups`, `flow_daily_rollups` and the node baselines over the whole restored history; their policies only look back 3, 7 and 28 days.
+7. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore*`).
+8. **Daemon Resumption:** Restarts API and engine daemons, also when the restore failed, so the platform does not stay down.
 
 ---
 

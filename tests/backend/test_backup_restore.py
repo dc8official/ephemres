@@ -30,6 +30,15 @@ from app.core.restore import (
 from app.seed_admin import seed_admin
 
 
+# pg_dump ends every finished dump with this; restore refuses dumps without it
+PG_DUMP_TRAILER = "\n--\n-- PostgreSQL database dump complete\n--\n\n"
+
+
+def _write_dump(path: Path, content: str) -> None:
+    """Writes a fixture dump that ends the way a completed pg_dump does."""
+    path.write_text(content + PG_DUMP_TRAILER, encoding="utf-8")
+
+
 class MockDbConnection:
     """Mock asyncpg connection recording all executed queries and parameter bindings."""
 
@@ -201,7 +210,7 @@ ev000000-0000-0000-0000-000000000001	e0000000-0000-0000-0000-000000000001	UP	HEA
 \\.
 """
     dump_file = tmp_path / "backup_v3.1.35s.sql"
-    dump_file.write_text(dump_content, encoding="utf-8")
+    _write_dump(dump_file, dump_content)
 
     # Target v3.3.2v+ schema includes the new flow and role columns
     mock_conn = MockDbConnection(get_target_table_columns.__wrapped__(None) if hasattr(get_target_table_columns, "__wrapped__") else {
@@ -322,7 +331,7 @@ COPY _timescaledb_internal._hyper_3_1_chunk (bucket, exporter_id, interface_idx,
 \\.
 """
     dump_file = tmp_path / "backup_v3.3.0.sql"
-    dump_file.write_text(dump_content, encoding="utf-8")
+    _write_dump(dump_file, dump_content)
 
     from app.core.restore import _get_default_v332_schema
     mock_conn = MockDbConnection(_get_default_v332_schema())
@@ -382,7 +391,7 @@ e0000000-0000-0000-0000-000000000003	172.16.0.1	fw-core	FIREWALL	DC2	Firewall	t	
     gz_file = tmp_path / "backup.sql.gz"
     import gzip
     with gzip.open(gz_file, "wt", encoding="utf-8") as gf:
-        gf.write(raw_sql)
+        gf.write(raw_sql + PG_DUMP_TRAILER)
 
     mock_conn = MockDbConnection({
         "endpoints": {"id": "uuid", "ip_address": "inet", "hostname": "varchar", "device_type": "varchar", "location": "varchar", "description": "text", "monitoring_enabled": "bool", "endpoint_status": "varchar", "created_by": "uuid", "created_at": "timestamptz", "updated_at": "timestamptz"},
@@ -475,7 +484,7 @@ ch000000-0000-0000-0000-000000000099	Broken Secret Channel	WEBHOOK	t	{corrupt_se
 \\.
 """
     dump_file = tmp_path / "broken_channel.sql"
-    dump_file.write_text(dump_content, encoding="utf-8")
+    _write_dump(dump_file, dump_content)
 
     mock_conn = MockDbConnection({
         "alert_channels": {"id": "uuid", "name": "varchar", "channel_type": "varchar", "is_enabled": "bool", "config": "text", "endpoint_ids": "jsonb", "subnet_filters": "jsonb", "severity_filters": "jsonb", "created_at": "timestamptz", "updated_at": "timestamptz"},
@@ -515,7 +524,7 @@ ev000000-0000-0000-0000-000000000002	ffffffff-ffff-ffff-ffff-ffffffffffff	DOWN	O
 \\.
 """
     dump_file = tmp_path / "custom_role.sql"
-    dump_file.write_text(dump_content, encoding="utf-8")
+    _write_dump(dump_file, dump_content)
 
     mock_conn = MockDbConnection({
         "roles": {"id": "uuid", "role_name": "varchar", "description": "text", "created_at": "timestamptz"},
@@ -603,7 +612,7 @@ u0000000-0000-0000-0000-000000000001	user_minimal	2026-01-01 00:00:00+00
 \\.
 """
     dump_file = tmp_path / "minimal_user.sql"
-    dump_file.write_text(dump_content, encoding="utf-8")
+    _write_dump(dump_file, dump_content)
 
     mock_conn_minimal = MockDbConnection({
         "users": {"id": "uuid", "username": "varchar", "created_at": "timestamptz"},
@@ -626,7 +635,7 @@ u0000000-0000-0000-0000-000000000002	user_full	$scrypt$ln=14,r=8,p=1$already_scr
 \\.
 """
     dump_file_full = tmp_path / "full_user.sql"
-    dump_file_full.write_text(dump_content_full, encoding="utf-8")
+    _write_dump(dump_file_full, dump_content_full)
 
     mock_conn_full = MockDbConnection({
         "roles": {"id": "uuid", "role_name": "varchar"},
@@ -733,7 +742,7 @@ class DecodingMockDbConnection(MockDbConnection):
 
 def test_scan_maps_compressed_chunks_through_the_catalog(tmp_path: Path):
     dump_file = tmp_path / "compressed.sql"
-    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+    _write_dump(dump_file, COMPRESSED_DUMP)
 
     chunk_to_parent, _, compressed_chunks = scan_backup_metadata_and_configs(dump_file)
 
@@ -786,7 +795,7 @@ COPY _timescaledb_internal.compress_hyper_2_4_chunk (endpoint_id, id, operationa
 \\.
 """
     dump_file = tmp_path / "compressed_legacy.sql"
-    dump_file.write_text(dump, encoding="utf-8")
+    _write_dump(dump_file, dump)
 
     chunk_to_parent, _, compressed_chunks = scan_backup_metadata_and_configs(dump_file)
 
@@ -801,7 +810,7 @@ COPY _timescaledb_internal.compress_hyper_2_4_chunk (endpoint_id, id, operationa
 @pytest.mark.anyio
 async def test_compressed_chunks_are_decoded_on_the_target(tmp_path: Path):
     dump_file = tmp_path / "compressed.sql"
-    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+    _write_dump(dump_file, COMPRESSED_DUMP)
     mock_conn = DecodingMockDbConnection(ENDPOINT_EVENTS_TARGET, can_decode=True)
 
     summary = await reconcile_and_restore_database(conn=mock_conn, backup_path=dump_file)
@@ -833,7 +842,7 @@ async def test_compressed_chunks_are_decoded_on_the_target(tmp_path: Path):
 @pytest.mark.anyio
 async def test_compressed_chunks_are_skipped_when_target_cannot_decode(tmp_path: Path):
     dump_file = tmp_path / "compressed.sql"
-    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+    _write_dump(dump_file, COMPRESSED_DUMP)
     mock_conn = DecodingMockDbConnection(ENDPOINT_EVENTS_TARGET, can_decode=False)
 
     summary = await reconcile_and_restore_database(conn=mock_conn, backup_path=dump_file)

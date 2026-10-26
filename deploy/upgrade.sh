@@ -35,6 +35,8 @@ echo -e "${BLUE}================================================================
 
 # Resolve Script and Project Root Directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=backup_lib.sh
+source "${SCRIPT_DIR}/backup_lib.sh"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INSTALL_DIR="/opt/ephemres"
 REPO_URL="${EPHEMRES_REPO_URL:-https://github.com/dc8official/ephemres.git}"
@@ -105,21 +107,15 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     chmod 775 "${BACKUP_DIR}"
     echo -e "${GREEN}[INFO] Creating timestamped database dump at ${BACKUP_FILE}...${NC}"
     
-    BACKUP_SUCCESS=0
-    if PGPASSWORD="${DB_PASS}" pg_dump -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -F p -f "${BACKUP_FILE}" 2>/dev/null; then
-        BACKUP_SUCCESS=1
-    elif command -v sudo &>/dev/null && id -u postgres &>/dev/null; then
-        echo -e "${YELLOW}[WARN] Non-superuser connection slots exhausted. Attempting fallback via postgres superuser...${NC}"
-        # Terminate any orphaned/idle connections holding database slots
-        sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DB_NAME}' AND pid <> pg_backend_pid();" &>/dev/null || true
-        if sudo -u postgres pg_dump -d "${DB_NAME}" -F p > "${BACKUP_FILE}"; then
-            BACKUP_SUCCESS=1
-        fi
-    fi
-
-    if [[ ${BACKUP_SUCCESS} -eq 1 ]]; then
-        chmod 640 "${BACKUP_FILE}"
+    # backup_create falls back to the postgres superuser, which still connects through the
+    # reserved superuser slots when the application user's connection slots are exhausted.
+    if backup_create "${BACKUP_FILE}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${DB_HOST}" "${DB_PORT}"; then
         echo -e "${GREEN}[SUCCESS] Pre-upgrade backup successfully saved to ${BACKUP_FILE}${NC}"
+        if backup_save_key "${BACKUP_FILE}" "${INSTALL_DIR}" "${INSTALL_DIR}/venv/bin/python3"; then
+            echo -e "${GREEN}[INFO] Encryption key saved to ${BACKUP_FILE}.key${NC}"
+        else
+            echo -e "${YELLOW}[WARN] Could not determine SECRET_KEY; no key file was saved next to the backup.${NC}"
+        fi
     else
         echo -e "${RED}[ERROR] Database backup failed. Aborting upgrade to preserve data safety.${NC}" >&2
         echo -e "${YELLOW}[HINT] If PostgreSQL connection slots are exhausted, stop background services first: 'systemctl stop ephemres-engine ephemres-api ephemres-flowd' or 'systemctl restart postgresql'.${NC}" >&2

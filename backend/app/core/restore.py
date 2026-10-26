@@ -166,6 +166,78 @@ def _open_dump_file(sql_path: Path | str) -> Any:
     return open(sql_path, "r", encoding="utf-8", errors="replace")
 
 
+# pg_dump writes this trailer only after the last table has been dumped
+DUMP_COMPLETE_MARKER = "-- PostgreSQL database dump complete"
+
+
+class IncompleteBackupError(RuntimeError):
+    """The dump ends without pg_dump's completion trailer, so its later tables are missing."""
+
+
+def backup_dump_is_complete(sql_path: Path | str) -> bool:
+    """True when the dump ends with pg_dump's completion trailer.
+
+    A dump cut short (pg_dump error, killed connection, full disk) loses the public tables first,
+    because pg_dump writes them after the TimescaleDB chunk data.
+    """
+    tail = b""
+    try:
+        if str(sql_path).endswith(".gz"):
+            with gzip.open(sql_path, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    tail = (tail + chunk)[-8192:]
+        else:
+            with open(sql_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 8192))
+                tail = f.read()
+    except (OSError, EOFError):
+        return False
+    return DUMP_COMPLETE_MARKER.encode() in tail
+
+
+# Env files of earlier installs that may still hold the key the backup's secrets were encrypted
+# with. The running install's own /etc/ephemres/ephemres.env is not one: restore already tries it.
+LEGACY_KEY_FILES = (
+    Path("/etc/netmon/netmon.env.bak"),
+    Path("/etc/netmon/netmon.env"),
+    Path("/etc/ephemres/ephemres.env.bak"),
+)
+SECRET_KEY_LINE_RE = re.compile(r"^(?:EPHEMRES_|NETMON_)?SECRET_KEY=(.*)$")
+
+
+def _read_secret_key(path: Path) -> Optional[str]:
+    """First non-empty [EPHEMRES_|NETMON_]SECRET_KEY value in an env-style file, unquoted."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        m = SECRET_KEY_LINE_RE.match(line.strip())
+        if m:
+            key = m.group(1).strip().strip("'\"")
+            if key:
+                return key
+    return None
+
+
+def discover_old_secret_key(
+    backup_path: Path | str,
+    legacy_files: Iterable[Path] = LEGACY_KEY_FILES,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Finds the key that encrypted the backup's alert channel secrets.
+
+    Prefers <backup>.key, which uninstall.sh and upgrade.sh save next to every backup, then the
+    env files of earlier installs. Returns (key, source path) or (None, None).
+    """
+    for path in (Path(f"{backup_path}.key"), *legacy_files):
+        if path.is_file():
+            key = _read_secret_key(path)
+            if key:
+                return key, str(path)
+    return None, None
+
+
 VALID_DEVICE_ROLES = {"ACTIVE_HOST", "FLOW_EXPORTER", "HYBRID_GATEWAY", "L2_SWITCH"}
 LEGACY_ROLE_MAP = {
     "STANDARD": "ACTIVE_HOST",
@@ -587,6 +659,48 @@ async def _execute_batch(conn: Any, sql: str, args_list: List[List[Any]]) -> Non
             await conn.execute(sql, *args)
 
 
+async def _refresh_continuous_aggregates(conn: Any, source_tables: Set[str]) -> List[str]:
+    """Rematerializes the continuous aggregates built on the restored hypertables.
+
+    Their refresh policies only look back a few days (hourly 3, daily 7, node baselines 28), so
+    older restored history would never reach them otherwise. An aggregate built on another
+    aggregate is refreshed after the one it reads from. Returns the refreshed view names.
+    """
+    try:
+        aggregates = await _fetch_all(
+            conn,
+            "SELECT view_schema, view_name, hypertable_schema, hypertable_name, "
+            "materialization_hypertable_schema, materialization_hypertable_name "
+            "FROM timescaledb_information.continuous_aggregates;",
+        )
+    except Exception as exc:
+        logger.debug("Continuous aggregate lookup failed: %s", exc)
+        return []
+
+    sources = {("public", t) for t in source_tables}
+    pending = list(aggregates)
+    refreshed: List[str] = []
+    progressed = True
+    while progressed:
+        progressed = False
+        for agg in list(pending):
+            if (agg["hypertable_schema"], agg["hypertable_name"]) not in sources:
+                continue
+            pending.remove(agg)
+            progressed = True
+            view = ".".join('"' + str(agg[k]).replace('"', '""') + '"' for k in ("view_schema", "view_name"))
+            view_literal = view.replace("'", "''")
+            logger.info("Refreshing continuous aggregate %s over the restored history...", view)
+            try:
+                await _execute_sql(conn, f"CALL refresh_continuous_aggregate('{view_literal}', NULL, NULL);")
+            except Exception as exc:
+                logger.warning("Could not refresh continuous aggregate %s: %s", view, exc)
+                continue
+            refreshed.append(str(agg["view_name"]))
+            sources.add((agg["materialization_hypertable_schema"], agg["materialization_hypertable_name"]))
+    return refreshed
+
+
 async def _compressed_decoding_available(conn: Any) -> bool:
     """True when the target's TimescaleDB (2.25+) can decode compressed column values."""
     try:
@@ -902,14 +1016,25 @@ async def reconcile_and_restore_database(
     skip_telemetry: bool = False,
     dry_run: bool = False,
     reset_report_path: Optional[str] = None,
+    allow_incomplete: bool = False,
 ) -> Dict[str, Any]:
     """Core execution engine for cross-version database restoration.
 
     admin_password: when given, always becomes the `admin` password (must change at first login).
     When omitted, a backed-up $scrypt$ admin hash is kept as-is, and a legacy admin hash is
     replaced by a random temporary password recorded in the password reset report.
+    allow_incomplete: restore what a dump without pg_dump's completion trailer still holds,
+    instead of refusing it before anything is written.
     """
     logger.info("Starting Ephemres database restoration from %s...", backup_path)
+    if not backup_dump_is_complete(backup_path):
+        if not allow_incomplete:
+            raise IncompleteBackupError(
+                f"{backup_path} ends without pg_dump's completion trailer: the dump was cut short and "
+                "its later tables (users, endpoints, settings) are missing. Nothing was restored. "
+                "Use another backup, or pass --allow-incomplete to restore what it holds."
+            )
+        logger.warning("Backup is incomplete (no pg_dump completion trailer); restoring what it holds.")
     target_schema = await get_target_table_columns(conn)
 
     chunk_to_parent, config_data, compressed_chunks = scan_backup_metadata_and_configs(backup_path)
@@ -934,6 +1059,7 @@ async def reconcile_and_restore_database(
         "admin_password_applied": False,
         "admin_temporary_password": False,
         "compressed_rows_skipped": 0,
+        "aggregates_refreshed": [],
     }
 
     if dry_run:
@@ -1319,6 +1445,9 @@ async def reconcile_and_restore_database(
             if ht not in summary["tables_restored"]:
                 summary["tables_restored"].append(ht)
 
+        if restored_hyper_tables:
+            summary["aggregates_refreshed"] = await _refresh_continuous_aggregates(conn, restored_hyper_tables)
+
     logger.info("Restoration finished successfully: %s", summary)
     return summary
 
@@ -1356,6 +1485,11 @@ def main() -> None:
         action="store_true",
         help="Validate backup and target schema compatibility without committing",
     )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Restore a dump that lacks pg_dump's completion trailer (it was cut short)",
+    )
 
     args = parser.parse_args()
     backup_path = Path(args.backup_file).resolve()
@@ -1363,25 +1497,19 @@ def main() -> None:
         logger.error("Backup file not found: %s", backup_path)
         sys.exit(1)
 
-    # Discover old secret key if not passed explicitly
     old_secret = args.old_secret_key or os.environ.get("OLD_SECRET_KEY")
-    if not old_secret:
-        for env_path in [
-            Path("/etc/netmon/netmon.env.bak"),
-            Path("/etc/netmon/netmon.env"),
-            Path("/etc/ephemres/ephemres.env.bak"),
-        ]:
-            if env_path.is_file():
-                try:
-                    for line in env_path.read_text(encoding="utf-8").splitlines():
-                        if line.startswith("SECRET_KEY="):
-                            old_secret = line.split("=", 1)[1].strip("'\"")
-                            logger.info("Discovered previous SECRET_KEY from %s", env_path)
-                            break
-                    if old_secret:
-                        break
-                except Exception:
-                    pass
+    if old_secret:
+        logger.info("Using the previous SECRET_KEY supplied for this restore.")
+    else:
+        old_secret, key_source = discover_old_secret_key(backup_path)
+        if old_secret:
+            logger.info("Using the previous SECRET_KEY from %s.", key_source)
+        else:
+            logger.warning(
+                "No previous SECRET_KEY found (no %s.key next to the backup). Alert channels whose "
+                "secrets were encrypted with another key will be restored disabled.",
+                backup_path,
+            )
 
     async def _run() -> None:
         from app.core.migrator import get_db_connection
@@ -1394,6 +1522,7 @@ def main() -> None:
                 old_secret_key=old_secret,
                 skip_telemetry=args.skip_telemetry,
                 dry_run=args.dry_run,
+                allow_incomplete=args.allow_incomplete,
             )
             print("\n" + "=" * 60)
             print(" Ephemres Database Restoration Summary Report")
@@ -1403,6 +1532,8 @@ def main() -> None:
             print(f" Users Restored:     {summary['user_count']}")
             print(f" Endpoints Restored: {summary['endpoint_count']}")
             print(f" Telemetry Rows:     {summary['telemetry_rows_restored']}")
+            if summary["aggregates_refreshed"]:
+                print(f" Aggregates Rebuilt: {', '.join(summary['aggregates_refreshed'])}")
             if summary["compressed_rows_skipped"] > 0:
                 print(f" Rows Skipped:       {summary['compressed_rows_skipped']} in compressed chunks (TimescaleDB 2.25+ needed)")
             print(f" Hashes Upgraded:    {summary['legacy_hashes_upgraded']} legacy hashes -> $scrypt$")

@@ -22,8 +22,9 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Options:"
     echo "  --backup-file <path>     Path to backup .sql or .sql.gz dump"
     echo "  --admin-password <pass>  New admin password, forced change at first login (default: keep backed-up password)"
-    echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels"
+    echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels (default: <backup>.key)"
     echo "  --skip-telemetry         Skip restoring hypertable metrics for fast config restore"
+    echo "  --allow-incomplete       Restore a backup that pg_dump did not finish (missing tables stay empty)"
     echo "  --dry-run                Simulate restoration without writing changes to database"
     echo "  -h, --help               Show this help message"
     exit 0
@@ -40,6 +41,7 @@ BACKUP_FILE=""
 ADMIN_PASS="${EPHEMRES_RESTORE_ADMIN_PASSWORD:-}"
 OLD_SECRET_KEY="${OLD_SECRET_KEY:-}"
 SKIP_TELEMETRY=""
+ALLOW_INCOMPLETE=""
 DRY_RUN=""
 
 # Parse command line flags
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_TELEMETRY="--skip-telemetry"
             shift
             ;;
+        --allow-incomplete)
+            ALLOW_INCOMPLETE="--allow-incomplete"
+            shift
+            ;;
         --dry-run)
             DRY_RUN="--dry-run"
             shift
@@ -71,8 +77,9 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --backup-file <path>     Path to backup .sql or .sql.gz dump"
             echo "  --admin-password <pass>  New admin password, forced change at first login (default: keep backed-up password)"
-            echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels"
+            echo "  --old-secret-key <key>   Previous SECRET_KEY for re-encrypting alert channels (default: <backup>.key)"
             echo "  --skip-telemetry         Skip restoring hypertable metrics for fast config restore"
+            echo "  --allow-incomplete       Restore a backup that pg_dump did not finish (missing tables stay empty)"
             echo "  --dry-run                Simulate restoration without writing changes to database"
             echo "  -h, --help               Show this help message"
             exit 0
@@ -132,19 +139,10 @@ if [[ ! -f "${BACKUP_FILE}" ]]; then
 fi
 echo -e "${GREEN}[OK] Selected backup archive:${NC} ${BACKUP_FILE}"
 
-# 2. Discover Old Secret Key if not supplied
-if [[ -z "${OLD_SECRET_KEY}" ]]; then
-    for env_cand in /etc/netmon/netmon.env.bak /etc/netmon/netmon.env /etc/ephemres/ephemres.env.bak /etc/ephemres/ephemres.env; do
-        if [[ -f "${env_cand}" ]]; then
-            DISC_KEY=$(grep -E "^(EPHEMRES_|NETMON_)?SECRET_KEY=" "${env_cand}" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-            if [[ -n "${DISC_KEY}" ]]; then
-                OLD_SECRET_KEY="${DISC_KEY}"
-                echo -e "${GREEN}[INFO] Auto-detected previous SECRET_KEY from ${env_cand}.${NC}"
-                break
-            fi
-        fi
-    done
-fi
+# 2. The previous SECRET_KEY (for alert channel secrets) is found by the restore engine itself:
+# --old-secret-key / OLD_SECRET_KEY, else <backup>.key saved by uninstall.sh / upgrade.sh, else the
+# env files of an earlier netmon install. The current /etc/ephemres/ephemres.env is never a
+# candidate: it holds this install's key, which the engine already tries.
 
 # 3. Prompt for Admin Temporary Password
 if [[ -z "${ADMIN_PASS}" ]]; then
@@ -180,17 +178,29 @@ fi
 echo -e "\n${BLUE}[INFO] Executing schema-aware database restoration...${NC}"
 # Secrets go to the restore engine through its environment, not argv: argv is world-readable
 # in the process list (/proc/<pid>/cmdline), the environment only to root and the same user.
+RESTORE_STATUS=0
 EPHEMRES_RESTORE_ADMIN_PASSWORD="${ADMIN_PASS}" OLD_SECRET_KEY="${OLD_SECRET_KEY}" \
 PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend:.:backend" "${PYTHON_BIN}" -m app.core.restore \
     --backup-file "${BACKUP_FILE}" \
     ${SKIP_TELEMETRY} \
-    ${DRY_RUN}
+    ${ALLOW_INCOMPLETE} \
+    ${DRY_RUN} || RESTORE_STATUS=$?
 
-# 6. Restart Platform Services
+# 6. Restart Platform Services, also after a failed restore so the platform does not stay down
 if [[ -z "${DRY_RUN}" ]]; then
     echo -e "\n${BLUE}[INFO] Clearing stale FastStore shared-memory state and restarting platform services...${NC}"
     systemctl restart ephemres-api ephemres-engine 2>/dev/null || true
     systemctl is-enabled ephemres-flowd &>/dev/null && systemctl restart ephemres-flowd 2>/dev/null || true
+fi
+
+if [[ ${RESTORE_STATUS} -ne 0 ]]; then
+    echo -e "${RED}==================================================================${NC}"
+    echo -e "${RED} Restoration FAILED (see the error above). Services were restarted. ${NC}"
+    echo -e "${RED}==================================================================${NC}"
+    exit "${RESTORE_STATUS}"
+fi
+
+if [[ -z "${DRY_RUN}" ]]; then
     echo -e "${GREEN}==================================================================${NC}"
     echo -e "${GREEN} Restoration Complete! Platform is operational.                   ${NC}"
     echo -e "${GREEN} Admin login: see the restore summary above for the password state. ${NC}"
