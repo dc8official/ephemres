@@ -131,6 +131,16 @@ Onboards a new endpoint for ICMP monitoring.
 ### `GET /endpoints/{id}`
 Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000}}`) for a specific endpoint.
 
+### `GET /endpoints/probe-summary`
+Per-endpoint ICMP statistics from the per-cycle probe history (v3.4) over the last `hours` (query param, default `24`, max `168`): `loss_pct`, reply-weighted `rtt_avg_ms`, `rtt_p95_ms` (95th percentile of per-cycle averages), `jitter_ms`, `sample_count`, `last_probe_at`, and `rtt_sparkline` (hourly mean RTT, oldest first, `null` for hours without replies). Endpoints without samples (passive, paused, not yet probed) are absent.
+
+### `GET /endpoints/{id}/probe-series`
+RTT min/avg/max, jitter and loss over time for one endpoint.
+- **Query Params:** `start_date`, `end_date` (ISO 8601, optional; default the last 24 hours).
+- Resolution follows the span: one point per monitoring cycle up to 2 days, 10-minute buckets up to 8 days, hourly beyond. The response carries `bucket_seconds` and `source` (`endpoint_probe_samples` or `endpoint_probe_hourly`). Raw samples are kept 30 days, hourly aggregates 365 days.
+- Each point: `timestamp`, `sample_count`, `sent`, `received`, `loss_pct`, `rtt_min_ms`, `rtt_avg_ms`, `rtt_max_ms`, `jitter_ms` (`null` where no reply arrived).
+- **Errors:** `400` when `start_date` is not before `end_date`.
+
 ### `GET /endpoints/{id}/traces`
 Returns the 10 most recent diagnostic traceroutes for the endpoint.
 
@@ -427,7 +437,7 @@ Deactivates or deletes a user account.
 High-precision passive telemetry endpoints for fleet-wide bandwidth analysis, top talkers, application protocol distribution, exporter health, and conversation drilling.
 
 ### `GET /bandwidth/overview`
-Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps), active exporter count, total flow count, and detected unmatched candidates over the last 5 minutes.
+Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_flows_count` (SYN-only or RST-without-FIN flows), `window_seconds` and `exporter_id`.
 - **Response:** `200 OK`
   ```json
   {
@@ -437,7 +447,10 @@ Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps)
       "total_egress_bps": 41732622.00,
       "active_exporters_count": 4,
       "unmatched_exporters_count": 1,
-      "total_flows_count": 128450
+      "total_flows_count": 128450,
+      "total_transit_bps": 3120400.00,
+      "window_seconds": 300,
+      "exporter_id": null
     },
     "meta": null,
     "error": null
@@ -450,6 +463,9 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
   - `exporter_id` (UUID, optional): Filter by exporter endpoint UUID.
   - `endpoint_id` (UUID, optional): Filter by source or destination endpoint UUID.
+  - `interface_idx` (int, optional, with `exporter_id`): One interface only.
+- Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; the fleet-wide 30d tier keeps no endpoint attribution, so it is `false` and all traffic is reported as transit.
+- With `exporter_id`, windows up to 6h read 1-minute interface rollups and longer windows the hourly interface rollup. The 24h/7d/30d flow aggregates use real-time aggregation, so the newest minutes are included.
 - **Response:** `200 OK`
   ```json
   {
@@ -556,13 +572,15 @@ Lists all configured flow exporters with interface aliases, along with detected 
           "primary_ip": "10.0.0.1",
           "flow_exporter_ips": ["192.168.100.1"],
           "interface_aliases": { "1": "WAN-Fiber", "2": "LAN-Trunk" },
-          "last_flow_time": null
+          "last_flow_time": "2026-09-15T20:59:00Z",
+          "flows_per_sec": 41.27
         }
       ],
       "unmatched": [
         {
           "ip_address": "172.16.50.1",
-          "last_seen": "2026-09-15T21:00:00Z"
+          "last_seen": "2026-09-15T21:00:00Z",
+          "flows_per_sec": 12.5
         }
       ]
     },
@@ -601,6 +619,8 @@ Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` ro
 ### `GET /bandwidth/interfaces`
 Per-interface ingress/egress throughput and utilization for one exporter.
 - **Query Params:** `exporter_id` (UUID, required), `window` (default `1h`; same values as the other bandwidth endpoints).
+- Rates average over `covered_seconds`: from the later of the window start and the exporter's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
+- Each interface: average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), and `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`. When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default.
 
 ### `PUT /bandwidth/endpoints/{id}/interfaces`
 Replaces an exporter's interface names and link speeds (requires `Admin` role).

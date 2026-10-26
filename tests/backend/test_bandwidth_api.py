@@ -314,8 +314,9 @@ def test_list_flow_exporters_and_unmatched(mock_get_flow_redis, client):
     assert len(unmatched) == 1
     assert unmatched[0]["ip_address"] == "10.10.10.0"
 
-    # Verify that the generated statement compiled cleanly with recent_exporters subqueries
-    call_stmt = mock_session.execute.call_args[0][0]
+    # Verify that the endpoint statement (the first query) compiled cleanly with the
+    # recent_exporters subqueries; the exporter health query runs after it.
+    call_stmt = mock_session.execute.call_args_list[0][0][0]
     compiled_sql = call_stmt.compile()
     assert "IN (SELECT DISTINCT" in compiled_sql
 

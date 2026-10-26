@@ -145,13 +145,34 @@ def test_fleet_series_reports_transit_separately(api_client, run_sql):
     assert p2["transit_pps"] == pytest.approx(1_000 / 60, abs=0.01)
 
 
-def test_hourly_window_lags_behind_fresh_data(api_client, run_sql):
+def test_hourly_window_includes_fresh_data(api_client, run_sql):
     _seed(run_sql)
-    # CHARACTERIZATION: flow_hourly_rollups is a materialized-only continuous aggregate, so
-    # minutes that have not been refreshed yet are invisible to the 24h window. Phase 2
-    # (migration 0014) enables real-time aggregation and this list stops being empty.
-    points = _data(api_client.get("/api/v1/bandwidth/traffic-series", params={"window": "24h"}))["points"]
-    assert points == []
+    # CHANGED IN v3.4 PHASE 2 (migration 0014): flow_hourly_rollups uses real-time aggregation,
+    # so minutes the refresh policy has not materialized yet still reach the 24h window.
+    # Before, this list was empty until the next hourly refresh.
+    series = _data(api_client.get("/api/v1/bandwidth/traffic-series", params={"window": "24h"}))
+    assert (series["bucket_seconds"], series["directional"]) == (3600, True)
+    points = series["points"]
+    assert points, "fresh minute data should be visible in the hourly tier"
+
+    def total(key):
+        return sum(p[key] for p in points) * 3600 / 8
+
+    # bps is rounded to 2 decimals per point, so allow a few bytes of drift.
+    assert total("ingress_bps") == pytest.approx(15_003_000, abs=10)
+    assert total("egress_bps") == pytest.approx(9_000_000, abs=10)
+    assert total("transit_bps") == pytest.approx(1_200_000, abs=10)
+
+
+def test_hourly_and_daily_aggregates_are_real_time(run_sql):
+    rows = run_sql(lambda conn: conn.fetch(
+        "SELECT view_name, materialized_only FROM timescaledb_information.continuous_aggregates "
+        "WHERE view_name IN ('flow_hourly_rollups', 'flow_daily_rollups') ORDER BY view_name"
+    ))
+    assert [(r["view_name"], r["materialized_only"]) for r in rows] == [
+        ("flow_daily_rollups", False),
+        ("flow_hourly_rollups", False),
+    ]
 
 
 def test_exporter_series_reads_interface_rollups(api_client, run_sql):
@@ -169,29 +190,66 @@ def test_exporter_series_reads_interface_rollups(api_client, run_sql):
     assert wan[0]["egress_bps"] == pytest.approx(3_000_000 * 8 / 60)
 
 
-def test_interfaces_average_over_the_whole_window(api_client, run_sql):
-    _seed(run_sql)
-    params = {"exporter_id": str(ROUTER_ID), "window": "1h"}
-    rows = {i["interface_idx"]: i for i in _data(api_client.get("/api/v1/bandwidth/interfaces", params=params))["interfaces"]}
-    assert set(rows) == {1, 2, 3}
+def _interfaces(api_client, window):
+    params = {"exporter_id": str(ROUTER_ID), "window": window}
+    data = _data(api_client.get("/api/v1/bandwidth/interfaces", params=params))
+    return data, {i["interface_idx"]: i for i in data["interfaces"]}
 
+
+def test_interfaces_rates_cover_the_time_with_data(api_client, run_sql):
+    from app.services.flow_metrics import percentile_with_idle
+
+    _seed(run_sql)
+    data, rows = _interfaces(api_client, "1h")
+    assert set(rows) == {1, 2, 3}
+    assert (data["source"], data["p95_resolution_seconds"]) == ("flow_interface_minute_rollups", 60)
+
+    # CHANGED IN v3.4 PHASE 2: rates average over the covered time (from the exporter's first
+    # data in the window, ~2-3 minutes here) instead of the full window length.
+    covered = data["covered_seconds"]
+    assert 60 <= covered <= 4 * 60
     wan = rows[1]
     assert wan["name"] == "WAN"
     assert wan["speed_mbps"] == 100
-    assert wan["in_bps"] == pytest.approx(9_000_000 * 8 / 3600, abs=0.01)
-    assert wan["out_bps"] == pytest.approx(3_000_000 * 8 / 3600, abs=0.01)
-    assert wan["utilization_percentage"] == pytest.approx(0.02)
+    assert wan["in_bps"] == pytest.approx(9_000_000 * 8 / covered, rel=0.02)
+    assert wan["out_bps"] == pytest.approx(3_000_000 * 8 / covered, rel=0.02)
+    # Busiest minute and 95th percentile minute (idle minutes count as 0).
+    assert wan["in_peak_bps"] == pytest.approx(9_000_000 * 8 / 60)
+    slots = -(-covered // 60)
+    assert wan["in_p95_bps"] == pytest.approx(percentile_with_idle([9_000_000], slots) * 8 / 60, rel=0.02)
+    assert wan["peak_utilization_percentage"] == pytest.approx(1.2)
     assert wan["speed_configured"] is True
     assert wan["is_active"] is True
 
-    # CHANGED IN v3.4 PHASE 1: a string alias carries no speed. speed_mbps still reports the
-    # 1 Gbps default, but utilization is withheld instead of measured against that guess.
+    # A string alias carries no speed: speed_mbps reports the 1 Gbps default, but no utilization.
     lan = rows[2]
     assert lan["name"] == "LAN"
     assert (lan["speed_mbps"], lan["speed_configured"], lan["utilization_percentage"]) == (1000, False, None)
+    assert lan["p95_utilization_percentage"] is None
 
     dmz = rows[3]
     assert (dmz["name"], dmz["speed_mbps"], dmz["in_bytes"], dmz["is_active"]) == ("DMZ", 10000, 0, False)
+
+
+def test_interfaces_30d_window_reads_hourly_rollup(api_client, run_sql):
+    _seed(run_sql)
+    data, rows = _interfaces(api_client, "30d")
+    # CHANGED IN v3.4 PHASE 2: 30 days used to read the 7-day minute table and divide a week of
+    # bytes by thirty days. The hourly rollup (real-time) covers it and keeps minute peaks.
+    assert (data["source"], data["p95_resolution_seconds"]) == ("flow_interface_hourly_rollups", 3600)
+    wan = rows[1]
+    assert wan["in_bytes"] == 9_000_000
+    assert wan["in_peak_bps"] == pytest.approx(9_000_000 * 8 / 60)
+    assert wan["in_bps"] == pytest.approx(9_000_000 * 8 / data["covered_seconds"], rel=0.02)
+
+
+def test_exporter_series_long_window_uses_hourly_rollup(api_client, run_sql):
+    _seed(run_sql)
+    params = {"window": "7d", "exporter_id": str(ROUTER_ID)}
+    series = _data(api_client.get("/api/v1/bandwidth/traffic-series", params=params))
+    assert series["bucket_seconds"] == 3600
+    total_in = sum(p["ingress_bps"] for p in series["points"]) * 3600 / 8
+    assert total_in == pytest.approx(12_000_000, abs=10)
 
 
 def test_top_talkers_and_conversations(api_client, run_sql):
@@ -254,3 +312,12 @@ def test_endpoint_detail_returns_flow_exporter_fields(api_client, run_sql):
 
     host = _data(api_client.get(f"/api/v1/endpoints/{HOST_A_ID}"))
     assert (host["device_role"], host["flow_exporter_ips"]) == ("ACTIVE_HOST", [])
+
+
+def test_exporter_health_from_minute_rollups(api_client, run_sql):
+    m1, _ = _seed(run_sql)
+    data = _data(api_client.get("/api/v1/bandwidth/exporters"))
+    router = next(e for e in data["exporters"] if e["id"] == str(ROUTER_ID))
+    # CHANGED IN v3.4 PHASE 2: last_flow_time was always None.
+    assert datetime.datetime.fromisoformat(router["last_flow_time"]) == m1
+    assert router["flows_per_sec"] == pytest.approx(95 / 300, abs=0.01)

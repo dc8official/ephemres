@@ -32,27 +32,27 @@ def test_database_sync_engine_none():
     assert db.sync_engine is None
 
 
-def test_migrator_loads_all_13_revisions():
-    """Ensure all 13 migration files are discovered, loaded, and sorted topologically."""
+def test_migrator_loads_all_16_revisions():
+    """Ensure all 16 migration files are discovered, loaded, and sorted topologically."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 13
-    expected_chain = [f"{i:04d}" for i in range(1, 14)]
+    assert len(ordered) == 16
+    expected_chain = [f"{i:04d}" for i in range(1, 17)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0013"
+    assert ordered[-1].revision == "0016"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 13):
+    for i in range(1, 16):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
-def test_all_13_revisions_upgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 13 revisions and verify generated SQL."""
+def test_all_16_revisions_upgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 16 revisions and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -65,8 +65,8 @@ def test_all_13_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 56 total statements across all 13 migrations
-    assert total_statements == 56
+    # 61 total statements across all 16 migrations
+    assert total_statements == 61
 
     full_sql = "\n".join(all_statements)
 
@@ -118,9 +118,22 @@ def test_all_13_revisions_upgrade_ddl_compilation():
     assert 'ADD COLUMN IF NOT EXISTS tcp_flags SMALLINT NOT NULL DEFAULT 0' in full_sql
     assert 'ADD COLUMN IF NOT EXISTS tos SMALLINT NOT NULL DEFAULT 0' in full_sql
 
+    # 0014 real-time flow aggregates
+    assert 'timescaledb.materialized_only = false' in full_sql
 
-def test_all_13_revisions_downgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 13 downgrades and verify generated SQL."""
+    # 0015 per-cycle probe history
+    assert 'CREATE TABLE IF NOT EXISTS endpoint_probe_samples (' in full_sql
+    assert 'CREATE MATERIALIZED VIEW IF NOT EXISTS endpoint_probe_hourly' in full_sql
+    assert "add_retention_policy('endpoint_probe_samples', INTERVAL '30 days'" in full_sql
+    assert "add_retention_policy('endpoint_probe_hourly', INTERVAL '365 days'" in full_sql
+
+    # 0016 hourly interface rollups
+    assert 'CREATE MATERIALIZED VIEW IF NOT EXISTS flow_interface_hourly_rollups' in full_sql
+    assert "start_offset => INTERVAL '6 days'" in full_sql
+
+
+def test_all_16_revisions_downgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 16 downgrades and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -133,12 +146,14 @@ def test_all_13_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 48 total downgrade statements
-    assert total_statements == 48
+    # 52 total downgrade statements
+    assert total_statements == 52
 
     full_sql = "\n".join(all_statements)
 
     assert 'ALTER TABLE flow_minute_rollups DROP COLUMN IF EXISTS tcp_flags;' in full_sql
+    assert 'DROP TABLE IF EXISTS endpoint_probe_samples CASCADE;' in full_sql
+    assert 'DROP MATERIALIZED VIEW IF EXISTS flow_interface_hourly_rollups CASCADE;' in full_sql
     assert 'DROP TABLE IF EXISTS "flow_interface_minute_rollups" CASCADE;' in full_sql
     assert 'ALTER TABLE "endpoints" DROP CONSTRAINT IF EXISTS "ck_endpoints_device_role";' in full_sql
     assert 'ALTER TABLE "endpoints" DROP COLUMN IF EXISTS "device_role";' in full_sql
@@ -155,13 +170,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0013 (head)" in captured.out
+    assert "0016 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0013 (head)" in captured.out
+    assert "0016 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])

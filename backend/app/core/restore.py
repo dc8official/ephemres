@@ -97,6 +97,7 @@ DECOMPRESS_FN = "_timescaledb_functions.compressed_data_to_array"
 
 HYPERTABLE_NAMES = {
     "endpoint_events",
+    "endpoint_probe_samples",
     "flow_minute_rollups",
     "flow_hourly_rollups",
     "flow_daily_rollups",
@@ -415,6 +416,16 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "duration_seconds": "int8",
             "monitoring_cycle_count": "int4",
             "created_at": "timestamptz",
+        },
+        "endpoint_probe_samples": {
+            "endpoint_id": "uuid",
+            "sampled_at": "timestamptz",
+            "sent": "int2",
+            "received": "int2",
+            "rtt_min_ms": "float4",
+            "rtt_avg_ms": "float4",
+            "rtt_max_ms": "float4",
+            "jitter_ms": "float4",
         },
         "flow_minute_rollups": {
             "bucket": "timestamptz",

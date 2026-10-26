@@ -63,6 +63,28 @@ def interface_alias(alias_data: Any, default_name: str) -> Tuple[str, int]:
     return default_name, DEFAULT_LINK_SPEED_MBPS
 
 
+def percentile_with_idle(sorted_values: Sequence[float], total_slots: int, q: float = 0.95) -> float:
+    """Percentile of per-slot traffic where slots missing from `sorted_values` were idle (0).
+
+    Rollups only hold rows for minutes (or hours) that carried traffic, so a percentile over the
+    rows alone would ignore idle time and overstate a bursty link. `sorted_values` is ascending;
+    `total_slots` is how many slots the covered period has. Interpolates like percentile_cont.
+    """
+    n_values = len(sorted_values)
+    n = max(total_slots, n_values)
+    if n == 0:
+        return 0.0
+    zeros = n - n_values
+
+    def at(i: int) -> float:
+        return 0.0 if i < zeros else float(sorted_values[i - zeros])
+
+    pos = q * (n - 1)
+    lower = int(pos)
+    upper = min(lower + 1, n - 1)
+    return at(lower) + (at(upper) - at(lower)) * (pos - lower)
+
+
 def configured_speed_mbps(alias_data: Any) -> Optional[int]:
     """Link speed an admin actually set for an interface, or None when it would be a guess.
 

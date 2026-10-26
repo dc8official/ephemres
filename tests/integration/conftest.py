@@ -14,6 +14,7 @@ _HERE = Path(__file__).resolve().parent
 
 # Tables the characterization tests write to; truncated between tests.
 _SEEDED_TABLES = (
+    "endpoint_probe_samples",
     "flow_minute_rollups",
     "flow_interface_minute_rollups",
     "endpoint_events",

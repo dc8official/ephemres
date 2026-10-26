@@ -217,3 +217,48 @@ def test_tcp_anomaly_handles_missing_flags():
 @pytest.mark.parametrize("tos", [None, 0, 3, 184, 255, 256 + 184])
 def test_dscp_from_tos(tos):
     assert fm.dscp_from_tos(tos) == ((tos or 0) & 0xFF) >> 2
+
+
+# --- v3.4 Phase 2 additions ------------------------------------------------------------------
+
+def test_percentile_with_idle_matches_percentile_cont_on_padded_series():
+    import statistics
+
+    values = [5.0, 1.0, 9.0, 3.0]
+    padded = sorted([0.0] * 16 + values)  # 20 slots, 16 idle
+    expected = statistics.quantiles(padded, n=100, method="inclusive")[94]
+    assert fm.percentile_with_idle(sorted(values), 20) == pytest.approx(expected)
+
+
+def test_percentile_with_idle_mostly_idle_link_is_zero():
+    # 2 busy minutes out of 60: the 95th percentile minute is idle.
+    assert fm.percentile_with_idle([800.0, 900.0], 60) == 0.0
+
+
+def test_percentile_with_idle_fully_busy_equals_plain_percentile():
+    values = [float(v) for v in range(1, 101)]
+    assert fm.percentile_with_idle(values, 100) == pytest.approx(95.05)
+
+
+def test_percentile_with_idle_edge_cases():
+    assert fm.percentile_with_idle([], 0) == 0.0
+    assert fm.percentile_with_idle([7.0], 1) == 7.0
+    # More rows than slots (clock skew): never index past the data.
+    assert fm.percentile_with_idle([1.0, 2.0, 3.0], 2) == pytest.approx(2.9)
+
+
+@pytest.mark.parametrize(
+    "alias,expected",
+    [
+        (None, None),
+        ("WAN", None),
+        ({"name": "WAN"}, None),
+        ({"name": "WAN", "speed_mbps": 0}, None),
+        ({"name": "WAN", "speed_mbps": None}, None),
+        ({"name": "WAN", "speed_mbps": "bad"}, None),
+        ({"name": "WAN", "speed_mbps": 100}, 100),
+        ({"speed_mbps": "10000"}, 10000),
+    ],
+)
+def test_configured_speed_mbps(alias, expected):
+    assert fm.configured_speed_mbps(alias) == expected

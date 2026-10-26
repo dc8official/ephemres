@@ -56,6 +56,7 @@ from app.services.flow_metrics import (
     dscp_from_tos,
     interface_alias,
     is_internal_address,
+    percentile_with_idle,
     tcp_anomaly,
     utilization_pct,
 )
@@ -321,59 +322,49 @@ async def get_traffic_series(
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
 
-    # If querying an exporter node (without specific endpoint_id) or isolating an interface:
+    # Exporter scope (optionally one interface): interface rollups. Windows up to 6h use the
+    # minute table; longer ones use flow_interface_hourly_rollups, which covers 30 days (the
+    # minute table keeps 7) and keeps a 7-day chart at 168 points instead of 10,080.
     if exporter_id and not endpoint_id:
-        stmt = (
-            select(
-                FlowInterfaceMinuteRollup.bucket,
-                func.coalesce(func.sum(FlowInterfaceMinuteRollup.in_bytes), 0).label("in_bytes"),
-                func.coalesce(func.sum(FlowInterfaceMinuteRollup.out_bytes), 0).label("out_bytes"),
-                func.coalesce(func.sum(FlowInterfaceMinuteRollup.in_packets), 0).label("in_pkts"),
-                func.coalesce(func.sum(FlowInterfaceMinuteRollup.out_packets), 0).label("out_pkts"),
-                func.coalesce(func.sum(FlowInterfaceMinuteRollup.flow_count), 0).label("flow_count"),
-            )
-            .where(
-                FlowInterfaceMinuteRollup.exporter_id == exporter_id,
-                FlowInterfaceMinuteRollup.bucket >= start_time,
-            )
-        )
+        if delta > datetime.timedelta(hours=6):
+            source, bucket_seconds = "flow_interface_hourly_rollups", 3600
+        else:
+            source, bucket_seconds = "flow_interface_minute_rollups", 60
+        params: Dict[str, Any] = {"exporter_id": str(exporter_id), "start": start_time}
+        interface_filter = ""
         if interface_idx is not None:
-            stmt = stmt.where(FlowInterfaceMinuteRollup.interface_idx == interface_idx)
-
-        stmt = stmt.group_by(FlowInterfaceMinuteRollup.bucket).order_by(FlowInterfaceMinuteRollup.bucket.asc())
-        res = await db.execute(stmt)
-        rows = res.all()
+            interface_filter = "AND interface_idx = :interface_idx"
+            params["interface_idx"] = interface_idx
+        res = await db.execute(
+            text(f"""
+                SELECT bucket,
+                       COALESCE(SUM(in_bytes), 0) AS in_bytes, COALESCE(SUM(out_bytes), 0) AS out_bytes,
+                       COALESCE(SUM(in_packets), 0) AS in_packets, COALESCE(SUM(out_packets), 0) AS out_packets,
+                       COALESCE(SUM(flow_count), 0) AS flow_count
+                FROM {source}
+                WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start {interface_filter}
+                GROUP BY bucket
+                ORDER BY bucket
+            """),
+            params,
+        )
 
         points: List[TrafficSeriesPoint] = []
-        for row in rows:
-            bucket_time = row[0]
-            in_bytes = int(row[1] or 0)
-            eg_bytes = int(row[2] or 0)
-            in_pkts = int(row[3] or 0) if len(row) > 3 else 0
-            eg_pkts = int(row[4] or 0) if len(row) > 4 else 0
-            flows_cnt = int(row[5] or 0) if len(row) > 5 else 0
-
-            # Each row in FlowInterfaceMinuteRollup represents a 1-minute bucket (60 seconds)
-            in_bps = bits_per_second(in_bytes, 60.0)
-            eg_bps = bits_per_second(eg_bytes, 60.0)
-            in_pps = round(float(in_pkts) / 60.0, 2)
-            eg_pps = round(float(eg_pkts) / 60.0, 2)
-            flows_per_sec = round(float(flows_cnt) / 60.0, 2)
-
-            iso_str = bucket_time.astimezone(datetime.timezone.utc).isoformat()
+        for row in res.all():
+            in_bytes, eg_bytes, in_pkts, eg_pkts, flows_cnt = (int(row[i] or 0) for i in range(1, 6))
             points.append(
                 TrafficSeriesPoint(
-                    timestamp=iso_str,
-                    ingress_bps=round(in_bps, 2),
-                    egress_bps=round(eg_bps, 2),
-                    ingress_pps=in_pps,
-                    egress_pps=eg_pps,
-                    flows_per_sec=flows_per_sec,
+                    timestamp=row[0].astimezone(datetime.timezone.utc).isoformat(),
+                    ingress_bps=round(bits_per_second(in_bytes, bucket_seconds), 2),
+                    egress_bps=round(bits_per_second(eg_bytes, bucket_seconds), 2),
+                    ingress_pps=round(in_pkts / bucket_seconds, 2),
+                    egress_pps=round(eg_pkts / bucket_seconds, 2),
+                    flows_per_sec=round(flows_cnt / bucket_seconds, 2),
                 )
             )
 
         return APIResponse.success(
-            data=TrafficSeriesResponse(window=window, points=points, bucket_seconds=60)
+            data=TrafficSeriesResponse(window=window, points=points, bucket_seconds=bucket_seconds)
         )
 
     # Standard endpoint or fleet-wide flow rollup query
@@ -924,6 +915,20 @@ async def get_applications_breakdown(
     )
 
 
+async def _unmatched_flow_rate(store_client: Any, ip: str) -> Optional[float]:
+    """Recent flows/s the flow daemon recorded for an unregistered exporter, if any."""
+    try:
+        raw = await store_client.get(f"flow:unmatched:{ip}:fps")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return float(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/exporters", response_model=APIResponse)
 async def list_flow_exporters(
     current_user: dict = Depends(get_current_user),
@@ -960,10 +965,36 @@ async def list_flow_exporters(
     res = await db.execute(stmt)
     endpoints = res.scalars().all()
 
+    # Exporter health: newest flow minute in the last 24 h and the rate over the last five
+    # complete minutes.
+    window_end = now_utc.replace(second=0, microsecond=0)
+    health: Dict[str, Tuple[Any, int]] = {}
+    try:
+        health_res = await db.execute(
+            text("""
+                SELECT exporter_id,
+                       MAX(bucket) AS last_bucket,
+                       COALESCE(SUM(flow_count) FILTER (WHERE bucket >= :recent AND bucket < :window_end), 0) AS recent_flows
+                FROM flow_minute_rollups
+                WHERE bucket >= :since
+                GROUP BY exporter_id
+            """),
+            {
+                "since": since_24h,
+                "recent": window_end - datetime.timedelta(seconds=OVERVIEW_WINDOW_SECONDS),
+                "window_end": window_end,
+            },
+        )
+        for h_row in health_res.all():
+            health[str(h_row[0])] = (h_row[1], int(h_row[2] or 0))
+    except Exception as exc:
+        logger.debug("Exporter health query failed: %s", exc)
+
     exporters: List[FlowExporterItem] = []
     for ep in endpoints:
         exp_ips = [str(ip) for ip in (ep.flow_exporter_ips or [])]
         aliases = ep.flow_interface_aliases or {}
+        last_bucket, recent_flows = health.get(str(ep.id), (None, 0))
         exporters.append(
             FlowExporterItem(
                 id=ep.id,
@@ -972,7 +1003,8 @@ async def list_flow_exporters(
                 flow_exporter_ips=exp_ips,
                 interface_aliases=aliases,
                 device_role=getattr(ep, "device_role", "ACTIVE_HOST"),
-                last_flow_time=None,
+                last_flow_time=last_bucket.astimezone(datetime.timezone.utc).isoformat() if last_bucket else None,
+                flows_per_sec=round(recent_flows / OVERVIEW_WINDOW_SECONDS, 2),
             )
         )
 
@@ -1001,6 +1033,7 @@ async def list_flow_exporters(
                             UnmatchedExporterItem(
                                 ip_address=ip_str,
                                 last_seen=dt.isoformat(),
+                                flows_per_sec=await _unmatched_flow_rate(store_client, ip_str),
                             )
                         )
                         seen_ips.add(ip_str)
@@ -1185,7 +1218,6 @@ async def get_interfaces_telemetry(
     delta = _get_window_delta(window)
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
-    window_seconds = max(1.0, delta.total_seconds())
 
     # Get endpoint for alias & speed mappings
     ep_stmt = select(Endpoint).where(
@@ -1196,24 +1228,42 @@ async def get_interfaces_telemetry(
     endpoint = ep_res.scalar_one_or_none()
     aliases = getattr(endpoint, "flow_interface_aliases", {}) or {}
 
-    # Query flow_interface_minute_rollups
-    stmt = (
-        select(
-            FlowInterfaceMinuteRollup.interface_idx,
-            func.sum(FlowInterfaceMinuteRollup.in_bytes).label("in_bytes"),
-            func.sum(FlowInterfaceMinuteRollup.out_bytes).label("out_bytes"),
-            func.sum(FlowInterfaceMinuteRollup.in_packets).label("in_packets"),
-            func.sum(FlowInterfaceMinuteRollup.out_packets).label("out_packets"),
-            func.sum(FlowInterfaceMinuteRollup.flow_count).label("flow_count"),
-        )
-        .where(
-            FlowInterfaceMinuteRollup.exporter_id == exporter_id,
-            FlowInterfaceMinuteRollup.bucket >= start_time,
-        )
-        .group_by(FlowInterfaceMinuteRollup.interface_idx)
-        .order_by(FlowInterfaceMinuteRollup.interface_idx.asc())
+    # Up to 7 days the minute table answers directly; 30 days needs the hourly rollup (the minute
+    # table is kept 7 days). p95 is over minutes, or over hourly averages for the hourly tier.
+    hourly = delta > datetime.timedelta(days=7)
+    if hourly:
+        source, slot_seconds = "flow_interface_hourly_rollups", 3600
+        peak_in_col, peak_out_col = "peak_in_minute_bytes", "peak_out_minute_bytes"
+    else:
+        source, slot_seconds = "flow_interface_minute_rollups", 60
+        peak_in_col, peak_out_col = "in_bytes", "out_bytes"
+    params = {"exporter_id": str(exporter_id), "start": start_time}
+
+    first_res = await db.execute(
+        text(f"SELECT MIN(bucket) FROM {source} WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start"),
+        params,
     )
-    res = await db.execute(stmt)
+    first_bucket = first_res.scalar()
+    coverage_start = max(start_time, first_bucket) if first_bucket else start_time
+    covered_seconds = max(60.0, (now - coverage_start).total_seconds())
+    total_slots = int(-(-covered_seconds // slot_seconds))
+
+    res = await db.execute(
+        text(f"""
+            SELECT interface_idx,
+                   SUM(in_bytes) AS in_bytes, SUM(out_bytes) AS out_bytes,
+                   SUM(in_packets) AS in_packets, SUM(out_packets) AS out_packets,
+                   SUM(flow_count) AS flow_count,
+                   MAX({peak_in_col}) AS peak_in, MAX({peak_out_col}) AS peak_out,
+                   array_agg(in_bytes ORDER BY in_bytes) AS in_slots,
+                   array_agg(out_bytes ORDER BY out_bytes) AS out_slots
+            FROM {source}
+            WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start
+            GROUP BY interface_idx
+            ORDER BY interface_idx
+        """),
+        params,
+    )
     rows = res.all()
 
     # Active interfaces from FastStore if available
@@ -1231,30 +1281,28 @@ async def get_interfaces_telemetry(
         except Exception as e:
             logger.debug("Failed to read active interfaces from FastStore: %s", e)
 
-    # Collect known interface indexes from rollups and configured aliases
+    zero_stats = {
+        "in_bytes": 0, "out_bytes": 0, "in_packets": 0, "out_packets": 0, "flow_count": 0,
+        "peak_in": 0, "peak_out": 0, "in_slots": [], "out_slots": [],
+    }
     all_if_indices: dict[int, dict[str, Any]] = {}
     for row in rows:
-        idx = int(row[0])
-        all_if_indices[idx] = {
-            "in_bytes": int(row[1] or 0) if len(row) > 1 else 0,
-            "out_bytes": int(row[2] or 0) if len(row) > 2 else 0,
-            "in_packets": int(row[3] or 0) if len(row) > 3 else 0,
-            "out_packets": int(row[4] or 0) if len(row) > 4 else 0,
-            "flow_count": int(row[5] or 0) if len(row) > 5 else 0,
+        all_if_indices[int(row[0])] = {
+            "in_bytes": int(row[1] or 0),
+            "out_bytes": int(row[2] or 0),
+            "in_packets": int(row[3] or 0),
+            "out_packets": int(row[4] or 0),
+            "flow_count": int(row[5] or 0),
+            "peak_in": int(row[6] or 0),
+            "peak_out": int(row[7] or 0),
+            "in_slots": list(row[8] or []),
+            "out_slots": list(row[9] or []),
         }
 
     # Include any interfaces configured in aliases even if 0 traffic recorded
-    for k_str, val in aliases.items():
+    for k_str in aliases:
         try:
-            k_int = int(k_str)
-            if k_int not in all_if_indices:
-                all_if_indices[k_int] = {
-                    "in_bytes": 0,
-                    "out_bytes": 0,
-                    "in_packets": 0,
-                    "out_packets": 0,
-                    "flow_count": 0,
-                }
+            all_if_indices.setdefault(int(k_str), dict(zero_stats))
         except ValueError:
             pass
 
@@ -1263,14 +1311,21 @@ async def get_interfaces_telemetry(
         stats = all_if_indices[if_idx]
         in_b = stats["in_bytes"]
         out_b = stats["out_bytes"]
-        in_bps = bits_per_second(in_b, window_seconds)
-        out_bps = bits_per_second(out_b, window_seconds)
+        in_bps = bits_per_second(in_b, covered_seconds)
+        out_bps = bits_per_second(out_b, covered_seconds)
+        in_p95 = bits_per_second(percentile_with_idle(stats["in_slots"], total_slots), slot_seconds)
+        out_p95 = bits_per_second(percentile_with_idle(stats["out_slots"], total_slots), slot_seconds)
+        in_peak = bits_per_second(stats["peak_in"], 60.0)
+        out_peak = bits_per_second(stats["peak_out"], 60.0)
 
         alias_data = aliases.get(str(if_idx))
         name, speed_mbps = interface_alias(alias_data, f"Interface {if_idx}")
         speed_mbps = max(1, speed_mbps)
         speed_configured = configured_speed_mbps(alias_data) is not None
-        utilization = round(utilization_pct(max(in_bps, out_bps), speed_mbps), 2) if speed_configured else None
+
+        def _util(bps_in: float, bps_out: float) -> Optional[float]:
+            return round(utilization_pct(max(bps_in, bps_out), speed_mbps), 2) if speed_configured else None
+
         is_active = (if_idx in active_store_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
 
         interfaces.append(
@@ -1286,8 +1341,14 @@ async def get_interfaces_telemetry(
                 in_packets=stats["in_packets"],
                 out_packets=stats["out_packets"],
                 flow_count=stats["flow_count"],
-                utilization_percentage=utilization,
+                utilization_percentage=_util(in_bps, out_bps),
                 is_active=is_active,
+                in_p95_bps=round(in_p95, 2),
+                out_p95_bps=round(out_p95, 2),
+                in_peak_bps=round(in_peak, 2),
+                out_peak_bps=round(out_peak, 2),
+                p95_utilization_percentage=_util(in_p95, out_p95),
+                peak_utilization_percentage=_util(in_peak, out_peak),
             )
         )
 
@@ -1296,6 +1357,9 @@ async def get_interfaces_telemetry(
             exporter_id=exporter_id,
             window=window,
             interfaces=interfaces,
+            covered_seconds=int(covered_seconds),
+            p95_resolution_seconds=slot_seconds,
+            source=source,
         )
     )
 

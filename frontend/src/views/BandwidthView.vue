@@ -293,7 +293,7 @@
               <th class="text-right">Link Speed</th>
               <th class="text-right">Ingress Rate</th>
               <th class="text-right">Egress Rate</th>
-              <th style="width: 200px;">Utilization</th>
+              <th style="width: 300px;" title="Bar: average. Ticks: 95th percentile (|) and busiest minute (▲).">Utilization · avg / p95 / peak</th>
               <th class="text-center" style="width: 90px;">Status</th>
             </tr>
           </thead>
@@ -335,9 +335,22 @@
                       :class="getUtilClass(item.utilization_percentage)"
                       :style="{ width: `${Math.min(100, item.utilization_percentage)}%` }"
                     ></div>
+                    <span
+                      v-if="item.p95_utilization_percentage != null"
+                      class="util-marker util-marker-p95"
+                      :style="{ left: `${Math.min(100, item.p95_utilization_percentage)}%` }"
+                      :title="`95th percentile: ${item.p95_utilization_percentage.toFixed(1)}%`"
+                    ></span>
+                    <span
+                      v-if="item.peak_utilization_percentage != null"
+                      class="util-marker util-marker-peak"
+                      :style="{ left: `${Math.min(100, item.peak_utilization_percentage)}%` }"
+                      :title="`Busiest minute: ${item.peak_utilization_percentage.toFixed(1)}%`"
+                    ></span>
                   </div>
-                  <span class="util-text tnum" :class="getUtilClass(item.utilization_percentage)">
-                    {{ item.utilization_percentage.toFixed(1) }}%
+                  <span class="util-text tnum" :class="getUtilClass(item.p95_utilization_percentage ?? item.utilization_percentage)">
+                    {{ item.utilization_percentage.toFixed(1) }}<span class="util-sub">
+                      / {{ (item.p95_utilization_percentage ?? 0).toFixed(1) }} / {{ (item.peak_utilization_percentage ?? 0).toFixed(1) }}%</span>
                   </span>
                 </div>
               </td>
@@ -2227,11 +2240,37 @@ html.dark .unmatched-scope-badge {
 }
 
 .util-bar-bg {
+  position: relative;
   flex: 1;
   height: 6px;
   background: var(--border-color, rgba(255, 255, 255, 0.1));
   border-radius: 3px;
-  overflow: hidden;
+}
+
+.util-marker {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 12px;
+  transform: translateX(-1px);
+  background: var(--text-secondary);
+}
+
+.util-marker-peak {
+  top: -6px;
+  width: 0;
+  height: 0;
+  background: none;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--status-text-down);
+  transform: translateX(-4px);
+}
+
+.util-sub {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
 }
 
 .util-bar-fill {
@@ -2255,8 +2294,9 @@ html.dark .unmatched-scope-badge {
 .util-text {
   font-size: 0.75rem;
   font-weight: 700;
-  width: 45px;
+  min-width: 45px;
   text-align: right;
+  white-space: nowrap;
 }
 
 .util-text.util-healthy {

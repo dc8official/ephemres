@@ -14,6 +14,7 @@ from app.core.orm import AsyncSession
 from app.database import get_db
 from app.repositories.auth_repo import AuthRepository
 from app.repositories.endpoint_repo import EndpointRepository
+from app.services import probe_history
 from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse, PaginationMeta
 from app.services.uptime_calculator import (
@@ -244,6 +245,41 @@ async def list_endpoints(
             total_pages=1,
         )
     return APIResponse.success(data=data, meta=meta)
+
+
+@router.get("/probe-summary", response_model=APIResponse)
+async def get_probe_summary(
+    hours: int = Query(default=24, ge=1, le=168),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-endpoint loss %, mean and p95 RTT, jitter, last probe time and an hourly RTT sparkline
+    over the last `hours`, from the per-cycle probe history. Endpoints without samples (passive,
+    paused or not yet probed) are absent."""
+    return APIResponse.success(data=await probe_history.probe_summary(db, hours=hours))
+
+
+@router.get("/{endpoint_id}/probe-series", response_model=APIResponse)
+async def get_probe_series(
+    endpoint_id: UUID,
+    start_date: Optional[datetime] = Query(default=None),
+    end_date: Optional[datetime] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """RTT min/avg/max, jitter and loss over time for one endpoint (default: last 24 hours).
+
+    Resolution follows the span: per cycle up to 2 days, 10-minute buckets up to 8 days, hourly
+    beyond that."""
+    end = end_date or datetime.now(timezone.utc)
+    start = start_date or (end - timedelta(hours=24))
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if start >= end:
+        raise HTTPException(status_code=400, detail="start_date must be before end_date.")
+    return APIResponse.success(data=await probe_history.probe_series(db, endpoint_id, start, end))
 
 
 @router.get("/{endpoint_id}", response_model=APIResponse)

@@ -145,6 +145,19 @@ export function getEndpoint(id) {
   return api.get(`/endpoints/${id}`)
 }
 
+// Per-cycle probe history: RTT min/avg/max, jitter and loss over time (v3.4).
+export function getProbeSeries(id, startDate = null, endDate = null) {
+  const params = {}
+  if (startDate) params.start_date = startDate
+  if (endDate) params.end_date = endDate
+  return api.get(`/endpoints/${id}/probe-series`, { params })
+}
+
+// Per-endpoint loss, mean/p95 RTT, last probe time and hourly RTT sparkline.
+export function getProbeSummary(hours = 24) {
+  return api.get('/endpoints/probe-summary', { params: { hours } })
+}
+
 export function getTopology() {
   return api.get('/topology')
 }

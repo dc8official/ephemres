@@ -14,6 +14,7 @@ from app.services.baseline_service import baseline_cache, start_baseline_refresh
 from app.services.diagnostics import run_throttled_traceroute, save_diagnostic_trace
 from monitoring.gap_handler import resolve_startup_state
 from monitoring.ping import run_ping_cycle
+from monitoring.probe_samples import record_probe_sample
 from monitoring.registry import endpoint_registry, MonitoredEndpoint
 from monitoring.state_machine import EndpointState, StateMachine
 
@@ -156,6 +157,7 @@ async def monitor_endpoint(
             str(endpoint_id),
         )
         try:
+            sampled_at = datetime.now(timezone.utc)
             result = await run_ping_cycle(
                 ip_address=ip_address,
                 count=1,
@@ -170,6 +172,7 @@ async def monitor_endpoint(
                     endpoint_id, result, db, baseline=baseline
                 )
                 await db.commit()
+            await record_probe_sample(endpoint_id, sampled_at, result)
 
             async with states_lock:
                 endpoint_states[str(endpoint_id)] = new_state
@@ -194,6 +197,7 @@ async def monitor_endpoint(
     while True:
         try:
             # Default 5 pings @ 8.0s: ~32s typical, 42s worst case, inside the 60s slot cycle
+            sampled_at = datetime.now(timezone.utc)
             result = await run_ping_cycle(
                 ip_address=ip_address,
                 count=PING_COUNT,
@@ -253,6 +257,8 @@ async def monitor_endpoint(
                                     )
 
                     await db.commit()
+                # Separate transaction: a failed sample write must not undo the state update.
+                await record_probe_sample(endpoint_id, sampled_at, result)
 
             async with states_lock:
                 endpoint_states[str(endpoint_id)] = new_state

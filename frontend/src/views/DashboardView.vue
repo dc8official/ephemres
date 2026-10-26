@@ -161,12 +161,13 @@
                 <th @click="handleSort('detailed_state')" class="sortable-th">
                   State {{ sortKey === 'detailed_state' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right">
-                  Avg Latency {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right" title="Mean and 95th percentile RTT over the last 24 hours">
+                  Latency 24h · p95 {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th class="text-right" title="Packet loss needs per-probe history, which is not recorded yet">
-                  Loss %
+                <th @click="handleSort('loss_pct')" class="sortable-th text-right" title="Share of probes without a reply over the last 24 hours">
+                  Loss 24h {{ sortKey === 'loss_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
+                <th title="Hourly mean RTT over the last 24 hours">RTT trend</th>
                 <th @click="handleSort('uptime_pct')" class="sortable-th text-right">
                   24h Uptime {{ sortKey === 'uptime_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
@@ -204,9 +205,21 @@
                   />
                 </td>
                 <td class="font-mono tnum text-right">
-                  {{ ep.avg_rtt_ms != null ? ep.avg_rtt_ms.toFixed(1) + ' ms' : (ep.current_state?.avg_rtt_ms != null ? ep.current_state.avg_rtt_ms.toFixed(1) + ' ms' : '—') }}
+                  <template v-if="probeFor(ep)?.rtt_avg_ms != null">
+                    {{ probeFor(ep).rtt_avg_ms.toFixed(1) }} ms
+                    <span class="text-muted p95">· {{ probeFor(ep).rtt_p95_ms != null ? probeFor(ep).rtt_p95_ms.toFixed(1) : '—' }}</span>
+                  </template>
+                  <template v-else>—</template>
                 </td>
-                <td class="font-mono tnum text-right text-muted">—</td>
+                <td class="font-mono tnum text-right" :style="{ color: probeFor(ep)?.loss_pct > 0 ? 'var(--status-text-down)' : null }">
+                  {{ formatLoss(probeFor(ep)?.loss_pct) }}
+                </td>
+                <td>
+                  <Sparkline
+                    :values="probeFor(ep)?.rtt_sparkline || []"
+                    :aria-label="`${ep.hostname} hourly RTT over 24 hours`"
+                  />
+                </td>
                 <td class="font-mono tnum text-right font-bold" :style="{ color: toneVar(uptimeTone(uptimeValue(ep))) }">
                   {{ getUptimePct(ep) }}
                 </td>
@@ -341,11 +354,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, shallowRef, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import { 
-  getEndpoints, 
+  getEndpoints,
+  getProbeSummary,
   createEndpoint, 
   updateEndpoint, 
   deleteEndpoint, 
@@ -359,6 +373,7 @@ import EndpointInspectorDrawer from '../components/EndpointInspectorDrawer.vue'
 import TelemetryExportPopover from '../components/TelemetryExportPopover.vue'
 import { useSSE } from '../composables/useSSE.js'
 import KpiTile from '../components/ui/KpiTile.vue'
+import Sparkline from '../components/ui/Sparkline.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import { endpointStateBucket, isMonitored, meanUptime, uptimeValue } from '../utils/endpointState.js'
 import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
@@ -367,6 +382,18 @@ const router = useRouter()
 const toast = useToast()
 
 const endpoints = ref([])
+// 24 h probe statistics per endpoint id (loss, mean/p95 RTT, hourly sparkline).
+const probeSummary = shallowRef(new Map())
+
+function probeFor(ep) {
+  return isMonitored(ep) ? probeSummary.value.get(ep.id) : undefined
+}
+
+function formatLoss(pct) {
+  if (pct === null || pct === undefined) return '—'
+  if (pct === 0) return '0%'
+  return pct < 1 ? `${pct.toFixed(2)}%` : `${pct.toFixed(1)}%`
+}
 const loading = ref(false)
 const error = ref(null)
 const lastRefreshed = ref(null)
@@ -488,7 +515,9 @@ const sortedEndpoints = computed(() => {
     if (key === 'detailed_state') {
       sortVal = ep.current_detailed_state || ep.current_operational_state || ep.endpoint_status || ''
     } else if (key === 'avg_rtt_ms') {
-      sortVal = ep.avg_rtt_ms ?? (ep.current_state?.avg_rtt_ms ?? 99999)
+      sortVal = probeFor(ep)?.rtt_avg_ms ?? null
+    } else if (key === 'loss_pct') {
+      sortVal = probeFor(ep)?.loss_pct ?? null
     } else if (key === 'uptime_pct') {
       sortVal = uptimeValue(ep)
     } else if (key === 'last_seen') {
@@ -604,8 +633,15 @@ const fetchEndpoints = async (isRetry = false) => {
     error.value = null
   }
   try {
-    const response = await getEndpoints()
+    const [response, probeRes] = await Promise.all([
+      getEndpoints(),
+      getProbeSummary(24).catch((err) => {
+        console.warn('[DashboardView] Probe summary unavailable:', err)
+        return null
+      }),
+    ])
     endpoints.value = response.data.data || []
+    probeSummary.value = new Map((probeRes?.data?.data || []).map((row) => [row.endpoint_id, row]))
     lastRefreshed.value = new Date()
     error.value = null
   } catch (err) {
@@ -863,6 +899,10 @@ onUnmounted(() => {
 }
 
 .text-down { color: var(--status-text-down); }
+
+.p95 {
+  font-size: var(--text-xs);
+}
 
 /* 24 px hit area around native checkboxes */
 .select-target {

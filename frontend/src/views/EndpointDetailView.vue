@@ -35,10 +35,11 @@
             size="small"
             class="refresh-btn"
           />
-          <StatusBadge :status="endpoint.endpoint_status" />
-          <span class="monitoring-badge" :class="endpoint.monitoring_enabled ? 'enabled' : 'disabled'">
-            <i class="pi" :class="endpoint.monitoring_enabled ? 'pi-eye' : 'pi-eye-slash'"></i>
-            {{ endpoint.monitoring_enabled ? 'Active' : 'Paused' }}
+          <span class="header-chip" title="Inventory record status">
+            Record <strong>{{ (endpoint.endpoint_status || 'unknown').toLowerCase() }}</strong>
+          </span>
+          <span class="header-chip" :class="endpoint.monitoring_enabled ? 'chip-on' : 'chip-off'" title="Active ICMP probing">
+            ICMP monitoring <strong>{{ endpoint.monitoring_enabled ? 'on' : 'off' }}</strong>
           </span>
         </div>
       </div>
@@ -86,6 +87,32 @@
                 <span class="meta-value desc">{{ endpoint.description || 'No description provided.' }}</span>
               </div>
             </div>
+            <dl class="status-bar">
+              <div class="status-cell">
+                <dt>State</dt>
+                <dd><StatusBadge :status="statusBar.state" size="sm" /></dd>
+              </div>
+              <div class="status-cell">
+                <dt>Latency now</dt>
+                <dd class="tnum">{{ statusBar.latency }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Loss (24h)</dt>
+                <dd class="tnum" :style="{ color: statusBar.lossColor }">{{ statusBar.loss }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Jitter (24h)</dt>
+                <dd class="tnum">{{ statusBar.jitter }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>In state since</dt>
+                <dd class="tnum">{{ statusBar.since }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Last probe</dt>
+                <dd class="tnum">{{ statusBar.lastProbe }}</dd>
+              </div>
+            </dl>
           </template>
         </Card>
 
@@ -239,10 +266,20 @@
         <!-- RTT Latency Trend Component -->
         <div class="visualizer-container">
           <div class="panel-header">
-            <h3><i class="pi pi-chart-line header-icon"></i>ICMP Latency & Jitter Trend (RTT)</h3>
-            <span class="panel-desc">Average round-trip time recorded for each state period</span>
+            <h3><i class="pi pi-chart-line header-icon"></i>ICMP latency and loss</h3>
+            <span class="panel-desc">
+              <template v-if="periodProbe.points.length">Average RTT with min–max range and packet loss, {{ resolutionLabel(periodProbe.bucket_seconds) }}</template>
+              <template v-else>No per-probe history for this period; showing the RTT recorded for each state period</template>
+            </span>
           </div>
-          <RTTTrendPanel :events="chartEvents" />
+          <ProbeTrendPanel
+            v-if="periodProbe.points.length"
+            :points="periodProbe.points"
+            :bucket-seconds="periodProbe.bucket_seconds"
+            :start="periodStartStr"
+            :end="periodEndStr"
+          />
+          <RTTTrendPanel v-else :events="chartEvents" />
         </div>
 
         <!-- Detailed Event Logs Table -->
@@ -420,8 +457,11 @@
                       ></div>
                     </div>
                     <div class="meter-meta tnum">
-                      <span>Avg utilization</span>
-                      <span>{{ iface.utilization != null ? `${iface.utilization.toFixed(1)}%` : '—' }}</span>
+                      <span>Utilization avg · p95 · peak</span>
+                      <span v-if="iface.utilization != null">
+                        {{ iface.utilization.toFixed(1) }} · {{ (iface.p95Utilization ?? 0).toFixed(1) }} · {{ (iface.peakUtilization ?? 0).toFixed(1) }}%
+                      </span>
+                      <span v-else>—</span>
                     </div>
                   </div>
                 </div>
@@ -466,7 +506,7 @@
             <div class="section-header">
               <div>
                 <span class="font-bold text-base">Latency vs bandwidth</span>
-                <p class="text-xs text-muted mt-1">ICMP latency per state period against flow throughput. Latency has one value per state period until per-probe history is recorded.</p>
+                <p class="text-xs text-muted mt-1">Per-probe ICMP latency and loss above flow throughput, on the same time axis.</p>
               </div>
               <div class="header-controls">
                 <div v-if="interfaceTelemetry && interfaceTelemetry.length > 0" class="interface-filter-wrapper">
@@ -489,16 +529,24 @@
                 </div>
               </div>
             </div>
-            <div class="flow-chart-box">
+            <ProbeTrendPanel
+              compact
+              :points="flowProbe.points"
+              :bucket-seconds="flowProbe.bucket_seconds"
+              :start="flowRange.start"
+              :end="flowRange.end"
+              empty-text="No per-probe latency history in this window (the device may not be ICMP-monitored)."
+            />
+            <div class="flow-chart-box flow-chart-box-compact">
               <LineChart
                 v-if="flowSeriesPoints.length > 0"
-                :data="correlatedChartData"
-                :options="correlatedChartOptions"
+                :data="correlatedBandwidthData"
+                :options="correlatedBandwidthOptions"
               />
               <div v-else-if="!loadingFlow" class="no-data-msg">
-                No telemetry recorded for cross-correlation in the selected {{ flowWindow }} window.
+                No flow throughput recorded in the last {{ flowWindow }}.
               </div>
-              <div v-else class="no-data-msg">Correlating RTT and flow points...</div>
+              <div v-else class="no-data-msg">Loading flow throughput...</div>
             </div>
           </div>
 
@@ -813,10 +861,11 @@
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getTopTalkers, getInterfaceTelemetry, updateEndpointInterfaces } from '../services/api.js'
+import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getTopTalkers, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
 import StateTimeline from '../components/StateTimeline.vue'
 import RTTTrendPanel from '../components/RTTTrendPanel.vue'
+import ProbeTrendPanel from '../components/ProbeTrendPanel.vue'
 import EndpointRcaDetail from '../components/EndpointRcaDetail.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { Line as LineChart } from 'vue-chartjs'
@@ -928,6 +977,65 @@ function setFlowWindow(w) {
 // Not ICMP-monitored (passive flow exporter, paused): availability does not apply.
 const icmpMonitored = computed(() => isMonitored(endpoint.value))
 
+// Per-probe history (endpoint_probe_samples): the analysis period for the latency chart, the
+// last 24 h for the status bar, and the flow window for the latency-vs-bandwidth view.
+const EMPTY_PROBE = { points: [], bucket_seconds: 60 }
+const periodProbe = shallowRef(EMPTY_PROBE)
+const probe24h = shallowRef(EMPTY_PROBE)
+const flowProbe = shallowRef(EMPTY_PROBE)
+const flowRange = ref({ start: new Date(Date.now() - 3600 * 1000).toISOString(), end: new Date().toISOString() })
+
+const FLOW_WINDOW_MS = { '1h': 3600e3, '6h': 21600e3, '24h': 86400e3, '7d': 604800e3 }
+
+function resolutionLabel(bucketSeconds) {
+  if (bucketSeconds >= 3600) return 'hourly'
+  if (bucketSeconds >= 600) return 'per 10 minutes'
+  return 'per monitoring cycle'
+}
+
+function relativeTime(iso) {
+  if (!iso) return '—'
+  const secs = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000))
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
+const statusBar = computed(() => {
+  const ep = endpoint.value || {}
+  const monitored = icmpMonitored.value
+  const pts = probe24h.value.points
+  const last = [...pts].reverse().find((p) => p.sent > 0)
+  const lastReply = [...pts].reverse().find((p) => p.rtt_avg_ms != null)
+  const sent = pts.reduce((a, p) => a + p.sent, 0)
+  const received = pts.reduce((a, p) => a + p.received, 0)
+  const jitters = pts.map((p) => p.jitter_ms).filter((v) => v != null)
+  const loss = sent ? (1 - received / sent) * 100 : null
+  const notMonitored = 'Not ICMP-monitored'
+  return {
+    state: ep.current_detailed_state || ep.current_operational_state || (monitored ? 'UNKNOWN' : 'PASSIVE'),
+    latency: !monitored ? notMonitored
+      : lastReply ? `${lastReply.rtt_avg_ms.toFixed(1)} ms`
+      : ep.avg_rtt_ms != null ? `${Number(ep.avg_rtt_ms).toFixed(1)} ms` : '—',
+    loss: !monitored ? '—' : loss === null ? '—' : `${loss.toFixed(loss < 1 && loss > 0 ? 2 : 1)}%`,
+    lossColor: loss > 0 ? 'var(--status-text-down)' : 'inherit',
+    jitter: !monitored || !jitters.length ? '—' : `${(jitters.reduce((a, v) => a + v, 0) / jitters.length).toFixed(1)} ms`,
+    since: monitored ? relativeTime(ep.last_seen) : '—',
+    lastProbe: !monitored ? '—' : last ? relativeTime(last.timestamp) : 'No probe history yet',
+  }
+})
+
+async function loadProbe(start, end) {
+  try {
+    const res = await getProbeSeries(endpointId, start, end)
+    return res.data?.data || EMPTY_PROBE
+  } catch (err) {
+    console.warn('Probe history unavailable:', err)
+    return EMPTY_PROBE
+  }
+}
+
 const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
 const showInterfaceModal = ref(false)
@@ -944,6 +1052,10 @@ function switchPerspective(persp) {
 async function loadFlowTelemetry() {
   if (!endpoint.value) return
   loadingFlow.value = true
+  const flowEnd = new Date()
+  const flowStart = new Date(flowEnd.getTime() - (FLOW_WINDOW_MS[flowWindow.value] || 3600e3))
+  flowRange.value = { start: flowStart.toISOString(), end: flowEnd.toISOString() }
+  loadProbe(flowRange.value.start, flowRange.value.end).then((data) => { flowProbe.value = data })
   try {
     const epId = endpoint.value.id
     const isExporter = flowMode.value === 'exporter'
@@ -1095,6 +1207,8 @@ const interfaceMeters = computed(() => {
       ingressBps: item.in_bps,
       egressBps: item.out_bps,
       utilization: item.utilization_percentage,
+      p95Utilization: item.p95_utilization_percentage,
+      peakUtilization: item.peak_utilization_percentage,
       active: item.is_active,
     }))
   }
@@ -1216,124 +1330,43 @@ const sortedEvents = computed(() => {
   return [...events.value].sort((a, b) => (Date.parse(b.start_time) || 0) - (Date.parse(a.start_time) || 0))
 })
 
-const correlatedChartData = computed(() => {
+// Bandwidth on the same linear time axis as the latency panel above it.
+const correlatedBandwidthData = computed(() => {
+  const series = theme.value.series
   const points = flowSeriesPoints.value
-  const labels = new Array(points.length)
-  const inData = new Array(points.length)
-  const outData = new Array(points.length)
-  const rttData = new Array(points.length)
-
-  // Pre-sorted RTT intervals: O(M log M) once per computation
-  const rttIntervals = indexedEvents.value
-    .filter((item) => item.raw.avg_rtt_ms != null)
-    .sort((a, b) => a.startMs - b.startMs)
-
-  const fallbackRtt = endpoint.value?.avg_rtt_ms != null ? Number(endpoint.value.avg_rtt_ms) : 0
-  const mLen = rttIntervals.length
-  let cursor = 0
-
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i]
-    const pTime = Date.parse(p.timestamp) || 0
-    const d = new Date(pTime)
-    labels[i] = formatAxisTime(pTime, flowWindow.value)
-    inData[i] = p.ingress_bps
-    outData[i] = p.egress_bps
-
-    let closestRtt = null
-    if (mLen > 0) {
-      while (cursor + 1 < mLen && rttIntervals[cursor].endMs < pTime) {
-        cursor++
-      }
-      const cur = rttIntervals[cursor]
-      if (pTime >= cur.startMs && pTime <= cur.endMs) {
-        closestRtt = cur.raw.avg_rtt_ms
-      } else {
-        const distCur = pTime < cur.startMs ? cur.startMs - pTime : pTime - cur.endMs
-        if (cursor > 0) {
-          const prev = rttIntervals[cursor - 1]
-          const distPrev = pTime < prev.startMs ? prev.startMs - pTime : pTime - prev.endMs
-          closestRtt = distPrev <= distCur ? prev.raw.avg_rtt_ms : cur.raw.avg_rtt_ms
-        } else {
-          closestRtt = cur.raw.avg_rtt_ms
-        }
-      }
-    }
-    const resolved = closestRtt ?? fallbackRtt
-    rttData[i] = Number(Number(resolved).toFixed(1))
-  }
-
+  const xy = (key) => points.map((p) => ({ x: Date.parse(p.timestamp), y: p[key] || 0 }))
   const matched = selectedCorrelatedInterfaceIdx.value !== null
-    ? interfaceTelemetry.value?.find(i => i.interface_idx === selectedCorrelatedInterfaceIdx.value)
+    ? interfaceTelemetry.value?.find((i) => i.interface_idx === selectedCorrelatedInterfaceIdx.value)
     : null
-  const ifName = matched?.interface_name || matched?.name || (selectedCorrelatedInterfaceIdx.value !== null ? `Interface #${selectedCorrelatedInterfaceIdx.value}` : '')
-
-  const inLabel = ifName ? `${ifName} Ingress (bps)` : 'Ingress (bps)'
-  const outLabel = ifName ? `${ifName} Egress (bps)` : 'Egress (bps)'
-
+  const prefix = matched ? `${matched.name} ` : ''
   return {
-    labels,
     datasets: [
-      {
-        label: 'ICMP Latency (ms)',
-        data: rttData,
-        borderColor: theme.value.series.rtt,
-        backgroundColor: withAlpha(theme.value.series.rtt, 0.15),
-        borderWidth: 2,
-        yAxisID: 'y_rtt',
-        tension: 0.2,
-        pointRadius: points.length > 100 ? 0 : 2,
-      },
-      {
-        label: inLabel,
-        data: inData,
-        borderColor: theme.value.series.in,
-        backgroundColor: withAlpha(theme.value.series.in, 0.15),
-        borderWidth: 2,
-        yAxisID: 'y_bandwidth',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 0,
-      },
-      {
-        label: outLabel,
-        data: outData,
-        borderColor: theme.value.series.out,
-        backgroundColor: withAlpha(theme.value.series.out, 0.15),
-        borderWidth: 2,
-        yAxisID: 'y_bandwidth',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 0,
-      },
+      flowDataset(`${prefix}Ingress (bps)`, xy('ingress_bps'), series.in),
+      flowDataset(`${prefix}Egress (bps)`, xy('egress_bps'), series.out),
     ],
   }
 })
 
-const correlatedChartOptions = computed(() => {
+const correlatedBandwidthOptions = computed(() => {
   const t = theme.value
+  const start = Date.parse(flowRange.value.start)
+  const end = Date.parse(flowRange.value.end)
   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
-    normalized: true,
-    interaction: { mode: 'index', intersect: false },
+    interaction: { mode: 'nearest', axis: 'x', intersect: false },
     scales: {
-      x: { grid: { display: false }, ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 12 } },
-      y_rtt: {
+      x: {
         type: 'linear',
-        position: 'left',
+        min: start,
+        max: end,
+        grid: { display: false },
+        ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 6, callback: (v) => formatAxisTime(v, flowWindow.value) },
+      },
+      y: {
         beginAtZero: true,
         grid: { color: t.grid },
-        title: { display: true, text: 'ICMP latency (ms)', color: t.text, font: { family: t.fontMono, size: 11 } },
-        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => `${val} ms` },
-      },
-      y_bandwidth: {
-        type: 'linear',
-        position: 'right',
-        beginAtZero: true,
-        grid: { drawOnChartArea: false },
-        title: { display: true, text: 'Bandwidth', color: t.text, font: { family: t.fontMono, size: 11 } },
         ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => formatBps(val) },
       },
     },
@@ -1341,12 +1374,8 @@ const correlatedChartOptions = computed(() => {
       legend: { position: 'top', labels: { color: t.text, font: { size: 11 } } },
       tooltip: {
         callbacks: {
-          label: (context) => {
-            if (context.dataset.yAxisID === 'y_rtt') {
-              return `ICMP latency: ${context.parsed.y} ms`
-            }
-            return `${context.dataset.label}: ${formatBps(context.parsed.y)}`
-          },
+          title: (items) => (items.length ? new Date(items[0].parsed.x).toLocaleString() : ''),
+          label: (ctx) => `${ctx.dataset.label}: ${formatBps(ctx.parsed.y)}`,
         },
       },
     },
@@ -1540,12 +1569,16 @@ const loadData = async ({ refresh = false } = {}) => {
   periodEndStr.value = end
 
   try {
-    const [endpointRes, uptimeRes, tableEventsRes, chartEventsRes] = await Promise.all([
+    const [endpointRes, uptimeRes, tableEventsRes, chartEventsRes, periodProbeRes, probe24hRes] = await Promise.all([
       getEndpoint(endpointId),
       getUptimeReport(endpointId, start, end),
       getEndpointEvents(endpointId, start, end, tablePage.value, tableSize.value),
       getEndpointEvents(endpointId, start, end, 1, CHART_EVENT_LIMIT),
+      loadProbe(start, end),
+      loadProbe(null, null),
     ])
+    periodProbe.value = periodProbeRes
+    probe24h.value = probe24hRes
 
     endpoint.value = endpointRes.data.data
     uptimeReport.value = uptimeRes.data.data
@@ -1679,6 +1712,68 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.header-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: var(--control-height-sm);
+  padding: 0 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+}
+
+.header-chip strong {
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.header-chip.chip-on strong {
+  color: var(--status-text-up);
+}
+
+.header-chip.chip-off strong {
+  color: var(--status-text-unknown);
+}
+
+.status-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem 1.5rem;
+  margin: 1.25rem 0 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.status-cell dt {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.status-cell dd {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.flow-chart-box.flow-chart-box-compact {
+  height: 220px;
+  margin-top: 0.75rem;
+}
+
 .value-muted {
   color: var(--status-text-unknown);
 }

@@ -32,6 +32,8 @@ class FlowCorrelator:
         self._exporter_map: Dict[str, UUID] = {}
         self._participant_map: Dict[str, UUID] = {}
         self._unmatched_local: Dict[str, float] = {}
+        # Flows seen per unmatched exporter IP since its last FastStore write.
+        self._unmatched_counts: Dict[str, int] = {}
 
         self._lock = asyncio.Lock()
         self._running = False
@@ -68,17 +70,25 @@ class FlowCorrelator:
 
     def _record_unmatched_exporter(self, ip: str) -> None:
         now = time.time()
+        self._unmatched_counts[ip] = self._unmatched_counts.get(ip, 0) + 1
         last_recorded = self._unmatched_local.get(ip, 0.0)
         # Rate-limit FastStore updates to once every 10 seconds per unmatched IP
         if now - last_recorded > 10.0:
+            # Flow rate since the previous write; unknown on the first sighting.
+            flows = self._unmatched_counts.pop(ip, 0)
+            flows_per_sec = round(flows / (now - last_recorded), 2) if last_recorded else None
             self._unmatched_local[ip] = now
             if self.store:
-                asyncio.create_task(self._async_record_redis_unmatched(ip, now))
+                asyncio.create_task(self._async_record_redis_unmatched(ip, now, flows_per_sec))
 
-    async def _async_record_redis_unmatched(self, ip: str, timestamp: float) -> None:
+    async def _async_record_redis_unmatched(
+        self, ip: str, timestamp: float, flows_per_sec: Optional[float] = None
+    ) -> None:
         try:
             key = f"flow:unmatched:{ip}"
             await self.store.set(key, str(timestamp), ex=900)
+            if flows_per_sec is not None:
+                await self.store.set(f"flow:unmatched:{ip}:fps", str(flows_per_sec), ex=900)
             await self.store.sadd("flow:unmatched:set", ip)
             # Track in FastStore ZSET with sliding-window 24h prune (Defect D4 / D12)
             await self.store.zadd("flow:unmatched:zset", {ip: timestamp})

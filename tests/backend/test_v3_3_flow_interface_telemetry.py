@@ -331,15 +331,21 @@ def test_get_interface_telemetry(client):
     mock_ep_res = MagicMock()
     mock_ep_res.scalar_one_or_none.return_value = mock_ep
 
-    # Mock interface rollups query: (if_idx, sum_in_bytes, sum_out_bytes, sum_in_pkts, sum_out_pkts, sum_flow_count)
+    # Coverage query: first bucket with data in the window (here: the whole hour).
+    import datetime as _dt
+    mock_cov_res = MagicMock()
+    mock_cov_res.scalar.return_value = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=2)
+
+    # Interface rollups query: (if_idx, in, out, in_pkts, out_pkts, flows, peak_in, peak_out,
+    # sorted per-minute in_bytes, sorted per-minute out_bytes)
     mock_rollup_rows = [
-        (1, 75000000, 37500000, 50000, 25000, 1000),  # if1: 75MB in, 37.5MB out
-        (2, 500000000, 250000000, 300000, 150000, 5000),  # if2: 500MB in, 250MB out
+        (1, 75000000, 37500000, 50000, 25000, 1000, 5000000, 2500000, [1250000] * 60, [625000] * 60),
+        (2, 500000000, 250000000, 300000, 150000, 5000, 9000000, 4500000, [8333333] * 60, [4166666] * 60),
     ]
     mock_rollups_res = MagicMock()
     mock_rollups_res.all.return_value = mock_rollup_rows
 
-    mock_session.execute.side_effect = [mock_ep_res, mock_rollups_res]
+    mock_session.execute.side_effect = [mock_ep_res, mock_cov_res, mock_rollups_res]
 
     resp = test_client.get(f"/api/v1/bandwidth/interfaces?exporter_id={exporter_id}&window=1h")
     assert resp.status_code == 200
@@ -354,6 +360,11 @@ def test_get_interface_telemetry(client):
     assert if1["in_bps"] > 0
     assert if1["out_bps"] > 0
     assert 0 <= if1["utilization_percentage"] <= 100
+    # 75 MB over the covered hour -> 166,667 bps; busiest minute 5 MB -> 666,667 bps
+    assert if1["in_bps"] == pytest.approx(75_000_000 * 8 / 3600, rel=0.01)
+    assert if1["in_peak_bps"] == pytest.approx(5_000_000 * 8 / 60, rel=0.001)
+    assert if1["in_p95_bps"] == pytest.approx(1_250_000 * 8 / 60, rel=0.001)
+    assert data["data"]["covered_seconds"] == pytest.approx(3600, abs=2)
 
     if2 = next(i for i in data["data"]["interfaces"] if i["interface_idx"] == 2)
     assert if2["name"] == "Ten0/1"

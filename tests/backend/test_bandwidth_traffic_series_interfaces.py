@@ -57,7 +57,8 @@ def test_traffic_series_exporter_queries_interface_rollup(client):
     in_bytes = 82_500_000
     out_bytes = 41_250_000
 
-    mock_row = (bucket_dt, in_bytes, out_bytes)
+    # (bucket, in_bytes, out_bytes, in_packets, out_packets, flow_count)
+    mock_row = (bucket_dt, in_bytes, out_bytes, 0, 0, 0)
     mock_res = MagicMock()
     mock_res.all.return_value = [mock_row]
     mock_session.execute = AsyncMock(return_value=mock_res)
@@ -84,7 +85,8 @@ def test_traffic_series_interface_idx_isolation(client):
     in_bytes = 15_000_000
     out_bytes = 7_500_000
 
-    mock_row = (bucket_dt, in_bytes, out_bytes)
+    # (bucket, in_bytes, out_bytes, in_packets, out_packets, flow_count)
+    mock_row = (bucket_dt, in_bytes, out_bytes, 0, 0, 0)
     mock_res = MagicMock()
     mock_res.all.return_value = [mock_row]
     mock_session.execute = AsyncMock(return_value=mock_res)

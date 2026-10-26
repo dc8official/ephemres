@@ -203,14 +203,15 @@
                   {{ row.uptime_percentage != null ? row.uptime_percentage.toFixed(2) + '%' : '—' }}
                 </span>
               </td>
+              <!-- Incident and duration figures only apply to ICMP-monitored endpoints. -->
               <td class="tnum" :class="row.incident_count > 0 ? 'text-down' : ''">
-                {{ row.incident_count }}
+                {{ row.monitoring_enabled === false ? '—' : row.incident_count }}
               </td>
               <td class="tnum font-mono">
-                {{ formatDuration(row.uptime_seconds) }}
+                {{ row.monitoring_enabled === false ? '—' : formatDuration(row.uptime_seconds) }}
               </td>
               <td class="tnum font-mono" :class="row.downtime_seconds > 0 ? 'text-down font-bold' : ''">
-                {{ formatDuration(row.downtime_seconds) }}
+                {{ row.monitoring_enabled === false ? '—' : formatDuration(row.downtime_seconds) }}
               </td>
               <td class="text-right">
                 <router-link :to="`/endpoints/${row.id}`" class="btn-inspect">

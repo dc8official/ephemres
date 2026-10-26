@@ -262,7 +262,10 @@ class FlowExporterItem(BaseModel):
     flow_exporter_ips: List[str] = Field(default_factory=list)
     interface_aliases: Dict[str, Any] = Field(default_factory=dict)
     device_role: Optional[str] = "FLOW_EXPORTER"
+    # Newest minute bucket with flows from this exporter in the last 24 h (None: silent for 24 h).
     last_flow_time: Optional[str] = None
+    # Flow records per second over the last five complete minutes.
+    flows_per_sec: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -290,6 +293,8 @@ class FlowExporterItem(BaseModel):
 class UnmatchedExporterItem(BaseModel):
     ip_address: str
     last_seen: str
+    # Recent flow rate reported by the flow daemon; None until it has two sightings.
+    flows_per_sec: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -317,14 +322,30 @@ class InterfaceTelemetryItem(BaseModel):
     # None when the link speed is not configured: utilization against a guessed speed is not shown.
     utilization_percentage: Optional[float] = None
     is_active: bool
+    # 95th percentile and busiest minute over the covered period (idle slots count as 0).
+    in_p95_bps: float = 0.0
+    out_p95_bps: float = 0.0
+    in_peak_bps: float = 0.0
+    out_peak_bps: float = 0.0
+    p95_utilization_percentage: Optional[float] = None
+    peak_utilization_percentage: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class InterfaceTelemetryResponse(BaseModel):
+    """Per-interface rates for one exporter.
+
+    Rates average over `covered_seconds`: from the later of the window start and the exporter's
+    first data in it, to now. `p95_resolution_seconds` is 60 when p95 is over minutes and 3600
+    when it is over hourly averages (30-day window); peaks are always the busiest minute.
+    """
     exporter_id: UUID
     window: str
     interfaces: List[InterfaceTelemetryItem]
+    covered_seconds: int = 0
+    p95_resolution_seconds: int = 60
+    source: str = "flow_interface_minute_rollups"
 
     model_config = ConfigDict(from_attributes=True)
 
