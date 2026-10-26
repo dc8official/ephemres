@@ -208,20 +208,30 @@ done
 # ============================================================
 print_header "Step 7: Copying project files"
 
+# The re-install sync uses --delete, so runtime state that only exists in $INSTALL_DIR (the venv,
+# .env files, the password reset report) must be excluded. Patterns are anchored to the transfer
+# root: unanchored names also match deep inside the venv and leave half-deleted directories behind.
+RSYNC_EXCLUDES=(
+    --exclude='/.git'
+    --exclude='/frontend/node_modules'
+    --exclude='/venv'
+    --exclude='/.venv'
+    --exclude='/backend/venv'
+    --exclude='/tests'
+    --exclude='/pytest.ini'
+    --exclude='/scratch'
+    --exclude='/.env'
+    --exclude='/backend/.env'
+    --exclude='/legacy_password_resets.txt'
+    --exclude='/certs'
+)
+
 if [ ! -d "$INSTALL_DIR" ]; then
     run "Creating project directory $INSTALL_DIR" \
         mkdir -p "$INSTALL_DIR"
     run "Copying project files to $INSTALL_DIR" \
         rsync -a \
-        --exclude='.git' \
-        --exclude='frontend/node_modules' \
-        --exclude='backend/venv' \
-        --exclude='tests' \
-        --exclude='pytest.ini' \
-        --exclude='scratch' \
-        --exclude='.env' \
-        --exclude='backend/.env' \
-        --exclude='certs' \
+        "${RSYNC_EXCLUDES[@]}" \
         "$PROJECT_ROOT/" "$INSTALL_DIR/"
     run "Setting project ownership" \
         chown -R ephemres:ephemres "$INSTALL_DIR"
@@ -230,15 +240,7 @@ else
     echo "Updating project files..."
     run "Syncing project files" \
         rsync -a --delete \
-        --exclude='.git' \
-        --exclude='frontend/node_modules' \
-        --exclude='backend/venv' \
-        --exclude='tests' \
-        --exclude='pytest.ini' \
-        --exclude='scratch' \
-        --exclude='.env' \
-        --exclude='backend/.env' \
-        --exclude='certs' \
+        "${RSYNC_EXCLUDES[@]}" \
         "$PROJECT_ROOT/" "$INSTALL_DIR/"
     run "Setting project ownership" \
         chown -R ephemres:ephemres "$INSTALL_DIR"
@@ -253,9 +255,10 @@ run "Marking install directory as git safe directory" \
 # ============================================================
 print_header "Step 8: Creating Python virtual environment"
 
-if [ ! -d "$VENV_DIR" ]; then
+# A venv missing its interpreter or pip (emptied by an older --delete sync) is rebuilt, not reused.
+if [ ! -x "$VENV_DIR/bin/python3" ] || [ ! -x "$VENV_DIR/bin/pip" ]; then
     run "Creating virtual environment with $PYTHON_BIN" \
-        $PYTHON_BIN -m venv "$VENV_DIR"
+        $PYTHON_BIN -m venv --clear "$VENV_DIR"
     run "Setting venv ownership" \
         chown -R ephemres:ephemres "$VENV_DIR"
 fi

@@ -319,16 +319,23 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     chown -R ephemres:ephemres /run/ephemres /var/log/ephemres 2>/dev/null || true
     if [[ "${SOURCE_DIR}" != "${INSTALL_DIR}" ]]; then
         echo -e "${GREEN}[INFO] Syncing repository files from ${SOURCE_DIR} to ${INSTALL_DIR}...${NC}"
+        # --delete removes anything the source lacks, so runtime state that only exists in
+        # ${INSTALL_DIR} (the venv, .env files, the password reset report) must be excluded.
+        # Patterns are anchored to the transfer root: unanchored names also match deep inside
+        # the venv and leave half-deleted directories behind.
         rsync -a --delete \
-            --exclude='.git' \
-            --exclude='frontend/node_modules' \
-            --exclude='backend/venv' \
-            --exclude='backend/.env' \
-            --exclude='.env' \
-            --exclude='tests' \
-            --exclude='pytest.ini' \
-            --exclude='scratch' \
-            --exclude='certs' \
+            --exclude='/.git' \
+            --exclude='/frontend/node_modules' \
+            --exclude='/venv' \
+            --exclude='/.venv' \
+            --exclude='/backend/venv' \
+            --exclude='/backend/.env' \
+            --exclude='/.env' \
+            --exclude='/legacy_password_resets.txt' \
+            --exclude='/tests' \
+            --exclude='/pytest.ini' \
+            --exclude='/scratch' \
+            --exclude='/certs' \
             "${SOURCE_DIR}/" "${INSTALL_DIR}/"
         chown -R ephemres:ephemres "${INSTALL_DIR}"
     fi
@@ -354,6 +361,26 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         VENV_PATH="${INSTALL_DIR}/backend/venv"
     elif [[ -d "${PROJECT_ROOT}/.venv" ]]; then
         VENV_PATH="${PROJECT_ROOT}/.venv"
+    fi
+
+    # Upgrades before v3.3.2v synced with --delete and emptied /opt/ephemres/venv, leaving a
+    # directory without bin/python3 or bin/pip. Rebuild it instead of failing with services stopped.
+    if [[ "${VENV_PATH}" == "/opt/ephemres/venv" ]] && [[ ! -x "${VENV_PATH}/bin/python3" || ! -x "${VENV_PATH}/bin/pip" ]]; then
+        VENV_PYTHON=""
+        # Python 3.11 is the floor: app.config imports the stdlib tomllib module.
+        for ver in 3.14 3.13 3.12 3.11; do
+            if command -v "python${ver}" &>/dev/null; then
+                VENV_PYTHON="python${ver}"
+                break
+            fi
+        done
+        if [[ -z "${VENV_PYTHON}" ]]; then
+            echo -e "${RED}[ERROR] ${VENV_PATH} is incomplete and no Python 3.11+ interpreter was found to rebuild it.${NC}" >&2
+            exit 1
+        fi
+        echo -e "${YELLOW}[WARN] ${VENV_PATH} is missing its interpreter or pip; rebuilding it with ${VENV_PYTHON}...${NC}"
+        "${VENV_PYTHON}" -m venv --clear "${VENV_PATH}"
+        chown -R ephemres:ephemres "${VENV_PATH}"
     fi
 
     if [[ -n "${VENV_PATH}" && -f "${INSTALL_DIR}/backend/requirements.txt" ]]; then
