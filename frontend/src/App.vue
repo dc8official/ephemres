@@ -8,7 +8,23 @@
           <span class="brand-name">Ephemres</span>
           <span class="brand-version">{{ appVersion || 'v3.3.2.v' }}</span>
         </div>
-        <nav class="header-nav" aria-label="Main Navigation">
+        <!-- Below ~1000 px the links collapse into a disclosure menu instead of wrapping. -->
+        <button
+          type="button"
+          class="nav-toggle"
+          :aria-expanded="navOpen"
+          aria-controls="main-nav"
+          @click="navOpen = !navOpen"
+        >
+          <span aria-hidden="true">☰</span> Menu
+        </button>
+        <nav
+          id="main-nav"
+          ref="navEl"
+          class="header-nav"
+          :class="{ open: navOpen }"
+          aria-label="Main Navigation"
+        >
           <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
           <RouterLink to="/topology" class="nav-link">Topology Map</RouterLink>
           <RouterLink to="/reports" class="nav-link">Reports & SLA</RouterLink>
@@ -24,7 +40,7 @@
           >
             {{ isDark ? '☀' : '☾' }}
           </button>
-          <span class="user-badge" v-if="currentUser">
+          <span class="user-badge" v-if="currentUser" :title="isAdmin ? `${currentUser} (admin)` : currentUser">
             {{ currentUser }} <span class="role-tag" v-if="isAdmin">(ADMIN)</span>
           </span>
           <button class="btn-sign-out" @click="handleLogout">
@@ -109,7 +125,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import Toast from 'primevue/toast'
 import ConfirmDialog from 'primevue/confirmdialog'
@@ -128,6 +144,21 @@ const { subscribe } = useSSE()
 let unsubscribeSSE = null
 
 const noNavRoutes = ['/login', '/change-password']
+
+// Collapsed navigation (narrow screens): closes on navigation, Escape and outside clicks.
+const navOpen = ref(false)
+const navEl = ref(null)
+watch(() => route.fullPath, () => { navOpen.value = false })
+
+function onDocumentKeydown(event) {
+  if (event.key === 'Escape' && navOpen.value) navOpen.value = false
+}
+
+function onDocumentClick(event) {
+  if (!navOpen.value) return
+  const toggle = event.target.closest?.('.nav-toggle')
+  if (!toggle && navEl.value && !navEl.value.contains(event.target)) navOpen.value = false
+}
 const showNav = computed(() => !noNavRoutes.includes(route.path))
 
 const displayPasswordModal = computed(() => {
@@ -143,6 +174,8 @@ const changePasswordForm = ref({
 })
 
 onMounted(async () => {
+  document.addEventListener('keydown', onDocumentKeydown)
+  document.addEventListener('click', onDocumentClick)
   const saved = localStorage.getItem('theme') || 'dark'
   if (saved === 'dark') {
     isDark.value = true
@@ -181,6 +214,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (unsubscribeSSE) unsubscribeSSE()
+  document.removeEventListener('keydown', onDocumentKeydown)
+  document.removeEventListener('click', onDocumentClick)
 })
 
 function toggleTheme() {
@@ -583,6 +618,80 @@ h1, h2, h3, h4, h5, h6,
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
+}
+
+.nav-toggle {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-height);
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.nav-toggle[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: var(--bg-surface-selected);
+}
+
+.user-badge {
+  max-width: 14rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1000px) {
+  .header-inner {
+    position: relative;
+    gap: 12px;
+  }
+
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .header-nav {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 16px 12px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: var(--shadow-hover);
+  }
+
+  .header-nav.open {
+    display: flex;
+  }
+
+  .header-nav .nav-link {
+    padding: 10px 12px;
+  }
+
+  .role-tag {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .header-inner {
+    padding: 0 16px;
+  }
+
+  .brand-version,
+  .user-badge {
+    display: none;
+  }
 }
 
 .theme-toggle {

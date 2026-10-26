@@ -489,6 +489,7 @@
               </div>
             </div>
             <div class="flow-chart-box">
+              <p v-if="flowSeriesPoints.length > 0" class="sr-only">{{ flowSummary }}</p>
               <LineChart
                 v-if="flowSeriesPoints.length > 0"
                 :data="flowChartData"
@@ -538,6 +539,7 @@
               empty-text="No per-probe latency history in this window (the device may not be ICMP-monitored)."
             />
             <div class="flow-chart-box flow-chart-box-compact">
+              <p v-if="flowSeriesPoints.length > 0" class="sr-only">{{ flowSummary }}</p>
               <LineChart
                 v-if="flowSeriesPoints.length > 0"
                 :data="correlatedBandwidthData"
@@ -807,6 +809,7 @@ import Button from 'primevue/button'
 import { useSSE } from '../composables/useSSE.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
 import { formatBps, formatPps } from '../utils/format.js'
+import { summarizeSeries } from '../utils/chartSummary.js'
 import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
 import { isMonitored } from '../utils/endpointState.js'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
@@ -1011,6 +1014,17 @@ const flowChartData = computed(() => {
     datasets.push(flowDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
   }
   return { labels, datasets }
+})
+
+// Text alternative for the flow charts (bandwidth and latency-vs-bandwidth views).
+const flowSummary = computed(() => {
+  const unit = nodeChartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const fmt = unit === 'pps' ? formatPps : formatBps
+  const pts = flowSeriesPoints.value.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  return [`Flow traffic, last ${flowWindow.value}.`]
+    .concat([[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress']].map(([key, label]) =>
+      summarizeSeries(label, pts.map(({ t, p }) => ({ t, v: p[key] ?? null })), fmt)))
+    .join(' ')
 })
 
 const flowChartOptions = computed(() => {

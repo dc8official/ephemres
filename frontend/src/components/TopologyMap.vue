@@ -4,7 +4,7 @@
     <div class="topology-toolbar">
       <div class="toolbar-left">
         <h2 class="topology-title">
-          <span class="icon">🕸</span> Live Network Topology Map
+          Network topology
         </h2>
         <span class="status-badge" :class="stabilized ? 'badge-stabilized' : 'badge-stabilizing'">
           {{ stabilized ? (layoutDirection === 'UD' ? '● Layout Fixed (Vertical)' : '● Layout Fixed (Horizontal)') : '◌ Stabilizing Hierarchical Layout...' }}
@@ -18,33 +18,54 @@
         </span>
       </div>
       <div class="toolbar-right">
-        <button 
-          v-if="isAdmin" 
-          class="btn-primary" 
-          :disabled="isDiscoveringAll" 
-          @click="handleDiscoverAll"
-          title="Run throttled background traceroute discovery across all endpoints"
-        >
-          {{ isDiscoveringAll ? '◌ Discovering Fleet...' : '⚡ Discover Fleet Routes' }}
-        </button>
-        <button 
-          v-if="isAdmin" 
-          class="btn-secondary" 
-          :disabled="isRebuilding" 
-          @click="handleRebuildHierarchy"
-          title="Reconstruct in-memory graph from current database baseline routes"
-        >
-          {{ isRebuilding ? 'Rebuilding...' : '↻ Rebuild Hierarchy' }}
-        </button>
-        <button class="btn-secondary" @click="toggleLayoutDirection" :title="layoutDirection === 'UD' ? 'Switch to Horizontal (Left-to-Right) view' : 'Switch to Vertical (Top-to-Bottom) view'">
-          {{ layoutDirection === 'UD' ? '↔ Horizontal View' : '↕ Vertical View' }}
-        </button>
-        <button class="btn-secondary" @click="resetView" title="Center and zoom map to fit all nodes">
-          🔍 Reset View
+        <SegmentedControl
+          :model-value="layoutDirection"
+          :options="[{ value: 'UD', label: 'Vertical', title: 'Top-to-bottom layout' }, { value: 'LR', label: 'Horizontal', title: 'Left-to-right layout' }]"
+          aria-label="Map layout"
+          size="sm"
+          @update:model-value="(dir) => dir !== layoutDirection && toggleLayoutDirection()"
+        />
+        <button class="btn-secondary" @click="resetView" title="Center and zoom the map to fit all nodes">
+          Fit view
         </button>
         <button class="btn-secondary" @click="fetchTopology" :disabled="loading">
-          {{ loading ? 'Updating...' : '↻ Refresh Topology' }}
+          {{ loading ? 'Updating...' : '↻ Refresh' }}
         </button>
+        <div v-if="isAdmin" ref="actionsMenuEl" class="actions-menu">
+          <button
+            type="button"
+            class="btn-secondary"
+            aria-haspopup="menu"
+            :aria-expanded="actionsOpen"
+            @click="actionsOpen = !actionsOpen"
+          >
+            Actions ▾
+          </button>
+          <div v-if="actionsOpen" class="actions-list" role="menu" @keydown.esc="actionsOpen = false">
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-item"
+              :disabled="isDiscoveringAll"
+              title="Run throttled background traceroute discovery across all endpoints"
+              @click="actionsOpen = false; handleDiscoverAll()"
+            >
+              {{ isDiscoveringAll ? 'Discovering fleet routes…' : 'Discover fleet routes' }}
+              <span class="actions-hint">Background traceroutes to every endpoint</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-item"
+              :disabled="isRebuilding"
+              title="Reconstruct the in-memory graph from the stored baseline routes"
+              @click="actionsOpen = false; handleRebuildHierarchy()"
+            >
+              {{ isRebuilding ? 'Rebuilding…' : 'Rebuild hierarchy' }}
+              <span class="actions-hint">From stored baseline routes</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -63,9 +84,17 @@
       </div>
 
       <!-- Dynamic Legend Overlay -->
-      <div class="map-legend">
-        <div class="legend-title">Topology Legend</div>
-        <div class="legend-items">
+      <div class="map-legend" :class="{ collapsed: !legendOpen }">
+        <button
+          type="button"
+          class="legend-title"
+          :aria-expanded="legendOpen"
+          aria-controls="topology-legend-items"
+          @click="toggleLegend"
+        >
+          Legend <span aria-hidden="true">{{ legendOpen ? '▾' : '▸' }}</span>
+        </button>
+        <div v-show="legendOpen" id="topology-legend-items" class="legend-items">
           <div class="legend-item">
             <span class="node-icon square state-root"></span>
             <span>Ephemres Engine</span>
@@ -192,6 +221,7 @@ import { DataSet } from 'vis-data'
 import { getTopology, rebuildTopology, discoverAllTopologyRoutes, refreshEndpointBaseline } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
 import EndpointRcaDetail from './EndpointRcaDetail.vue'
+import SegmentedControl from './ui/SegmentedControl.vue'
 import { useSSE } from '../composables/useSSE.js'
 
 const container = ref(null)
@@ -200,6 +230,38 @@ const error = ref(null)
 const networkInitialized = ref(false)
 const stabilized = ref(false)
 const layoutDirection = ref('UD')
+
+// Admin actions menu: closes on Escape (handled on the menu) and on clicks outside it.
+const actionsOpen = ref(false)
+const actionsMenuEl = ref(null)
+
+function onDocumentClick(event) {
+  if (actionsOpen.value && actionsMenuEl.value && !actionsMenuEl.value.contains(event.target)) {
+    actionsOpen.value = false
+  }
+}
+
+// Legend: open by default on wide screens; the user's choice is remembered.
+const LEGEND_KEY = 'topologyLegendOpen'
+function initialLegendOpen() {
+  try {
+    const saved = localStorage.getItem(LEGEND_KEY)
+    if (saved !== null) return saved === '1'
+  } catch {
+    // storage unavailable: fall through to the width default
+  }
+  return typeof window === 'undefined' || window.innerWidth >= 900
+}
+const legendOpen = ref(initialLegendOpen())
+
+function toggleLegend() {
+  legendOpen.value = !legendOpen.value
+  try {
+    localStorage.setItem(LEGEND_KEY, legendOpen.value ? '1' : '0')
+  } catch {
+    // storage unavailable: keep the choice for this page only
+  }
+}
 const { sseConnected, subscribe, subscribeBatched } = useSSE()
 let unsubscribeSSE = null
 
@@ -747,6 +809,7 @@ function initSSE() {
         continue
       }
       const isNodeStateChange = payload?.type === 'NODE_STATE_CHANGE'
+      const isStateTransition = payload?.type === 'STATE_TRANSITION'
       const nodeId = payload?.endpoint_id || payload?.node_id || payload?.data?.endpoint_id
       if ((isNodeStateChange || isStateTransition) && nodeId && nodesDataSet) {
         const newState = isNodeStateChange
@@ -802,9 +865,11 @@ onMounted(() => {
 
   fetchTopology()
   initSSE()
+  document.addEventListener('click', onDocumentClick)
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
   if (unsubscribeSSE) unsubscribeSSE()
   if (network) network.destroy()
   if (themeObserver) themeObserver.disconnect()
@@ -825,8 +890,10 @@ onUnmounted(() => {
 
 .topology-toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 10px 16px;
   padding: 16px 20px;
   background: var(--bg-surface-selected);
   border-bottom: 1px solid var(--border-color);
@@ -835,8 +902,13 @@ onUnmounted(() => {
 
 .toolbar-left {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
+}
+
+.topology-title {
+  white-space: nowrap;
 }
 
 .topology-title {
@@ -853,6 +925,7 @@ onUnmounted(() => {
   font-size: 0.8rem;
   padding: 4px 10px;
   border-radius: 9999px;
+  white-space: nowrap;
 }
 
 .badge-stabilized {
@@ -870,6 +943,7 @@ onUnmounted(() => {
 .sse-indicator {
   display: inline-flex;
   align-items: center;
+  white-space: nowrap;
   gap: 6px;
   font-size: 0.75rem;
   font-weight: 600;
@@ -915,7 +989,54 @@ onUnmounted(() => {
 
 .toolbar-right {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.actions-menu {
+  position: relative;
+}
+
+.actions-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 16rem;
+  padding: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-hover);
+}
+
+.actions-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.actions-item:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+}
+
+.actions-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.actions-hint {
+  font-size: var(--text-xs);
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .canvas-wrapper {
@@ -958,9 +1079,22 @@ onUnmounted(() => {
 }
 
 .legend-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--target-min);
+  padding: 0;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   color: var(--text-primary);
+}
+
+.map-legend.collapsed {
+  padding: 6px 12px;
+}
+
+.map-legend.collapsed .legend-title {
+  margin-bottom: 0;
 }
 
 .legend-items {

@@ -4,6 +4,7 @@
       {{ emptyText }}
     </div>
     <div v-else class="chart-wrapper">
+      <p class="sr-only">{{ summary }}</p>
       <LineChart :data="chartData" :options="chartOptions" />
     </div>
   </div>
@@ -24,6 +25,7 @@ import {
   Filler,
 } from 'chart.js'
 import { readToken, useChartTheme } from '../composables/useChartTheme.js'
+import { summarizeSeries } from '../utils/chartSummary.js'
 
 ChartJS.register(LinearScale, PointElement, LineElement, BarController, BarElement, Tooltip, Legend, Filler)
 
@@ -57,6 +59,15 @@ function withGaps(key) {
   }
   return out
 }
+
+// Text alternative for the canvas chart.
+const summary = computed(() => {
+  const pts = props.points.map((p) => ({ t: Date.parse(p.timestamp), v: p.rtt_avg_ms }))
+  const sent = props.points.reduce((a, p) => a + p.sent, 0)
+  const received = props.points.reduce((a, p) => a + p.received, 0)
+  const loss = sent ? `${((1 - received / sent) * 100).toFixed(1)}% of ${sent} probes lost` : 'no probes sent'
+  return `${summarizeSeries('Average round-trip time', pts, (v) => `${v.toFixed(1)} ms`)} Packet loss: ${loss}.`
+})
 
 const chartData = computed(() => {
   const rtt = theme.value.series.rtt

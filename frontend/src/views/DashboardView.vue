@@ -93,6 +93,41 @@
       />
     </div>
 
+    <!-- Search, filters and sort (kept in the URL) -->
+    <div class="filter-bar" role="search">
+      <input
+        v-model="searchQuery"
+        type="search"
+        class="form-input filter-search"
+        placeholder="Search hostname, IP or location"
+        aria-label="Search endpoints"
+      />
+      <label class="filter-field">
+        <span>Type</span>
+        <select v-model="typeFilter" class="form-select">
+          <option value="">All types</option>
+          <option v-for="t in deviceTypeOptions" :key="t" :value="t">{{ t }}</option>
+        </select>
+      </label>
+      <label class="filter-field">
+        <span>Location</span>
+        <select v-model="locationFilter" class="form-select">
+          <option value="">All locations</option>
+          <option v-for="l in locationOptions" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
+      <label class="filter-field">
+        <span>Sort by</span>
+        <select :value="sortKey" class="form-select" @change="applySortOption($event.target.value)">
+          <option v-for="o in SORT_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </label>
+      <span class="filter-count text-muted tnum" aria-live="polite">
+        {{ filteredEndpoints.length === endpoints.length ? `${endpoints.length} endpoints` : `${filteredEndpoints.length} of ${endpoints.length} endpoints` }}
+      </span>
+      <button v-if="hasActiveFilters" type="button" class="btn-text clear-filters" @click="clearFilters">Clear filters</button>
+    </div>
+
     <!-- Endpoints Content -->
     <div>
       <div v-if="error" class="alert-error" role="alert">
@@ -113,14 +148,15 @@
       </div>
 
       <div v-else-if="filteredEndpoints.length === 0" class="empty-state">
-        <p class="empty-title">No endpoints match filter "{{ statusFilterLabel }}"</p>
-        <button class="btn-secondary" @click="statusFilter = 'ALL'">Clear Filter</button>
+        <p class="empty-title">No endpoints match these filters</p>
+        <p class="empty-sub">{{ activeFilterSummary }}</p>
+        <button class="btn-secondary" @click="clearFilters">Clear filters</button>
       </div>
 
       <!-- View 1: Visual Card Grid -->
       <div v-else-if="viewMode === 'grid'" class="endpoint-grid">
         <EndpointCard
-          v-for="ep in filteredEndpoints"
+          v-for="ep in sortedEndpoints"
           :key="ep.id"
           :endpoint="ep"
           :isAdmin="isAdmin"
@@ -158,8 +194,8 @@
                 <th @click="handleSort('device_type')" class="sortable-th">
                   Device Type {{ sortKey === 'device_type' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('detailed_state')" class="sortable-th">
-                  State {{ sortKey === 'detailed_state' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('severity')" class="sortable-th" title="Down first, then unstable, up, and endpoints without status">
+                  State {{ sortKey === 'severity' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
                 <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right" title="Mean and 95th percentile RTT over the last 24 hours">
                   Latency 24h · p95 {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
@@ -218,6 +254,7 @@
                   <Sparkline
                     :values="probeFor(ep)?.rtt_sparkline || []"
                     :aria-label="`${ep.hostname} hourly RTT over 24 hours`"
+                    unit=" ms"
                   />
                 </td>
                 <td class="font-mono tnum text-right font-bold" :style="{ color: toneVar(uptimeTone(uptimeValue(ep))) }">
@@ -354,8 +391,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, shallowRef, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import { 
   getEndpoints,
@@ -379,6 +416,7 @@ import { endpointStateBucket, isMonitored, meanUptime, uptimeValue } from '../ut
 import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 
 const endpoints = ref([])
@@ -446,12 +484,48 @@ async function handleRunDiagnostics(ep) {
 }
 
 // View Mode: 'grid' | 'table'
-const viewMode = ref('grid')
-const statusFilter = ref('ALL')
+// View, filters and sort are mirrored in the URL so a filtered dashboard can be bookmarked.
+const STATUS_FILTERS = ['ALL', 'UP', 'UNSTABLE', 'DOWN', 'NO_STATUS']
+const viewMode = ref(route.query.view === 'table' ? 'table' : 'grid')
+const statusFilter = ref(STATUS_FILTERS.includes(route.query.status) ? route.query.status : 'ALL')
+const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
+const typeFilter = ref(typeof route.query.type === 'string' ? route.query.type : '')
+const locationFilter = ref(typeof route.query.location === 'string' ? route.query.location : '')
 
 // Sorting for table view
-const sortKey = ref('hostname')
-const sortAsc = ref(true)
+// Each option sorts the worst case first: most severe state, highest latency or loss, lowest
+// uptime, most recent state change.
+const SORT_OPTIONS = [
+  { value: 'severity', label: 'Severity', asc: true },
+  { value: 'hostname', label: 'Name', asc: true },
+  { value: 'avg_rtt_ms', label: 'Latency (24h)', asc: false },
+  { value: 'loss_pct', label: 'Loss (24h)', asc: false },
+  { value: 'uptime_pct', label: 'Uptime (24h)', asc: true },
+  { value: 'last_seen', label: 'Last state change', asc: false },
+]
+const SORT_KEYS = [...SORT_OPTIONS.map((o) => o.value), 'ip_address', 'device_type']
+const sortKey = ref(SORT_KEYS.includes(route.query.sort) ? route.query.sort : 'severity')
+const sortAsc = ref(route.query.dir ? route.query.dir !== 'desc' : (SORT_OPTIONS.find((o) => o.value === sortKey.value)?.asc ?? true))
+
+function applySortOption(value) {
+  const option = SORT_OPTIONS.find((o) => o.value === value)
+  sortKey.value = value
+  sortAsc.value = option ? option.asc : true
+}
+
+watch([viewMode, statusFilter, searchQuery, typeFilter, locationFilter, sortKey, sortAsc], () => {
+  const defaultAsc = SORT_OPTIONS.find((o) => o.value === sortKey.value)?.asc ?? true
+  const query = {
+    view: viewMode.value === 'table' ? 'table' : undefined,
+    status: statusFilter.value === 'ALL' ? undefined : statusFilter.value,
+    q: searchQuery.value.trim() || undefined,
+    type: typeFilter.value || undefined,
+    location: locationFilter.value || undefined,
+    sort: sortKey.value === 'severity' ? undefined : sortKey.value,
+    dir: sortAsc.value === defaultAsc ? undefined : (sortAsc.value ? 'asc' : 'desc'),
+  }
+  router.replace({ query: Object.fromEntries(Object.entries(query).filter(([, v]) => v !== undefined)) })
+})
 
 const selectedIds = ref([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
@@ -502,18 +576,56 @@ function toggleStatusFilter(bucket) {
   statusFilter.value = statusFilter.value === bucket ? 'ALL' : bucket
 }
 
-const filteredEndpoints = computed(() => {
-  if (statusFilter.value === 'ALL') return endpoints.value
-  return endpoints.value.filter((ep) => endpointStateBucket(ep) === statusFilter.value)
+const deviceTypeOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.device_type).filter(Boolean))].sort())
+const locationOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.location).filter(Boolean))].sort())
+
+const hasActiveFilters = computed(() =>
+  statusFilter.value !== 'ALL' || !!searchQuery.value.trim() || !!typeFilter.value || !!locationFilter.value
+)
+
+const activeFilterSummary = computed(() => {
+  const parts = []
+  if (statusFilter.value !== 'ALL') parts.push(`status ${statusFilterLabel.value}`)
+  if (searchQuery.value.trim()) parts.push(`"${searchQuery.value.trim()}"`)
+  if (typeFilter.value) parts.push(`type ${typeFilter.value}`)
+  if (locationFilter.value) parts.push(`location ${locationFilter.value}`)
+  return parts.length ? `Filtered by ${parts.join(', ')}.` : ''
 })
+
+function clearFilters() {
+  statusFilter.value = 'ALL'
+  searchQuery.value = ''
+  typeFilter.value = ''
+  locationFilter.value = ''
+}
+
+const filteredEndpoints = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  return endpoints.value.filter((ep) => {
+    if (statusFilter.value !== 'ALL' && endpointStateBucket(ep) !== statusFilter.value) return false
+    if (typeFilter.value && ep.device_type !== typeFilter.value) return false
+    if (locationFilter.value && ep.location !== locationFilter.value) return false
+    if (q) {
+      const haystack = [ep.hostname, String(ep.ip_address || ''), ep.location, ep.description]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
+    return true
+  })
+})
+
+// Down first, then unstable, up, and endpoints without status (passive, paused, not probed).
+const SEVERITY_RANK = { DOWN: 0, UNSTABLE: 1, UP: 2, NO_STATUS: 3 }
 
 const sortedEndpoints = computed(() => {
   const key = sortKey.value
   const asc = sortAsc.value ? 1 : -1
   const decorated = filteredEndpoints.value.map((ep) => {
     let sortVal
-    if (key === 'detailed_state') {
-      sortVal = ep.current_detailed_state || ep.current_operational_state || ep.endpoint_status || ''
+    if (key === 'severity') {
+      sortVal = SEVERITY_RANK[endpointStateBucket(ep)]
     } else if (key === 'avg_rtt_ms') {
       sortVal = probeFor(ep)?.rtt_avg_ms ?? null
     } else if (key === 'loss_pct') {
@@ -535,7 +647,8 @@ const sortedEndpoints = computed(() => {
     if (aMissing || bMissing) return aMissing === bMissing ? 0 : aMissing ? 1 : -1
     if (a.sortVal < b.sortVal) return -1 * asc
     if (a.sortVal > b.sortVal) return 1 * asc
-    return 0
+    // Ties (e.g. everything UP) fall back to name so the order is stable.
+    return String(a.ep.hostname || '').localeCompare(String(b.ep.hostname || ''))
   })
 
   return decorated.map((d) => d.ep)
@@ -558,8 +671,7 @@ function handleSort(key) {
   if (sortKey.value === key) {
     sortAsc.value = !sortAsc.value
   } else {
-    sortKey.value = key
-    sortAsc.value = true
+    applySortOption(key)
   }
 }
 
@@ -877,6 +989,46 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* ── Filter bar ── */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.filter-search {
+  flex: 1 1 16rem;
+  min-height: var(--control-height);
+  max-width: 24rem;
+}
+
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.filter-field .form-select {
+  min-height: var(--control-height);
+}
+
+.filter-count {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  align-self: center;
+}
+
+.clear-filters {
+  align-self: center;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-decoration: underline;
 }
 
 /* ── KPI Strip ── */

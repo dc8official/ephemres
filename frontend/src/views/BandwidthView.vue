@@ -256,6 +256,7 @@
         </div>
       </div>
       <div class="chart-container">
+        <p v-if="seriesPoints.length > 0" class="sr-only">{{ chartSummary }}</p>
         <LineChart
           v-if="seriesPoints.length > 0"
           :data="chartData"
@@ -395,6 +396,7 @@
         </div>
       </div>
       <div class="chart-container">
+        <p v-if="seriesPoints.length > 0" class="sr-only">{{ chartSummary }}</p>
         <LineChart
           v-if="seriesPoints.length > 0"
           :data="chartData"
@@ -865,6 +867,7 @@ import {
 import { isAdmin } from '../services/auth.js'
 import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
+import { summarizeSeries } from '../utils/chartSummary.js'
 import KpiTile from '../components/ui/KpiTile.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
@@ -1420,6 +1423,21 @@ const chartData = computed(() => {
     datasets.push(lineDataset(`Total (${unit})`, pick(`transit_${unit}`), series.transit))
   }
   return { labels, datasets }
+})
+
+// Text alternative for the canvas chart.
+const chartSummary = computed(() => {
+  const unit = chartMetricMode.value
+  const fmt = unit === 'pps' ? formatPps : unit === 'fps' ? (v) => `${v.toFixed(2)} flows/s` : formatBps
+  const pts = seriesPoints.value.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  const keys = unit === 'fps'
+    ? [['flows_per_sec', 'Flows']]
+    : seriesMeta.value.directional
+      ? [[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress'], [`transit_${unit}`, 'Transit']]
+      : [[`transit_${unit}`, 'Total']]
+  return [`${chartTitle.value}, last ${selectedWindow.value}.`]
+    .concat(keys.map(([key, label]) => summarizeSeries(label, pts.map(({ t, p }) => ({ t, v: p[key] ?? null })), fmt)))
+    .join(' ')
 })
 
 const chartOptions = computed(() => {

@@ -6,7 +6,7 @@
     :height="height"
     :viewBox="`0 0 ${width} ${height}`"
     role="img"
-    :aria-label="ariaLabel"
+    :aria-label="fullLabel"
   >
     <path :d="path" fill="none" :stroke="color" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" />
     <circle v-if="lastPoint" :cx="lastPoint.x" :cy="lastPoint.y" r="1.75" :fill="color" />
@@ -25,9 +25,16 @@ const props = defineProps({
   height: { type: Number, default: 22 },
   color: { type: String, default: 'var(--series-rtt)' },
   ariaLabel: { type: String, default: 'Trend' },
+  unit: { type: String, default: '' },
 })
 
 const hasData = computed(() => props.values.some((v) => v !== null && v !== undefined))
+
+const fullLabel = computed(() => {
+  const vals = props.values.filter((v) => v !== null && v !== undefined)
+  if (!vals.length) return `${props.ariaLabel}: no data`
+  return `${props.ariaLabel}: latest ${vals[vals.length - 1]}${props.unit}, highest ${Math.max(...vals)}${props.unit}`
+})
 
 const coords = computed(() => {
   const vals = props.values

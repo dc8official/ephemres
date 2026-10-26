@@ -11,6 +11,7 @@ screens use these instead of page-specific toggle, heading and KPI styles.
 | `TimeRangePicker` | Every time-window selector. Presets plus an optional custom range. |
 | `PanelHeader` | Card and section titles: sentence-case title, one-line hint, right-aligned actions. |
 | `KpiTile` | Headline numbers. Missing values show "—"; `clickable` turns it into a filter toggle. |
+| `Sparkline` | Inline trend line for table rows; gaps for missing slots; labelled for screen readers. |
 
 ```vue
 <SegmentedControl v-model="metric" aria-label="Chart metric"
@@ -34,3 +35,7 @@ Related helpers:
 - `utils/format.js`: bps, pps, bytes, number and port-label formatting.
 - `utils/statusTone.js`: one threshold set for uptime, utilization and health; returns a tone
   that maps to the `--status-text-*` tokens.
+- `utils/chartSummary.js`: text summaries (average, peak, latest; share of time per state) for
+  the visually hidden element next to every canvas chart.
+- `components/traffic/ConversationsPanel.vue`: the server-backed conversation table shared by
+  Traffic Analytics and Endpoint Detail.
