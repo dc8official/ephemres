@@ -437,7 +437,7 @@ Deactivates or deletes a user account.
 High-precision passive telemetry endpoints for fleet-wide bandwidth analysis, top talkers, application protocol distribution, exporter health, and conversation drilling.
 
 ### `GET /bandwidth/overview`
-Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_flows_count` (SYN-only or RST-without-FIN flows), `window_seconds` and `exporter_id`.
+Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_conversations_count` and `anomaly_flows_count` (conversations whose OR'd TCP flags are SYN without ACK or RST without FIN, and the flows in them), `window_seconds` and `exporter_id`.
 - **Response:** `200 OK`
   ```json
   {
@@ -485,11 +485,19 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   }
   ```
 
+### `GET /bandwidth/conversations`
+Conversations (source, destination, protocol, service port) over the window, filtered, counted and paged on the server.
+- **Query Parameters:** `window`, `exporter_id`, `endpoint_id` (either side), `ip` (either side), `port` (service port), `dscp` (0–63), `quick` (`all` | `anomalies` | `qos` | `bulk`), `sort` (`bytes` | `flows` | `packets`), `limit` (1–200, default 25), `offset`.
+- `quick`: `anomalies` = the OR of the conversation's TCP flags over the window is SYN without ACK or RST without FIN (the same rule as the overview KPI and the PDF report); `qos` = DSCP > 0; `bulk` = average packet ≥ 1100 bytes.
+- **Response:** `items` (same fields as `top_conversations` below), `counts` (`all`, `anomalies`, `qos`, `bulk` over every conversation matching the other filters), `total` (count for the requested `quick`), `limit`, `offset`, `window`.
+- **Errors:** `400` for an unknown `quick` or `sort`, or an invalid `ip`.
+
 ### `GET /bandwidth/top-talkers`
-Retrieves the highest-volume communicating endpoints and discrete IP conversations within the specified window.
+Retrieves the highest-volume addresses and the largest conversations within the specified window. Each address's ingress (as destination) and egress (as source) come from one aggregation; `top_conversations` is the first page of `GET /bandwidth/conversations`.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
-  - `limit` (int, default `10`, range `1`–`50`): Maximum records to return.
+  - `limit` (int, default `25`, range `1`–`200`): Maximum records to return.
+  - `exporter_id`, `endpoint_id` (UUID, optional): Scope to one exporter or to flows involving one endpoint.
 - **Response:** `200 OK`
   ```json
   {
@@ -523,7 +531,7 @@ Retrieves the highest-volume communicating endpoints and discrete IP conversatio
   ```
 
 ### `GET /bandwidth/applications`
-Returns protocol and service port volume distribution for donut/pie charts.
+Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). `zones_resolution` says how `traffic_zones` were classified: `ip` (addresses and monitored endpoints, windows up to 6h), `endpoint` (monitored endpoints only, 24h/7d), or `unavailable` (30d+, zones are zero).
 `qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_minute_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).

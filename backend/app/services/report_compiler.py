@@ -14,9 +14,8 @@ from app.models.flow_rollup import FlowHourlyRollup, FlowInterfaceMinuteRollup, 
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
+from app.services import conversations as conversation_queries
 from app.services.flow_metrics import (
-    ANOMALY_SYN_ONLY,
-    ANOMALY_TCP_RST,
     ZONE_EAST_WEST,
     ZONE_EXTERNAL_TRANSIT,
     ZONE_NORTH_SOUTH_EGRESS,
@@ -27,7 +26,6 @@ from app.services.flow_metrics import (
     dscp_breakdown,
     interface_alias,
     is_internal_address,
-    tcp_anomaly,
     utilization_pct,
 )
 from app.services.uptime_calculator import (
@@ -515,46 +513,23 @@ async def compile_bandwidth_report_data(
         logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
 
     # 4. Security Anomaly Telemetry (RFC 793 TCP Control Bits Analysis)
-    # Identifies forensic security incidents from flow control flags:
-    # - SYN Scan / Probe: SYN flag (0x02) asserted WITHOUT ACK (0x10), characteristic of half-open port scanning.
-    # - TCP RST Burst: RST flag (0x04) asserted WITHOUT FIN (0x01), characteristic of refused/rejected connections.
-    anomaly_stmt = (
-        select(
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.tcp_flags,
-            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
-            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
+    # Same per-conversation rule as the dashboard: a conversation is a SYN scan / probe when the
+    # OR of its TCP flags over the period is SYN without ACK, and a reset when RST without FIN.
+    syn_scan_count = syn_scan_bytes = rst_burst_count = rst_burst_bytes = 0
+    if exporter_ids:
+        exporter_params = {f"exp{i}": str(e) for i, e in enumerate(exporter_ids)}
+        where_sql = (
+            f"exporter_id IN ({', '.join(f'CAST(:{k} AS uuid)' for k in exporter_params)}) "
+            "AND bucket >= :start AND bucket <= :end"
         )
-        .where(
-            FlowMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowMinuteRollup.bucket >= start_dt,
-            FlowMinuteRollup.bucket <= end_dt,
-            FlowMinuteRollup.protocol == 6,
-        )
-        .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
-    )
-    syn_scan_count = 0
-    syn_scan_bytes = 0
-    rst_burst_count = 0
-    rst_burst_bytes = 0
-    try:
-        anomaly_res = await db.execute(anomaly_stmt)
-        raw_anomalies = anomaly_res.all() if anomaly_res else []
-        for a_row in raw_anomalies:
-            if len(a_row) < 3:
-                continue
-            kind = tcp_anomaly(a_row[1])
-            cnt = int(a_row[2] or 0)
-            b_val = int(a_row[3] or 0) if len(a_row) > 3 else 0
-
-            if kind == ANOMALY_SYN_ONLY:
-                syn_scan_count += cnt
-                syn_scan_bytes += b_val
-            elif kind == ANOMALY_TCP_RST:
-                rst_burst_count += cnt
-                rst_burst_bytes += b_val
-    except Exception as exc:
-        logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
+        try:
+            summary = await conversation_queries.anomaly_summary(
+                db, where_sql, {**exporter_params, "start": start_dt, "end": end_dt}
+            )
+            syn_scan_count, syn_scan_bytes = summary["syn_flows"], summary["syn_bytes"]
+            rst_burst_count, rst_burst_bytes = summary["rst_flows"], summary["rst_bytes"]
+        except Exception as exc:
+            logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
 
     total_anomaly_count = syn_scan_count + rst_burst_count
     anomaly_summary = {

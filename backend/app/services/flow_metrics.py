@@ -11,6 +11,17 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.schemas.bandwidth import format_dscp_label
 
+# IP protocol numbers shown by name; anything else renders as "PROTO-<n>".
+PROTOCOL_MAP: Dict[int, str] = {
+    1: "ICMP",
+    6: "TCP",
+    17: "UDP",
+    47: "GRE",
+    50: "ESP",
+    58: "IPv6-ICMP",
+    89: "OSPF",
+}
+
 # Link speed assumed for interfaces whose alias carries no speed.
 DEFAULT_LINK_SPEED_MBPS = 1000
 
@@ -163,6 +174,24 @@ def classify_zone(src_internal: bool, dst_internal: bool) -> str:
     if dst_internal:
         return ZONE_NORTH_SOUTH_INGRESS
     return ZONE_EXTERNAL_TRANSIT
+
+
+# Conversations whose average packet is at least this large count as bulk transfers.
+BULK_MIN_AVG_PACKET_BYTES = 1100
+
+
+def tcp_anomaly_sql(flags_expr: str, protocol_expr: str) -> str:
+    """SQL CASE yielding 'SYN_ONLY', 'TCP_RST' or NULL; the same rule as `tcp_anomaly`.
+
+    Apply it to the OR of a conversation's flags over the window, so the overview KPI, the
+    conversation table and the PDF report classify the same conversations.
+    """
+    return (
+        f"CASE WHEN {protocol_expr} = 6 AND ({flags_expr} & {_TCP_SYN}) <> 0 AND ({flags_expr} & {_TCP_ACK}) = 0 "
+        f"THEN '{ANOMALY_SYN_ONLY}' "
+        f"WHEN {protocol_expr} = 6 AND ({flags_expr} & {_TCP_RST}) <> 0 AND ({flags_expr} & {_TCP_FIN}) = 0 "
+        f"THEN '{ANOMALY_TCP_RST}' END"
+    )
 
 
 def tcp_anomaly(tcp_flags: Optional[int]) -> Optional[str]:

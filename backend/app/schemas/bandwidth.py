@@ -23,7 +23,9 @@ class BandwidthOverview(BaseModel):
     total_transit_bps: float = 0.0
     total_transit_pps: float = 0.0
     avg_packet_size: int = 0
+    # Flows in, and number of, conversations whose OR'd TCP flags are SYN-only or RST-without-FIN.
     anomaly_flows_count: int = 0
+    anomaly_conversations_count: int = 0
     window_seconds: int = 300
     exporter_id: Optional[UUID] = None
 
@@ -203,13 +205,31 @@ class TopTalkersResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ConversationsResponse(BaseModel):
+    """One page of server-filtered conversations.
+
+    `counts` holds the size of each quick filter (all, anomalies, qos, bulk) over every
+    conversation matching the other filters; `total` is the count for the requested filter.
+    """
+    window: str
+    items: List[TopConversationItem]
+    counts: Dict[str, int]
+    total: int
+    limit: int
+    offset: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ApplicationDistributionItem(BaseModel):
     """Protocol and destination port share of overall fleet traffic."""
     protocol_name: str
     port: int
     service_label: str
     total_bytes: int
+    # Share of all traffic in the window (the list holds the top 15 plus an "Other" row).
     percentage: float
+    is_other: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -251,6 +271,10 @@ class ApplicationDistributionResponse(BaseModel):
     qos_source: Optional[str] = None
     qos_window_start: Optional[datetime] = None
     traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)
+    total_bytes: int = 0
+    # How zones were classified: "ip" (addresses + monitored endpoints, minute tier), "endpoint"
+    # (monitored endpoints only, hourly tier) or "unavailable" (daily tier keeps neither).
+    zones_resolution: str = "ip"
 
     model_config = ConfigDict(from_attributes=True)
 

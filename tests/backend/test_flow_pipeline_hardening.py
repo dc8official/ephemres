@@ -434,47 +434,32 @@ def api_client(mock_admin_user):
 
 
 def test_top_talkers_true_ingress_egress_and_metadata(api_client):
+    # Ingress/egress per address are summed in one SQL aggregation (UNION ALL of both sides);
+    # tests/integration checks the arithmetic against a real database. Here: mapping, hostname
+    # lookup and conversation labelling.
+    from tests.backend.flow_mocks import conversation_row, talker_row, top_talkers_results
+
     client, mock_session = api_client
     ep1_id = uuid4()
     ep2_id = uuid4()
 
-    # 1. Egress query results:
-    # IP 10.0.0.1 sent 1,000,000 bytes (100 flows)
-    # IP 10.0.0.2 sent 200,000 bytes (20 flows)
-    m_egress = MagicMock()
-    m_egress.all.return_value = [
-        ("10.0.0.1", ep1_id, 1_000_000, 100),
-        ("10.0.0.2", ep2_id, 200_000, 20),
-    ]
-
-    # 2. Ingress query results:
-    # IP 10.0.0.1 received 500,000 bytes (50 flows)
-    # IP 10.0.0.2 received 5,000,000 bytes (500 flows)
-    m_ingress = MagicMock()
-    m_ingress.all.return_value = [
-        ("10.0.0.1", ep1_id, 500_000, 50),
-        ("10.0.0.2", ep2_id, 5_000_000, 500),
-    ]
-
-    # 3. Hostnames query result:
-    m_host = MagicMock()
-    m_host.all.return_value = [
-        (ep1_id, "server-alpha"),
-        (ep2_id, "server-beta"),
-    ]
-
-    # 4. Top conversations query result:
-    # Row 1: SYN only (anomaly), ToS 184 (DSCP 46, EF)
-    # Row 2: RST only (anomaly), ToS 0 (DSCP 0, Best Effort)
-    # Row 3: SYN + ACK, ToS 40 (DSCP 10, AF11)
-    m_conv = MagicMock()
-    m_conv.all.return_value = [
-        ("10.0.0.1", "10.0.0.2", 6, 443, 800_000, 80, 0x02, 184),
-        ("10.0.0.2", "10.0.0.1", 6, 80, 400_000, 40, 0x04, 0),
-        ("10.0.0.1", "10.0.0.2", 6, 22, 200_000, 20, 0x12, 40),
-    ]
-
-    mock_session.execute.side_effect = [m_egress, m_ingress, m_host, m_conv]
+    mock_session.execute.side_effect = top_talkers_results(
+        talkers=[
+            # SQL returns them ordered by total: server-beta 5.2 MB, server-alpha 1.5 MB
+            talker_row("10.0.0.2", ep2_id, ingress=5_000_000, egress=200_000, flows=520),
+            talker_row("10.0.0.1", ep1_id, ingress=500_000, egress=1_000_000, flows=150),
+        ],
+        hostnames=[(ep1_id, "server-alpha"), (ep2_id, "server-beta")],
+        conversations=[
+            # SYN only (anomaly), ToS 184 (DSCP 46, EF)
+            conversation_row("10.0.0.1", "10.0.0.2", 6, 443, 800_000, 80, flags=0x02, tos=184, anomaly="SYN_ONLY"),
+            # RST only (anomaly), ToS 0
+            conversation_row("10.0.0.2", "10.0.0.1", 6, 80, 400_000, 40, flags=0x04, tos=0, anomaly="TCP_RST"),
+            # SYN + ACK, ToS 40 (DSCP 10, AF11)
+            conversation_row("10.0.0.1", "10.0.0.2", 6, 22, 200_000, 20, flags=0x12, tos=40),
+        ],
+        conversation_hostnames=[("10.0.0.1", "server-alpha"), ("10.0.0.2", "server-beta")],
+    )
 
     res = client.get("/api/v1/bandwidth/top-talkers?window=1h&limit=10")
     assert res.status_code == 200
@@ -700,7 +685,10 @@ def test_applications_qos_and_traffic_zones_integration(api_client):
         ("1.1.1.1", "192.168.1.20", None, ep2_id, 200_000, 20),
     ]
 
-    mock_session.execute.side_effect = [m_apps, m_qos, m_zones]
+    m_total = MagicMock()
+    m_total.scalar.return_value = 1_000_000  # all traffic is in the two apps
+
+    mock_session.execute.side_effect = [m_apps, m_total, m_qos, m_zones]
 
     exp_id = uuid4()
     res = client.get(f"/api/v1/bandwidth/applications?window=1h&exporter_id={exp_id}")

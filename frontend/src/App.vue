@@ -12,7 +12,7 @@
           <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
           <RouterLink to="/topology" class="nav-link">Topology Map</RouterLink>
           <RouterLink to="/reports" class="nav-link">Reports & SLA</RouterLink>
-          <RouterLink to="/bandwidth" class="nav-link">Bandwidth</RouterLink>
+          <RouterLink to="/bandwidth" class="nav-link">Traffic</RouterLink>
           <RouterLink to="/settings" class="nav-link" v-if="isAdmin">Admin Settings</RouterLink>
         </nav>
         <div class="header-actions">

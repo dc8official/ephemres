@@ -321,3 +321,94 @@ def test_exporter_health_from_minute_rollups(api_client, run_sql):
     # CHANGED IN v3.4 PHASE 2: last_flow_time was always None.
     assert datetime.datetime.fromisoformat(router["last_flow_time"]) == m1
     assert router["flows_per_sec"] == pytest.approx(95 / 300, abs=0.01)
+
+
+# --- v3.4 Phase 3: server-side conversations --------------------------------------------------
+
+def test_sql_anomaly_rule_matches_python_for_every_flag_mask(run_sql):
+    from app.services.flow_metrics import tcp_anomaly, tcp_anomaly_sql
+
+    rows = run_sql(lambda conn: conn.fetch(
+        f"SELECT f AS flags, p AS protocol, {tcp_anomaly_sql('f', 'p')} AS hint "
+        "FROM generate_series(0, 255) f, (VALUES (6), (17)) AS t(p)"
+    ))
+    for r in rows:
+        expected = tcp_anomaly(r["flags"]) if r["protocol"] == 6 else None
+        assert r["hint"] == expected, (r["flags"], r["protocol"])
+
+
+def _conversations(api_client, **params):
+    return _data(api_client.get("/api/v1/bandwidth/conversations", params={"window": "1h", **params}))
+
+
+def test_conversations_counts_cover_every_match(api_client, run_sql):
+    _seed(run_sql)
+    page = _conversations(api_client, limit=2)
+    # Counts are over all five conversations, not the two returned.
+    assert page["counts"] == {"all": 5, "anomalies": 1, "qos": 1, "bulk": 3}
+    assert page["total"] == 5
+    assert [c["total_bytes"] for c in page["items"]] == [12_000_000, 6_000_000]
+    assert page["items"][0]["dst_hostname"] == "app-a"
+
+    second = _conversations(api_client, limit=2, offset=2)
+    assert [c["total_bytes"] for c in second["items"]] == [3_000_000, 1_200_000]
+
+
+def test_conversations_server_filters(api_client, run_sql):
+    _seed(run_sql)
+    by_ip = _conversations(api_client, ip=HOST_B_IP)
+    assert {(c["src_ip"], c["dst_port"]) for c in by_ip["items"]} == {(HOST_A_IP, 5432), (SCANNER_IP, 22)}
+    assert by_ip["counts"]["all"] == 2
+
+    by_port = _conversations(api_client, port=443)
+    assert by_port["total"] == 2
+
+    by_dscp = _conversations(api_client, dscp=46)
+    assert [c["dst_port"] for c in by_dscp["items"]] == [5432]
+
+    anomalies = _conversations(api_client, quick="anomalies")
+    assert [(c["src_ip"], c["anomaly_hint"]) for c in anomalies["items"]] == [(SCANNER_IP, "SYN_ONLY")]
+
+    # Bulk = average packet >= 1100 B: both 443 flows (1333 and 1200 B) and the transit DNS
+    # flow (1200 B); the A->B database flow averages 1000 B.
+    bulk = _conversations(api_client, quick="bulk")
+    assert sorted(c["avg_packet_size"] for c in bulk["items"]) == [1200, 1200, 1333]
+
+    by_flows = _conversations(api_client, sort="flows", limit=1)
+    assert by_flows["items"][0]["flow_count"] == 50
+
+
+def test_conversations_rejects_bad_parameters(api_client, run_sql):
+    _seed(run_sql)
+    for params in ({"quick": "nope"}, {"sort": "nope"}, {"ip": "not-an-ip"}):
+        resp = api_client.get("/api/v1/bandwidth/conversations", params=params)
+        assert resp.status_code == 400, params
+
+
+def test_top_talkers_single_aggregation_is_exact(api_client, run_sql):
+    _seed(run_sql)
+    talkers = {t["ip_address"]: t for t in _data(api_client.get(
+        "/api/v1/bandwidth/top-talkers", params={"window": "1h", "limit": 3}
+    ))["top_endpoints"]}
+    # With limit 3 the old per-direction queries were cut at 9 rows each; the merged
+    # aggregation keeps both sides exact for every listed address.
+    assert talkers[HOST_B_IP]["ingress_bytes"] == 3_003_000
+    assert talkers[HOST_B_IP]["egress_bytes"] == 0
+    assert talkers[INTERNET_IP]["ingress_bytes"] == 6_000_000
+    assert talkers[INTERNET_IP]["egress_bytes"] == 12_000_000
+
+
+def test_applications_share_of_all_traffic_with_other(api_client, run_sql):
+    _seed(run_sql)
+    data = _data(api_client.get("/api/v1/bandwidth/applications", params={"window": "1h"}))
+    assert data["total_bytes"] == 22_203_000
+    assert data["zones_resolution"] == "ip"
+    # Four services fit in the top 15, so nothing is left for "Other".
+    assert not any(a["is_other"] for a in data["applications"])
+    assert sum(a["percentage"] for a in data["applications"]) == pytest.approx(100.0, abs=0.05)
+
+
+def test_overview_anomalies_use_conversation_rule(api_client, run_sql):
+    _seed(run_sql)
+    ov = _data(api_client.get("/api/v1/bandwidth/overview"))
+    assert (ov["anomaly_flows_count"], ov["anomaly_conversations_count"]) == (50, 1)

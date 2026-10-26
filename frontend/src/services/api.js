@@ -354,6 +354,18 @@ export function getTopTalkers(window = '1h', limit = 25, endpointId = null, expo
   return api.get('/bandwidth/top-talkers', { params })
 }
 
+// Server-filtered, paged conversations. `filters`: exporterId, endpointId, ip, port, dscp,
+// quick ('all' | 'anomalies' | 'qos' | 'bulk'), sort ('bytes' | 'flows' | 'packets'), limit, offset.
+export function getConversations(window = '1h', filters = {}) {
+  const params = { window }
+  const map = { exporterId: 'exporter_id', endpointId: 'endpoint_id', ip: 'ip', port: 'port', dscp: 'dscp', quick: 'quick', sort: 'sort', limit: 'limit', offset: 'offset' }
+  for (const [key, name] of Object.entries(map)) {
+    const value = filters[key]
+    if (value !== null && value !== undefined && value !== '') params[name] = value
+  }
+  return api.get('/bandwidth/conversations', { params })
+}
+
 export function getApplicationDistribution(window = '1h', exporterId = null, endpointId = null) {
   const params = { window }
   if (exporterId) params.exporter_id = exporterId

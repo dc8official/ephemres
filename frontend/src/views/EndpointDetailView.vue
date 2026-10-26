@@ -550,109 +550,18 @@
             </div>
           </div>
 
-          <!-- Top Node Conversations / Flows Table -->
-          <div class="table-card">
-            <div class="section-header section-header-split p-4">
-              <div>
-                <span class="font-bold text-base">Conversations</span>
-                <span class="text-muted text-xs block mt-1">The 50 largest IP pairs in this window</span>
-              </div>
-              <div class="header-controls">
-                <input
-                  v-model="nodeConversationFilter"
-                  class="filter-select"
-                  style="min-width: 220px;"
-                  placeholder="Filter IP, port, flag, profile..."
-                  aria-label="Filter node conversations"
-                />
-              </div>
-            </div>
-            <div class="table-responsive">
-              <table class="dense-table" aria-label="Forensic Node Conversations Table">
-                <thead>
-                  <tr>
-                    <th>Source Host / IP</th>
-                    <th>Destination Host / IP</th>
-                    <th>Protocol</th>
-                    <th>Service Port</th>
-                    <th>Profile &amp; avg packet</th>
-                    <th>Flags &amp; QoS</th>
-                    <th class="text-right">Volume</th>
-                    <th class="text-right">Flows</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(fc, idx) in filteredNodeConversations" :key="idx">
-                    <td>
-                      <span class="tnum font-mono">{{ fc.src_ip }}</span>
-                      <span v-if="fc.src_hostname" class="text-muted text-xs block">({{ fc.src_hostname }})</span>
-                    </td>
-                    <td>
-                      <span class="tnum font-mono">{{ fc.dst_ip }}</span>
-                      <span v-if="fc.dst_hostname" class="text-muted text-xs block">({{ fc.dst_hostname }})</span>
-                    </td>
-                    <td><span class="status-pill status-unknown">{{ fc.protocol }}</span></td>
-                    <td>
-                      <span class="service-port-badge" :class="getPortBadgeClass(fc.dst_port)">
-                        {{ formatPortLabel(fc.dst_port, fc.protocol) }}
-                      </span>
-                    </td>
-                    <td>
-                      <div class="physics-profile-cell">
-                        <span class="badge-profile" :class="getTrafficProfileBadgeClass(fc.traffic_profile)">
-                          {{ fc.traffic_profile || 'Interactive' }}
-                        </span>
-                        <div class="packet-physics-meta text-xs text-muted tnum font-mono">
-                          <span>{{ fc.avg_packet_size || 0 }} B/pkt</span> · 
-                          <span>{{ fc.packets_per_flow || 0 }} pkts/fl</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <div class="metadata-badge-group">
-                        <span
-                          v-if="fc.protocol === 'TCP' && fc.tcp_flags_labels && fc.tcp_flags_labels.length > 0"
-                          class="badge-tcp-flags font-mono"
-                          :title="`TCP Flags: ${fc.tcp_flags_labels.join(', ')} (0x${(fc.tcp_flags || 0).toString(16).padStart(2, '0')})`"
-                        >
-                          {{ fc.tcp_flags_labels.join(' ') }}
-                        </span>
-                        <span
-                          v-if="fc.anomaly_hint === 'SYN_ONLY'"
-                          class="badge-anomaly badge-syn-only"
-                          title="Anomaly: SYN-only packets observed without ACK (potential port scan)"
-                        >
-                          SYN ONLY
-                        </span>
-                        <span
-                          v-else-if="fc.anomaly_hint === 'TCP_RST'"
-                          class="badge-anomaly badge-tcp-rst"
-                          title="Anomaly: Connection reset (RST) observed"
-                        >
-                          RST
-                        </span>
-                        <span
-                          v-if="fc.dscp > 0"
-                          class="badge-dscp"
-                          :class="{ 'badge-dscp-ef': fc.dscp === 46, 'badge-dscp-af': fc.dscp_label && fc.dscp_label.includes('AF') }"
-                          :title="`ToS: 0x${(fc.tos || 0).toString(16).padStart(2, '0')} · DSCP: ${fc.dscp} (${fc.dscp_label})`"
-                        >
-                          {{ fc.dscp_label }}
-                        </span>
-                      </div>
-                    </td>
-                    <td class="text-right tnum font-bold">{{ formatBytes(fc.total_bytes) }}</td>
-                    <td class="text-right tnum text-muted">{{ formatNumber(fc.flow_count) }}</td>
-                  </tr>
-                  <tr v-if="filteredNodeConversations.length === 0">
-                    <td colspan="8" class="text-center text-muted p-4">
-                      {{ nodeConversations.length === 0 ? `No active conversations found for this node in the selected ${flowWindow} window.` : 'No conversations matching current filter.' }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <!-- Conversations through (exporter) or with (participant) this device, server-filtered -->
+          <ConversationsPanel
+            :window="flowWindow"
+            :exporter-id="flowMode === 'exporter' ? endpointId : null"
+            :endpoint-id="flowMode === 'participant' ? endpointId : null"
+            v-model:ip="convIp"
+            v-model:port="convPort"
+            v-model:dscp="convDscp"
+            v-model:dscp-label="convDscpLabel"
+            :refresh-key="convRefreshKey"
+            :title="flowMode === 'exporter' ? 'Conversations through this device' : 'Conversations with this device'"
+          />
         </div> <!-- End Tab 2: Flow -->
 
       </div>
@@ -861,11 +770,12 @@
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getTopTalkers, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries } from '../services/api.js'
+import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
 import StateTimeline from '../components/StateTimeline.vue'
 import RTTTrendPanel from '../components/RTTTrendPanel.vue'
 import ProbeTrendPanel from '../components/ProbeTrendPanel.vue'
+import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
 import EndpointRcaDetail from '../components/EndpointRcaDetail.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { Line as LineChart } from 'vue-chartjs'
@@ -896,7 +806,7 @@ import Card from 'primevue/card'
 import Button from 'primevue/button'
 import { useSSE } from '../composables/useSSE.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
-import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
+import { formatBps, formatPps } from '../utils/format.js'
 import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
 import { isMonitored } from '../utils/endpointState.js'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
@@ -918,31 +828,13 @@ const flowWindow = ref('1h')
 // Stores time-series points, peer conversations, and triage filter query for this endpoint.
 const loadingFlow = ref(false)
 const flowSeriesPoints = shallowRef([])
-const nodeConversations = shallowRef([])
 
-// Real-time live triage search filter:
-// Matches across remote IPs, hostnames, destination ports, protocols,
-// packet physics profiles ('Bulk Transfer', 'Real-Time / VoIP', 'Micro-Flow'),
-// DiffServ DSCP labels ('EF (VoIP)', 'AF41 (Video)'), and security anomalies ('SYN ONLY', 'RST').
-const nodeConversationFilter = ref('')
-const filteredNodeConversations = computed(() => {
-  const q = nodeConversationFilter.value.trim().toLowerCase()
-  if (!q) return nodeConversations.value
-  return nodeConversations.value.filter((c) => {
-    return (
-      (c.src_ip && c.src_ip.toLowerCase().includes(q)) ||
-      (c.dst_ip && c.dst_ip.toLowerCase().includes(q)) ||
-      (c.src_hostname && c.src_hostname.toLowerCase().includes(q)) ||
-      (c.dst_hostname && c.dst_hostname.toLowerCase().includes(q)) ||
-      String(c.dst_port).includes(q) ||
-      (c.protocol && c.protocol.toLowerCase().includes(q)) ||
-      (c.traffic_profile && c.traffic_profile.toLowerCase().includes(q)) ||
-      (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
-      (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
-      (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
-    )
-  })
-})
+// Filters for the shared conversation panel; bumped on refresh so it reloads with the page.
+const convIp = ref(null)
+const convPort = ref(null)
+const convDscp = ref(null)
+const convDscpLabel = ref('')
+const convRefreshKey = ref(0)
 
 // Metric mode toggle for endpoint bandwidth chart:
 // - 'bps': Standard bandwidth throughput (bits/sec).
@@ -1068,24 +960,6 @@ async function loadFlowTelemetry() {
     if (res.data?.data?.points) {
       flowSeriesPoints.value = res.data.data.points
     }
-    const talkersRes = await getTopTalkers(
-      flowWindow.value,
-      50,
-      !isExporter ? epId : null,
-      isExporter ? epId : null
-    )
-    if (talkersRes.data?.data?.top_conversations) {
-      const epIp = String(endpoint.value.ip_address).split('/')[0].trim()
-      if (isExporter) {
-        nodeConversations.value = talkersRes.data.data.top_conversations
-      } else {
-        nodeConversations.value = talkersRes.data.data.top_conversations.filter((c) => {
-          const s = String(c.src_ip || '').split('/')[0].trim()
-          const d = String(c.dst_ip || '').split('/')[0].trim()
-          return s === epIp || d === epIp || !c.src_ip
-        })
-      }
-    }
     if (isExporter) {
       try {
         const ifRes = await getInterfaceTelemetry(epId, flowWindow.value)
@@ -1162,26 +1036,6 @@ const flowChartOptions = computed(() => {
     },
   }
 })
-
-function getPortBadgeClass(port) {
-  const p = Number(port)
-  if (p === 443 || p === 80) return 'port-web'
-  if (p === 53) return 'port-dns'
-  if (p === 22) return 'port-ssh'
-  if (p === 2055 || p === 4739) return 'port-telemetry'
-  return 'port-generic'
-}
-
-function getTrafficProfileBadgeClass(profile) {
-  switch (profile) {
-    case 'Bulk Transfer': return 'badge-profile-bulk'
-    case 'SYN Scan / Probe': return 'badge-profile-syn'
-    case 'Reset / Refused': return 'badge-profile-rst'
-    case 'Micro-Flow / Control': return 'badge-profile-micro'
-    case 'Real-Time / VoIP': return 'badge-profile-voip'
-    default: return 'badge-profile-interactive'
-  }
-}
 
 const flowSubView = ref('bandwidth')
 
@@ -1597,6 +1451,7 @@ const loadData = async ({ refresh = false } = {}) => {
     }
     if (activePerspective.value === 'flow') {
       await loadFlowTelemetry()
+      if (refresh) convRefreshKey.value++
     }
   } catch (err) {
     console.error('Failed to query endpoint telemetry:', err)
@@ -1788,8 +1643,6 @@ onBeforeUnmount(() => {
   background-color: var(--canvas-bg);
 }
 
-
-
 .detail-container {
   padding: 2rem;
   max-width: 1400px;
@@ -1806,53 +1659,6 @@ onBeforeUnmount(() => {
 .device-actions {
   display: flex;
   gap: 0.75rem;
-}
-
-.status-badge {
-  font-size: 0.8rem;
-  font-weight: 700;
-  padding: 0.35rem 0.75rem;
-  border-radius: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background-color: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
-.status-badge.active {
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.status-badge.disabled {
-  color: var(--text-muted);
-  border-color: var(--border-color);
-}
-
-.monitoring-badge {
-  font-size: 0.8rem;
-  font-weight: 700;
-  padding: 0.35rem 0.75rem;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background-color: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
-.monitoring-badge.enabled {
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.monitoring-badge.disabled {
-  border: 1px solid var(--status-down-color);
-  color: var(--status-down-color);
 }
 
 .loading-state {
@@ -2026,12 +1832,6 @@ h2 {
   letter-spacing: 0.05em;
 }
 
-.range-buttons {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
 .toolbar-right {
   display: flex;
   align-items: center;
@@ -2046,36 +1846,6 @@ h2 {
     justify-content: flex-end;
   }
 }
-
-.date-input-group {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.date-input-group label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.date-picker-input {
-  background-color: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 4px;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.85rem;
-  outline: none;
-  font-family: monospace;
-  color: var(--text-primary);
-}
-
-.date-picker-input:focus {
-  border-color: #049f6c;
-}
-
 /* Metrics Cards Grid */
 .metrics-grid {
   display: grid;
@@ -2142,7 +1912,6 @@ h2 {
 }
 
 .value.perfect { color: var(--text-primary); }
-.value.good { color: var(--text-primary); }
 .value.warning { color: var(--status-warn-color); }
 .value.critical { color: var(--status-down-color); }
 
@@ -2257,21 +2026,6 @@ h2 {
 .text-warning { color: var(--status-warn-color); }
 .text-danger { color: var(--status-down-color); }
 
-.table-badge {
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.table-badge.up {
-  color: var(--status-up-color);
-}
-
-.table-badge.down {
-  color: var(--status-down-color);
-}
-
 .table-detail-badge {
   font-size: 0.75rem;
   font-weight: 700;
@@ -2280,46 +2034,16 @@ h2 {
 }
 
 .table-detail-badge.up {
-  color: var(--status-up-color);
+  color: var(--status-text-up);
 }
 
 .table-detail-badge.up-unstable,
 .table-detail-badge.down-unstable {
-  color: var(--status-warn-color);
+  color: var(--status-text-warn);
 }
 
 .table-detail-badge.down {
-  color: var(--status-down-color);
-}
-
-/* PrimeVue Button custom scoping overrides */
-:deep(.p-button) {
-  background-color: var(--bg-surface) !important;
-  border: 1px solid var(--border-color) !important;
-  color: var(--text-secondary) !important;
-  font-family: monospace !important;
-  font-size: 0.85rem !important;
-  font-weight: 700 !important;
-  border-radius: 4px !important;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  transition: all 0.15s ease;
-}
-:deep(.p-button:hover) {
-  background-color: var(--bg-surface-hover) !important;
-  border-color: var(--border-color-strong) !important;
-  color: var(--text-primary) !important;
-}
-/* When button is active (i.e. not outlined) */
-:deep(.p-button:not(.p-button-outlined)) {
-  background-color: var(--text-primary) !important;
-  border-color: var(--text-primary) !important;
-  color: var(--text-inverse) !important;
-}
-:deep(.p-button:not(.p-button-outlined):hover) {
-  background-color: var(--text-secondary) !important;
-  border-color: var(--text-secondary) !important;
-  color: var(--text-inverse) !important;
+  color: var(--status-text-down);
 }
 /* Back button specific */
 .back-btn {
@@ -2333,40 +2057,6 @@ h2 {
   border: 1px solid var(--status-down-color) !important;
   color: var(--status-down-color) !important;
 }
-:deep(.p-button-danger:hover) {
-  background-color: var(--bg-surface-hover) !important;
-  border-color: var(--status-down-color) !important;
-  color: var(--status-down-color) !important;
-}
-/* Text button (header menu navigation) */
-:deep(.p-button-text) {
-  background: transparent !important;
-  border-color: transparent !important;
-  color: var(--text-secondary) !important;
-}
-:deep(.p-button-text:hover) {
-  background-color: var(--bg-surface-selected) !important;
-  color: var(--text-primary) !important;
-}
-:deep(.p-button-text.p-button-danger:hover) {
-  background-color: var(--bg-surface-selected) !important;
-  color: var(--status-down-color) !important;
-}
-
-/* ==========================================================================
-   Light Mode Theme Scoping Overrides (Remaining wrapper variables)
-   ========================================================================== */
-
-
-.version-tag {
-  font-family: monospace;
-  font-size: 0.75rem;
-  color: var(--text-muted, #737373);
-  margin-left: 0.25rem;
-  font-weight: 500;
-  text-transform: none;
-}
-
 
 /* Compact Table Pagination Footer Styles */
 .table-pagination-footer {
@@ -2440,8 +2130,6 @@ h2 {
 .density-dropdown:focus, .density-dropdown:hover {
   border-color: var(--text-secondary);
 }
-
-
 
 .form-row {
   display: grid;
@@ -2619,33 +2307,6 @@ h2 {
   display: flex;
   gap: 0.5rem;
   margin-bottom: 1rem;
-}
-
-.subview-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  padding: 0.4rem 0.85rem;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.subview-btn:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.subview-btn.active {
-  background: rgba(14, 165, 233, 0.15);
-  border-color: #0ea5e9;
-  color: #0ea5e9;
-  font-weight: 600;
 }
 
 .interface-meter-grid {
@@ -2938,16 +2599,6 @@ h2 {
   border-color: var(--border-color-strong);
 }
 
-.badge-window {
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
 /* Section header split */
 .section-header-split {
   display: flex;
@@ -2955,215 +2606,5 @@ h2 {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-}
-
-/* Metric Mode Switcher Pills */
-.metric-mode-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-pill:hover {
-  color: var(--text-primary);
-}
-
-.btn-pill.active {
-  background: var(--bg-surface, #ffffff);
-  color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-}
-
-html.dark .btn-pill.active {
-  background: rgba(255, 255, 255, 0.12);
-  color: #ffffff;
-}
-
-.btn-pill-sm {
-  padding: 2px 8px;
-  font-size: 0.7rem;
-}
-
-/* Service Port Badges */
-.service-port-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-family: var(--font-mono, monospace);
-  font-weight: 600;
-}
-
-.port-web {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.port-dns {
-  background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.port-ssh {
-  background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-
-.port-telemetry {
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.port-generic {
-  background: rgba(107, 114, 128, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-/* Physics & Profiles */
-.physics-profile-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.badge-profile {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  width: fit-content;
-}
-
-.badge-profile-bulk {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.badge-profile-syn {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-profile-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.badge-profile-micro {
-  background: rgba(139, 92, 246, 0.15);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-}
-
-.badge-profile-voip {
-  background: rgba(6, 182, 212, 0.15);
-  color: #06b6d4;
-  border: 1px solid rgba(6, 182, 212, 0.35);
-}
-
-.badge-profile-interactive {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.packet-physics-meta {
-  font-size: 0.6875rem;
-  white-space: nowrap;
-}
-
-/* Forensic L3/L4 Telemetry & Anomaly Badges */
-.metadata-badge-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.badge-tcp-flags {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  background: rgba(100, 116, 139, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.badge-anomaly {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.badge-syn-only {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-tcp-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.badge-dscp {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.badge-dscp-ef {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border-color: rgba(16, 185, 129, 0.4);
-  font-weight: 700;
-}
-
-.badge-dscp-af {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
-  border-color: rgba(59, 130, 246, 0.4);
 }
 </style>

@@ -383,11 +383,13 @@ async def test_compile_bandwidth_report_data():
     ]
 
     # 5. Anomaly Query (protocol, tcp_flags, flow_count, total_bytes)
-    mock_res_anomalies = MagicMock()
-    mock_res_anomalies.all.return_value = [
-        (6, 2, 15, 750),  # SYN ONLY
-        (6, 4, 8, 400),   # TCP RST
-    ]
+    # 5. Anomaly summary over conversations (shared rule): 15 SYN-only flows, 8 RST flows
+    from tests.backend.flow_mocks import mapping_result
+    mock_res_anomalies = mapping_result([{
+        "flows": 23, "conversations": 2,
+        "syn_flows": 15, "syn_bytes": 750,
+        "rst_flows": 8, "rst_bytes": 400,
+    }])
 
     # 6. Traffic Zones Query (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
     mock_res_zones = MagicMock()

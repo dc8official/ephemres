@@ -436,22 +436,17 @@ def test_update_endpoint_interfaces(client):
 
 
 def test_bandwidth_top_talkers_with_exporter_id(client):
+    from tests.backend.flow_mocks import conversation_row, talker_row, top_talkers_results
+
     test_client, mock_session = client
     exporter_id = uuid4()
 
-    mock_src_row = ("10.0.0.5", exporter_id, 5000000, 500)
-    mock_conv_row = ("10.0.0.5", "10.0.0.20", 6, 443, 5000000, 500)
-
-    m1 = MagicMock()
-    m1.all.return_value = [mock_src_row]
-    m_in = MagicMock()
-    m_in.all.return_value = []
-    m_ep = MagicMock()
-    m_ep.all.return_value = [(exporter_id, "Edge-Router")]
-    m2 = MagicMock()
-    m2.all.return_value = [mock_conv_row]
-
-    mock_session.execute.side_effect = [m1, m_in, m_ep, m2]
+    mock_session.execute.side_effect = top_talkers_results(
+        talkers=[talker_row("10.0.0.5", exporter_id, ingress=0, egress=5000000, flows=500)],
+        hostnames=[(exporter_id, "Edge-Router")],
+        conversations=[conversation_row("10.0.0.5", "10.0.0.20", 6, 443, 5000000, 500)],
+        conversation_hostnames=[],
+    )
 
     resp = test_client.get(f"/api/v1/bandwidth/top-talkers?window=1h&exporter_id={exporter_id}")
     assert resp.status_code == 200
@@ -460,6 +455,9 @@ def test_bandwidth_top_talkers_with_exporter_id(client):
     assert len(data["data"]["top_endpoints"]) == 1
     assert len(data["data"]["top_conversations"]) == 1
     assert data["data"]["top_conversations"][0]["src_ip"] == "10.0.0.5"
+    # The exporter filter reaches both the talker and the conversation SQL
+    sqls = [str(c.args[0]) for c in mock_session.execute.call_args_list]
+    assert sum("exporter_id = CAST(:exporter_id AS uuid)" in q for q in sqls) >= 2
 
 
 # ==============================================================================

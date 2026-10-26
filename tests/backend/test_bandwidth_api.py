@@ -99,24 +99,17 @@ def test_bandwidth_traffic_series(client):
 
 
 def test_bandwidth_top_talkers(client):
+    from tests.backend.flow_mocks import conversation_row, talker_row, top_talkers_results
+
     test_client, mock_session = client
 
     ep_id = uuid4()
-    mock_src_row = ("192.168.1.50", ep_id, 1000000, 800)
-    mock_conv_row = ("192.168.1.50", "192.168.1.100", 6, 5432, 2000000, 1200)
-
-    m1 = MagicMock()
-    m1.all.return_value = [mock_src_row]
-    m_in = MagicMock()
-    m_in.all.return_value = []
-    # Hostname resolution query for ep_id
-    m_host = MagicMock()
-    m_host.all.return_value = [(ep_id, "app-server-1")]
-    # Conversations query
-    m2 = MagicMock()
-    m2.all.return_value = [mock_conv_row]
-
-    mock_session.execute.side_effect = [m1, m_in, m_host, m2]
+    mock_session.execute.side_effect = top_talkers_results(
+        talkers=[talker_row("192.168.1.50", ep_id, ingress=0, egress=1000000, flows=800)],
+        hostnames=[(ep_id, "app-server-1")],
+        conversations=[conversation_row("192.168.1.50", "192.168.1.100", 6, 5432, 2000000, 1200)],
+        conversation_hostnames=[("192.168.1.50", "app-server-1")],
+    )
 
     resp = test_client.get("/api/v1/bandwidth/top-talkers?window=1h")
     assert resp.status_code == 200
@@ -173,8 +166,12 @@ def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
     mock_res_column = MagicMock()
     mock_res_column.scalar.return_value = 1 if daily_has_tos else None
 
-    # FlowDailyRollup skips the zone query; executes app query, `tos` column check, then qos query
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_column, mock_res_qos]
+    # Total bytes in the window, so shares are of all traffic (here: all of it is HTTPS)
+    mock_res_total = MagicMock()
+    mock_res_total.scalar.return_value = 85000000
+
+    # FlowDailyRollup skips the zone query; executes app query, total, `tos` column check, then qos
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos]
 
     resp = test_client.get("/api/v1/bandwidth/applications?window=30d")
     assert resp.status_code == 200
@@ -189,7 +186,7 @@ def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
         assert z["total_bytes"] == 0
         assert z["percentage"] == 0.0
 
-    qos_sql = str(mock_session.execute.call_args_list[2].args[0])
+    qos_sql = str(mock_session.execute.call_args_list[3].args[0])
     expected_table = "flow_daily_rollups" if daily_has_tos else "flow_minute_rollups"
     assert expected_table in qos_sql
     assert data["data"]["qos_source"] == expected_table
@@ -211,7 +208,9 @@ def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
     mock_res_column.scalar.return_value = None
     mock_res_qos = MagicMock()
     mock_res_qos.all.return_value = [(0, 1000, 10, 1)]
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_column, mock_res_qos]
+    mock_res_total = MagicMock()
+    mock_res_total.scalar.return_value = 1000
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos]
 
     resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
     assert resp.status_code == 200
@@ -220,7 +219,7 @@ def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
     qos_start = datetime.datetime.fromisoformat(data["qos_window_start"].replace("Z", "+00:00"))
     age = datetime.datetime.now(datetime.timezone.utc) - qos_start
     assert datetime.timedelta(days=89) < age <= datetime.timedelta(days=90, minutes=1)
-    column_check_sql = str(mock_session.execute.call_args_list[1].args[0])
+    column_check_sql = str(mock_session.execute.call_args_list[2].args[0])
     assert "current_schema()" in column_check_sql
     bandwidth._TABLE_COLUMN_CACHE.clear()
 
@@ -328,6 +327,9 @@ def test_bandwidth_traffic_zones_with_cidr_masks(client):
     m_apps = MagicMock()
     m_apps.all.return_value = []
 
+    m_total = MagicMock()
+    m_total.scalar.return_value = 0
+
     m_qos = MagicMock()
     m_qos.all.return_value = []
 
@@ -341,7 +343,7 @@ def test_bandwidth_traffic_zones_with_cidr_masks(client):
     m_zone = MagicMock()
     m_zone.all.return_value = mock_rows
 
-    mock_session.execute.side_effect = [m_apps, m_qos, m_zone]
+    mock_session.execute.side_effect = [m_apps, m_total, m_qos, m_zone]
 
     resp = test_client.get("/api/v1/bandwidth/applications?window=1h")
     assert resp.status_code == 200

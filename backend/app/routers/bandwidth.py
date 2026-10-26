@@ -27,6 +27,7 @@ from app.schemas.bandwidth import (
     ApplicationDistributionItem,
     ApplicationDistributionResponse,
     BandwidthOverview,
+    ConversationsResponse,
     EnrollExporterRequest,
     ExportersResponse,
     FlowExporterItem,
@@ -46,8 +47,10 @@ from app.schemas.bandwidth import (
     format_tcp_flags,
 )
 from app.schemas.endpoints import InterfaceConfig
+from app.services import conversations as conversation_queries
 from app.services.driver_manager import driver_manager
 from app.services.flow_metrics import (
+    PROTOCOL_MAP,
     TRAFFIC_ZONES,
     bits_per_second,
     classify_zone,
@@ -109,16 +112,6 @@ async def get_flow_store() -> Optional[Any]:
 async def get_flow_redis() -> Optional[Any]:
     return await _init_flow_store_pool()
 
-
-PROTOCOL_MAP = {
-    1: "ICMP",
-    6: "TCP",
-    17: "UDP",
-    47: "GRE",
-    50: "ESP",
-    58: "IPv6-ICMP",
-    89: "OSPF",
-}
 
 PORT_LABEL_MAP = {
     22: "SSH",
@@ -253,21 +246,17 @@ async def get_bandwidth_overview(
     seconds = float(OVERVIEW_WINDOW_SECONDS)
     avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
 
-    stmt_anomaly = (
-        select(
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.tcp_flags,
-            func.sum(FlowMinuteRollup.flow_count),
-        )
-        .where(*window_filters, FlowMinuteRollup.protocol == 6)
-        .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
-    )
+    # Anomalies use the same per-conversation rule as the conversation table and the PDF report:
+    # a conversation is anomalous when the OR of its TCP flags over the window is SYN-only or
+    # RST-without-FIN.
     anomaly_flows_count = 0
+    anomaly_conversations_count = 0
     try:
-        res_anomaly = await db.execute(stmt_anomaly)
-        for a_row in res_anomaly.all():
-            if tcp_anomaly(a_row[1]):
-                anomaly_flows_count += int(a_row[2] or 0)
+        where_sql, where_params = conversation_queries.build_filters(window_start, exporter_id=exporter_id)
+        where_sql += " AND bucket < :window_end"
+        summary = await conversation_queries.anomaly_summary(db, where_sql, {**where_params, "window_end": window_end})
+        anomaly_flows_count = summary["flows"]
+        anomaly_conversations_count = summary["conversations"]
     except Exception as exc:
         logger.debug("Failed to calculate anomaly flow count: %s", exc)
 
@@ -298,6 +287,7 @@ async def get_bandwidth_overview(
             total_transit_pps=round(transit_packets / seconds, 2),
             avg_packet_size=avg_packet_size,
             anomaly_flows_count=anomaly_flows_count,
+            anomaly_conversations_count=anomaly_conversations_count,
             window_seconds=OVERVIEW_WINDOW_SECONDS,
             exporter_id=exporter_id,
         )
@@ -454,225 +444,132 @@ async def get_top_talkers(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns top communicating endpoints and top IP conversations.
-    Supports scoping by router/exporter_id for transit flow forensics.
+    """Top addresses by total volume, plus the largest conversations (first page of
+    GET /bandwidth/conversations, kept for existing clients).
+
+    Each address's ingress (as destination) and egress (as source) come from one aggregation,
+    so neither side is cut off by a separate per-direction limit.
     """
     delta = _get_window_delta(window)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    start_time = now - delta
+    start_time = datetime.datetime.now(datetime.timezone.utc) - delta
+    where_sql, params = conversation_queries.build_filters(start_time, exporter_id, endpoint_id)
 
-    # 1. Top endpoints (True Ingress & Egress accounting across src_ip and dst_ip)
-    model = FlowMinuteRollup
-    ep_filters = [model.bucket >= start_time]
-    if exporter_id is not None:
-        ep_filters.append(model.exporter_id == exporter_id)
-    if endpoint_id is not None:
-        ep_filters.append(
-            or_(
-                model.src_endpoint_id == endpoint_id,
-                model.dst_endpoint_id == endpoint_id,
+    talkers_res = await db.execute(
+        text(f"""
+            WITH sides AS (
+                SELECT src_ip AS ip, src_endpoint_id AS endpoint_id,
+                       0::BIGINT AS ingress_bytes, bytes AS egress_bytes,
+                       flow_count, COALESCE(packets, 0) AS packets
+                FROM flow_minute_rollups WHERE {where_sql}
+                UNION ALL
+                SELECT dst_ip, dst_endpoint_id,
+                       bytes, 0::BIGINT,
+                       flow_count, COALESCE(packets, 0)
+                FROM flow_minute_rollups WHERE {where_sql}
             )
-        )
-
-    egress_stmt = (
-        select(
-            model.src_ip,
-            model.src_endpoint_id,
-            func.sum(model.bytes).label("egress_bytes"),
-            func.sum(model.flow_count).label("egress_flows"),
-            func.coalesce(func.sum(model.packets), 0).label("egress_packets"),
-        )
-        .where(*ep_filters)
-        .group_by(model.src_ip, model.src_endpoint_id)
-        .order_by(func.sum(model.bytes).desc())
-        .limit(limit * 3)
+            SELECT ip,
+                   (array_agg(endpoint_id) FILTER (WHERE endpoint_id IS NOT NULL))[1] AS endpoint_id,
+                   SUM(ingress_bytes) AS ingress_bytes,
+                   SUM(egress_bytes) AS egress_bytes,
+                   SUM(ingress_bytes + egress_bytes) AS total_bytes,
+                   SUM(flow_count) AS flow_count,
+                   SUM(packets) AS total_packets
+            FROM sides
+            GROUP BY ip
+            ORDER BY total_bytes DESC, ip
+            LIMIT :limit
+        """),
+        {**params, "limit": limit},
     )
+    talker_rows = [dict(r) for r in talkers_res.mappings()]
 
-    ingress_stmt = (
-        select(
-            model.dst_ip,
-            model.dst_endpoint_id,
-            func.sum(model.bytes).label("ingress_bytes"),
-            func.sum(model.flow_count).label("ingress_flows"),
-            func.coalesce(func.sum(model.packets), 0).label("ingress_packets"),
-        )
-        .where(*ep_filters)
-        .group_by(model.dst_ip, model.dst_endpoint_id)
-        .order_by(func.sum(model.bytes).desc())
-        .limit(limit * 3)
-    )
-
-    egress_res = await db.execute(egress_stmt)
-    ingress_res = await db.execute(ingress_stmt)
-
-    egress_map: Dict[str, Dict[str, Any]] = {}
-    for row in egress_res.all():
-        ip_str = str(row[0])
-        ep_id = row[1]
-        eg_b = int(row[2] or 0)
-        eg_f = int(row[3] or 0)
-        eg_p = int(row[4] or 0) if len(row) > 4 else 0
-        egress_map[ip_str] = {"ep_id": ep_id, "bytes": eg_b, "flows": eg_f, "packets": eg_p}
-
-    ingress_map: Dict[str, Dict[str, Any]] = {}
-    for row in ingress_res.all():
-        ip_str = str(row[0])
-        ep_id = row[1]
-        in_b = int(row[2] or 0)
-        in_f = int(row[3] or 0)
-        in_p = int(row[4] or 0) if len(row) > 4 else 0
-        ingress_map[ip_str] = {"ep_id": ep_id, "bytes": in_b, "flows": in_f, "packets": in_p}
-
-    all_ips = set(egress_map.keys()) | set(ingress_map.keys())
-    merged_candidates: List[Dict[str, Any]] = []
-    for ip_str in all_ips:
-        eg = egress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0, "packets": 0})
-        ing = ingress_map.get(ip_str, {"ep_id": None, "bytes": 0, "flows": 0, "packets": 0})
-        eg_bytes = eg["bytes"]
-        in_bytes = ing["bytes"]
-        tot_bytes = eg_bytes + in_bytes
-        tot_flows = eg["flows"] + ing["flows"]
-        tot_pkts = eg["packets"] + ing["packets"]
-        avg_pkt_sz = int(tot_bytes // tot_pkts) if tot_pkts > 0 else 0
-        ep_id = eg["ep_id"] or ing["ep_id"]
-        merged_candidates.append({
-            "ip": ip_str,
-            "endpoint_id": ep_id,
-            "ingress_bytes": in_bytes,
-            "egress_bytes": eg_bytes,
-            "total_bytes": tot_bytes,
-            "flow_count": tot_flows,
-            "total_packets": tot_pkts,
-            "avg_packet_size": avg_pkt_sz,
-        })
-
-    merged_candidates.sort(key=lambda x: x["total_bytes"], reverse=True)
-    selected_candidates = merged_candidates[:limit]
-
-    # Load hostnames for known endpoints
-    ep_ids = [c["endpoint_id"] for c in selected_candidates if c["endpoint_id"]]
-    hostnames: Dict[UUID, str] = {}
+    ep_ids = [r["endpoint_id"] for r in talker_rows if r["endpoint_id"]]
+    hostnames: Dict[Any, str] = {}
     if ep_ids:
-        h_stmt = select(Endpoint.id, Endpoint.hostname).where(Endpoint.id.in_(ep_ids))
-        h_res = await db.execute(h_stmt)
-        for e_id, h_name in h_res.all():
-            hostnames[e_id] = h_name
+        h_res = await db.execute(select(Endpoint.id, Endpoint.hostname).where(Endpoint.id.in_(ep_ids)))
+        hostnames = {e_id: h_name for e_id, h_name in h_res.all()}
 
-    ip_to_hostname: Dict[str, str] = {}
-    for c in selected_candidates:
-        if c.get("endpoint_id") and c["endpoint_id"] in hostnames:
-            c_ip_clean = str(c["ip"]).split("/")[0].strip()
-            ip_to_hostname[c_ip_clean] = hostnames[c["endpoint_id"]]
-            ip_to_hostname[str(c["ip"])] = hostnames[c["endpoint_id"]]
-
-    top_endpoints: List[TopTalkerItem] = []
-    for c in selected_candidates:
+    top_endpoints = []
+    for r in talker_rows:
+        total_bytes = int(r["total_bytes"] or 0)
+        total_packets = int(r["total_packets"] or 0)
         top_endpoints.append(
             TopTalkerItem(
-                endpoint_id=c["endpoint_id"],
-                ip_address=c["ip"],
-                hostname=hostnames.get(c["endpoint_id"]),
-                total_bytes=c["total_bytes"],
-                ingress_bytes=c["ingress_bytes"],
-                egress_bytes=c["egress_bytes"],
-                flow_count=c["flow_count"],
-                total_packets=c["total_packets"],
-                avg_packet_size=c["avg_packet_size"],
+                endpoint_id=r["endpoint_id"],
+                ip_address=str(r["ip"]),
+                hostname=hostnames.get(r["endpoint_id"]),
+                total_bytes=total_bytes,
+                ingress_bytes=int(r["ingress_bytes"] or 0),
+                egress_bytes=int(r["egress_bytes"] or 0),
+                flow_count=int(r["flow_count"] or 0),
+                total_packets=total_packets,
+                avg_packet_size=int(total_bytes // total_packets) if total_packets > 0 else 0,
             )
         )
 
-    # 2. Top Conversations
-    conv_filters = [FlowMinuteRollup.bucket >= start_time]
-    if exporter_id is not None:
-        conv_filters.append(FlowMinuteRollup.exporter_id == exporter_id)
-    if endpoint_id is not None:
-        conv_filters.append(
-            or_(
-                FlowMinuteRollup.src_endpoint_id == endpoint_id,
-                FlowMinuteRollup.dst_endpoint_id == endpoint_id,
-            )
-        )
-
-    top_conv_stmt = (
-        select(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.dst_port,
-            func.sum(FlowMinuteRollup.bytes).label("total_bytes"),
-            func.sum(FlowMinuteRollup.flow_count).label("total_flows"),
-            func.bit_or(FlowMinuteRollup.tcp_flags).label("tcp_flags_mask"),
-            func.max(FlowMinuteRollup.tos).label("max_tos"),
-            func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
-        )
-        .where(*conv_filters)
-        .group_by(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.dst_port,
-        )
-        .order_by(func.sum(FlowMinuteRollup.bytes).desc())
-        .limit(limit)
+    page = await conversation_queries.query_conversations(
+        db, start_time, exporter_id=exporter_id, endpoint_id=endpoint_id, limit=limit
+    )
+    return APIResponse.success(
+        data=TopTalkersResponse(top_endpoints=top_endpoints, top_conversations=page["items"])
     )
 
-    conv_res = await db.execute(top_conv_stmt)
-    top_conversations: List[TopConversationItem] = []
-    for row in conv_res.all():
-        s_ip = row[0]
-        d_ip = row[1]
-        proto_id = row[2]
-        port = row[3]
-        b_sum = int(row[4] or 0)
-        f_sum = int(row[5] or 0)
-        tcp_flags = int(row[6] or 0) if len(row) > 6 else 0
-        tos = int(row[7] or 0) if len(row) > 7 else 0
-        tot_packets = int(row[8] or 0) if len(row) > 8 else 0
 
-        proto_name = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
-        flags_labels = format_tcp_flags(tcp_flags) if proto_name == "TCP" else []
-        dscp_val = dscp_from_tos(tos)
-        dscp_lbl = format_dscp_label(tos)
-        anomaly_hint = tcp_anomaly(tcp_flags) if proto_name == "TCP" else None
+@router.get("/conversations", response_model=APIResponse)
+async def get_conversations(
+    window: str = Query(default="1h"),
+    exporter_id: Optional[UUID] = Query(default=None),
+    endpoint_id: Optional[UUID] = Query(default=None),
+    ip: Optional[str] = Query(default=None),
+    port: Optional[int] = Query(default=None, ge=0, le=65535),
+    dscp: Optional[int] = Query(default=None, ge=0, le=63),
+    quick: str = Query(default="all"),
+    sort: str = Query(default="bytes"),
+    limit: int = Query(default=25, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Conversations (src, dst, protocol, service port) filtered and paged on the server.
 
-        avg_pkt_size = int(b_sum // tot_packets) if tot_packets > 0 else 0
-        pkts_per_flow = round(float(tot_packets) / float(f_sum), 1) if f_sum > 0 else 0.0
-        traffic_prof = derive_traffic_profile(anomaly_hint, avg_pkt_size, pkts_per_flow, dscp_val, int(port))
+    Filters: `ip` (either side), `port` (service port), `dscp`, plus `quick` = all | anomalies |
+    qos | bulk. `counts` gives the size of each quick filter over every conversation matching
+    the other filters, not just the returned page. `sort` = bytes | flows | packets.
+    """
+    if quick not in conversation_queries.QUICK_FILTERS:
+        raise HTTPException(status_code=400, detail=f"quick must be one of {', '.join(conversation_queries.QUICK_FILTERS)}.")
+    if sort not in conversation_queries.SORT_COLUMNS:
+        raise HTTPException(status_code=400, detail=f"sort must be one of {', '.join(conversation_queries.SORT_COLUMNS)}.")
+    clean_ip = None
+    if ip:
+        clean_ip = ip.strip().split("/")[0]
+        try:
+            ipaddress.ip_address(clean_ip)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"'{clean_ip}' is not a valid IP address.")
 
-        s_ip_str = str(s_ip)
-        d_ip_str = str(d_ip)
-        s_ip_clean = s_ip_str.split("/")[0].strip()
-        d_ip_clean = d_ip_str.split("/")[0].strip()
-        s_host = ip_to_hostname.get(s_ip_clean) or ip_to_hostname.get(s_ip_str)
-        d_host = ip_to_hostname.get(d_ip_clean) or ip_to_hostname.get(d_ip_str)
-
-        top_conversations.append(
-            TopConversationItem(
-                src_ip=s_ip_str,
-                dst_ip=d_ip_str,
-                src_hostname=s_host,
-                dst_hostname=d_host,
-                protocol=proto_name,
-                dst_port=int(port),
-                total_bytes=b_sum,
-                flow_count=f_sum,
-                total_packets=tot_packets,
-                avg_packet_size=avg_pkt_size,
-                packets_per_flow=pkts_per_flow,
-                traffic_profile=traffic_prof,
-                tcp_flags=tcp_flags,
-                tcp_flags_labels=flags_labels,
-                tos=tos,
-                dscp=dscp_val,
-                dscp_label=dscp_lbl,
-                anomaly_hint=anomaly_hint,
-            )
-        )
-
+    start_time = datetime.datetime.now(datetime.timezone.utc) - _get_window_delta(window)
+    page = await conversation_queries.query_conversations(
+        db,
+        start_time,
+        exporter_id=exporter_id,
+        endpoint_id=endpoint_id,
+        ip=clean_ip,
+        port=port,
+        dscp=dscp,
+        quick=quick,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
     return APIResponse.success(
-        data=TopTalkersResponse(
-            top_endpoints=top_endpoints, top_conversations=top_conversations
+        data=ConversationsResponse(
+            window=window,
+            items=page["items"],
+            counts=page["counts"],
+            total=page["total"],
+            limit=limit,
+            offset=offset,
         )
     )
 
@@ -765,7 +662,9 @@ async def get_applications_breakdown(
     res = await db.execute(stmt)
     rows = res.all()
 
-    overall_bytes = sum(int(getattr(r, "total_bytes", r[2]) or 0) for r in rows)
+    # Shares are of all traffic in the window, not of the top 15; the rest becomes "Other".
+    total_res = await db.execute(select(func.coalesce(func.sum(model.bytes), 0)).where(*app_filters))
+    overall_bytes = int(total_res.scalar() or 0)
 
     apps: List[ApplicationDistributionItem] = []
     for proto_id, port, byte_sum in rows:
@@ -780,6 +679,18 @@ async def get_applications_breakdown(
                 service_label=label,
                 total_bytes=b_val,
                 percentage=round(pct, 2),
+            )
+        )
+    other_bytes = overall_bytes - sum(a.total_bytes for a in apps)
+    if other_bytes > 0:
+        apps.append(
+            ApplicationDistributionItem(
+                protocol_name="Other",
+                port=0,
+                service_label="Other",
+                total_bytes=other_bytes,
+                percentage=round(other_bytes / overall_bytes * 100.0, 2),
+                is_other=True,
             )
         )
 
@@ -821,6 +732,7 @@ async def get_applications_breakdown(
     # 3. Traffic Zone Breakdown (East-West, North-South, External)
     zone_sums = {zone: {"bytes": 0, "flows": 0} for zone in TRAFFIC_ZONES}
 
+    zones_resolution = "ip" if hasattr(model, "src_ip") else ("endpoint" if hasattr(model, "src_endpoint_id") else "unavailable")
     if hasattr(model, "src_ip"):
         zone_stmt = (
             select(
@@ -911,6 +823,8 @@ async def get_applications_breakdown(
             qos_source=qos_model.__tablename__,
             qos_window_start=qos_start,
             traffic_zones=traffic_zones,
+            total_bytes=overall_bytes,
+            zones_resolution=zones_resolution,
         )
     )
 
