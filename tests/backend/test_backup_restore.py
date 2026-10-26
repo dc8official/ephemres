@@ -646,3 +646,200 @@ u0000000-0000-0000-0000-000000000002	user_full	$scrypt$ln=14,r=8,p=1$already_scr
     assert 'EXCLUDED."updated_at"' not in uq
     assert uq.count('"updated_at"') == 2  # Once in INSERT column list, once in DO UPDATE SET "updated_at" = NOW()
 
+
+
+# ---------------------------------------------------------------------------
+# Test 8: TimescaleDB compressed chunks are decoded, never inserted as raw blobs
+# ---------------------------------------------------------------------------
+COMPRESSED_DUMP = """
+CREATE TABLE public.endpoint_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    endpoint_id uuid NOT NULL,
+    operational_state character varying(20) NOT NULL,
+    start_time timestamp with time zone NOT NULL,
+    end_time timestamp with time zone
+);
+
+CREATE TABLE _timescaledb_internal._hyper_1_1_chunk (
+)
+INHERITS (public.endpoint_events);
+
+CREATE TABLE _timescaledb_internal.compress_hyper_2_4_chunk (
+    _ts_meta_count integer,
+    endpoint_id uuid,
+    id _timescaledb_internal.compressed_data,
+    operational_state _timescaledb_internal.compressed_data,
+    _ts_meta_min_1 timestamp with time zone,
+    _ts_meta_max_1 timestamp with time zone,
+    start_time _timescaledb_internal.compressed_data,
+    end_time _timescaledb_internal.compressed_data
+)
+WITH (toast_tuple_target='128');
+
+CREATE TABLE _timescaledb_internal._hyper_3_5_chunk (
+)
+INHERITS (_timescaledb_internal._materialized_hypertable_3);
+
+COPY _timescaledb_catalog.hypertable (id, schema_name, table_name, associated_schema_name, associated_table_prefix, num_dimensions, chunk_sizing_func_schema, chunk_sizing_func_name, chunk_target_size, compression_state, compressed_hypertable_id, status) FROM stdin;
+2	_timescaledb_internal	_compressed_hypertable_2	_timescaledb_internal	_hyper_2	0	_timescaledb_functions	calculate_chunk_interval	0	2	\\N	0
+1	public	endpoint_events	_timescaledb_internal	_hyper_1	1	_timescaledb_functions	calculate_chunk_interval	0	1	2	0
+3	_timescaledb_internal	_materialized_hypertable_3	_timescaledb_internal	_hyper_3	1	_timescaledb_functions	calculate_chunk_interval	0	0	\\N	0
+\\.
+
+COPY public.endpoints (id) FROM stdin;
+e0000000-0000-0000-0000-000000000010
+\\.
+
+COPY _timescaledb_internal._hyper_1_1_chunk (id, endpoint_id, operational_state, start_time, end_time) FROM stdin;
+a0000000-0000-0000-0000-000000000003	e0000000-0000-0000-0000-000000000010	UP	2026-10-20 00:00:00+00	\\N
+\\.
+
+COPY _timescaledb_internal._hyper_3_5_chunk (endpoint_id, operational_state, start_time) FROM stdin;
+e0000000-0000-0000-0000-000000000010	MATERIALIZED	2026-09-01 00:00:00+00
+\\.
+
+COPY _timescaledb_internal.compress_hyper_2_4_chunk (_ts_meta_count, endpoint_id, id, operational_state, _ts_meta_min_1, _ts_meta_max_1, start_time, end_time) FROM stdin;
+2	e0000000-0000-0000-0000-000000000010	AQBwZ19jYXRhbG9nAHV1aWQAAAEAAAPo	AgBwZ19jYXRhbG9nAHZhcmNoYXIA	2026-09-01 00:01:00+00	2026-09-01 00:02:00+00	BAAAAv1mWnwsAP/////8bHkAAAAD	Bg==
+\\.
+"""
+
+ENDPOINT_EVENTS_TARGET = {
+    "endpoints": {"id": "uuid"},
+    "endpoint_events": {"id": "uuid", "endpoint_id": "uuid", "operational_state": "varchar", "start_time": "timestamptz", "end_time": "timestamptz"},
+}
+
+
+class DecodingMockDbConnection(MockDbConnection):
+    """Mock connection that also answers TimescaleDB's compressed_data_to_array() decoding queries."""
+
+    def __init__(self, target_schema: Dict[str, Dict[str, str]], can_decode: bool) -> None:
+        super().__init__(target_schema)
+        self.can_decode = can_decode
+        self.decode_calls: List[tuple[str, tuple]] = []
+
+    async def fetch(self, query: str, *args: Any) -> List[Dict[str, Any]]:
+        if "compressed_data_to_array" in query and "pg_proc" in query:
+            self.executed_queries.append(query)
+            return [{"ok": 1}] if self.can_decode else []
+        if "compressed_data_to_array" in query:
+            self.executed_queries.append(query)
+            self.decode_calls.append((query, args))
+            return [
+                {"c0": "a0000000-0000-0000-0000-000000000001", "c1": "UP", "c2": "2026-09-01 00:02:00+00"},
+                {"c0": "a0000000-0000-0000-0000-000000000002", "c1": "DOWN", "c2": "2026-09-01 00:01:00+00"},
+            ]
+        return await super().fetch(query, *args)
+
+
+def test_scan_maps_compressed_chunks_through_the_catalog(tmp_path: Path):
+    dump_file = tmp_path / "compressed.sql"
+    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+
+    chunk_to_parent, _, compressed_chunks = scan_backup_metadata_and_configs(dump_file)
+
+    assert chunk_to_parent["_hyper_1_1_chunk"] == "endpoint_events"
+    assert chunk_to_parent["compress_hyper_2_4_chunk"] == "endpoint_events"
+    # Continuous aggregate materialization chunks are not user data, whatever their columns look like
+    assert "_hyper_3_5_chunk" not in chunk_to_parent
+    # Compressed columns carry the source type from the hypertable DDL; segmentby endpoint_id is plain
+    assert compressed_chunks == {
+        "compress_hyper_2_4_chunk": {
+            "id": "uuid",
+            "operational_state": "character varying(20)",
+            "start_time": "timestamp with time zone",
+            "end_time": "timestamp with time zone",
+        }
+    }
+
+
+def test_scan_reads_compressed_layout_from_inherited_ddl_without_catalog(tmp_path: Path):
+    # Older TimescaleDB dumps declare compressed chunk columns on the inherited compressed hypertable
+    dump = """
+CREATE TABLE public.endpoint_events (
+    id uuid NOT NULL,
+    endpoint_id uuid NOT NULL,
+    operational_state character varying(20) NOT NULL,
+    start_time timestamp with time zone NOT NULL
+);
+
+CREATE TABLE _timescaledb_internal._compressed_hypertable_2 (
+    endpoint_id uuid,
+    id _timescaledb_internal.compressed_data,
+    operational_state _timescaledb_internal.compressed_data,
+    start_time _timescaledb_internal.compressed_data,
+    _ts_meta_count integer,
+    _ts_meta_sequence_num integer
+);
+
+CREATE TABLE _timescaledb_internal.compress_hyper_2_4_chunk (
+)
+INHERITS (_timescaledb_internal._compressed_hypertable_2);
+
+CREATE TABLE _timescaledb_internal._hyper_3_5_chunk (
+)
+INHERITS (_timescaledb_internal._materialized_hypertable_3);
+
+COPY _timescaledb_internal._hyper_3_5_chunk (endpoint_id, operational_state, start_time) FROM stdin;
+\\.
+
+COPY _timescaledb_internal.compress_hyper_2_4_chunk (endpoint_id, id, operational_state, start_time, _ts_meta_count, _ts_meta_sequence_num) FROM stdin;
+\\.
+"""
+    dump_file = tmp_path / "compressed_legacy.sql"
+    dump_file.write_text(dump, encoding="utf-8")
+
+    chunk_to_parent, _, compressed_chunks = scan_backup_metadata_and_configs(dump_file)
+
+    assert chunk_to_parent == {"compress_hyper_2_4_chunk": "endpoint_events"}
+    assert compressed_chunks["compress_hyper_2_4_chunk"] == {
+        "id": "uuid",
+        "operational_state": "character varying(20)",
+        "start_time": "timestamp with time zone",
+    }
+
+
+@pytest.mark.anyio
+async def test_compressed_chunks_are_decoded_on_the_target(tmp_path: Path):
+    dump_file = tmp_path / "compressed.sql"
+    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+    mock_conn = DecodingMockDbConnection(ENDPOINT_EVENTS_TARGET, can_decode=True)
+
+    summary = await reconcile_and_restore_database(conn=mock_conn, backup_path=dump_file)
+
+    # One decode round trip per compressed row, typed as in the source DDL (varchar is not text).
+    # end_time uses the NULL algorithm, which TimescaleDB cannot decode, so it is never sent.
+    assert len(mock_conn.decode_calls) == 1
+    decode_sql, decode_args = mock_conn.decode_calls[0]
+    assert "NULL::uuid" in decode_sql
+    assert "NULL::character varying(20)" in decode_sql
+    assert "NULL::timestamp with time zone" in decode_sql
+    assert decode_args == ("AQBwZ19jYXRhbG9nAHV1aWQAAAEAAAPo", "AgBwZ19jYXRhbG9nAHZhcmNoYXIA", "BAAAAv1mWnwsAP/////8bHkAAAAD")
+
+    rows = sorted(mock_conn.tables["endpoint_events"], key=lambda r: str(r["id"]))
+    assert [str(r["id"]) for r in rows] == [
+        "a0000000-0000-0000-0000-000000000001",
+        "a0000000-0000-0000-0000-000000000002",
+        "a0000000-0000-0000-0000-000000000003",
+    ]
+    assert all(str(r["endpoint_id"]) == "e0000000-0000-0000-0000-000000000010" for r in rows)
+    assert [r["operational_state"] for r in rows] == ["UP", "DOWN", "UP"]
+    assert rows[0]["end_time"] is None and rows[1]["end_time"] is None
+    # The materialization chunk's MATERIALIZED row was not restored as an event
+    assert all(r["operational_state"] != "MATERIALIZED" for r in rows)
+    assert summary["telemetry_rows_restored"] == 3
+    assert summary["compressed_rows_skipped"] == 0
+
+
+@pytest.mark.anyio
+async def test_compressed_chunks_are_skipped_when_target_cannot_decode(tmp_path: Path):
+    dump_file = tmp_path / "compressed.sql"
+    dump_file.write_text(COMPRESSED_DUMP, encoding="utf-8")
+    mock_conn = DecodingMockDbConnection(ENDPOINT_EVENTS_TARGET, can_decode=False)
+
+    summary = await reconcile_and_restore_database(conn=mock_conn, backup_path=dump_file)
+
+    # The plain chunk still restores; the compressed batch is counted rather than inserted as blobs
+    assert [str(r["id"]) for r in mock_conn.tables["endpoint_events"]] == ["a0000000-0000-0000-0000-000000000003"]
+    assert summary["telemetry_rows_restored"] == 1
+    assert summary["compressed_rows_skipped"] == 2
+    assert mock_conn.decode_calls == []

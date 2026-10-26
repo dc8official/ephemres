@@ -7,7 +7,9 @@ Key Capabilities:
 1. TimescaleDB Chunk Remapping:
    Resolves COPY _timescaledb_internal._hyper_* chunk blocks into target public
    hypertables (endpoint_events, flow_minute_rollups, flow_interface_minute_rollups)
-   via CREATE TABLE ... INHERITS introspection and column signature heuristics.
+   via the dumped _timescaledb_catalog, CREATE TABLE ... INHERITS introspection and column
+   signature heuristics. Compressed chunks (compress_hyper_*) are expanded by the target's own
+   TimescaleDB (2.25+ compressed_data_to_array); continuous aggregate chunks are skipped.
 2. Dynamic Schema Reconciliation:
    Introspects target information_schema.columns to gracefully handle schema drift;
    new columns (flow_exporter_ips, flow_interface_aliases, device_role) automatically
@@ -69,6 +71,29 @@ INHERITS_RE = re.compile(
     r"INHERITS\s*\(\s*(?:public\.)?([\"\w]+)\s*\)",
     re.IGNORECASE,
 )
+INTERNAL_INHERITS_RE = re.compile(
+    r"INHERITS\s*\(\s*_timescaledb_internal\.([\"\w]+)\s*\)",
+    re.IGNORECASE,
+)
+CREATE_TABLE_RE = re.compile(
+    r"^CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\"\w]+)\.([\"\w]+)\s*\(",
+    re.IGNORECASE,
+)
+# One column line inside a pg_dump CREATE TABLE body: "    name type [DEFAULT ...] [NOT NULL],"
+DDL_COLUMN_RE = re.compile(
+    r"^\s+(\"[^\"]+\"|\w+)\s+(.+?)(?:\s+(?:DEFAULT|NOT\s+NULL|NULL|COLLATE|GENERATED|CONSTRAINT|CHECK)\b.*?)?,?\s*$",
+    re.IGNORECASE,
+)
+# Compressed chunks are named compress_hyper_<compressed hypertable id>_<chunk id>_chunk
+COMPRESSED_CHUNK_RE = re.compile(r"^compress_hyper_(\d+)_\d+_chunk$")
+# Type names are spliced into the decompression SQL, so only plain (optionally qualified) names pass
+SQL_TYPE_RE = re.compile(
+    r"^(?:[A-Za-z_]\w*\.)?[A-Za-z_][\w ]*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\[\])*$"
+)
+COMPRESSED_DATA_TYPE = "_timescaledb_internal.compressed_data"
+# Algorithm byte TimescaleDB writes for a column that is NULL throughout a compressed batch
+COMPRESSION_ALGORITHM_NULL = 6
+DECOMPRESS_FN = "_timescaledb_functions.compressed_data_to_array"
 
 HYPERTABLE_NAMES = {
     "endpoint_events",
@@ -562,17 +587,122 @@ async def _execute_batch(conn: Any, sql: str, args_list: List[List[Any]]) -> Non
             await conn.execute(sql, *args)
 
 
+async def _compressed_decoding_available(conn: Any) -> bool:
+    """True when the target's TimescaleDB (2.25+) can decode compressed column values."""
+    try:
+        rows = await _fetch_all(
+            conn,
+            "SELECT 1 AS ok FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = '_timescaledb_functions' AND p.proname = 'compressed_data_to_array' LIMIT 1;",
+        )
+    except Exception as exc:
+        logger.debug("Compressed chunk decoding probe failed: %s", exc)
+        return False
+    return bool(rows)
+
+
+def _is_all_null_column(value: Optional[str]) -> bool:
+    """True for a SQL NULL or a compressed value using TimescaleDB's NULL algorithm.
+
+    compressed_data_to_array() cannot decode the NULL algorithm, so such columns are left NULL.
+    """
+    if value is None:
+        return True
+    try:
+        return base64.b64decode(value[:4])[:1] == bytes([COMPRESSION_ALGORITHM_NULL])
+    except ValueError:
+        return False
+
+
+async def _decompress_chunk_row(
+    conn: Any,
+    row: Dict[str, Optional[str]],
+    compressed: Dict[str, Optional[str]],
+    wanted_cols: List[str],
+    target_cols: Dict[str, str],
+) -> List[Dict[str, Optional[str]]]:
+    """Expands one compressed-chunk row (a batch of up to 1,000 tuples) into plain text rows.
+
+    Segmentby columns hold plain values that repeat on every tuple. Compressed columns are decoded
+    on the target by TimescaleDB itself, using the column's type from the backup DDL: array and
+    dictionary blobs only decode as their original element type (varchar is not text).
+    """
+    plain = {c: v for c, v in row.items() if c not in compressed and not c.startswith("_ts_meta")}
+    decode = [c for c in wanted_cols if c in compressed and not _is_all_null_column(row.get(c))]
+    if not decode:
+        count = row.get("_ts_meta_count") or ""
+        return [dict(plain) for _ in range(int(count) if count.isdigit() else 0)]
+
+    exprs: List[str] = []
+    for i, col in enumerate(decode):
+        col_type = compressed[col]
+        if not col_type or not SQL_TYPE_RE.match(col_type):
+            col_type = target_cols.get(col) or "text"
+            if not SQL_TYPE_RE.match(col_type):
+                col_type = "text"
+        exprs.append(f"unnest({DECOMPRESS_FN}(${i + 1}::{COMPRESSED_DATA_TYPE}, NULL::{col_type}))")
+    aliases = ", ".join(f"c{i}" for i in range(len(decode)))
+    selects = ", ".join(f"c{i}::text AS c{i}" for i in range(len(decode)))
+    sql = f"SELECT {selects} FROM ROWS FROM ({', '.join(exprs)}) AS u({aliases});"
+
+    tuples: List[Dict[str, Optional[str]]] = []
+    for rec in await _fetch_all(conn, sql, *[row[c] for c in decode]):
+        tup = dict(plain)
+        for i, col in enumerate(decode):
+            tup[col] = rec.get(f"c{i}")
+        tuples.append(tup)
+    return tuples
+
+
+def _classify_internal_table(
+    table: str,
+    hypertables: Dict[str, Tuple[str, str]],
+    compressed_owner: Dict[str, str],
+) -> Tuple[bool, Optional[Tuple[str, str]]]:
+    """Resolves an _timescaledb_internal table to its owning hypertable via the dumped catalog.
+
+    Returns (is_compressed_chunk, (schema, table) of the owning hypertable or None if unknown).
+    """
+    m = COMPRESSED_CHUNK_RE.match(table)
+    if m:
+        owner_id = compressed_owner.get(m.group(1))
+        return True, hypertables.get(owner_id) if owner_id else None
+    m = re.match(r"^_hyper_(\d+)_\d+_chunk$", table)
+    if m:
+        return False, hypertables.get(m.group(1))
+    return False, None
+
+
 def scan_backup_metadata_and_configs(
     backup_path: Path | str,
-) -> Tuple[Dict[str, str], Dict[str, Tuple[List[str], List[Dict[str, Any]]]]]:
+) -> Tuple[
+    Dict[str, str],
+    Dict[str, Tuple[List[str], List[Dict[str, Any]]]],
+    Dict[str, Dict[str, Optional[str]]],
+]:
     """Scans backup file to extract chunk inheritance DDL and all configuration tables.
 
-    Returns: (chunk_to_parent, config_data)
+    Returns: (chunk_to_parent, config_data, compressed_chunks)
+
+    compressed_chunks maps each TimescaleDB compressed chunk to {column: original type} for its
+    compressed columns; its other columns (segmentby) hold plain values. A compressed chunk whose
+    layout could not be read from the DDL maps to an empty dict.
     """
     chunk_to_parent: Dict[str, str] = {}
     config_data: Dict[str, Tuple[List[str], List[Dict[str, Any]]]] = {}
+    compressed_chunks: Dict[str, Dict[str, Optional[str]]] = {}
+
+    # DDL column types per (schema, table), and internal tables inheriting another internal table
+    table_columns: Dict[Tuple[str, str], Dict[str, str]] = {}
+    internal_parent: Dict[str, str] = {}
+    # From _timescaledb_catalog.hypertable: id -> (schema, table), compressed hypertable id -> owner id
+    hypertables: Dict[str, Tuple[str, str]] = {}
+    compressed_owner: Dict[str, str] = {}
 
     current_chunk: Optional[str] = None
+    ddl_table: Optional[Tuple[str, str]] = None
+    in_catalog_hypertables = False
+    catalog_cols: List[str] = []
     in_copy = False
     copy_table: Optional[str] = None
     copy_cols: List[str] = []
@@ -582,15 +712,46 @@ def scan_backup_metadata_and_configs(
         for line in f:
             line_str = line
 
+            if in_catalog_hypertables:
+                stripped = line_str.rstrip("\r\n")
+                if stripped == r"\.":
+                    in_catalog_hypertables = False
+                else:
+                    ht = dict(zip(catalog_cols, stripped.split("\t")))
+                    ht_id = ht.get("id")
+                    if ht_id:
+                        hypertables[ht_id] = (ht.get("schema_name", ""), ht.get("table_name", ""))
+                        compressed_id = ht.get("compressed_hypertable_id")
+                        if compressed_id and compressed_id != r"\N":
+                            compressed_owner[compressed_id] = ht_id
+                continue
+
             if not in_copy:
+                # Record column types of every CREATE TABLE body (pg_dump closes it with a ")" line)
+                if ddl_table is not None:
+                    if line_str.startswith(")"):
+                        ddl_table = None
+                    else:
+                        col_m = DDL_COLUMN_RE.match(line_str)
+                        if col_m and col_m.group(1).upper() != "CONSTRAINT":
+                            table_columns[ddl_table][col_m.group(1).strip('"')] = col_m.group(2).strip()
+                table_m = CREATE_TABLE_RE.match(line_str)
+                if table_m:
+                    ddl_table = (table_m.group(1).strip('"'), table_m.group(2).strip('"'))
+                    table_columns[ddl_table] = {}
+
                 # Detect CREATE TABLE _timescaledb_internal.<chunk>
                 chunk_m = CREATE_TABLE_INTERNAL_RE.match(line_str)
                 if chunk_m:
                     current_chunk = chunk_m.group(1).strip('"')
 
                 if current_chunk:
+                    internal_m = INTERNAL_INHERITS_RE.search(line_str)
                     inherits_m = INHERITS_RE.search(line_str)
-                    if inherits_m:
+                    if internal_m:
+                        internal_parent[current_chunk] = internal_m.group(1).strip('"')
+                        current_chunk = None
+                    elif inherits_m:
                         parent = inherits_m.group(1).strip('"')
                         chunk_to_parent[current_chunk] = parent
                         current_chunk = None
@@ -604,30 +765,55 @@ def scan_backup_metadata_and_configs(
                     raw_table = copy_m.group(2).strip('"')
                     cols = [c.strip().strip('"') for c in copy_m.group(3).split(",") if c.strip()]
 
+                    if schema == "_timescaledb_catalog" and raw_table == "hypertable":
+                        in_catalog_hypertables = True
+                        catalog_cols = cols
+                        continue
+
                     if schema == "_timescaledb_internal":
+                        is_compressed, owner = _classify_internal_table(raw_table, hypertables, compressed_owner)
+                        is_compressed = is_compressed or "_ts_meta_count" in cols
+                        # Compression bookkeeping columns never exist on the user-facing hypertable
+                        data_cols = [c for c in cols if not c.startswith("_ts_meta")]
                         parent = chunk_to_parent.get(raw_table)
-                        if not parent:
+                        if owner is not None:
+                            # The catalog is authoritative; chunks of internal hypertables (continuous
+                            # aggregate materializations) are not user data and stay unmapped.
+                            parent = owner[1] if owner[0] == "public" else None
+                        elif not parent and (is_compressed or raw_table not in internal_parent):
+                            # Without a catalog, a chunk inheriting an internal table is a
+                            # materialization chunk unless it is compressed; guess the rest by columns.
                             if (
-                                ("operational_state" in cols and "start_time" in cols)
-                                or ("detailed_state" in cols and "endpoint_id" in cols)
-                                or "event_timestamp" in cols
+                                ("operational_state" in data_cols and "start_time" in data_cols)
+                                or ("detailed_state" in data_cols and "endpoint_id" in data_cols)
+                                or "event_timestamp" in data_cols
                             ):
                                 parent = "endpoint_events"
                             elif (
-                                "interface_idx" in cols
-                                or ("in_bytes" in cols and "out_bytes" in cols)
-                                or "input_snmp" in cols
-                                or "output_snmp" in cols
+                                "interface_idx" in data_cols
+                                or ("in_bytes" in data_cols and "out_bytes" in data_cols)
+                                or "input_snmp" in data_cols
+                                or "output_snmp" in data_cols
                             ):
                                 parent = "flow_interface_minute_rollups"
                             elif (
-                                ("src_ip" in cols and "dst_ip" in cols)
-                                or ("bytes" in cols and "packets" in cols)
-                                or ("byte_count" in cols and "flow_count" in cols)
+                                ("src_ip" in data_cols and "dst_ip" in data_cols)
+                                or ("bytes" in data_cols and "packets" in data_cols)
+                                or ("byte_count" in data_cols and "flow_count" in data_cols)
                             ):
                                 parent = "flow_minute_rollups"
                         if parent:
                             chunk_to_parent[raw_table] = parent
+                        else:
+                            chunk_to_parent.pop(raw_table, None)
+                        if parent and is_compressed:
+                            ddl = table_columns.get((schema, raw_table)) or {}
+                            if not ddl and raw_table in internal_parent:
+                                ddl = table_columns.get((schema, internal_parent[raw_table])) or {}
+                            source_types = table_columns.get(("public", parent), {})
+                            compressed_chunks[raw_table] = {
+                                c: source_types.get(c) for c in data_cols if ddl.get(c) == COMPRESSED_DATA_TYPE
+                            }
                         effective_table = parent
                     elif schema == "public":
                         if raw_table == "system_settings":
@@ -668,7 +854,7 @@ def scan_backup_metadata_and_configs(
                         row = {col: _unescape_pg_copy_field(p) for col, p in zip(copy_cols, parts)}
                         copy_rows.append(row)
 
-    return chunk_to_parent, config_data
+    return chunk_to_parent, config_data, compressed_chunks
 
 
 DEFAULT_RESET_REPORT = "/opt/ephemres/legacy_password_resets.txt"
@@ -726,8 +912,13 @@ async def reconcile_and_restore_database(
     logger.info("Starting Ephemres database restoration from %s...", backup_path)
     target_schema = await get_target_table_columns(conn)
 
-    chunk_to_parent, config_data = scan_backup_metadata_and_configs(backup_path)
-    logger.info("Backup parsed: %d internal chunks mapped, %d config tables extracted.", len(chunk_to_parent), len(config_data))
+    chunk_to_parent, config_data, compressed_chunks = scan_backup_metadata_and_configs(backup_path)
+    logger.info(
+        "Backup parsed: %d internal chunks mapped (%d compressed), %d config tables extracted.",
+        len(chunk_to_parent),
+        len(compressed_chunks),
+        len(config_data),
+    )
 
     summary: Dict[str, Any] = {
         "dry_run": dry_run,
@@ -742,6 +933,7 @@ async def reconcile_and_restore_database(
         "password_reset_report": None,
         "admin_password_applied": False,
         "admin_temporary_password": False,
+        "compressed_rows_skipped": 0,
     }
 
     if dry_run:
@@ -1039,6 +1231,15 @@ async def reconcile_and_restore_database(
         insert_sql: str = ""
         batch_rows: List[List[Any]] = []
         restored_hyper_tables: Set[str] = set()
+        # Compressed chunk layout of the block being streamed (None for plain row blocks)
+        current_compressed: Optional[Dict[str, Optional[str]]] = None
+        can_decompress = bool(compressed_chunks) and await _compressed_decoding_available(conn)
+        if compressed_chunks and not can_decompress:
+            logger.warning(
+                "Backup holds %d compressed TimescaleDB chunks, but the target's TimescaleDB cannot decode "
+                "them (needs 2.25+: ALTER EXTENSION timescaledb UPDATE). Their rows will be skipped.",
+                len(compressed_chunks),
+            )
 
         with _open_dump_file(backup_path) as f:
             for line in f:
@@ -1063,6 +1264,7 @@ async def reconcile_and_restore_database(
                                 in_hyper = True
                                 current_target_table = mapped
                                 current_cols = raw_cols
+                                current_compressed = compressed_chunks.get(tbl) if schema == "_timescaledb_internal" else None
                                 col_names = ", ".join(f'"{c}"' for c in usable_cols)
                                 placeholders = ", ".join(f"${i+1}" for i in range(len(usable_cols)))
                                 insert_sql = f'INSERT INTO "{mapped}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
@@ -1081,25 +1283,37 @@ async def reconcile_and_restore_database(
                         parts = stripped.split("\t")
                         if len(parts) == len(current_cols) and current_target_table:
                             row_dict = {c: _unescape_pg_copy_field(p) for c, p in zip(current_cols, parts)}
-                            # Filter FK-constrained endpoint_events by valid_endpoint_ids
-                            if current_target_table == "endpoint_events":
-                                ep_id = row_dict.get("endpoint_id")
-                                if ep_id and str(ep_id) not in valid_endpoint_ids:
-                                    continue
-                            elif current_target_table == "flow_minute_rollups":
-                                for fk_col in ("src_endpoint_id", "dst_endpoint_id"):
-                                    if row_dict.get(fk_col) and str(row_dict[fk_col]) not in valid_endpoint_ids:
-                                        row_dict[fk_col] = None
+                            if current_compressed is None:
+                                tuples = [row_dict]
+                            elif can_decompress and current_compressed:
+                                tuples = await _decompress_chunk_row(
+                                    conn, row_dict, current_compressed, usable_cols, target_schema[current_target_table]
+                                )
+                            else:
+                                count = row_dict.get("_ts_meta_count") or ""
+                                summary["compressed_rows_skipped"] += int(count) if count.isdigit() else 0
+                                continue
 
                             t_cols = target_schema[current_target_table]
-                            vals = [_prepare_column_val(row_dict.get(c), t_cols.get(c, "varchar")) for c in usable_cols]
-                            batch_rows.append(vals)
+                            for row_dict in tuples:
+                                # Filter FK-constrained endpoint_events by valid_endpoint_ids
+                                if current_target_table == "endpoint_events":
+                                    ep_id = row_dict.get("endpoint_id")
+                                    if ep_id and str(ep_id) not in valid_endpoint_ids:
+                                        continue
+                                elif current_target_table == "flow_minute_rollups":
+                                    for fk_col in ("src_endpoint_id", "dst_endpoint_id"):
+                                        if row_dict.get(fk_col) and str(row_dict[fk_col]) not in valid_endpoint_ids:
+                                            row_dict[fk_col] = None
 
-                            if len(batch_rows) >= 1000:
-                                await _execute_batch(conn, insert_sql, batch_rows)
-                                summary["telemetry_rows_restored"] += len(batch_rows)
-                                restored_hyper_tables.add(current_target_table)
-                                batch_rows.clear()
+                                vals = [_prepare_column_val(row_dict.get(c), t_cols.get(c, "varchar")) for c in usable_cols]
+                                batch_rows.append(vals)
+
+                                if len(batch_rows) >= 1000:
+                                    await _execute_batch(conn, insert_sql, batch_rows)
+                                    summary["telemetry_rows_restored"] += len(batch_rows)
+                                    restored_hyper_tables.add(current_target_table)
+                                    batch_rows.clear()
 
         for ht in sorted(restored_hyper_tables):
             if ht not in summary["tables_restored"]:
@@ -1189,6 +1403,8 @@ def main() -> None:
             print(f" Users Restored:     {summary['user_count']}")
             print(f" Endpoints Restored: {summary['endpoint_count']}")
             print(f" Telemetry Rows:     {summary['telemetry_rows_restored']}")
+            if summary["compressed_rows_skipped"] > 0:
+                print(f" Rows Skipped:       {summary['compressed_rows_skipped']} in compressed chunks (TimescaleDB 2.25+ needed)")
             print(f" Hashes Upgraded:    {summary['legacy_hashes_upgraded']} legacy hashes -> $scrypt$")
             print(f" Secrets Re-enc:     {summary['channels_re_encrypted']} channel secrets")
             if summary['channels_disabled'] > 0:
