@@ -129,7 +129,7 @@ Onboards a new endpoint for ICMP monitoring.
 - Synthetic TCP/HTTP/SSL probe settings are not part of this API (see the note in [Architecture §5](architecture.md)).
 
 ### `GET /endpoints/{id}`
-Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000}}`) for a specific endpoint.
+Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000, "role": "wan"}}`) for a specific endpoint. `speed_mbps` is `null` when no link speed was set (legacy name-only aliases included), and `role` is `"wan"` or `"lan"`.
 
 ### `GET /endpoints/probe-summary`
 Per-endpoint ICMP statistics from the per-cycle probe history (v3.4) over the last `hours` (query param, default `24`, max `168`): `loss_pct`, reply-weighted `rtt_avg_ms`, `rtt_p95_ms` (95th percentile of per-cycle averages), `jitter_ms`, `sample_count`, `last_probe_at`, and `rtt_sparkline` (hourly mean RTT, oldest first, `null` for hours without replies). Endpoints without samples (passive, paused, not yet probed) are absent.
@@ -438,6 +438,7 @@ High-precision passive telemetry endpoints for fleet-wide bandwidth analysis, to
 
 ### `GET /bandwidth/overview`
 Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_conversations_count` and `anomaly_flows_count` (conversations whose OR'd TCP flags are SYN without ACK or RST without FIN, and the flows in them), `window_seconds` and `exporter_id`.
+- **Network edge (WAN):** the totals above add up what every exporter saw, so traffic that crosses two monitored routers counts twice. `wan_in_bps`/`wan_out_bps` and `wan_in_pps`/`wan_out_pps` sum only interfaces an admin marked `role: "wan"` (see `PUT /bandwidth/endpoints/{id}/interfaces`), which counts each packet once as it enters or leaves the network; "in" is traffic arriving from outside. `wan_links` has one row per WAN interface, busiest first: `exporter_id`, `exporter_hostname`, `interface_idx`, `name`, in/out rates, `speed_mbps` and `utilization_percentage` (`null` without a configured speed) and `share_percentage` of all WAN bytes. `wan_interfaces_count` is 0, and the WAN fields are zero, until an interface is marked WAN.
 - **Response:** `200 OK`
   ```json
   {
@@ -450,7 +451,13 @@ Rates over the last five complete minutes, fleet-wide or for one exporter (`expo
       "total_flows_count": 128450,
       "total_transit_bps": 3120400.00,
       "window_seconds": 300,
-      "exporter_id": null
+      "exporter_id": null,
+      "wan_interfaces_count": 1,
+      "wan_in_bps": 31240000.00,
+      "wan_out_bps": 9870000.00,
+      "wan_links": [
+        {"exporter_hostname": "core-gw-01", "interface_idx": 1, "name": "WAN-Fiber", "in_bps": 31240000.00, "out_bps": 9870000.00, "speed_mbps": 1000, "utilization_percentage": 3.12, "share_percentage": 100.0}
+      ]
     },
     "meta": null,
     "error": null
@@ -464,6 +471,7 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   - `exporter_id` (UUID, optional): Filter by exporter endpoint UUID.
   - `endpoint_id` (UUID, optional): Filter by source or destination endpoint UUID.
   - `interface_idx` (int, optional, with `exporter_id`): One interface only.
+  - `wan_only` (bool, default `false`): Fleet or exporter scope only (ignored with `endpoint_id` or `interface_idx`). Returns in/out summed over WAN-role interfaces as `ingress_*`/`egress_*`, from the interface rollups. The response's `wan_only` says whether it applied: with no WAN interface marked it is `false` and the normal series is returned.
 - Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; the fleet-wide 30d tier keeps no endpoint attribution, so it is `false` and all traffic is reported as transit.
 - With `exporter_id`, windows up to 6h read 1-minute interface rollups and longer windows the hourly interface rollup. The 24h/7d/30d flow aggregates use real-time aggregation, so the newest minutes are included.
 - **Response:** `200 OK`
@@ -579,7 +587,10 @@ Lists all configured flow exporters with interface aliases, along with detected 
           "hostname": "core-gw-01",
           "primary_ip": "10.0.0.1",
           "flow_exporter_ips": ["192.168.100.1"],
-          "interface_aliases": { "1": "WAN-Fiber", "2": "LAN-Trunk" },
+          "interface_aliases": {
+            "1": { "name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan" },
+            "2": { "name": "LAN-Trunk", "speed_mbps": null, "role": "lan" }
+          },
           "last_flow_time": "2026-09-15T20:59:00Z",
           "flows_per_sec": 41.27
         }
@@ -628,8 +639,8 @@ Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` ro
 Per-interface ingress/egress throughput and utilization for one exporter.
 - **Query Params:** `exporter_id` (UUID, required), `window` (default `1h`; same values as the other bandwidth endpoints).
 - Rates average over `covered_seconds`: from the later of the window start and the exporter's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
-- Each interface: average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), and `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`. When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default.
+- Each interface: average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), and `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`. When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default. `role` is `"wan"` or `"lan"`.
 
 ### `PUT /bandwidth/endpoints/{id}/interfaces`
 Replaces an exporter's interface names and link speeds (requires `Admin` role).
-- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000.
+- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan"}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000, or omitted/`null` to leave the speed unset (utilization is then not shown); `role` is `"wan"` (a link to the internet or a provider, counted in the overview's WAN totals) or `"lan"` (default). The body replaces the whole map, so send every interface with its current values.

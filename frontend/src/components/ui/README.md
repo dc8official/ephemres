@@ -39,3 +39,5 @@ Related helpers:
   the visually hidden element next to every canvas chart.
 - `components/traffic/ConversationsPanel.vue`: the server-backed conversation table shared by
   Traffic Analytics and Endpoint Detail.
+- `utils/interfaceConfig.js`: rows and payload for the interface editor in Traffic Analytics and
+  Endpoint Detail (name, link speed or "Not set", WAN/LAN role).

@@ -262,3 +262,19 @@ def test_percentile_with_idle_edge_cases():
 )
 def test_configured_speed_mbps(alias, expected):
     assert fm.configured_speed_mbps(alias) == expected
+
+
+@pytest.mark.parametrize(
+    "alias,expected",
+    [
+        (None, "lan"),
+        ("WAN-Uplink", "lan"),  # legacy string alias: the name alone never makes a WAN link
+        ({"name": "ISP-A"}, "lan"),
+        ({"name": "ISP-A", "role": "lan"}, "lan"),
+        ({"name": "ISP-A", "role": "WAN"}, "lan"),
+        ({"name": "ISP-A", "role": "core"}, "lan"),
+        ({"name": "ISP-A", "role": "wan"}, "wan"),
+    ],
+)
+def test_interface_role(alias, expected):
+    assert fm.interface_role(alias) == expected

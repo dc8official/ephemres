@@ -14,6 +14,29 @@
   </span>
 </div>
 
+{% if wan_edge and wan_edge.interfaces_count > 0 %}
+<!-- Network edge: WAN-role interfaces count each packet once, unlike per-router totals -->
+<table>
+  <thead>
+    <tr>
+      <th>Network Edge (WAN)</th>
+      <th class="text-right">In from WAN</th>
+      <th class="text-right">Out to WAN</th>
+      <th class="text-right">Mean In Rate</th>
+      <th class="text-right">Mean Out Rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="font-weight: 700;">{{ wan_edge.interfaces_count }} WAN interface{% if wan_edge.interfaces_count != 1 %}s{% endif %}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ wan_edge.formatted_in_bytes }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ wan_edge.formatted_out_bytes }}</td>
+      <td class="text-right font-mono tnum color-rate-in">{{ wan_edge.formatted_in_bps }}</td>
+      <td class="text-right font-mono tnum color-rate-out">{{ wan_edge.formatted_out_bps }}</td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
 <!-- Section 1: Exporters Summary Table -->
 <div class="section-title-row font-display">
   <div class="section-title">1. Flow Exporter Routers & Gateways Summary</div>
@@ -66,7 +89,7 @@
     {% for iface in interfaces %}
     <tr>
       <td style="font-weight: 700;">{{ iface.router_hostname }}</td>
-      <td class="font-mono">#{{ iface.interface_idx }} {{ iface.interface_name }}</td>
+      <td class="font-mono">#{{ iface.interface_idx }} {{ iface.interface_name }}{% if iface.is_wan %} <span class="pill pill-passive">WAN</span>{% endif %}</td>
       <td class="text-right font-mono tnum">{{ iface.formatted_speed }}</td>
       <td class="text-right font-mono tnum color-rate-in">{{ iface.formatted_in_bps }}</td>
       <td class="text-right font-mono tnum color-rate-out">{{ iface.formatted_out_bps }}</td>

@@ -431,6 +431,7 @@
                       <div class="iface-title">
                         <span class="iface-tag tnum">if{{ iface.idx }}</span>
                         <span class="iface-name" :title="iface.name">{{ iface.name }}</span>
+                        <span v-if="iface.role === 'wan'" class="iface-wan" title="WAN link: counted in edge totals">WAN</span>
                         <span v-if="iface.speedConfigured && iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
                         <span v-else class="iface-speed iface-speed-unset text-xs" title="Set the link speed to see utilization">(speed not set)</span>
                       </div>
@@ -679,6 +680,7 @@
         <form @submit.prevent="saveInterfaces" class="modal-form">
           <p class="modal-subtitle">
             Assign human-readable SNMP interface names and provisioned line speeds for accurate utilization calculation.
+            Mark links to the internet or a provider as WAN: fleet totals then count traffic once, at the network edge.
           </p>
 
           <div class="interface-config-list">
@@ -711,9 +713,18 @@
                 />
               </div>
 
+              <div class="form-group role-col">
+                <label v-if="i === 0" :for="`iface-role-${i}`">Role</label>
+                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select" :aria-label="i === 0 ? undefined : 'Role'">
+                  <option value="lan">Internal</option>
+                  <option value="wan">WAN (edge)</option>
+                </select>
+              </div>
+
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
                 <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                  <option value="unset">Not set</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -812,6 +823,7 @@ import { formatBps, formatPps } from '../utils/format.js'
 import { summarizeSeries } from '../utils/chartSummary.js'
 import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
 import { isMonitored } from '../utils/endpointState.js'
+import { aliasesPayload, applyPreset, editRow, rowsFromAliases } from '../utils/interfaceConfig.js'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 
@@ -1072,6 +1084,7 @@ const interfaceMeters = computed(() => {
       name: item.name,
       speed_mbps: item.speed_mbps,
       speedConfigured: item.speed_configured !== false,
+      role: item.role,
       ingressBps: item.in_bps,
       egressBps: item.out_bps,
       utilization: item.utilization_percentage,
@@ -1086,17 +1099,20 @@ const interfaceMeters = computed(() => {
   return Object.entries(aliases).map(([idx, val]) => {
     let name = `if${idx}`
     let speed = null
+    let role = 'lan'
     if (typeof val === 'string') {
       name = val
     } else if (val && typeof val === 'object') {
       name = val.name || `if${idx}`
       speed = val.speed_mbps || null
+      role = val.role === 'wan' ? 'wan' : 'lan'
     }
     return {
       idx,
       name,
       speed_mbps: speed,
       speedConfigured: speed !== null,
+      role,
       ingressBps: 0,
       egressBps: 0,
       utilization: null,
@@ -1106,25 +1122,9 @@ const interfaceMeters = computed(() => {
 })
 
 function openInterfaceModal() {
-  const current = endpoint.value?.flow_interface_aliases || {}
-  const rows = Object.entries(current).map(([idx, val]) => {
-    let name = `if${idx}`
-    let speed = 1000
-    if (typeof val === 'string') {
-      name = val
-    } else if (val && typeof val === 'object') {
-      name = val.name || `if${idx}`
-      speed = val.speed_mbps || 1000
-    }
-    return {
-      index: Number(idx) || idx,
-      name,
-      speed_mbps: speed,
-      preset: [10, 100, 1000, 10000, 40000, 100000].includes(speed) ? speed : 'custom'
-    }
-  })
+  const rows = rowsFromAliases(endpoint.value?.flow_interface_aliases)
   if (rows.length === 0) {
-    rows.push({ index: 1, name: 'GigabitEthernet0/1', speed_mbps: 1000, preset: 1000 })
+    rows.push(editRow(1, 'GigabitEthernet0/1', null, 'lan'))
   }
   editingInterfaces.value = rows
   showInterfaceModal.value = true
@@ -1132,7 +1132,7 @@ function openInterfaceModal() {
 
 function addInterfaceRow() {
   const nextIdx = (editingInterfaces.value.length + 1)
-  editingInterfaces.value.push({ index: nextIdx, name: `GigabitEthernet0/${nextIdx}`, speed_mbps: 1000, preset: 1000 })
+  editingInterfaces.value.push(editRow(nextIdx, `GigabitEthernet0/${nextIdx}`, null, 'lan'))
 }
 
 function removeInterfaceRow(index) {
@@ -1140,25 +1140,14 @@ function removeInterfaceRow(index) {
 }
 
 function onPresetChange(row) {
-  if (row.preset !== 'custom') {
-    row.speed_mbps = Number(row.preset)
-  }
+  applyPreset(row)
 }
 
 async function saveInterfaces() {
   if (!endpoint.value) return
   savingInterfaces.value = true
   try {
-    const payload = {}
-    for (const row of editingInterfaces.value) {
-      const idxStr = String(row.index).trim()
-      if (idxStr) {
-        payload[idxStr] = {
-          name: row.name.trim() || `if${idxStr}`,
-          speed_mbps: Number(row.speed_mbps) || 1000
-        }
-      }
-    }
+    const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(endpoint.value.id, payload)
     endpoint.value.flow_interface_aliases = payload
     showInterfaceModal.value = false
@@ -2508,11 +2497,27 @@ h2 {
   color: var(--text-muted);
 }
 
+.iface-wan {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-selected);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
 /* Interface Configuration Modal */
 .modal-subtitle {
   font-size: 0.85rem;
   color: var(--text-secondary);
   margin-bottom: 1rem;
+}
+
+/* Index, name, role, speed and remove fit side by side; the global card is 520px. */
+.modal-card.wide {
+  max-width: 760px;
 }
 
 .interface-config-list {
@@ -2537,10 +2542,15 @@ h2 {
 
 .name-col {
   flex: 1;
+  min-width: 0;
 }
 
 .preset-col {
   width: 170px;
+}
+
+.role-col {
+  width: 130px;
 }
 
 .speed-col {

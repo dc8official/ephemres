@@ -193,6 +193,20 @@
     <!-- KPI strip: last five complete minutes for the selected scope -->
     <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
     <div class="kpi-grid">
+      <template v-if="hasWan">
+        <KpiTile
+          label="WAN in"
+          :value="formatBps(overview.wan_in_bps)"
+          :marker="theme.series.in"
+          :sub="`${formatPps(overview.wan_in_pps)} · arriving on ${wanLinksLabel}`"
+        />
+        <KpiTile
+          label="WAN out"
+          :value="formatBps(overview.wan_out_bps)"
+          :marker="theme.series.out"
+          :sub="`${formatPps(overview.wan_out_pps)} · leaving on ${wanLinksLabel}`"
+        />
+      </template>
       <KpiTile
         label="Ingress"
         :value="formatBps(overview.total_ingress_bps)"
@@ -241,6 +255,50 @@
         </template>
       </KpiTile>
     </div>
+    <p v-if="doubleCountNote" class="kpi-scope-note kpi-footnote">{{ doubleCountNote }}</p>
+
+    <!-- WAN links: traffic at the network edge, one row per WAN-role interface -->
+    <div v-if="hasWan" class="table-card wan-links-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">WAN links</div>
+          <span class="section-hint">Share of edge traffic per link · last 5 complete minutes</span>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="dense-table" aria-label="WAN links">
+          <thead>
+            <tr>
+              <th>Link</th>
+              <th class="text-right">In</th>
+              <th class="text-right">Out</th>
+              <th style="width: 32%;">Share of WAN traffic</th>
+              <th class="text-right">Utilization</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="link in overview.wan_links" :key="`${link.exporter_id}-${link.interface_idx}`">
+              <td>
+                <span class="font-bold">{{ link.name }}</span>
+                <span class="text-muted text-xs"> · {{ link.exporter_hostname }} #{{ link.interface_idx }}</span>
+              </td>
+              <td class="text-right tnum ingress-text">{{ formatBps(link.in_bps) }}</td>
+              <td class="text-right tnum egress-text">{{ formatBps(link.out_bps) }}</td>
+              <td>
+                <div class="wan-share">
+                  <span class="app-bar-track"><span class="app-bar-fill" :style="{ width: `${Math.min(100, link.share_percentage)}%` }"></span></span>
+                  <span class="app-bar-value tnum">{{ link.share_percentage.toFixed(1) }}%</span>
+                </div>
+              </td>
+              <td class="text-right tnum">
+                <span v-if="link.utilization_percentage == null" class="text-muted text-xs" title="Set the link speed to see utilization">Speed not set</span>
+                <span v-else class="util-text" :class="getUtilClass(link.utilization_percentage)">{{ link.utilization_percentage.toFixed(1) }}%</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
 
     <!-- Main Section: Stacked Area Traffic Chart -->
     <div class="chart-section table-card">
@@ -252,6 +310,14 @@
           <span class="section-hint">{{ chartHint }}</span>
         </div>
         <div class="chart-header-actions">
+          <SegmentedControl
+            v-if="showTotalsToggle"
+            :model-value="chartTotals"
+            :options="totalsOptions"
+            aria-label="Chart totals"
+            size="sm"
+            @update:model-value="setChartTotals"
+          />
           <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
         </div>
       </div>
@@ -392,6 +458,14 @@
           <span class="section-hint">{{ chartHint }}</span>
         </div>
         <div class="chart-header-actions">
+          <SegmentedControl
+            v-if="showTotalsToggle"
+            :model-value="chartTotals"
+            :options="totalsOptions"
+            aria-label="Chart totals"
+            size="sm"
+            @update:model-value="setChartTotals"
+          />
           <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
         </div>
       </div>
@@ -460,6 +534,7 @@
               <td class="name-cell">
                 <div class="name-cell-inner">
                   <span class="font-bold">{{ item.name }}</span>
+                  <span v-if="item.role === 'wan'" class="badge-wan" title="WAN link: counted in edge totals">WAN</span>
                   <button
                     v-if="isAdmin"
                     type="button"
@@ -748,6 +823,7 @@
         <form @submit.prevent="saveInterfaces" class="modal-form">
           <p class="modal-subtitle">
             Assign human-readable SNMP interface names and provisioned line speeds for accurate utilization calculation.
+            Mark links to the internet or a provider as WAN: fleet totals then count traffic once, at the network edge.
           </p>
 
           <div class="interface-config-list">
@@ -780,9 +856,18 @@
                 />
               </div>
 
+              <div class="form-group role-col">
+                <label v-if="i === 0" :for="`iface-role-${i}`">Role</label>
+                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select" :aria-label="i === 0 ? undefined : 'Role'">
+                  <option value="lan">Internal</option>
+                  <option value="wan">WAN (edge)</option>
+                </select>
+              </div>
+
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
                 <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                  <option value="unset">Not set</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -868,6 +953,7 @@ import { isAdmin } from '../services/auth.js'
 import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
 import { summarizeSeries } from '../utils/chartSummary.js'
+import { aliasesPayload, applyPreset, editRow } from '../utils/interfaceConfig.js'
 import KpiTile from '../components/ui/KpiTile.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
@@ -975,6 +1061,12 @@ const overview = ref({
   unmatched_exporters_count: 0,
   total_flows_count: 0,
   anomaly_flows_count: 0,
+  wan_interfaces_count: 0,
+  wan_in_bps: 0,
+  wan_out_bps: 0,
+  wan_in_pps: 0,
+  wan_out_pps: 0,
+  wan_links: [],
 })
 
 // Throughput Metric Display Modes:
@@ -1068,6 +1160,37 @@ const scopeLabel = computed(() => {
   const exp = flowExporters.value.find((e) => e.id === selectedExporterId.value)
   return exp ? exp.hostname : 'selected exporter'
 })
+
+// WAN edge: interfaces an admin marked as WAN. Their totals count each packet once; the
+// ingress/egress/transit totals add up what every exporter saw.
+const hasWan = computed(() => (overview.value.wan_interfaces_count || 0) > 0)
+
+const wanLinksLabel = computed(() => {
+  const n = overview.value.wan_interfaces_count || 0
+  return n === 1 ? '1 WAN link' : `${n} WAN links`
+})
+
+const doubleCountNote = computed(() => {
+  if (selectedExporterId.value || (overview.value.active_exporters_count || 0) < 2) return ''
+  const base = 'Ingress, egress and transit add up every exporter, so traffic that crosses two routers counts twice.'
+  if (hasWan.value) return `${base} WAN in and out count it once.`
+  return isAdmin.value ? `${base} Mark your WAN interfaces (Interfaces view, ✎) to see edge totals counted once.` : base
+})
+
+// Chart totals: WAN edge by default once WAN interfaces exist; "all" keeps the per-exporter sum.
+const chartTotals = ref(route.query.totals === 'all' ? 'all' : 'wan')
+const totalsOptions = [
+  { value: 'wan', label: 'WAN edge', title: 'Traffic on WAN-role interfaces, counted once' },
+  { value: 'all', label: 'All flows', title: 'Everything every exporter saw' },
+]
+const wantWanSeries = computed(() => chartTotals.value === 'wan' && selectedInterfaceIdx.value === null)
+const showTotalsToggle = computed(() => selectedInterfaceIdx.value === null && (hasWan.value || seriesMeta.value.wanOnly))
+
+function setChartTotals(value) {
+  chartTotals.value = value === 'all' ? 'all' : 'wan'
+  replaceQuery({ totals: chartTotals.value === 'all' ? 'all' : undefined })
+  fetchTrafficSeriesData()
+}
 
 const exporterSummary = computed(() => {
   const configured = flowExporters.value.length
@@ -1171,7 +1294,7 @@ function handleScopeChange() {
 async function fetchTrafficSeriesData() {
   try {
     const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
-    const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value)
+    const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value)
     applySeries(seriesRes.data?.data)
   } catch (err) {
     console.error('Failed to load traffic series for interface isolation:', err)
@@ -1241,18 +1364,15 @@ const savingInterfaces = ref(false)
 
 function openInterfaceModal(focusIdx = null) {
   const current = interfaceList.value || []
-  let rows = current.map((item) => {
-    const sp = item.speed_mbps || 1000
-    return {
-      index: Number(item.interface_idx) || 1,
-      name: item.name || `GigabitEthernet0/${item.interface_idx}`,
-      speed_mbps: sp,
-      preset: [10, 100, 1000, 10000, 40000, 100000].includes(sp) ? sp : 'custom',
-    }
-  })
+  let rows = current.map((item) => editRow(
+    Number(item.interface_idx) || 1,
+    item.name || `GigabitEthernet0/${item.interface_idx}`,
+    item.speed_configured === false ? null : item.speed_mbps,
+    item.role,
+  ))
 
   if (rows.length === 0) {
-    rows = [{ index: 1, name: 'GigabitEthernet0/1', speed_mbps: 1000, preset: 1000 }]
+    rows = [editRow(1, 'GigabitEthernet0/1', null, 'lan')]
   }
 
   editingInterfaces.value = rows
@@ -1261,12 +1381,7 @@ function openInterfaceModal(focusIdx = null) {
 
 function addInterfaceRow() {
   const nextIdx = editingInterfaces.value.length + 1
-  editingInterfaces.value.push({
-    index: nextIdx,
-    name: `GigabitEthernet0/${nextIdx}`,
-    speed_mbps: 1000,
-    preset: 1000,
-  })
+  editingInterfaces.value.push(editRow(nextIdx, `GigabitEthernet0/${nextIdx}`, null, 'lan'))
 }
 
 function removeInterfaceRow(index) {
@@ -1274,25 +1389,14 @@ function removeInterfaceRow(index) {
 }
 
 function onPresetChange(row) {
-  if (row.preset !== 'custom') {
-    row.speed_mbps = Number(row.preset)
-  }
+  applyPreset(row)
 }
 
 async function saveInterfaces() {
   if (!selectedExporterId.value) return
   savingInterfaces.value = true
   try {
-    const payload = {}
-    for (const row of editingInterfaces.value) {
-      const idxStr = String(row.index).trim()
-      if (idxStr) {
-        payload[idxStr] = {
-          name: row.name.trim() || `if${idxStr}`,
-          speed_mbps: Number(row.speed_mbps) || 1000,
-        }
-      }
-    }
+    const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(selectedExporterId.value, payload)
     showInterfaceModal.value = false
     await refreshData()
@@ -1319,6 +1423,11 @@ const chartTitle = computed(() => {
     return `${ifName} Interface Telemetry (Isolated)`
   }
 
+  if (seriesMeta.value.wanOnly) {
+    if (chartMetricMode.value === 'pps') return 'WAN edge packet rate'
+    if (chartMetricMode.value === 'fps') return 'WAN edge flow rate'
+    return 'WAN edge throughput'
+  }
   if (chartMetricMode.value === 'pps') return 'Packet Rate Telemetry (pps)'
   if (chartMetricMode.value === 'fps') return 'Flow Burst Rate Telemetry (fps)'
   return 'Aggregated Flow Throughput'
@@ -1326,7 +1435,7 @@ const chartTitle = computed(() => {
 
 // Chart Data
 const seriesPoints = shallowRef([])
-const seriesMeta = ref({ bucket_seconds: 60, directional: true })
+const seriesMeta = ref({ bucket_seconds: 60, directional: true, wanOnly: false })
 
 function applySeries(data) {
   if (!data?.points) return
@@ -1334,6 +1443,7 @@ function applySeries(data) {
   seriesMeta.value = {
     bucket_seconds: data.bucket_seconds || 60,
     directional: data.directional !== false,
+    wanOnly: data.wan_only === true,
   }
 }
 
@@ -1368,7 +1478,8 @@ const chartHint = computed(() => {
   const bucket = seriesMeta.value.bucket_seconds || 60
   const res = bucket >= 86400 ? '1-day' : bucket >= 3600 ? '1-hour' : '1-minute'
   const direction = seriesMeta.value.directional ? '' : ' · direction not kept at this resolution'
-  return `Last ${selectedWindow.value} · ${res} averages · gaps mean no data${direction}`
+  const scope = seriesMeta.value.wanOnly ? ' · WAN-role interfaces only' : ''
+  return `Last ${selectedWindow.value} · ${res} averages · gaps mean no data${direction}${scope}`
 })
 
 function formatAxisTime(t) {
@@ -1412,7 +1523,10 @@ const chartData = computed(() => {
 
   const unit = chartMetricMode.value === 'pps' ? 'pps' : 'bps'
   const datasets = []
-  if (seriesMeta.value.directional) {
+  if (seriesMeta.value.wanOnly) {
+    datasets.push(lineDataset(`WAN in (${unit})`, pick(`ingress_${unit}`), series.in))
+    datasets.push(lineDataset(`WAN out (${unit})`, pick(`egress_${unit}`), series.out))
+  } else if (seriesMeta.value.directional) {
     datasets.push(lineDataset(`${prefix}Ingress (${unit})`, pick(`ingress_${unit}`), series.in))
     datasets.push(lineDataset(`${prefix}Egress (${unit})`, pick(`egress_${unit}`), series.out))
     const transit = pick(`transit_${unit}`)
@@ -1432,7 +1546,9 @@ const chartSummary = computed(() => {
   const pts = seriesPoints.value.map((p) => ({ t: Date.parse(p.timestamp), p }))
   const keys = unit === 'fps'
     ? [['flows_per_sec', 'Flows']]
-    : seriesMeta.value.directional
+    : seriesMeta.value.wanOnly
+      ? [[`ingress_${unit}`, 'WAN in'], [`egress_${unit}`, 'WAN out']]
+      : seriesMeta.value.directional
       ? [[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress'], [`transit_${unit}`, 'Transit']]
       : [[`transit_${unit}`, 'Total']]
   return [`${chartTitle.value}, last ${selectedWindow.value}.`]
@@ -1593,7 +1709,7 @@ async function refreshData() {
     const expId = selectedExporterId.value || null
     const [ovRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
       getBandwidthOverview(expId),
-      getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value),
+      getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value),
       getTopTalkers(selectedWindow.value, 10, null, expId),
       getApplicationDistribution(selectedWindow.value, expId),
       getFlowExporters(),
@@ -2248,6 +2364,37 @@ onUnmounted(() => {
   border: 1px solid rgba(16, 185, 129, 0.3);
 }
 
+.badge-wan {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: var(--bg-surface-selected);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.wan-links-card {
+  margin-top: 16px;
+}
+
+.wan-links-card td.tnum {
+  white-space: nowrap;
+}
+
+.wan-share {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.kpi-footnote {
+  margin: 0.5rem 0 0;
+}
+
 .badge-idle {
   display: inline-block;
   padding: 2px 6px;
@@ -2288,6 +2435,11 @@ onUnmounted(() => {
   color: var(--accent-primary, #2563eb);
 }
 
+/* Index, name, role, speed and remove fit side by side; the global card is 520px. */
+.modal-card.wide {
+  max-width: 760px;
+}
+
 .interface-config-list {
   display: flex;
   flex-direction: column;
@@ -2309,8 +2461,9 @@ onUnmounted(() => {
 }
 
 .interface-config-row .idx-col { width: 80px; }
-.interface-config-row .name-col { flex: 1; }
+.interface-config-row .name-col { flex: 1; min-width: 0; }
 .interface-config-row .preset-col { width: 170px; }
+.interface-config-row .role-col { width: 130px; }
 .interface-config-row .speed-col { width: 100px; }
 .interface-config-row .remove-col { width: 36px; display: flex; align-items: flex-end; }
 

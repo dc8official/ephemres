@@ -6,6 +6,52 @@ from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 
+def normalize_interface_aliases(v: Any) -> Dict[str, Dict[str, Any]]:
+    """Stored `flow_interface_aliases` as {ifIndex: {name, speed_mbps, role}} for API responses.
+
+    Legacy entries are plain name strings. `speed_mbps` is None unless a positive speed was set
+    (utilization is then not shown), and `role` is "wan" only when an admin set it.
+    """
+    if not isinstance(v, dict):
+        return {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for k, val in v.items():
+        if hasattr(val, "model_dump"):
+            val = val.model_dump()
+        if isinstance(val, str):
+            normalized[str(k)] = {"name": val, "speed_mbps": None, "role": "lan"}
+        elif isinstance(val, dict):
+            try:
+                speed = int(val.get("speed_mbps") or 0)
+            except (TypeError, ValueError):
+                speed = 0
+            normalized[str(k)] = {
+                "name": str(val.get("name", f"Interface {k}")),
+                "speed_mbps": speed if speed > 0 else None,
+                "role": "wan" if val.get("role") == "wan" else "lan",
+            }
+    return normalized
+
+
+class WanLinkItem(BaseModel):
+    """One WAN-role interface over the overview window. In is traffic arriving from outside."""
+    exporter_id: UUID
+    exporter_hostname: str
+    interface_idx: int
+    name: str
+    in_bps: float = 0.0
+    out_bps: float = 0.0
+    in_pps: float = 0.0
+    out_pps: float = 0.0
+    # None when the link speed is not configured.
+    speed_mbps: Optional[int] = None
+    utilization_percentage: Optional[float] = None
+    # Share of all WAN bytes (in + out) carried by this link, 0-100.
+    share_percentage: float = 0.0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class BandwidthOverview(BaseModel):
     """Snapshot of the last five complete minutes of flow telemetry, fleet-wide or for one exporter.
 
@@ -28,6 +74,15 @@ class BandwidthOverview(BaseModel):
     anomaly_conversations_count: int = 0
     window_seconds: int = 300
     exporter_id: Optional[UUID] = None
+    # Edge totals over WAN-role interfaces only. Unlike the totals above, which add up what every
+    # exporter saw, these count a packet once as it enters or leaves the network. All zero, with
+    # `wan_interfaces_count` 0, until an admin marks an interface as WAN.
+    wan_interfaces_count: int = 0
+    wan_in_bps: float = 0.0
+    wan_out_bps: float = 0.0
+    wan_in_pps: float = 0.0
+    wan_out_pps: float = 0.0
+    wan_links: List[WanLinkItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -61,6 +116,8 @@ class TrafficSeriesResponse(BaseModel):
     points: List[TrafficSeriesPoint]
     bucket_seconds: int = 60
     directional: bool = True
+    # True when the points are WAN-interface totals (ingress = in on WAN links, egress = out).
+    wan_only: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -296,22 +353,7 @@ class FlowExporterItem(BaseModel):
     @field_validator("interface_aliases", mode="before")
     @classmethod
     def normalize_aliases(cls, v):
-        if not isinstance(v, dict):
-            return {}
-        normalized = {}
-        for k, val in v.items():
-            if isinstance(val, str):
-                normalized[str(k)] = {"name": val, "speed_mbps": 1000}
-            elif isinstance(val, dict):
-                normalized[str(k)] = {
-                    "name": str(val.get("name", f"Interface {k}")),
-                    "speed_mbps": int(val.get("speed_mbps", 1000)),
-                }
-            elif hasattr(val, "model_dump"):
-                normalized[str(k)] = val.model_dump()
-            else:
-                normalized[str(k)] = val
-        return normalized
+        return normalize_interface_aliases(v)
 
 
 class UnmatchedExporterItem(BaseModel):
@@ -336,6 +378,7 @@ class InterfaceTelemetryItem(BaseModel):
     # Configured link speed, or the 1 Gbps default when `speed_configured` is False.
     speed_mbps: int
     speed_configured: bool = True
+    role: Literal["wan", "lan"] = "lan"
     in_bytes: int
     out_bytes: int
     in_bps: float

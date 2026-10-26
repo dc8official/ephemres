@@ -42,12 +42,14 @@ from app.schemas.bandwidth import (
     TrafficSeriesResponse,
     TrafficZoneItem,
     UnmatchedExporterItem,
+    WanLinkItem,
     derive_traffic_profile,
     format_dscp_label,
     format_tcp_flags,
 )
 from app.schemas.endpoints import InterfaceConfig
 from app.services import conversations as conversation_queries
+from app.services import wan_edge
 from app.services.driver_manager import driver_manager
 from app.services.flow_metrics import (
     PROTOCOL_MAP,
@@ -58,6 +60,7 @@ from app.services.flow_metrics import (
     dscp_breakdown,
     dscp_from_tos,
     interface_alias,
+    interface_role,
     is_internal_address,
     percentile_with_idle,
     tcp_anomaly,
@@ -196,6 +199,8 @@ async def get_bandwidth_overview(
     - Transit: flows with no monitored endpoint on either side, reported separately.
     - avg_packet_size: total bytes / total packets.
     - Anomalies: SYN-only (half-open) and RST-without-FIN flows.
+    - WAN: in/out over interfaces an admin marked as WAN, which counts each packet once at the
+      network edge (the totals above count it once per exporter it crossed).
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     window_end = now.replace(second=0, microsecond=0)
@@ -260,6 +265,8 @@ async def get_bandwidth_overview(
     except Exception as exc:
         logger.debug("Failed to calculate anomaly flow count: %s", exc)
 
+    wan = await _wan_overview(db, exporter_id, window_start, window_end, seconds)
+
     # Fetch unmatched count from FastStore
     unmatched_count = 0
     store_client = await get_flow_store()
@@ -290,8 +297,58 @@ async def get_bandwidth_overview(
             anomaly_conversations_count=anomaly_conversations_count,
             window_seconds=OVERVIEW_WINDOW_SECONDS,
             exporter_id=exporter_id,
+            **wan,
         )
     )
+
+
+async def _wan_overview(
+    db: AsyncSession,
+    exporter_id: Optional[UUID],
+    window_start: datetime.datetime,
+    window_end: datetime.datetime,
+    seconds: float,
+) -> Dict[str, Any]:
+    """WAN-edge fields of the overview: totals and one row per WAN link, busiest first."""
+    interfaces = await wan_edge.list_wan_interfaces(db, exporter_id)
+    totals = await wan_edge.wan_link_totals(db, interfaces, window_start, window_end)
+    zero = {"in_bytes": 0, "out_bytes": 0, "in_packets": 0, "out_packets": 0}
+    stats = [(w, totals.get((w.exporter_id, w.interface_idx), zero)) for w in interfaces]
+    all_bytes = sum(t["in_bytes"] + t["out_bytes"] for _, t in stats)
+
+    links: List[WanLinkItem] = []
+    for w, t in stats:
+        in_bps = bits_per_second(t["in_bytes"], seconds)
+        out_bps = bits_per_second(t["out_bytes"], seconds)
+        links.append(
+            WanLinkItem(
+                exporter_id=w.exporter_id,
+                exporter_hostname=w.exporter_hostname,
+                interface_idx=w.interface_idx,
+                name=w.name,
+                in_bps=round(in_bps, 2),
+                out_bps=round(out_bps, 2),
+                in_pps=round(t["in_packets"] / seconds, 2),
+                out_pps=round(t["out_packets"] / seconds, 2),
+                speed_mbps=w.speed_mbps,
+                utilization_percentage=(
+                    round(utilization_pct(max(in_bps, out_bps), w.speed_mbps), 2) if w.speed_mbps else None
+                ),
+                share_percentage=(
+                    round((t["in_bytes"] + t["out_bytes"]) * 100.0 / all_bytes, 2) if all_bytes else 0.0
+                ),
+            )
+        )
+    links.sort(key=lambda link: link.in_bps + link.out_bps, reverse=True)
+
+    return {
+        "wan_interfaces_count": len(interfaces),
+        "wan_in_bps": round(bits_per_second(sum(t["in_bytes"] for _, t in stats), seconds), 2),
+        "wan_out_bps": round(bits_per_second(sum(t["out_bytes"] for _, t in stats), seconds), 2),
+        "wan_in_pps": round(sum(t["in_packets"] for _, t in stats) / seconds, 2),
+        "wan_out_pps": round(sum(t["out_packets"] for _, t in stats) / seconds, 2),
+        "wan_links": links,
+    }
 
 
 @router.get("/traffic-series", response_model=APIResponse)
@@ -300,6 +357,7 @@ async def get_traffic_series(
     exporter_id: Optional[UUID] = Query(default=None),
     endpoint_id: Optional[UUID] = Query(default=None),
     interface_idx: Optional[int] = Query(default=None),
+    wan_only: bool = Query(default=False),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -307,55 +365,28 @@ async def get_traffic_series(
     Returns time-series data points for Chart.js stacked area chart.
     Dynamically routes to 1-minute hypertable, 1-hour CAGG, or 1-day CAGG based on window.
     For flow exporter nodes and per-interface isolation, queries FlowInterfaceMinuteRollup.
+    With `wan_only` (fleet or exporter scope, no single interface), returns in/out summed over
+    WAN-role interfaces as ingress/egress; when none are marked it falls back to the normal
+    series and reports `wan_only: false`.
     """
     delta = _get_window_delta(window)
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
 
-    # Exporter scope (optionally one interface): interface rollups. Windows up to 6h use the
-    # minute table; longer ones use flow_interface_hourly_rollups, which covers 30 days (the
-    # minute table keeps 7) and keeps a 7-day chart at 168 points instead of 10,080.
+    if wan_only and not endpoint_id and interface_idx is None:
+        wan_interfaces = await wan_edge.list_wan_interfaces(db, exporter_id)
+        if wan_interfaces:
+            predicate, params = wan_edge.interface_filter_sql(wan_interfaces)
+            return await _interface_series(db, window, delta, start_time, predicate, params, wan_only=True)
+
+    # Exporter scope (optionally one interface): interface rollups.
     if exporter_id and not endpoint_id:
-        if delta > datetime.timedelta(hours=6):
-            source, bucket_seconds = "flow_interface_hourly_rollups", 3600
-        else:
-            source, bucket_seconds = "flow_interface_minute_rollups", 60
-        params: Dict[str, Any] = {"exporter_id": str(exporter_id), "start": start_time}
-        interface_filter = ""
+        params: Dict[str, Any] = {"exporter_id": str(exporter_id)}
+        predicate = "exporter_id = CAST(:exporter_id AS uuid)"
         if interface_idx is not None:
-            interface_filter = "AND interface_idx = :interface_idx"
+            predicate += " AND interface_idx = :interface_idx"
             params["interface_idx"] = interface_idx
-        res = await db.execute(
-            text(f"""
-                SELECT bucket,
-                       COALESCE(SUM(in_bytes), 0) AS in_bytes, COALESCE(SUM(out_bytes), 0) AS out_bytes,
-                       COALESCE(SUM(in_packets), 0) AS in_packets, COALESCE(SUM(out_packets), 0) AS out_packets,
-                       COALESCE(SUM(flow_count), 0) AS flow_count
-                FROM {source}
-                WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start {interface_filter}
-                GROUP BY bucket
-                ORDER BY bucket
-            """),
-            params,
-        )
-
-        points: List[TrafficSeriesPoint] = []
-        for row in res.all():
-            in_bytes, eg_bytes, in_pkts, eg_pkts, flows_cnt = (int(row[i] or 0) for i in range(1, 6))
-            points.append(
-                TrafficSeriesPoint(
-                    timestamp=row[0].astimezone(datetime.timezone.utc).isoformat(),
-                    ingress_bps=round(bits_per_second(in_bytes, bucket_seconds), 2),
-                    egress_bps=round(bits_per_second(eg_bytes, bucket_seconds), 2),
-                    ingress_pps=round(in_pkts / bucket_seconds, 2),
-                    egress_pps=round(eg_pkts / bucket_seconds, 2),
-                    flows_per_sec=round(flows_cnt / bucket_seconds, 2),
-                )
-            )
-
-        return APIResponse.success(
-            data=TrafficSeriesResponse(window=window, points=points, bucket_seconds=bucket_seconds)
-        )
+        return await _interface_series(db, window, delta, start_time, predicate, params)
 
     # Standard endpoint or fleet-wide flow rollup query
     model, bucket_seconds = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
@@ -432,6 +463,57 @@ async def get_traffic_series(
             bucket_seconds=int(bucket_seconds),
             directional=directional,
         )
+    )
+
+
+async def _interface_series(
+    db: AsyncSession,
+    window: str,
+    delta: datetime.timedelta,
+    start_time: datetime.datetime,
+    predicate: str,
+    params: Dict[str, Any],
+    wan_only: bool = False,
+) -> Any:
+    """Series from the interface rollups for rows matching `predicate` (in -> ingress, out -> egress).
+
+    Windows up to 6h use the minute table; longer ones use flow_interface_hourly_rollups, which
+    covers 30 days (the minute table keeps 7) and keeps a 7-day chart at 168 points, not 10,080.
+    """
+    if delta > datetime.timedelta(hours=6):
+        source, bucket_seconds = "flow_interface_hourly_rollups", 3600
+    else:
+        source, bucket_seconds = "flow_interface_minute_rollups", 60
+    res = await db.execute(
+        text(f"""
+            SELECT bucket,
+                   COALESCE(SUM(in_bytes), 0) AS in_bytes, COALESCE(SUM(out_bytes), 0) AS out_bytes,
+                   COALESCE(SUM(in_packets), 0) AS in_packets, COALESCE(SUM(out_packets), 0) AS out_packets,
+                   COALESCE(SUM(flow_count), 0) AS flow_count
+            FROM {source}
+            WHERE bucket >= :start AND {predicate}
+            GROUP BY bucket
+            ORDER BY bucket
+        """),
+        {**params, "start": start_time},
+    )
+
+    points: List[TrafficSeriesPoint] = []
+    for row in res.all():
+        in_bytes, eg_bytes, in_pkts, eg_pkts, flows_cnt = (int(row[i] or 0) for i in range(1, 6))
+        points.append(
+            TrafficSeriesPoint(
+                timestamp=row[0].astimezone(datetime.timezone.utc).isoformat(),
+                ingress_bps=round(bits_per_second(in_bytes, bucket_seconds), 2),
+                egress_bps=round(bits_per_second(eg_bytes, bucket_seconds), 2),
+                ingress_pps=round(in_pkts / bucket_seconds, 2),
+                egress_pps=round(eg_pkts / bucket_seconds, 2),
+                flows_per_sec=round(flows_cnt / bucket_seconds, 2),
+            )
+        )
+
+    return APIResponse.success(
+        data=TrafficSeriesResponse(window=window, points=points, bucket_seconds=bucket_seconds, wan_only=wan_only)
     )
 
 
@@ -1248,6 +1330,7 @@ async def get_interfaces_telemetry(
                 name=name,
                 speed_mbps=speed_mbps,
                 speed_configured=speed_configured,
+                role=interface_role(alias_data),
                 in_bytes=in_b,
                 out_bytes=out_b,
                 in_bps=round(in_bps, 2),

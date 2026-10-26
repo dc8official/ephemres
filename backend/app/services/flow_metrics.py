@@ -110,6 +110,20 @@ def configured_speed_mbps(alias_data: Any) -> Optional[int]:
     return speed if speed > 0 else None
 
 
+# Interface roles an admin can set in `flow_interface_aliases`. "wan" marks a link to the outside
+# (internet or provider uplink); everything else is "lan".
+ROLE_WAN = "wan"
+ROLE_LAN = "lan"
+INTERFACE_ROLES: Tuple[str, ...] = (ROLE_WAN, ROLE_LAN)
+
+
+def interface_role(alias_data: Any) -> str:
+    """Role of an interface: "wan" only when an admin set it; legacy and missing entries are "lan"."""
+    if isinstance(alias_data, dict) and alias_data.get("role") == ROLE_WAN:
+        return ROLE_WAN
+    return ROLE_LAN
+
+
 def dscp_from_tos(tos: Optional[int]) -> int:
     """6-bit DSCP codepoint from the 8-bit ToS / Traffic Class byte (RFC 2474)."""
     return ((tos or 0) & 0xFF) >> 2

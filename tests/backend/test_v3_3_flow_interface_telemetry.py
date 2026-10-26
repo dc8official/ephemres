@@ -131,9 +131,12 @@ def test_endpoint_polymorphic_flow_interface_aliases():
     }
     ep = EndpointDetail(**legacy_data)
     assert ep.flow_interface_aliases["1"].name == "GigabitEthernet0/1"
-    assert ep.flow_interface_aliases["1"].speed_mbps == 1000  # Default 1Gbps
+    # CHANGED IN v3.4 PHASE 4: a legacy name carries no speed, so none is reported (it was a
+    # guessed 1 Gbps); utilization already treated these as unset since Phase 1.
+    assert ep.flow_interface_aliases["1"].speed_mbps is None
+    assert ep.flow_interface_aliases["1"].role == "lan"
     assert ep.flow_interface_aliases["2"].name == "TenGigabit0/2"
-    assert ep.flow_interface_aliases["2"].speed_mbps == 1000
+    assert ep.flow_interface_aliases["2"].speed_mbps is None
 
     # Modern v3.3.0 format: {"1": {"name": "WAN", "speed_mbps": 10000}}
     v33_data = {
@@ -202,7 +205,8 @@ def test_flow_exporter_item_polymorphic():
     )
     assert item.device_role == "FLOW_EXPORTER"
     assert item.interface_aliases["1"]["name"] == "Gig0/1"
-    assert item.interface_aliases["1"]["speed_mbps"] == 1000
+    # CHANGED IN v3.4 PHASE 4: no guessed 1 Gbps for a legacy name.
+    assert item.interface_aliases["1"]["speed_mbps"] is None
     assert item.interface_aliases["2"]["name"] == "10G-Uplink"
     assert item.interface_aliases["2"]["speed_mbps"] == 10000
 

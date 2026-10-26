@@ -339,11 +339,13 @@ export function getBandwidthOverview(exporterId = null) {
   return api.get('/bandwidth/overview', { params })
 }
 
-export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null) {
+export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null, wanOnly = false) {
   const params = { window }
   if (exporterId) params.exporter_id = exporterId
   if (endpointId) params.endpoint_id = endpointId
   if (interfaceIdx !== null && interfaceIdx !== undefined) params.interface_idx = interfaceIdx
+  // WAN-interface totals; the server falls back to all flows when no interface is marked WAN.
+  if (wanOnly) params.wan_only = true
   return api.get('/bandwidth/traffic-series', { params })
 }
 

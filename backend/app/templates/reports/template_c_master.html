@@ -123,7 +123,7 @@
     {% for iface in interfaces %}
     <tr>
       <td style="font-weight: 700;">{{ iface.router_hostname }}</td>
-      <td class="font-mono">#{{ iface.interface_idx }} {{ iface.interface_name }}</td>
+      <td class="font-mono">#{{ iface.interface_idx }} {{ iface.interface_name }}{% if iface.is_wan %} <span class="pill pill-passive">WAN</span>{% endif %}</td>
       <td class="text-right font-mono tnum">{{ iface.formatted_speed }}</td>
       <td class="text-right font-mono tnum color-rate-in">{{ iface.formatted_in_bps }}</td>
       <td class="text-right font-mono tnum color-rate-out">{{ iface.formatted_out_bps }}</td>

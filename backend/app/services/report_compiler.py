@@ -16,6 +16,7 @@ from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
 from app.services import conversations as conversation_queries
 from app.services.flow_metrics import (
+    ROLE_WAN,
     ZONE_EAST_WEST,
     ZONE_EXTERNAL_TRANSIT,
     ZONE_NORTH_SOUTH_EGRESS,
@@ -25,6 +26,7 @@ from app.services.flow_metrics import (
     configured_speed_mbps,
     dscp_breakdown,
     interface_alias,
+    interface_role,
     is_internal_address,
     utilization_pct,
 )
@@ -379,6 +381,8 @@ async def compile_bandwidth_report_data(
 
     interface_rows = []
     exporter_stats = {r.id: {"in_bytes": 0, "out_bytes": 0, "peak_bps": 0, "if_count": 0} for r in routers}
+    # Network edge: traffic on WAN-role interfaces, counted once however many routers it crossed.
+    wan = {"count": 0, "in_bytes": 0, "out_bytes": 0}
 
     for exp_id, if_idx, in_b, out_b, max_in_b, max_out_b in raw_interfaces:
         router = router_map.get(exp_id)
@@ -398,6 +402,11 @@ async def compile_bandwidth_report_data(
         speed_configured = configured_speed_mbps(alias_entry) is not None
         # Without a configured link speed utilization would be measured against a guess.
         util_pct = utilization_pct(peak_rate_bps, speed_mbps) if speed_configured else None
+        is_wan = interface_role(alias_entry) == ROLE_WAN
+        if is_wan:
+            wan["count"] += 1
+            wan["in_bytes"] += in_bytes
+            wan["out_bytes"] += out_bytes
 
         exporter_stats[exp_id]["in_bytes"] += in_bytes
         exporter_stats[exp_id]["out_bytes"] += out_bytes
@@ -415,6 +424,7 @@ async def compile_bandwidth_report_data(
             "formatted_out_bps": format_bps(avg_out_bps),
             "formatted_peak_bps": format_bps(peak_rate_bps),
             "utilization_pct": util_pct,
+            "is_wan": is_wan,
         })
 
     exporter_rows = []
@@ -619,9 +629,18 @@ async def compile_bandwidth_report_data(
                 "percentage": 0.0,
             })
 
+    wan_edge = {
+        "interfaces_count": wan["count"],
+        "formatted_in_bytes": format_bytes(wan["in_bytes"]),
+        "formatted_out_bytes": format_bytes(wan["out_bytes"]),
+        "formatted_in_bps": format_bps(bits_per_second(wan["in_bytes"], total_window_sec)),
+        "formatted_out_bps": format_bps(bits_per_second(wan["out_bytes"], total_window_sec)),
+    }
+
     return {
         "exporters": exporter_rows,
         "interfaces": interface_rows,
+        "wan_edge": wan_edge,
         "conversations": conversation_rows,
         "qos_classes": qos_rows,
         "anomalies": anomaly_summary,
@@ -648,6 +667,7 @@ async def compile_master_report_data(
         "summary": avail_data["summary"],
         "exporters": bandwidth_data["exporters"],
         "interfaces": bandwidth_data["interfaces"],
+        "wan_edge": bandwidth_data.get("wan_edge"),
         "conversations": bandwidth_data["conversations"],
         "qos_classes": bandwidth_data.get("qos_classes", []),
         "anomalies": bandwidth_data.get("anomalies", {}),
