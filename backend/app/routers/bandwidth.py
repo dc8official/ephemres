@@ -47,6 +47,17 @@ from app.schemas.bandwidth import (
 )
 from app.schemas.endpoints import InterfaceConfig
 from app.services.driver_manager import driver_manager
+from app.services.flow_metrics import (
+    TRAFFIC_ZONES,
+    bits_per_second,
+    classify_zone,
+    dscp_breakdown,
+    dscp_from_tos,
+    interface_alias,
+    is_internal_address,
+    tcp_anomaly,
+    utilization_pct,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,8 +285,8 @@ async def get_bandwidth_overview(
         total_bytes = ingress_bytes = egress_bytes = total_flows = active_exporters = 0
 
     # Calculate average bps and pps over 300 seconds
-    ingress_bps = (float(ingress_bytes) * 8.0) / 300.0 if ingress_bytes > 0 else 0.0
-    egress_bps = (float(egress_bytes) * 8.0) / 300.0 if egress_bytes > 0 else 0.0
+    ingress_bps = bits_per_second(ingress_bytes, 300.0) if ingress_bytes > 0 else 0.0
+    egress_bps = bits_per_second(egress_bytes, 300.0) if egress_bytes > 0 else 0.0
     total_ingress_pps = round(float(ingress_packets) / 300.0, 2) if ingress_packets > 0 else 0.0
     total_egress_pps = round(float(egress_packets) / 300.0, 2) if egress_packets > 0 else 0.0
     avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
@@ -297,11 +308,8 @@ async def get_bandwidth_overview(
     try:
         res_anomaly = await db.execute(stmt_anomaly)
         for a_row in res_anomaly.all():
-            a_flags = int(a_row[1] or 0)
-            a_cnt = int(a_row[2] or 0)
-            # SYN_ONLY (0x02 and not 0x10) or TCP_RST (0x04 and not 0x01)
-            if ((a_flags & 0x02) and not (a_flags & 0x10)) or ((a_flags & 0x04) and not (a_flags & 0x01)):
-                anomaly_flows_count += a_cnt
+            if tcp_anomaly(a_row[1]):
+                anomaly_flows_count += int(a_row[2] or 0)
     except Exception as exc:
         logger.debug("Failed to calculate anomaly flow count: %s", exc)
 
@@ -385,8 +393,8 @@ async def get_traffic_series(
             flows_cnt = int(row[5] or 0) if len(row) > 5 else 0
 
             # Each row in FlowInterfaceMinuteRollup represents a 1-minute bucket (60 seconds)
-            in_bps = (float(in_bytes) * 8.0) / 60.0
-            eg_bps = (float(eg_bytes) * 8.0) / 60.0
+            in_bps = bits_per_second(in_bytes, 60.0)
+            eg_bps = bits_per_second(eg_bytes, 60.0)
             in_pps = round(float(in_pkts) / 60.0, 2)
             eg_pps = round(float(eg_pkts) / 60.0, 2)
             flows_per_sec = round(float(flows_cnt) / 60.0, 2)
@@ -499,8 +507,8 @@ async def get_traffic_series(
             in_pkts = pkt_sum // 2
             eg_pkts = pkt_sum - in_pkts
 
-        in_bps = (float(in_bytes) * 8.0) / bucket_seconds
-        eg_bps = (float(eg_bytes) * 8.0) / bucket_seconds
+        in_bps = bits_per_second(in_bytes, bucket_seconds)
+        eg_bps = bits_per_second(eg_bytes, bucket_seconds)
         in_pps = round(float(in_pkts) / bucket_seconds, 2)
         eg_pps = round(float(eg_pkts) / bucket_seconds, 2)
         flows_per_sec = round(float(flows_cnt) / bucket_seconds, 2)
@@ -709,17 +717,9 @@ async def get_top_talkers(
 
         proto_name = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
         flags_labels = format_tcp_flags(tcp_flags) if proto_name == "TCP" else []
-        dscp_val = (tos & 0xFF) >> 2
+        dscp_val = dscp_from_tos(tos)
         dscp_lbl = format_dscp_label(tos)
-
-        anomaly_hint = None
-        if proto_name == "TCP":
-            # SYN_ONLY: SYN bit set (0x02) and not ACK (0x10)
-            if (tcp_flags & 0x02) and not (tcp_flags & 0x10):
-                anomaly_hint = "SYN_ONLY"
-            # TCP_RST: RST bit set (0x04) and not FIN (0x01)
-            elif (tcp_flags & 0x04) and not (tcp_flags & 0x01):
-                anomaly_hint = "TCP_RST"
+        anomaly_hint = tcp_anomaly(tcp_flags) if proto_name == "TCP" else None
 
         avg_pkt_size = int(b_sum // tot_packets) if tot_packets > 0 else 0
         pkts_per_flow = round(float(tot_packets) / float(f_sum), 1) if f_sum > 0 else 0.0
@@ -891,51 +891,20 @@ async def get_applications_breakdown(
         .group_by(qos_model.tos)
     )
     qos_res = await db.execute(qos_stmt)
-    dscp_buckets: Dict[int, Dict[str, Any]] = {}
-    total_qos_bytes = 0
-    for q_row in qos_res.all():
-        if len(q_row) < 2:
-            continue
-        tos_val = int(q_row[0] or 0)
-        q_bytes = int(q_row[1] or 0)
-        q_pkts = int(q_row[2] or 0) if len(q_row) > 2 else 0
-        q_flows = int(q_row[3] or 0) if len(q_row) > 3 else 0
-        dscp_val = (tos_val & 0xFF) >> 2
-        total_qos_bytes += q_bytes
-        if dscp_val not in dscp_buckets:
-            dscp_buckets[dscp_val] = {
-                "dscp": dscp_val,
-                "dscp_label": format_dscp_label(tos_val),
-                "total_bytes": 0,
-                "total_packets": 0,
-                "flow_count": 0,
-            }
-        dscp_buckets[dscp_val]["total_bytes"] += q_bytes
-        dscp_buckets[dscp_val]["total_packets"] += q_pkts
-        dscp_buckets[dscp_val]["flow_count"] += q_flows
-
-    qos_classes: List[QoSDistributionItem] = []
-    sorted_dscp = sorted(dscp_buckets.values(), key=lambda x: x["total_bytes"], reverse=True)
-    for item in sorted_dscp:
-        pct = (item["total_bytes"] / total_qos_bytes * 100.0) if total_qos_bytes > 0 else 0.0
-        qos_classes.append(
-            QoSDistributionItem(
-                dscp=item["dscp"],
-                dscp_label=item["dscp_label"],
-                total_bytes=item["total_bytes"],
-                total_packets=item["total_packets"],
-                flow_count=item["flow_count"],
-                percentage=round(pct, 2),
-            )
+    qos_classes: List[QoSDistributionItem] = [
+        QoSDistributionItem(
+            dscp=item["dscp"],
+            dscp_label=item["dscp_label"],
+            total_bytes=item["total_bytes"],
+            total_packets=item["total_packets"],
+            flow_count=item["flow_count"],
+            percentage=round(item["percentage"], 2),
         )
+        for item in dscp_breakdown(qos_res.all())
+    ]
 
     # 3. Traffic Zone Breakdown (East-West, North-South, External)
-    zone_sums = {
-        "East-West (Internal)": {"bytes": 0, "flows": 0},
-        "North-South Egress": {"bytes": 0, "flows": 0},
-        "North-South Ingress": {"bytes": 0, "flows": 0},
-        "External / Transit": {"bytes": 0, "flows": 0},
-    }
+    zone_sums = {zone: {"bytes": 0, "flows": 0} for zone in TRAFFIC_ZONES}
 
     if hasattr(model, "src_ip"):
         zone_stmt = (
@@ -956,18 +925,6 @@ async def get_applications_breakdown(
             )
         )
         zone_res = await db.execute(zone_stmt)
-
-        def _is_internal(ip_val: str, ep_val: Optional[Any]) -> bool:
-            if ep_val is not None:
-                return True
-            try:
-                clean_ip = str(ip_val or "").split("/")[0].strip()
-                if not clean_ip:
-                    return False
-                return ipaddress.ip_address(clean_ip).is_private
-            except Exception:
-                return False
-
         for z_row in zone_res.all():
             if len(z_row) < 5:
                 continue
@@ -978,17 +935,7 @@ async def get_applications_breakdown(
             z_b = int(z_row[4] or 0)
             z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
 
-            src_int = _is_internal(s_ip, s_ep)
-            dst_int = _is_internal(d_ip, d_ep)
-            if src_int and dst_int:
-                z_key = "East-West (Internal)"
-            elif src_int and not dst_int:
-                z_key = "North-South Egress"
-            elif not src_int and dst_int:
-                z_key = "North-South Ingress"
-            else:
-                z_key = "External / Transit"
-
+            z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
     elif hasattr(model, "src_endpoint_id"):
@@ -1016,20 +963,8 @@ async def get_applications_breakdown(
             z_b = int(z_row[2] or 0)
             z_f = int(z_row[3] or 0) if len(z_row) > 3 else 0
 
-            # Endpoint topology classification:
-            # - Both known endpoints: East-West lateral mesh traffic.
-            # - Source known, destination unknown: North-South egress out of cluster.
-            # - Source unknown, destination known: North-South ingress into cluster.
-            # - Neither known: External perimeter transit.
-            if s_ep is not None and d_ep is not None:
-                z_key = "East-West (Internal)"
-            elif s_ep is not None and d_ep is None:
-                z_key = "North-South Egress"
-            elif s_ep is None and d_ep is not None:
-                z_key = "North-South Ingress"
-            else:
-                z_key = "External / Transit"
-
+            # Without IPs only known endpoints count as internal.
+            z_key = classify_zone(s_ep is not None, d_ep is not None)
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
     else:
@@ -1042,12 +977,7 @@ async def get_applications_breakdown(
 
     total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
     traffic_zones: List[TrafficZoneItem] = []
-    for z_name in [
-        "East-West (Internal)",
-        "North-South Egress",
-        "North-South Ingress",
-        "External / Transit",
-    ]:
+    for z_name in TRAFFIC_ZONES:
         data = zone_sums[z_name]
         pct = (data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0
         traffic_zones.append(
@@ -1409,25 +1339,12 @@ async def get_interfaces_telemetry(
         stats = all_if_indices[if_idx]
         in_b = stats["in_bytes"]
         out_b = stats["out_bytes"]
-        in_bps = (in_b * 8.0) / window_seconds
-        out_bps = (out_b * 8.0) / window_seconds
+        in_bps = bits_per_second(in_b, window_seconds)
+        out_bps = bits_per_second(out_b, window_seconds)
 
-        # Resolve alias and configured speed
-        alias_data = aliases.get(str(if_idx))
-        if isinstance(alias_data, dict):
-            name = str(alias_data.get("name", f"Interface {if_idx}"))
-            speed_mbps = int(alias_data.get("speed_mbps", 1000))
-        elif isinstance(alias_data, str):
-            name = alias_data
-            speed_mbps = 1000
-        else:
-            name = f"Interface {if_idx}"
-            speed_mbps = 1000
-
+        name, speed_mbps = interface_alias(aliases.get(str(if_idx)), f"Interface {if_idx}")
         speed_mbps = max(1, speed_mbps)
-        capacity_bps = speed_mbps * 1_000_000.0
-        peak_bps = max(in_bps, out_bps)
-        utilization = round(min(100.0, (peak_bps / capacity_bps) * 100.0), 2)
+        utilization = round(utilization_pct(max(in_bps, out_bps), speed_mbps), 2)
         is_active = (if_idx in active_store_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
 
         interfaces.append(

@@ -1,0 +1,36 @@
+# UI primitives
+
+Shared controls for the v3.4 dashboard work
+(`docs/architecture/v3.4-dashboard-data-and-design-plan.md`). They use only the CSS variables
+defined in `App.vue`, so they follow light and dark mode without extra code. New or reworked
+screens use these instead of page-specific toggle, heading and KPI styles.
+
+| Component | Use it for |
+|---|---|
+| `SegmentedControl` | Any single-choice toggle: chart metric, view mode, perspective. Keyboard: arrows, Home/End. |
+| `TimeRangePicker` | Every time-window selector. Presets plus an optional custom range. |
+| `PanelHeader` | Card and section titles: sentence-case title, one-line hint, right-aligned actions. |
+| `KpiTile` | Headline numbers. Missing values show "—"; `clickable` turns it into a filter toggle. |
+
+```vue
+<SegmentedControl v-model="metric" aria-label="Chart metric"
+  :options="[{ value: 'bps', label: 'Throughput' }, { value: 'pps', label: 'Packets' }]" />
+
+<TimeRangePicker v-model="window" :windows="['1h', '6h', '24h', '7d']" />
+
+<TimeRangePicker v-model="range" allow-custom v-model:start="from" v-model:end="to" @apply="load" />
+
+<PanelHeader title="Top conversations" hint="Largest flows in the selected window">
+  <template #actions><button class="btn-secondary btn-small">Export</button></template>
+</PanelHeader>
+
+<KpiTile label="Down" :value="3" tone="down" clickable :active="filter === 'DOWN'" @select="filter = 'DOWN'" />
+```
+
+Related helpers:
+
+- `composables/useChartTheme.js`: chart text, grid and series colors from the `--chart-*` and
+  `--series-*` tokens, recomputed when the theme changes.
+- `utils/format.js`: bps, pps, bytes, number and port-label formatting.
+- `utils/statusTone.js`: one threshold set for uptime, utilization and health; returns a tone
+  that maps to the `--status-text-*` tokens.

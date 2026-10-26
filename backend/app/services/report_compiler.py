@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -15,7 +14,21 @@ from app.models.flow_rollup import FlowHourlyRollup, FlowInterfaceMinuteRollup, 
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
-from app.schemas.bandwidth import format_dscp_label
+from app.services.flow_metrics import (
+    ANOMALY_SYN_ONLY,
+    ANOMALY_TCP_RST,
+    ZONE_EAST_WEST,
+    ZONE_EXTERNAL_TRANSIT,
+    ZONE_NORTH_SOUTH_EGRESS,
+    ZONE_NORTH_SOUTH_INGRESS,
+    bits_per_second,
+    classify_zone,
+    dscp_breakdown,
+    interface_alias,
+    is_internal_address,
+    tcp_anomaly,
+    utilization_pct,
+)
 from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
@@ -376,24 +389,13 @@ async def compile_bandwidth_report_data(
         in_bytes = int(in_b or 0)
         out_bytes = int(out_b or 0)
         peak_b = max(int(max_in_b or 0), int(max_out_b or 0))
-        peak_rate_bps = (peak_b * 8.0) / 60.0  # minute rollup
-        avg_in_bps = (in_bytes * 8.0) / total_window_sec
-        avg_out_bps = (out_bytes * 8.0) / total_window_sec
+        peak_rate_bps = bits_per_second(peak_b, 60.0)  # minute rollup
+        avg_in_bps = bits_per_second(in_bytes, total_window_sec)
+        avg_out_bps = bits_per_second(out_bytes, total_window_sec)
 
         aliases = getattr(router, "flow_interface_aliases", {}) or {}
-        alias_entry = aliases.get(str(if_idx), {})
-        if isinstance(alias_entry, str):
-            if_name = alias_entry
-            speed_mbps = 1000
-        elif isinstance(alias_entry, dict):
-            if_name = alias_entry.get("name", f"Interface #{if_idx}")
-            speed_mbps = int(alias_entry.get("speed_mbps", 1000) or 1000)
-        else:
-            if_name = f"Interface #{if_idx}"
-            speed_mbps = 1000
-
-        speed_bps = speed_mbps * 1e6
-        util_pct = min(100.0, (peak_rate_bps / speed_bps * 100.0) if speed_bps > 0 else 0.0)
+        if_name, speed_mbps = interface_alias(aliases.get(str(if_idx), {}), f"Interface #{if_idx}")
+        util_pct = utilization_pct(peak_rate_bps, speed_mbps)
 
         exporter_stats[exp_id]["in_bytes"] += in_bytes
         exporter_stats[exp_id]["out_bytes"] += out_bytes
@@ -415,7 +417,7 @@ async def compile_bandwidth_report_data(
     exporter_rows = []
     for r in routers:
         stats = exporter_stats.get(r.id, {"in_bytes": 0, "out_bytes": 0, "peak_bps": 0, "if_count": 0})
-        mean_in_rate = (stats["in_bytes"] * 8.0) / total_window_sec
+        mean_in_rate = bits_per_second(stats["in_bytes"], total_window_sec)
         exporter_rows.append({
             "hostname": r.hostname,
             "primary_ip": r.ip_address,
@@ -492,32 +494,7 @@ async def compile_bandwidth_report_data(
     try:
         qos_res = await db.execute(qos_stmt)
         raw_qos = qos_res.all() if qos_res else []
-        dscp_buckets: Dict[int, Dict[str, Any]] = {}
-        total_qos_bytes = 0
-        for q_row in raw_qos:
-            if len(q_row) < 2:
-                continue
-            tos_val = int(q_row[0] or 0)
-            q_bytes = int(q_row[1] or 0)
-            q_pkts = int(q_row[2] or 0) if len(q_row) > 2 else 0
-            q_flows = int(q_row[3] or 0) if len(q_row) > 3 else 0
-            dscp_val = (tos_val & 0xFF) >> 2
-            total_qos_bytes += q_bytes
-            if dscp_val not in dscp_buckets:
-                dscp_buckets[dscp_val] = {
-                    "dscp": dscp_val,
-                    "dscp_label": format_dscp_label(tos_val),
-                    "total_bytes": 0,
-                    "total_packets": 0,
-                    "flow_count": 0,
-                }
-            dscp_buckets[dscp_val]["total_bytes"] += q_bytes
-            dscp_buckets[dscp_val]["total_packets"] += q_pkts
-            dscp_buckets[dscp_val]["flow_count"] += q_flows
-
-        sorted_dscp = sorted(dscp_buckets.values(), key=lambda x: x["total_bytes"], reverse=True)
-        for item in sorted_dscp:
-            pct = (item["total_bytes"] / total_qos_bytes * 100.0) if total_qos_bytes > 0 else 0.0
+        for item in dscp_breakdown(raw_qos):
             qos_rows.append({
                 "dscp": item["dscp"],
                 "dscp_label": item["dscp_label"],
@@ -527,7 +504,7 @@ async def compile_bandwidth_report_data(
                 "formatted_packets": f"{item['total_packets']:,}",
                 "flow_count": item["flow_count"],
                 "formatted_flows": f"{item['flow_count']:,}",
-                "percentage": pct,
+                "percentage": item["percentage"],
             })
     except Exception as exc:
         logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
@@ -561,16 +538,14 @@ async def compile_bandwidth_report_data(
         for a_row in raw_anomalies:
             if len(a_row) < 3:
                 continue
-            flags = int(a_row[1] or 0)
+            kind = tcp_anomaly(a_row[1])
             cnt = int(a_row[2] or 0)
             b_val = int(a_row[3] or 0) if len(a_row) > 3 else 0
 
-            # SYN ONLY (0x02 & ~0x10): Half-open connection initiation without completion
-            if (flags & 0x02) and not (flags & 0x10):
+            if kind == ANOMALY_SYN_ONLY:
                 syn_scan_count += cnt
                 syn_scan_bytes += b_val
-            # TCP RST (0x04 & ~0x01): Connection reset without graceful close
-            elif (flags & 0x04) and not (flags & 0x01):
+            elif kind == ANOMALY_TCP_RST:
                 rst_burst_count += cnt
                 rst_burst_bytes += b_val
     except Exception as exc:
@@ -614,22 +589,11 @@ async def compile_bandwidth_report_data(
         )
     )
     zone_sums = {
-        "East-West (Internal)": {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
-        "North-South Egress": {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
-        "North-South Ingress": {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
-        "External / Transit": {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
+        ZONE_EAST_WEST: {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
+        ZONE_NORTH_SOUTH_EGRESS: {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
+        ZONE_NORTH_SOUTH_INGRESS: {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
+        ZONE_EXTERNAL_TRANSIT: {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
     }
-
-    def _is_internal(ip_val: str, ep_val: Optional[Any]) -> bool:
-        if ep_val is not None:
-            return True
-        try:
-            clean_ip = str(ip_val or "").split("/")[0].strip()
-            if not clean_ip:
-                return False
-            return ipaddress.ip_address(clean_ip).is_private
-        except Exception:
-            return False
 
     zone_rows = []
     try:
@@ -646,18 +610,7 @@ async def compile_bandwidth_report_data(
             z_b = int(z_row[4] or 0)
             z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
 
-            src_int = _is_internal(s_ip, s_ep)
-            dst_int = _is_internal(d_ip, d_ep)
-
-            if src_int and dst_int:
-                z_key = "East-West (Internal)"
-            elif src_int and not dst_int:
-                z_key = "North-South Egress"
-            elif not src_int and dst_int:
-                z_key = "North-South Ingress"
-            else:
-                z_key = "External / Transit"
-
+            z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
             total_zone_bytes += z_b

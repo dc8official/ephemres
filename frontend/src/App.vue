@@ -361,6 +361,35 @@ button { cursor: pointer; border: none; background: none; }
 
   --topo-edge-stroke: #94a3b8;
   --topo-edge-highlight: #2563eb;
+
+  /* ── Status Text (AA contrast for small text on surfaces and status tints) ── */
+  --status-text-up: #15803d;
+  --status-text-warn: #b45309;
+  --status-text-down: #b91c1c;
+  --status-text-info: #1d4ed8;
+  --status-text-unknown: #4b5563;
+
+  /* ── Chart & Data Series Tokens (read by composables/useChartTheme.js) ── */
+  --chart-text: #4b5563;
+  --chart-grid: rgba(0, 0, 0, 0.08);
+  --series-in: #10b981;
+  --series-out: #0ea5e9;
+  --series-flows: #8b5cf6;
+  --series-rtt: #f59e0b;
+  --series-transit: #64748b;
+  --series-1: #3b82f6;
+  --series-2: #10b981;
+  --series-3: #f59e0b;
+  --series-4: #ef4444;
+  --series-5: #8b5cf6;
+  --series-6: #ec4899;
+  --series-7: #06b6d4;
+  --series-8: #64748b;
+
+  /* ── Control Sizing ── */
+  --control-height-sm: 28px;
+  --control-height: 32px;
+  --target-min: 24px;
 }
 
 /* ── Focus Outlines for Keyboard Accessibility (WCAG 2.1 AA) ── */
@@ -443,6 +472,17 @@ html.dark {
 
   --topo-edge-stroke: #475569;
   --topo-edge-highlight: #60a5fa;
+
+  /* ── Status Text (Dark Mode) ── */
+  --status-text-up: #4ade80;
+  --status-text-warn: #f59e0b;
+  --status-text-down: #f87171;
+  --status-text-info: #60a5fa;
+  --status-text-unknown: #a3a3a3;
+
+  /* ── Chart & Data Series Tokens (Dark Mode) ── */
+  --chart-text: #9ca3af;
+  --chart-grid: rgba(255, 255, 255, 0.08);
 }
 
 /* ── Base ── */
