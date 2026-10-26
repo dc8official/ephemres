@@ -22,12 +22,19 @@ FT_INPUT_SNMP = 10
 FT_L4_DST_PORT = 11
 FT_IPV4_DST_ADDR = 12
 FT_OUTPUT_SNMP = 14
+FT_IPV4_NEXT_HOP = 15
 FT_LAST_SWITCHED = 21
 FT_FIRST_SWITCHED = 22
 FT_OUT_BYTES = 23
 FT_OUT_PKTS = 24
 FT_IPV6_SRC_ADDR = 27
 FT_IPV6_DST_ADDR = 28
+FT_IPV6_NEXT_HOP = 62
+
+
+def _routed_next_hop(family: int, raw: bytes) -> Optional[str]:
+    """Next-hop address, or None for the all-zero address (delivered locally or not routed)."""
+    return socket.inet_ntop(family, raw) if any(raw) else None
 
 
 class V9Template:
@@ -210,6 +217,7 @@ class V9Parser:
             tos = 0
             input_if = 0
             output_if = 0
+            next_hop: Optional[str] = None
             first_ms: Optional[int] = None
             last_ms: Optional[int] = None
 
@@ -226,6 +234,10 @@ class V9Parser:
                     src_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
                 elif f_type == FT_IPV6_DST_ADDR and f_len == 16:
                     dst_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
+                elif f_type == FT_IPV4_NEXT_HOP and f_len == 4:
+                    next_hop = _routed_next_hop(socket.AF_INET, f_bytes)
+                elif f_type == FT_IPV6_NEXT_HOP and f_len == 16:
+                    next_hop = _routed_next_hop(socket.AF_INET6, f_bytes)
                 elif f_type == FT_L4_SRC_PORT:
                     src_port = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_L4_DST_PORT:
@@ -284,6 +296,7 @@ class V9Parser:
                         "tos": tos,
                         "input_if": input_if,
                         "output_if": output_if,
+                        "next_hop": next_hop,
                         "start_time": start_time,
                         "end_time": end_time,
                     }

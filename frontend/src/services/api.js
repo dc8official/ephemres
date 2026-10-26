@@ -178,6 +178,11 @@ export function getEndpointRca(id) {
   return api.get(`/endpoints/${id}/rca`)
 }
 
+// Where exporters forwarded this endpoint's traffic (24 h) and route changes seen in flows (7 days).
+export function getEndpointFlowPaths(id) {
+  return api.get(`/endpoints/${id}/flow-paths`)
+}
+
 export function refreshEndpointBaseline(id) {
   return api.post(`/endpoints/${id}/refresh-baseline`)
 }

@@ -217,6 +217,10 @@ class FlowSettings:
     ipfix_port: int = 4739
     sampling_multiplier: int = 1
     buffer_memory_limit_mb: int = 512
+    # Route changes seen in flows: minutes a new path must stay dominant before it counts, and
+    # the byte share above which two or more paths are load balancing rather than a change.
+    route_change_minutes: int = 3
+    route_ecmp_share: float = 0.2
 
     def __post_init__(self) -> None:
         self.enabled = _coerce_bool(self.enabled)
@@ -232,6 +236,13 @@ class FlowSettings:
         self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
         self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
         self.buffer_memory_limit_mb = _coerce_int(self.buffer_memory_limit_mb, "flow.buffer_memory_limit_mb", ge=64)
+        self.route_change_minutes = _coerce_int(self.route_change_minutes, "flow.route_change_minutes", ge=1, le=60)
+        try:
+            self.route_ecmp_share = float(self.route_ecmp_share)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"flow.route_ecmp_share must be a number, got {self.route_ecmp_share!r}") from exc
+        if not 0.05 <= self.route_ecmp_share <= 0.5:
+            raise ConfigurationError(f"flow.route_ecmp_share must be between 0.05 and 0.5, got {self.route_ecmp_share}")
 
     def model_dump(self) -> Dict[str, Any]:
         return asdict(self)

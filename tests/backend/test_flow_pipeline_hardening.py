@@ -378,7 +378,11 @@ async def test_flow_aggregator_tcp_flags_or_and_tos_max():
     # Flush to database and check SQL params
     await agg.flush_to_timescaledb()
     assert mock_db_session.execute.called
-    call_args = mock_db_session.execute.call_args[0]
+    # Path observations are written after the rollups; pick the rollup insert.
+    call_args = next(
+        c[0] for c in mock_db_session.execute.call_args_list
+        if "INSERT INTO flow_minute_rollups" in str(c[0][0])
+    )
     sql_text = str(call_args[0])
     chunk_rows = call_args[1]
 

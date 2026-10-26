@@ -32,27 +32,27 @@ def test_database_sync_engine_none():
     assert db.sync_engine is None
 
 
-def test_migrator_loads_all_16_revisions():
-    """Ensure all 16 migration files are discovered, loaded, and sorted topologically."""
+def test_migrator_loads_all_17_revisions():
+    """Ensure all 17 migration files are discovered, loaded, and sorted topologically."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 16
-    expected_chain = [f"{i:04d}" for i in range(1, 17)]
+    assert len(ordered) == 17
+    expected_chain = [f"{i:04d}" for i in range(1, 18)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0016"
+    assert ordered[-1].revision == "0017"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 16):
+    for i in range(1, 17):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
-def test_all_16_revisions_upgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 16 revisions and verify generated SQL."""
+def test_all_17_revisions_upgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 17 revisions and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -65,8 +65,8 @@ def test_all_16_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 61 total statements across all 16 migrations
-    assert total_statements == 61
+    # 67 total statements across all 17 migrations
+    assert total_statements == 67
 
     full_sql = "\n".join(all_statements)
 
@@ -131,9 +131,15 @@ def test_all_16_revisions_upgrade_ddl_compilation():
     assert 'CREATE MATERIALIZED VIEW IF NOT EXISTS flow_interface_hourly_rollups' in full_sql
     assert "start_offset => INTERVAL '6 days'" in full_sql
 
+    # 0017 flow path observations and route changes
+    assert 'CREATE TABLE IF NOT EXISTS flow_path_observations (' in full_sql
+    assert "(COALESCE(next_hop, '0.0.0.0'::inet))" in full_sql
+    assert 'CREATE TABLE IF NOT EXISTS flow_route_changes (' in full_sql
+    assert 'ADD COLUMN IF NOT EXISTS flow_evidence JSONB' in full_sql
 
-def test_all_16_revisions_downgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 16 downgrades and verify generated SQL."""
+
+def test_all_17_revisions_downgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 17 downgrades and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -146,12 +152,13 @@ def test_all_16_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 52 total downgrade statements
-    assert total_statements == 52
+    # 55 total downgrade statements
+    assert total_statements == 55
 
     full_sql = "\n".join(all_statements)
 
     assert 'ALTER TABLE flow_minute_rollups DROP COLUMN IF EXISTS tcp_flags;' in full_sql
+    assert 'DROP TABLE IF EXISTS flow_path_observations CASCADE;' in full_sql
     assert 'DROP TABLE IF EXISTS endpoint_probe_samples CASCADE;' in full_sql
     assert 'DROP MATERIALIZED VIEW IF EXISTS flow_interface_hourly_rollups CASCADE;' in full_sql
     assert 'DROP TABLE IF EXISTS "flow_interface_minute_rollups" CASCADE;' in full_sql
@@ -170,13 +177,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0016 (head)" in captured.out
+    assert "0017 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0016 (head)" in captured.out
+    assert "0017 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])

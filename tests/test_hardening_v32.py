@@ -98,9 +98,9 @@ def test_flow_aggregator_insert_sql_bindparams():
     from monitoring.flow import aggregator
 
     # Extract insert_sql definition from source
-    src = inspect.getsource(aggregator.FlowAggregator.flush_to_timescaledb)
+    src = inspect.getsource(aggregator.FlowAggregator._flush_rollups)
     m = re.search(r'insert_sql\s*=\s*text\(\s*"""(.*?)"""\s*\)', src, re.DOTALL)
-    assert m is not None, "Could not find insert_sql in flush_to_timescaledb"
+    assert m is not None, "Could not find insert_sql in _flush_rollups"
     sql_text = text(m.group(1))
 
     compiled_params = set(sql_text.compile().params.keys())

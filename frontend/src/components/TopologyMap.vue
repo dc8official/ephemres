@@ -140,6 +140,21 @@
             <span>Subnet Hub (L2)</span>
             <span class="count-badge glow-subnet">{{ legendCounts.subnet }}</span>
           </div>
+          <div class="legend-item" v-if="legendCounts.flowConfirmed > 0" title="An exporter's flows send traffic along this traceroute link">
+            <span class="edge-swatch confirmed"></span>
+            <span>Link confirmed by traffic</span>
+            <span class="count-badge">{{ legendCounts.flowConfirmed }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.flowDiffers > 0" title="Flows show this router sending the traffic to a different next hop">
+            <span class="edge-swatch differs"></span>
+            <span>Traffic takes another path</span>
+            <span class="count-badge">{{ legendCounts.flowDiffers }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.flowInferred > 0" title="The hop did not answer traceroute; flows name it">
+            <span class="edge-swatch inferred"></span>
+            <span>Silent hop named by flows</span>
+            <span class="count-badge">{{ legendCounts.flowInferred }}</span>
+          </div>
         </div>
       </div>
 
@@ -317,6 +332,9 @@ const legendCounts = reactive({
   inferredDown: 0,
   l2: 0,
   subnet: 0,
+  flowConfirmed: 0,
+  flowDiffers: 0,
+  flowInferred: 0,
 })
 
 let network = null
@@ -347,11 +365,9 @@ watch(isDark, () => {
     nodesDataSet.update(updatedNodes)
   }
   if (edgesDataSet) {
-    const edgeStroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
-    const edgeHighlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
     const updatedEdges = edgesDataSet.get().map(edge => ({
       ...edge,
-      color: { color: edgeStroke, highlight: edgeHighlight }
+      ...edgeFlowStyle(edge.rawEdge || {})
     }))
     edgesDataSet.update(updatedEdges)
   }
@@ -400,6 +416,34 @@ function updateLegendCounts() {
   legendCounts.inferredDown = inferredDown
   legendCounts.l2 = l2
   legendCounts.subnet = subnet
+
+  const flowCounts = { confirmed: 0, differs: 0, inferred: 0 }
+  for (const e of edgesDataSet ? edgesDataSet.get() : []) {
+    const status = e.rawEdge?.flow_status
+    if (status in flowCounts) flowCounts[status]++
+  }
+  legendCounts.flowConfirmed = flowCounts.confirmed
+  legendCounts.flowDiffers = flowCounts.differs
+  legendCounts.flowInferred = flowCounts.inferred
+}
+
+// Traceroute links checked against the next hops exporters report in flows (flow_status):
+// confirmed, differs (traffic leaves for another next hop) or inferred (a silent hop named by
+// flows). Links without a status keep the plain style.
+function edgeFlowStyle(edge) {
+  const stroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
+  const highlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
+  const status = edge.flow_status
+  if (status === 'confirmed') {
+    return { color: { color: getCssVar('--status-text-up', '#15803d'), highlight }, width: 3, dashes: false, title: `Confirmed by traffic. ${edge.flow_detail || ''}`.trim() }
+  }
+  if (status === 'differs') {
+    return { color: { color: getCssVar('--status-text-warn', '#b45309'), highlight }, width: 2, dashes: [8, 5], title: `Traffic takes another path. ${edge.flow_detail || ''}`.trim() }
+  }
+  if (status === 'inferred') {
+    return { color: { color: getCssVar('--status-text-info', '#1d4ed8'), highlight }, width: 2, dashes: [3, 4], title: `Silent hop named by flows. ${edge.flow_detail || ''}`.trim() }
+  }
+  return { color: { color: stroke, highlight }, width: 2, dashes: false, title: undefined }
 }
 
 // Visual Node Styling & Categorization
@@ -605,7 +649,9 @@ function formatVisData(nodesData, edgesData) {
       size = 18
     }
 
-    let labelText = `${node.label}\n(${node.ip_address || ''})`
+    let labelText = node.flow_inferred_ip
+      ? `${node.label}\n(≈ ${node.flow_inferred_ip} from flows)`
+      : `${node.label}\n(${node.ip_address || ''})`
     if (nodeType === 'subnet_hub') {
       labelText = `🌐 ${node.label}`
     } else {
@@ -630,13 +676,12 @@ function formatVisData(nodesData, edgesData) {
     }
   })
 
-  const edgeStroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
-  const edgeHighlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
   const visEdges = edgesData.map(edge => ({
     id: `${edge.source}->${edge.target}`,
     from: edge.source,
     to: edge.target,
-    color: { color: edgeStroke, highlight: edgeHighlight },
+    ...edgeFlowStyle(edge),
+    rawEdge: edge,
     arrows: { to: { enabled: true, scaleFactor: 0.7 } },
     smooth: {
       type: 'cubicBezier',
@@ -1130,6 +1175,17 @@ onUnmounted(() => {
 .state-failure-point { background: var(--topo-node-failure-bg); border: 1px solid var(--topo-node-failure-border); }
 .state-inferred-down { background: var(--topo-node-inferred-bg); border: 1px solid var(--topo-node-inferred-border); }
 .state-subnet { background: var(--topo-node-subnet-bg); border: 1px solid var(--topo-node-subnet-border); }
+
+.edge-swatch {
+  width: 18px;
+  height: 0;
+  flex-shrink: 0;
+  border-top: 3px solid var(--topo-edge-stroke);
+}
+
+.edge-swatch.confirmed { border-top-color: var(--status-text-up); }
+.edge-swatch.differs { border-top: 2px dashed var(--status-text-warn); }
+.edge-swatch.inferred { border-top: 2px dotted var(--status-text-info); }
 
 .count-badge {
   margin-left: auto;

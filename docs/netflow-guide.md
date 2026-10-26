@@ -63,7 +63,16 @@ To ensure maximum telemetry fidelity, eliminate bursty traffic artifacts, and pr
 * **Recommended Setting:** Include the IPv4 Type-of-Service byte in every exported record: NetFlow v9 field type **5** (`SRC_TOS`) or IPFIX Information Element **5** (`ipClassOfService`). NetFlow v5 always carries it.
 * **Operational Rationale:** The QoS / DSCP breakdown on the Bandwidth dashboard, the endpoint flow view, and PDF reports is computed from this field only. Exporters whose template omits it are counted as DSCP 0 (`CS0` / best effort), so the QoS panels show everything as best effort. Check your platform's flow-record or template options for a ToS/DSCP field; the Cisco example below adds `match ipv4 tos`.
 
-### 2.5 Persistent Export Source IP (`Loopback0`)
+### 2.5 Export the Next Hop for Route Augmentation
+* **Recommended Setting:** Include the next-hop address in every record: NetFlow v9 field type **15** (`IPV4_NEXT_HOP`) / **62** (`IPV6_NEXT_HOP`), or IPFIX Information Element **15** (`ipNextHopIPv4Address`) / **62** (`ipNextHopIPv6Address`). NetFlow v5 always carries it. Keep the input and output interface fields as well.
+* **Operational Rationale:** Traceroute stays Ephemres' route of record. Flows add the path real traffic takes: for every flow to or from a monitored endpoint, Ephemres records the exporter's interfaces and next hop (`flow_path_observations`). With the next hop present:
+  * the Topology map marks traceroute links **confirmed by traffic**, flags links where **traffic takes another path**, and names hops that do not answer traceroute (`* * *`);
+  * a change of the dominant path, held for 3 minutes, is recorded as a route change and triggers a traceroute of just that endpoint (only while it is UP, at most once per 15 minutes per endpoint and 10 per minute overall);
+  * an RCA records which path the endpoint's traffic last took and whether traffic still flowed after probes started failing.
+
+  Without it, Endpoint Detail still lists the interfaces used, but paths cannot be compared with traceroute. A traceroute hop is matched to an exporter by its IP or one of its exporter IP aliases; traceroute shows a router's ingress address, so add interface addresses as aliases where they differ. Tunables in `config.toml` `[flow]`: `route_change_minutes` (default 3) and `route_ecmp_share` (default 0.2: two or more paths each above this share are load balancing, not a change).
+
+### 2.6 Persistent Export Source IP (`Loopback0`)
 * **Recommended Setting:** Always bind the exporter source address to a stable virtual interface:
   * Cisco: `source Loopback0`
   * Juniper: `inline-jflow { source-address <Loopback0_IP>; }`
@@ -112,6 +121,7 @@ flow record EPHEMRES-FLOW-RECORD
  match transport destination-port
  match interface input
  match interface output
+ collect routing next-hop address ipv4
  collect counter bytes long
  collect counter packets long
  collect timestamp sys-uptime first

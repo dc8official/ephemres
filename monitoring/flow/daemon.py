@@ -19,6 +19,7 @@ from app.services.runtime_settings import get_runtime_settings, start_runtime_se
 from monitoring.flow.aggregator import FlowAggregator
 from monitoring.flow.collector import FlowCollector
 from monitoring.flow.correlator import FlowCorrelator
+from monitoring.flow.path_tracker import PathTracker
 
 logger = setup_logging(
     service_name="ephemres-flowd",
@@ -76,7 +77,22 @@ async def run_flow_daemon() -> None:
         netflow_port=netflow_port,
         ipfix_port=ipfix_port,
     )
-    aggregator = FlowAggregator(store_client=store_client, correlator=correlator, db_session_factory=AsyncSessionLocal)
+    # Route changes seen in flows go to the API (targeted traceroute) over the same broker the
+    # monitoring engine uses, so initialize it the same way.
+    from app.services.driver_manager import driver_manager
+
+    await driver_manager.initialize()
+    path_tracker = PathTracker(
+        change_minutes=getattr(flow_cfg, "route_change_minutes", 3) if flow_cfg else 3,
+        ecmp_share=getattr(flow_cfg, "route_ecmp_share", 0.2) if flow_cfg else 0.2,
+    )
+    aggregator = FlowAggregator(
+        store_client=store_client,
+        correlator=correlator,
+        db_session_factory=AsyncSessionLocal,
+        path_tracker=path_tracker,
+        event_publisher=driver_manager.get_event_broker().publish,
+    )
 
     await correlator.start()
     await collector.start()

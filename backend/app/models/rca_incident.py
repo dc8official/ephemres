@@ -90,6 +90,13 @@ class EndpointRCAIncident(Base):
         nullable=False,
     )
 
+    # What flow data showed when the RCA ran (paths, traffic after the failure, route changes);
+    # None when no exporter sees the endpoint's traffic.
+    flow_evidence: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
     # Flag indicating whether this incident has been resolved
     is_resolved: Mapped[bool] = mapped_column(
         Boolean,

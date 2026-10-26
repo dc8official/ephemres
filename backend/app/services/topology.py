@@ -65,6 +65,9 @@ class TopologyGraphManager:
         self._baseline_routes: Dict[str, List[Dict[str, Any]]] = {}
         self._failed_hop_ips: Set[str] = set()
         self._failed_endpoint_ids: Set[str] = set()
+        # (source, target) -> {"flow_status", "flow_detail"[, "inferred_ip"]}: traceroute links
+        # checked against the next hops exporters report in flows (refresh_flow_status).
+        self._edge_flow: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
         self._cached_graph: Dict[str, Any] = {"nodes": [], "edges": []}
         self._cached_graph_json: str = json.dumps({"nodes": [], "edges": []})
@@ -421,7 +424,7 @@ class TopologyGraphManager:
 
             self._cached_graph = {
                 "nodes": list(nodes.values()),
-                "edges": [{"source": src, "target": tgt} for src, tgt in edges],
+                "edges": self._edges_payload(edges),
             }
             self._cached_graph_json = json.dumps(self._cached_graph)
             self._initialized = True
@@ -473,7 +476,7 @@ class TopologyGraphManager:
                 self._propagate_inferred_down(self._nodes, self._transit_children)
                 self._cached_graph = {
                     "nodes": list(self._nodes.values()),
-                    "edges": [{"source": src, "target": tgt} for src, tgt in self._edges],
+                    "edges": self._edges_payload(self._edges),
                 }
                 self._cached_graph_json = json.dumps(self._cached_graph)
 
@@ -621,7 +624,7 @@ class TopologyGraphManager:
 
             self._cached_graph = {
                 "nodes": list(self._nodes.values()),
-                "edges": [{"source": src, "target": tgt} for src, tgt in self._edges],
+                "edges": self._edges_payload(self._edges),
             }
             self._cached_graph_json = json.dumps(self._cached_graph)
 
@@ -639,8 +642,87 @@ class TopologyGraphManager:
             logger.debug("Failed to broadcast TOPOLOGY_UPDATED SSE: %s", exc)
 
 
+    def _edges_payload(self, edges: Set[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        return [{"source": src, "target": tgt, **self._edge_flow.get((src, tgt), {})} for src, tgt in edges]
+
+    def _route_paths(self) -> List[Tuple[str, List[Tuple[str, Optional[str]]]]]:
+        """Per traced endpoint, its path as (node_id, hop_ip) from the first hop to the endpoint,
+        with the node ids full_rebuild gives those hops."""
+        from app.services.diagnostics import sanitize_traceroute_hops
+
+        routes: List[Tuple[str, List[Tuple[str, Optional[str]]]]] = []
+        for ep_id, ep_data in self._monitored_by_id.items():
+            if ep_data.get("manual_parent_id") and ep_data["manual_parent_id"] in self._nodes:
+                continue
+            hops = sanitize_traceroute_hops(self._baseline_routes.get(ep_id, []))
+            if not hops:
+                continue
+            path: List[Tuple[str, Optional[str]]] = []
+            previous_tag = "root"
+            for hop in hops:
+                hop_ip = hop.get("ip")
+                if hop_ip is None:
+                    node_id = f"anon_{previous_tag}_to_{ep_id[:8]}"
+                else:
+                    node_id = self._monitored_by_ip.get(hop_ip) or f"transit:{hop_ip}"
+                    previous_tag = hop_ip.replace(".", "_")
+                if not path or path[-1][0] != node_id:
+                    path.append((node_id, hop_ip))
+            if path[-1][0] != ep_id:
+                path.append((ep_id, ep_data.get("ip_address")))
+            routes.append((ep_id, path))
+        return routes
+
+    async def refresh_flow_status(self, db: AsyncSession) -> int:
+        """Marks traceroute links confirmed, inferred or differing using recent flow next hops.
+
+        Returns the number of links with a flow status. Traceroute stays the route of record:
+        this only annotates the existing links and `* * *` nodes, never adds or removes any.
+        """
+        from app.services.flow_paths import active_next_hops, classify_route_edges, exporter_ip_map
+
+        exporter_by_ip = await exporter_ip_map(db)
+        next_hops = await active_next_hops(db) if exporter_by_ip else {}
+        async with self._lock:
+            self._edge_flow = (
+                classify_route_edges(self._route_paths(), exporter_by_ip, next_hops) if next_hops else {}
+            )
+            inferred = {tgt: v["inferred_ip"] for (_, tgt), v in self._edge_flow.items() if "inferred_ip" in v}
+            for node_id, node in self._nodes.items():
+                if node_id in inferred:
+                    node["flow_inferred_ip"] = inferred[node_id]
+                else:
+                    node.pop("flow_inferred_ip", None)
+            self._cached_graph = {
+                "nodes": list(self._nodes.values()),
+                "edges": self._edges_payload(self._edges),
+            }
+            self._cached_graph_json = json.dumps(self._cached_graph)
+            return len(self._edge_flow)
+
+
 # Global singleton instance
 topology_manager = TopologyGraphManager.get_instance()
+
+
+TOPOLOGY_FLOW_REFRESH_SECONDS = 300
+
+
+async def start_topology_flow_refresh_task(session_factory: Any) -> asyncio.Task:
+    """Re-checks topology links against flow next hops every 5 minutes (first run at once)."""
+
+    async def _loop() -> None:
+        while True:
+            try:
+                async with session_factory() as db:
+                    await topology_manager.refresh_flow_status(db)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Topology flow status refresh failed: %s", exc)
+            await asyncio.sleep(TOPOLOGY_FLOW_REFRESH_SECONDS)
+
+    return asyncio.create_task(_loop(), name="topology_flow_refresh")
 
 
 async def generate_unified_topology(db: Optional[AsyncSession] = None) -> Dict[str, Any]:

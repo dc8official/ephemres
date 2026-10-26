@@ -145,7 +145,13 @@ RTT min/avg/max, jitter and loss over time for one endpoint.
 Returns the 10 most recent diagnostic traceroutes for the endpoint.
 
 ### `GET /endpoints/{id}/rca`
-Returns root-cause analysis incidents recorded for the endpoint.
+Returns root-cause analysis incidents recorded for the endpoint. `baseline_snapshot` and `failure_trace_snapshot` are hop lists. `flow_evidence` is `null` unless an exporter saw the endpoint's traffic in the 24 h before the RCA; otherwise it holds what flows showed when the RCA ran (evidence only, the verdict comes from traceroute): `paths` (per exporter and direction: `out_if`/`out_if_name`, `next_hop`, `last_seen`, `after_failure`), `traffic_after_failure` (traffic still seen after probes started failing, i.e. the probe path or ICMP is the likely problem), `route_changes` seen from 15 minutes before the failure, and a one-line `summary`.
+
+### `GET /endpoints/{id}/flow-paths`
+Where exporting routers forwarded the endpoint's traffic, from flows (requires the next hop in the export template for `next_hop`; see the NetFlow guide §2.5).
+- `paths`: up to 100 rows from the last 24 h, newest first: `exporter_hostname`, `direction` (`to`/`from` the endpoint), `in_if`/`out_if` with alias names, `next_hop`, `first_seen`, `last_seen`, `bytes`, `flow_count`, and `active` (traffic in the last `active_minutes`, 15).
+- `route_changes`: up to 50 from the last 7 days, newest first: `detected_at`, `exporter_hostname`, `direction`, old and new out interface (with names) and next hop. A change is recorded when a different path carries most of the traffic for 3 minutes in a row; load balancing is not a change.
+- `next_hop_reported`: `false` when none of the paths carries a next hop.
 
 ### `POST /endpoints/{id}/refresh-baseline`
 Re-runs baseline route discovery for the endpoint (requires `Admin` role).
@@ -165,6 +171,7 @@ Removes an endpoint from monitoring and deregisters it from the polling engine.
 ### `GET /topology`
 Retrieves the parent-child topology DAG (nodes with state and hop level, plus edges). The crossing-free hierarchical layout is computed in the browser by vis-network; the API returns graph data only.
 - **Response:** `200 OK` returning an object containing arrays of `nodes` and `edges`.
+- Traceroute links are checked every 5 minutes against the next hops exporters reported in the last 15 minutes. An edge then carries `flow_status`: `confirmed` (traffic goes to the next traceroute hop), `differs` (traffic leaves for another next hop) or `inferred` (the next hop did not answer traceroute; flows name it), with a `flow_detail` sentence. A `* * *` node named by flows carries `flow_inferred_ip`. Edges without a matching exporter or recent flows have no `flow_status`.
 
 ### `POST /topology/rebuild`
 Rebuilds the in-memory topology DAG from the database (requires `Admin` role).

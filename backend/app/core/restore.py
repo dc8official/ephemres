@@ -119,6 +119,8 @@ CONFIG_TABLE_ORDER = [
     "endpoint_baseline_routes",
     "endpoint_diagnostic_traces",
     "endpoint_rca_incidents",
+    "flow_path_observations",
+    "flow_route_changes",
     "user_sessions",
 ]
 
@@ -350,6 +352,30 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "baseline_snapshot": "jsonb",
             "failure_trace_snapshot": "jsonb",
             "is_resolved": "bool",
+            "flow_evidence": "jsonb",
+        },
+        "flow_path_observations": {
+            "exporter_id": "uuid",
+            "endpoint_id": "uuid",
+            "direction": "varchar",
+            "in_if": "int4",
+            "out_if": "int4",
+            "next_hop": "inet",
+            "first_seen": "timestamptz",
+            "last_seen": "timestamptz",
+            "bytes": "int8",
+            "flow_count": "int8",
+        },
+        "flow_route_changes": {
+            "id": "uuid",
+            "detected_at": "timestamptz",
+            "exporter_id": "uuid",
+            "endpoint_id": "uuid",
+            "direction": "varchar",
+            "old_out_if": "int4",
+            "old_next_hop": "inet",
+            "new_out_if": "int4",
+            "new_next_hop": "inet",
         },
         "alert_channels": {
             "id": "uuid",
@@ -1327,7 +1353,7 @@ async def reconcile_and_restore_database(
         summary["tables_restored"].append("alert_channels")
 
     # 7. Restore remaining non-hypertable config tables (skipping ephemeral user_sessions)
-    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents"]:
+    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents", "flow_path_observations", "flow_route_changes"]:
         if t in config_data and t in target_schema:
             cols, rows = config_data[t]
             target_cols = target_schema[t]

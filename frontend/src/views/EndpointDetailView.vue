@@ -553,6 +553,54 @@
             </div>
           </div>
 
+          <!-- Paths seen in flows: where exporting routers forwarded this endpoint's traffic -->
+          <div v-if="flowPaths.paths.length || flowPaths.route_changes.length" class="table-card flow-paths-card">
+            <PanelHeader
+              title="Paths seen in flows"
+              :hint="`Where exporting routers forwarded this endpoint's traffic in the last 24 h · greyed rows carried none in the last ${flowPaths.active_minutes} min`"
+            />
+            <p v-if="!flowPaths.next_hop_reported" class="flow-paths-note">
+              These exporters send no next hop, so paths can't be compared with traceroute. Add the next hop to the export template (see the NetFlow guide).
+            </p>
+            <div class="table-responsive">
+              <table class="dense-table" aria-label="Paths seen in flows">
+                <thead>
+                  <tr>
+                    <th>Router</th>
+                    <th>Direction</th>
+                    <th>In</th>
+                    <th>Out</th>
+                    <th>Next hop</th>
+                    <th class="text-right">Volume</th>
+                    <th>Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(p, i) in flowPaths.paths" :key="i" :class="{ 'flow-path-stale': !p.active }">
+                    <td>{{ p.exporter_hostname }}</td>
+                    <td>{{ p.direction === 'to' ? 'To' : 'From' }}</td>
+                    <td>{{ p.in_if_name || '—' }}</td>
+                    <td>{{ p.out_if_name || '—' }}</td>
+                    <td class="tnum">{{ p.next_hop || '—' }}</td>
+                    <td class="text-right tnum">{{ formatBytes(p.bytes) }}</td>
+                    <td class="tnum">{{ formatShortTime(p.last_seen) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="flowPaths.route_changes.length" class="flow-route-changes">
+              <span class="meta-label">Route changes seen in flows (7 days)</span>
+              <ul>
+                <li v-for="(c, i) in flowPaths.route_changes" :key="i">
+                  <span class="tnum">{{ formatShortTime(c.detected_at) }}</span> ·
+                  {{ c.exporter_hostname }} moved traffic {{ c.direction === 'to' ? 'to' : 'from' }} this endpoint from
+                  {{ c.old_out_if_name || `if${c.old_out_if}` }}{{ c.old_next_hop ? ` via ${c.old_next_hop}` : '' }} to
+                  {{ c.new_out_if_name || `if${c.new_out_if}` }}{{ c.new_next_hop ? ` via ${c.new_next_hop}` : '' }}
+                </li>
+              </ul>
+            </div>
+          </div>
+
           <!-- Conversations through (exporter) or with (participant) this device, server-filtered -->
           <ConversationsPanel
             :window="flowWindow"
@@ -783,12 +831,13 @@
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries } from '../services/api.js'
+import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries, getEndpointFlowPaths } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
 import StateTimeline from '../components/StateTimeline.vue'
 import RTTTrendPanel from '../components/RTTTrendPanel.vue'
 import ProbeTrendPanel from '../components/ProbeTrendPanel.vue'
 import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
+import PanelHeader from '../components/ui/PanelHeader.vue'
 import EndpointRcaDetail from '../components/EndpointRcaDetail.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { Line as LineChart } from 'vue-chartjs'
@@ -819,7 +868,7 @@ import Card from 'primevue/card'
 import Button from 'primevue/button'
 import { useSSE } from '../composables/useSSE.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
-import { formatBps, formatPps } from '../utils/format.js'
+import { formatBps, formatBytes, formatPps } from '../utils/format.js'
 import { summarizeSeries } from '../utils/chartSummary.js'
 import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
 import { isMonitored } from '../utils/endpointState.js'
@@ -850,6 +899,12 @@ const convPort = ref(null)
 const convDscp = ref(null)
 const convDscpLabel = ref('')
 const convRefreshKey = ref(0)
+const flowPaths = ref({ paths: [], route_changes: [], next_hop_reported: true, active_minutes: 15 })
+
+function formatShortTime(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
 
 // Metric mode toggle for endpoint bandwidth chart:
 // - 'bps': Standard bandwidth throughput (bits/sec).
@@ -963,6 +1018,9 @@ async function loadFlowTelemetry() {
   const flowStart = new Date(flowEnd.getTime() - (FLOW_WINDOW_MS[flowWindow.value] || 3600e3))
   flowRange.value = { start: flowStart.toISOString(), end: flowEnd.toISOString() }
   loadProbe(flowRange.value.start, flowRange.value.end).then((data) => { flowProbe.value = data })
+  getEndpointFlowPaths(endpoint.value.id)
+    .then((res) => { if (res.data?.data) flowPaths.value = res.data.data })
+    .catch((err) => console.warn('Failed to load flow paths:', err))
   try {
     const epId = endpoint.value.id
     const isExporter = flowMode.value === 'exporter'
@@ -2551,6 +2609,32 @@ h2 {
 
 .role-col {
   width: 130px;
+}
+
+.flow-paths-card {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
+.flow-paths-note {
+  margin: 0 0 12px;
+  font-size: var(--text-sm);
+  color: var(--status-text-warn);
+}
+
+.flow-path-stale td {
+  color: var(--text-muted);
+}
+
+.flow-route-changes {
+  margin-top: 12px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.flow-route-changes ul {
+  margin: 6px 0 0;
+  padding-left: 1.1rem;
 }
 
 .speed-col {

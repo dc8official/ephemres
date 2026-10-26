@@ -38,7 +38,7 @@ from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.scheduler_leader import scheduler_leader
-from app.services.topology import topology_manager
+from app.services.topology import start_topology_flow_refresh_task, topology_manager
 
 # Initialize dual console and rotating file logging
 logger = setup_logging(
@@ -58,6 +58,8 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await baseline_cache.refresh_from_db(db)
         await topology_manager.full_rebuild(db)
+    # Topology links checked against the next hops exporters report in flows
+    topology_flow_task = await start_topology_flow_refresh_task(AsyncSessionLocal)
 
     # Admin-editable runtime settings; SYSTEM_SETTINGS_SYNC pushes changes, the loop is a safety net.
     runtime_settings_task = await start_runtime_settings_refresh_task(
@@ -92,6 +94,7 @@ async def lifespan(app: FastAPI):
     )
     yield
     watchdog_task.cancel()
+    topology_flow_task.cancel()
     settings_sync_task.cancel()
     runtime_settings_task.cancel()
     await alert_dispatcher.stop()

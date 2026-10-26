@@ -169,6 +169,8 @@ class FlowCollector:
                     "tos": str(int(f.get("tos", 0) or 0)),
                     "in_if": str(f.get("input_if", 0)),
                     "out_if": str(f.get("output_if", 0)),
+                    # Empty when the record carries no next hop (or the all-zero address).
+                    "nh": str(f.get("next_hop") or ""),
                     "ts_start": f"{f.get('start_time', 0.0):.3f}",
                     "ts_end": f"{f.get('end_time', 0.0):.3f}",
                 }

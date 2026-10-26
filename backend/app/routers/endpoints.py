@@ -146,9 +146,22 @@ async def get_endpoint_rca(
         "rca_summary": rca.rca_summary,
         "baseline_snapshot": rca.baseline_snapshot,
         "failure_trace_snapshot": rca.failure_trace_snapshot,
+        "flow_evidence": getattr(rca, "flow_evidence", None),
         "is_resolved": rca.is_resolved,
     }
     return APIResponse.success(data=incident_data)
+
+
+@router.get("/{id}/flow-paths", response_model=APIResponse)
+async def get_endpoint_flow_paths(
+    id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Where exporters forwarded this endpoint's traffic (last 24 h) and route changes (7 days)."""
+    from app.services.flow_paths import endpoint_flow_paths
+
+    return APIResponse.success(data=await endpoint_flow_paths(db, id))
 
 
 @router.get("/", response_model=APIResponse)

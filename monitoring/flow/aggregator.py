@@ -6,8 +6,10 @@ import datetime
 import ipaddress
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from uuid import UUID
+
+from monitoring.flow.path_tracker import DIRECTION_FROM, DIRECTION_TO, PathTracker
 
 try:
     from app.core.orm import text
@@ -20,6 +22,11 @@ STREAM_KEY = "stream:netflow:raw"
 GROUP_NAME = "flow_agg_group"
 CONSUMER_NAME = "aggregator_worker_1"
 SENTINEL_UUID = UUID("00000000-0000-0000-0000-000000000000")
+
+# flow_path_observations rows not seen for this long, and flow_route_changes older than this,
+# are pruned hourly.
+PATH_OBSERVATION_RETENTION_DAYS = 30
+ROUTE_CHANGE_RETENTION_DAYS = 90
 
 
 KNOWN_SERVICE_PORTS = frozenset({
@@ -59,6 +66,8 @@ class FlowAggregator:
         *,
         redis_client: Any = None,
         memory_limit_mb: Optional[int] = None,
+        path_tracker: Optional[PathTracker] = None,
+        event_publisher: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.store = store_client if store_client is not None else redis_client
         # Circuit-breaker ceiling for the FastStore buffer (config.toml flow.buffer_memory_limit_mb).
@@ -83,6 +92,11 @@ class FlowAggregator:
             List[int],
         ] = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
 
+        # Forwarding paths to and from monitored endpoints; route changes go to event_publisher
+        # (the event broker) as ROUTE_HINT.
+        self.path_tracker = path_tracker if path_tracker is not None else PathTracker()
+        self.event_publisher = event_publisher
+
         self._active_interfaces_set: Set[Tuple[UUID, int]] = set()
         self._pending_msg_ids: List[str] = []
         self._flush_lock = asyncio.Lock()
@@ -91,6 +105,7 @@ class FlowAggregator:
         self._consume_task: Optional[asyncio.Task] = None
         self._flush_task: Optional[asyncio.Task] = None
         self._trim_task: Optional[asyncio.Task] = None
+        self._prune_task: Optional[asyncio.Task] = None
 
     @property
     def redis(self) -> Any:
@@ -194,6 +209,8 @@ class FlowAggregator:
         out_if: int = 0,
         tcp_flags: int = 0,
         tos: int = 0,
+        next_hop: Optional[str] = None,
+        end_time_unix: Optional[float] = None,
     ) -> None:
         if not src_ip or not dst_ip:
             return
@@ -247,8 +264,19 @@ class FlowAggregator:
                 flow_bytes=flow_bytes,
                 flow_packets=flow_packets,
             )
+            end_unix = end_time_unix if end_time_unix is not None else start_time_unix
+            for endpoint_id, direction in ((dst_ep_id, DIRECTION_TO), (src_ep_id, DIRECTION_FROM)):
+                if endpoint_id is not None and endpoint_id != exporter_id:
+                    self.path_tracker.observe(
+                        exporter_id, endpoint_id, direction, in_if, out_if, next_hop,
+                        flow_bytes, start_time_unix, end_unix,
+                    )
 
     async def flush_to_timescaledb(self) -> None:
+        await self._flush_rollups()
+        await self._flush_paths()
+
+    async def _flush_rollups(self) -> None:
         async with self._flush_lock:
             if not self._accumulator and not self._interface_accumulator and not self._pending_msg_ids:
                 return
@@ -489,6 +517,13 @@ class FlowAggregator:
                             tcp_flags = int(fields.get("flags", 0) or 0)
                             tos = int(fields.get("tos", 0) or 0)
                             ts_start = float(fields.get("ts_start", time.time()))
+                            ts_end = float(fields.get("ts_end") or ts_start)
+                            next_hop = (fields.get("nh") or "").strip() or None
+                            if next_hop is not None:
+                                try:
+                                    ipaddress.ip_address(next_hop)
+                                except ValueError:
+                                    next_hop = None
 
                             # Extract interface indexes with IPFIX 32-bit bound checks
                             raw_in_if = int(fields.get("in_if", 0))
@@ -510,6 +545,8 @@ class FlowAggregator:
                                 out_if=valid_out_if,
                                 tcp_flags=tcp_flags,
                                 tos=tos,
+                                next_hop=next_hop,
+                                end_time_unix=ts_end,
                             )
                         except Exception as parse_err:
                             logger.debug("Corrupted stream message %s: %s", msg_id, parse_err)
@@ -545,11 +582,124 @@ class FlowAggregator:
             except Exception as e:
                 logger.warning("Stream trim error: %s", e)
 
+    async def _flush_paths(self) -> None:
+        """Writes path observations and route changes, then publishes the changes.
+
+        Runs in its own transaction after the rollups: an endpoint deleted mid-batch (a foreign
+        key violation here) must never hold back the rollups. Observations whose write fails are
+        kept for the next flush; route changes are dropped with a warning.
+        """
+        async with self._flush_lock:
+            self.path_tracker.tick()
+            observations = self.path_tracker.drain_observations()
+            changes = self.path_tracker.drain_changes()
+            if not observations and not changes:
+                return
+
+            def _ts(unix: float) -> datetime.datetime:
+                return datetime.datetime.fromtimestamp(unix, tz=datetime.timezone.utc)
+
+            obs_rows = [
+                {
+                    "exporter_id": exp_id,
+                    "endpoint_id": ep_id,
+                    "direction": direction,
+                    "in_if": in_if,
+                    "out_if": out_if,
+                    "next_hop": next_hop,
+                    "first_seen": _ts(first),
+                    "last_seen": _ts(last),
+                    "bytes": int(nbytes),
+                    "flow_count": int(flows),
+                }
+                for (exp_id, ep_id, direction, in_if, out_if, next_hop), (first, last, nbytes, flows) in observations.items()
+            ]
+            change_rows = [
+                {
+                    "detected_at": c.detected_at,
+                    "exporter_id": c.exporter_id,
+                    "endpoint_id": c.endpoint_id,
+                    "direction": c.direction,
+                    "old_out_if": c.old_out_if,
+                    "old_next_hop": c.old_next_hop,
+                    "new_out_if": c.new_out_if,
+                    "new_next_hop": c.new_next_hop,
+                }
+                for c in changes
+            ]
+
+            observation_sql = text("""
+                INSERT INTO flow_path_observations (
+                    exporter_id, endpoint_id, direction, in_if, out_if, next_hop,
+                    first_seen, last_seen, bytes, flow_count
+                ) VALUES (
+                    :exporter_id, :endpoint_id, :direction, :in_if, :out_if, CAST(:next_hop AS inet),
+                    :first_seen, :last_seen, :bytes, :flow_count
+                )
+                ON CONFLICT (exporter_id, endpoint_id, direction, in_if, out_if, (COALESCE(next_hop, '0.0.0.0'::inet)))
+                DO UPDATE SET
+                    first_seen = LEAST(flow_path_observations.first_seen, EXCLUDED.first_seen),
+                    last_seen = GREATEST(flow_path_observations.last_seen, EXCLUDED.last_seen),
+                    bytes = flow_path_observations.bytes + EXCLUDED.bytes,
+                    flow_count = flow_path_observations.flow_count + EXCLUDED.flow_count;
+            """)
+            change_sql = text("""
+                INSERT INTO flow_route_changes (
+                    detected_at, exporter_id, endpoint_id, direction,
+                    old_out_if, old_next_hop, new_out_if, new_next_hop
+                ) VALUES (
+                    :detected_at, :exporter_id, :endpoint_id, :direction,
+                    :old_out_if, CAST(:old_next_hop AS inet), :new_out_if, CAST(:new_next_hop AS inet)
+                );
+            """)
+            try:
+                async with self.db_factory() as session:
+                    for i in range(0, len(obs_rows), 1000):
+                        await session.execute(observation_sql, obs_rows[i : i + 1000])
+                    if change_rows:
+                        await session.execute(change_sql, change_rows)
+                    await session.commit()
+            except Exception as e:
+                logger.warning("Failed to persist %d path observations / %d route changes: %s", len(obs_rows), len(change_rows), e)
+                self.path_tracker.restore_observations(observations)
+                return
+
+        for change in changes:
+            logger.info(
+                "Route change seen in flows: exporter %s now sends traffic %s endpoint %s out if%s via %s (was if%s via %s).",
+                change.exporter_id, change.direction, change.endpoint_id, change.new_out_if,
+                change.new_next_hop or "no next hop", change.old_out_if, change.old_next_hop or "no next hop",
+            )
+            if self.event_publisher is not None:
+                try:
+                    await self.event_publisher("ROUTE_HINT", change.to_event())
+                except Exception as pub_err:
+                    logger.warning("Failed to publish ROUTE_HINT: %s", pub_err)
+
+    async def _prune_loop(self) -> None:
+        """Drops stale path observations and old route changes once an hour."""
+        while self._running:
+            try:
+                await asyncio.sleep(3600.0)
+                async with self.db_factory() as session:
+                    await session.execute(
+                        text(f"DELETE FROM flow_path_observations WHERE last_seen < now() - INTERVAL '{PATH_OBSERVATION_RETENTION_DAYS} days'")
+                    )
+                    await session.execute(
+                        text(f"DELETE FROM flow_route_changes WHERE detected_at < now() - INTERVAL '{ROUTE_CHANGE_RETENTION_DAYS} days'")
+                    )
+                    await session.commit()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Path observation prune error: %s", e)
+
     async def start(self) -> None:
         self._running = True
         self._consume_task = asyncio.create_task(self._consume_stream())
         self._flush_task = asyncio.create_task(self._flush_loop())
         self._trim_task = asyncio.create_task(self._stream_trim_loop())
+        self._prune_task = asyncio.create_task(self._prune_loop())
         logger.info("FlowAggregator started.")
 
     async def stop(self) -> None:
@@ -564,6 +714,9 @@ class FlowAggregator:
         if self._trim_task:
             self._trim_task.cancel()
             tasks.append(self._trim_task)
+        if self._prune_task:
+            self._prune_task.cancel()
+            tasks.append(self._prune_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self.flush_to_timescaledb()

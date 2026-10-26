@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import ipaddress
 import json
 import logging
@@ -9,8 +10,10 @@ from uuid import UUID
 from app.core.orm import text
 from app.core.orm import AsyncSession
 
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.services.baseline_route import refresh_baseline_route
+from app.services.flow_paths import flow_evidence
 from app.services.diagnostics import run_throttled_traceroute
 from app.services.driver_manager import driver_manager
 
@@ -227,6 +230,40 @@ async def run_differential_rca(
         except (Exception, StopIteration, StopAsyncIteration) as exc:
             logger.debug("Could not query symptom endpoints: %s", exc)
 
+        # Flow evidence, added after the incident is recorded (traceroute stays the verdict):
+        # which path real traffic last took and whether it still flowed after probes started
+        # failing (probes fail for the confirmation cycles before the RCA runs). A savepoint keeps
+        # a failed evidence query from aborting the incident.
+        evidence: Optional[Dict[str, Any]] = None
+        if incident_id:
+            try:
+                await session.execute(text("SAVEPOINT rca_flow_evidence"))
+                try:
+                    monitoring_cfg = getattr(settings, "monitoring", None)
+                    failing_seconds = int(getattr(monitoring_cfg, "interval_seconds", 60)) * int(
+                        getattr(monitoring_cfg, "state_confirmation_cycles", 3)
+                    )
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    evidence = await flow_evidence(
+                        session, endpoint_id, now - datetime.timedelta(seconds=failing_seconds), now=now
+                    )
+                    if evidence is not None:
+                        await session.execute(
+                            text("""
+                                UPDATE endpoint_rca_incidents SET flow_evidence = CAST(:evidence AS jsonb)
+                                WHERE id = CAST(:incident_id AS uuid)
+                            """),
+                            {"evidence": json.dumps(evidence), "incident_id": incident_id},
+                        )
+                    await session.execute(text("RELEASE SAVEPOINT rca_flow_evidence"))
+                except Exception as exc:
+                    evidence = None
+                    await session.execute(text("ROLLBACK TO SAVEPOINT rca_flow_evidence"))
+                    logger.debug("Flow evidence unavailable for RCA of %s: %s", endpoint_id, exc)
+            except Exception as exc:
+                evidence = None
+                logger.debug("Could not record RCA flow evidence for %s: %s", endpoint_id, exc)
+
         # Publish RCA_INCIDENT event to event broker
         try:
             broker = driver_manager.get_event_broker()
@@ -256,6 +293,7 @@ async def run_differential_rca(
             "rca_summary": rca_summary,
             "baseline_snapshot": baseline_hops,
             "failure_trace_snapshot": live_hops,
+            "flow_evidence": evidence,
         }
 
     if db is not None:
