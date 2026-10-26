@@ -51,6 +51,7 @@ from app.services.flow_metrics import (
     TRAFFIC_ZONES,
     bits_per_second,
     classify_zone,
+    configured_speed_mbps,
     dscp_breakdown,
     dscp_from_tos,
     interface_alias,
@@ -178,42 +179,50 @@ def _select_rollup_model_and_bucket_seconds(
         return FlowMinuteRollup, 60.0
 
 
+def _sum_where(condition: Any, column: Any) -> Any:
+    """SUM(column) over the rows matching `condition`, 0 when none do."""
+    return func.coalesce(func.sum(case((condition, column), else_=0)), 0)
+
+
+# The overview averages the last five complete minutes; the current minute is still filling.
+OVERVIEW_WINDOW_SECONDS = 300
+
+
 @router.get("/overview", response_model=APIResponse)
 async def get_bandwidth_overview(
+    exporter_id: Optional[UUID] = Query(default=None),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Fleet-wide real-time Ingress/Egress throughput, packet rates, and forensic anomalies.
+    """Throughput, packet rates and TCP anomalies over the last five complete minutes.
 
-    Aggregates flow telemetry over the trailing 5-minute rolling window:
-    - Ingress/Egress bit rates (bps): (bytes * 8.0) / 300.0.
-    - Ingress/Egress packet rates (pps): packets / 300.0.
-    - Mean packet physics (avg_packet_size): total_bytes / total_packets.
-    - Security anomalies: TCP SYN scans (half-open probes) and TCP RST bursts (rejected connections).
+    Fleet-wide by default, or for one exporter with `exporter_id`.
+    - Ingress: flows towards a monitored endpoint; egress: flows from one. A flow between two
+      monitored endpoints counts in both.
+    - Transit: flows with no monitored endpoint on either side, reported separately.
+    - avg_packet_size: total bytes / total packets.
+    - Anomalies: SYN-only (half-open) and RST-without-FIN flows.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
-    five_min_ago = now - datetime.timedelta(minutes=5)
+    window_end = now.replace(second=0, microsecond=0)
+    window_start = window_end - datetime.timedelta(seconds=OVERVIEW_WINDOW_SECONDS)
+    window_filters = [FlowMinuteRollup.bucket >= window_start, FlowMinuteRollup.bucket < window_end]
+    if exporter_id is not None:
+        window_filters.append(FlowMinuteRollup.exporter_id == exporter_id)
+
+    to_endpoint = FlowMinuteRollup.dst_endpoint_id.is_not(None)
+    from_endpoint = FlowMinuteRollup.src_endpoint_id.is_not(None)
+    unattributed = FlowMinuteRollup.src_endpoint_id.is_(None) & FlowMinuteRollup.dst_endpoint_id.is_(None)
 
     stmt = select(
         func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
-        func.coalesce(
-            func.sum(
-                case(
-                    (FlowMinuteRollup.dst_endpoint_id.is_not(None), FlowMinuteRollup.bytes),
-                    else_=0,
-                )
-            ),
-            0,
-        ).label("ingress_bytes"),
-        func.coalesce(
-            func.sum(
-                case(
-                    (FlowMinuteRollup.src_endpoint_id.is_not(None), FlowMinuteRollup.bytes),
-                    else_=0,
-                )
-            ),
-            0,
-        ).label("egress_bytes"),
+        _sum_where(to_endpoint, FlowMinuteRollup.bytes).label("ingress_bytes"),
+        _sum_where(from_endpoint, FlowMinuteRollup.bytes).label("egress_bytes"),
+        _sum_where(unattributed, FlowMinuteRollup.bytes).label("transit_bytes"),
+        func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
+        _sum_where(to_endpoint, FlowMinuteRollup.packets).label("ingress_packets"),
+        _sum_where(from_endpoint, FlowMinuteRollup.packets).label("egress_packets"),
+        _sum_where(unattributed, FlowMinuteRollup.packets).label("transit_packets"),
         func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("total_flows"),
         func.count(
             func.distinct(
@@ -223,85 +232,33 @@ async def get_bandwidth_overview(
                 )
             )
         ).label("active_exporters"),
-        func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
-        func.coalesce(
-            func.sum(
-                case(
-                    (FlowMinuteRollup.dst_endpoint_id.is_not(None), FlowMinuteRollup.packets),
-                    else_=0,
-                )
-            ),
-            0,
-        ).label("ingress_packets"),
-        func.coalesce(
-            func.sum(
-                case(
-                    (FlowMinuteRollup.src_endpoint_id.is_not(None), FlowMinuteRollup.packets),
-                    else_=0,
-                )
-            ),
-            0,
-        ).label("egress_packets"),
-    ).where(FlowMinuteRollup.bucket >= five_min_ago)
+    ).where(*window_filters)
 
     res = await db.execute(stmt)
     row = res.one_or_none()
+    (
+        total_bytes,
+        ingress_bytes,
+        egress_bytes,
+        transit_bytes,
+        total_packets,
+        ingress_packets,
+        egress_packets,
+        transit_packets,
+        total_flows,
+        active_exporters,
+    ) = (int(v or 0) for v in (row if row else (0,) * 10))
 
-    total_packets = 0
-    ingress_packets = 0
-    egress_packets = 0
-
-    if row and len(row) >= 8:
-        total_bytes = int(row[0] or 0)
-        ingress_bytes = int(row[1] or 0)
-        egress_bytes = int(row[2] or 0)
-        total_flows = int(row[3] or 0)
-        active_exporters = int(row[4] or 0)
-        total_packets = int(row[5] or 0)
-        ingress_packets = int(row[6] or 0)
-        egress_packets = int(row[7] or 0)
-        if ingress_bytes == 0 and egress_bytes == 0 and total_bytes > 0:
-            ingress_bytes = total_bytes // 2
-            egress_bytes = total_bytes - ingress_bytes
-        if ingress_packets == 0 and egress_packets == 0 and total_packets > 0:
-            ingress_packets = total_packets // 2
-            egress_packets = total_packets - ingress_packets
-    elif row and len(row) >= 5:
-        total_bytes = int(row[0] or 0)
-        ingress_bytes = int(row[1] or 0)
-        egress_bytes = int(row[2] or 0)
-        total_flows = int(row[3] or 0)
-        active_exporters = int(row[4] or 0)
-        if ingress_bytes == 0 and egress_bytes == 0 and total_bytes > 0:
-            ingress_bytes = total_bytes // 2
-            egress_bytes = total_bytes - ingress_bytes
-    elif row and len(row) >= 3:
-        total_bytes = int(row[0] or 0)
-        total_flows = int(row[1] or 0)
-        active_exporters = int(row[2] or 0)
-        ingress_bytes = total_bytes // 2
-        egress_bytes = total_bytes - ingress_bytes
-    else:
-        total_bytes = ingress_bytes = egress_bytes = total_flows = active_exporters = 0
-
-    # Calculate average bps and pps over 300 seconds
-    ingress_bps = bits_per_second(ingress_bytes, 300.0) if ingress_bytes > 0 else 0.0
-    egress_bps = bits_per_second(egress_bytes, 300.0) if egress_bytes > 0 else 0.0
-    total_ingress_pps = round(float(ingress_packets) / 300.0, 2) if ingress_packets > 0 else 0.0
-    total_egress_pps = round(float(egress_packets) / 300.0, 2) if egress_packets > 0 else 0.0
+    seconds = float(OVERVIEW_WINDOW_SECONDS)
     avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
 
-    # Calculate anomaly flows count over 5-minute window (TCP SYN scan or RST bursts)
     stmt_anomaly = (
         select(
             FlowMinuteRollup.protocol,
             FlowMinuteRollup.tcp_flags,
             func.sum(FlowMinuteRollup.flow_count),
         )
-        .where(
-            FlowMinuteRollup.bucket >= five_min_ago,
-            FlowMinuteRollup.protocol == 6,
-        )
+        .where(*window_filters, FlowMinuteRollup.protocol == 6)
         .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
     )
     anomaly_flows_count = 0
@@ -329,15 +286,19 @@ async def get_bandwidth_overview(
 
     return APIResponse.success(
         data=BandwidthOverview(
-            total_ingress_bps=round(ingress_bps, 2),
-            total_egress_bps=round(egress_bps, 2),
+            total_ingress_bps=round(bits_per_second(ingress_bytes, seconds), 2),
+            total_egress_bps=round(bits_per_second(egress_bytes, seconds), 2),
+            total_transit_bps=round(bits_per_second(transit_bytes, seconds), 2),
             active_exporters_count=active_exporters,
             unmatched_exporters_count=unmatched_count,
             total_flows_count=total_flows,
-            total_ingress_pps=total_ingress_pps,
-            total_egress_pps=total_egress_pps,
+            total_ingress_pps=round(ingress_packets / seconds, 2),
+            total_egress_pps=round(egress_packets / seconds, 2),
+            total_transit_pps=round(transit_packets / seconds, 2),
             avg_packet_size=avg_packet_size,
             anomaly_flows_count=anomaly_flows_count,
+            window_seconds=OVERVIEW_WINDOW_SECONDS,
+            exporter_id=exporter_id,
         )
     )
 
@@ -412,65 +373,47 @@ async def get_traffic_series(
             )
 
         return APIResponse.success(
-            data=TrafficSeriesResponse(window=window, points=points)
+            data=TrafficSeriesResponse(window=window, points=points, bucket_seconds=60)
         )
 
     # Standard endpoint or fleet-wide flow rollup query
     model, bucket_seconds = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
+    directional = hasattr(model, "src_endpoint_id")
 
     filters = [model.bucket >= start_time]
     if exporter_id:
         filters.append(model.exporter_id == exporter_id)
-    if endpoint_id and hasattr(model, "src_endpoint_id"):
+    if endpoint_id and directional:
         filters.append(
             (model.src_endpoint_id == endpoint_id)
             | (model.dst_endpoint_id == endpoint_id)
         )
 
-    # Ingress / Egress calculations via case expressions
-    if endpoint_id and hasattr(model, "src_endpoint_id"):
-        ingress_calc = func.sum(
-            case((model.dst_endpoint_id == endpoint_id, model.bytes), else_=0)
-        )
-        egress_calc = func.sum(
-            case((model.src_endpoint_id == endpoint_id, model.bytes), else_=0)
-        )
-        ingress_pkt_calc = func.sum(
-            case((model.dst_endpoint_id == endpoint_id, model.packets), else_=0)
-        )
-        egress_pkt_calc = func.sum(
-            case((model.src_endpoint_id == endpoint_id, model.packets), else_=0)
-        )
-    elif hasattr(model, "src_endpoint_id"):
-        ingress_calc = func.sum(
-            case((model.dst_endpoint_id.is_not(None), model.bytes), else_=0)
-        )
-        egress_calc = func.sum(
-            case((model.src_endpoint_id.is_not(None), model.bytes), else_=0)
-        )
-        ingress_pkt_calc = func.sum(
-            case((model.dst_endpoint_id.is_not(None), model.packets), else_=0)
-        )
-        egress_pkt_calc = func.sum(
-            case((model.src_endpoint_id.is_not(None), model.packets), else_=0)
-        )
+    if endpoint_id and directional:
+        # Every row involves the endpoint, so nothing is transit.
+        to_side = model.dst_endpoint_id == endpoint_id
+        from_side = model.src_endpoint_id == endpoint_id
+        transit_side = None
+    elif directional:
+        to_side = model.dst_endpoint_id.is_not(None)
+        from_side = model.src_endpoint_id.is_not(None)
+        transit_side = model.src_endpoint_id.is_(None) & model.dst_endpoint_id.is_(None)
     else:
-        ingress_calc = func.sum(model.bytes) / 2
-        egress_calc = func.sum(model.bytes) / 2
-        ingress_pkt_calc = func.sum(model.packets) / 2
-        egress_pkt_calc = func.sum(model.packets) / 2
+        # The daily tier keeps no endpoint attribution: everything is reported as transit.
+        to_side = from_side = None
+        transit_side = True
+
+    # Only the sides this tier can resolve are queried; the rest stay 0.
+    measures: List[Tuple[str, Any]] = [("flow_count", func.coalesce(func.sum(model.flow_count), 0))]
+    for side, condition in (("ingress", to_side), ("egress", from_side), ("transit", transit_side)):
+        if condition is None:
+            continue
+        for unit, column in (("bytes", model.bytes), ("packets", model.packets)):
+            expr = func.coalesce(func.sum(column), 0) if condition is True else _sum_where(condition, column)
+            measures.append((f"{side}_{unit}", expr))
 
     stmt = (
-        select(
-            model.bucket,
-            func.coalesce(func.sum(model.bytes), 0).label("total_bytes"),
-            func.coalesce(ingress_calc, 0).label("ingress_bytes"),
-            func.coalesce(egress_calc, 0).label("egress_bytes"),
-            func.coalesce(func.sum(model.packets), 0).label("total_packets"),
-            func.coalesce(ingress_pkt_calc, 0).label("ingress_packets"),
-            func.coalesce(egress_pkt_calc, 0).label("egress_packets"),
-            func.coalesce(func.sum(model.flow_count), 0).label("flow_count"),
-        )
+        select(model.bucket, *(expr.label(name) for name, expr in measures))
         .where(*filters)
         .group_by(model.bucket)
         .order_by(model.bucket.asc())
@@ -482,51 +425,32 @@ async def get_traffic_series(
     points: List[TrafficSeriesPoint] = []
     for row in rows:
         bucket_time = row[0]
-        byte_sum = int(row[1] or 0)
-        in_bytes = int(row[2] or 0) if len(row) > 2 else 0
-        eg_bytes = int(row[3] or 0) if len(row) > 3 else 0
-        pkt_sum = int(row[4] or 0) if len(row) > 4 else 0
-        in_pkts = int(row[5] or 0) if len(row) > 5 else 0
-        eg_pkts = int(row[6] or 0) if len(row) > 6 else 0
-        flows_cnt = int(row[7] or 0) if len(row) > 7 else 0
-
-        # If there is transit traffic not captured by monitored endpoint attribution:
-        transit_bytes = max(0, byte_sum - (in_bytes + eg_bytes))
-        if transit_bytes > 0:
-            in_bytes += transit_bytes // 2
-            eg_bytes += (transit_bytes - transit_bytes // 2)
-        elif in_bytes == 0 and eg_bytes == 0 and byte_sum > 0:
-            in_bytes = byte_sum // 2
-            eg_bytes = byte_sum - in_bytes
-
-        transit_pkts = max(0, pkt_sum - (in_pkts + eg_pkts))
-        if transit_pkts > 0:
-            in_pkts += transit_pkts // 2
-            eg_pkts += (transit_pkts - transit_pkts // 2)
-        elif in_pkts == 0 and eg_pkts == 0 and pkt_sum > 0:
-            in_pkts = pkt_sum // 2
-            eg_pkts = pkt_sum - in_pkts
-
-        in_bps = bits_per_second(in_bytes, bucket_seconds)
-        eg_bps = bits_per_second(eg_bytes, bucket_seconds)
-        in_pps = round(float(in_pkts) / bucket_seconds, 2)
-        eg_pps = round(float(eg_pkts) / bucket_seconds, 2)
-        flows_per_sec = round(float(flows_cnt) / bucket_seconds, 2)
+        values = {name: int(row[i + 1] or 0) for i, (name, _) in enumerate(measures)}
+        in_bytes, eg_bytes, tr_bytes = (values.get(f"{side}_bytes", 0) for side in ("ingress", "egress", "transit"))
+        in_pkts, eg_pkts, tr_pkts = (values.get(f"{side}_packets", 0) for side in ("ingress", "egress", "transit"))
+        flows_cnt = values["flow_count"]
 
         iso_str = bucket_time.astimezone(datetime.timezone.utc).isoformat()
         points.append(
             TrafficSeriesPoint(
                 timestamp=iso_str,
-                ingress_bps=round(in_bps, 2),
-                egress_bps=round(eg_bps, 2),
-                ingress_pps=in_pps,
-                egress_pps=eg_pps,
-                flows_per_sec=flows_per_sec,
+                ingress_bps=round(bits_per_second(in_bytes, bucket_seconds), 2),
+                egress_bps=round(bits_per_second(eg_bytes, bucket_seconds), 2),
+                transit_bps=round(bits_per_second(tr_bytes, bucket_seconds), 2),
+                ingress_pps=round(float(in_pkts) / bucket_seconds, 2),
+                egress_pps=round(float(eg_pkts) / bucket_seconds, 2),
+                transit_pps=round(float(tr_pkts) / bucket_seconds, 2),
+                flows_per_sec=round(float(flows_cnt) / bucket_seconds, 2),
             )
         )
 
     return APIResponse.success(
-        data=TrafficSeriesResponse(window=window, points=points)
+        data=TrafficSeriesResponse(
+            window=window,
+            points=points,
+            bucket_seconds=int(bucket_seconds),
+            directional=directional,
+        )
     )
 
 
@@ -1342,9 +1266,11 @@ async def get_interfaces_telemetry(
         in_bps = bits_per_second(in_b, window_seconds)
         out_bps = bits_per_second(out_b, window_seconds)
 
-        name, speed_mbps = interface_alias(aliases.get(str(if_idx)), f"Interface {if_idx}")
+        alias_data = aliases.get(str(if_idx))
+        name, speed_mbps = interface_alias(alias_data, f"Interface {if_idx}")
         speed_mbps = max(1, speed_mbps)
-        utilization = round(utilization_pct(max(in_bps, out_bps), speed_mbps), 2)
+        speed_configured = configured_speed_mbps(alias_data) is not None
+        utilization = round(utilization_pct(max(in_bps, out_bps), speed_mbps), 2) if speed_configured else None
         is_active = (if_idx in active_store_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
 
         interfaces.append(
@@ -1352,6 +1278,7 @@ async def get_interfaces_telemetry(
                 interface_idx=if_idx,
                 name=name,
                 speed_mbps=speed_mbps,
+                speed_configured=speed_configured,
                 in_bytes=in_b,
                 out_bytes=out_b,
                 in_bps=round(in_bps, 2),

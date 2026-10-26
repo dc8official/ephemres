@@ -7,7 +7,10 @@
     :aria-pressed="clickable ? active : undefined"
     @click="clickable && emit('select')"
   >
-    <span class="kpi-tile-label">{{ label }}</span>
+    <span class="kpi-tile-label">
+      <span v-if="marker" class="kpi-tile-marker" :style="{ background: marker }" aria-hidden="true"></span>
+      {{ label }}
+    </span>
     <span class="kpi-tile-value tnum" :class="`tone-${tone}`">
       <template v-if="value === null || value === undefined || value === ''">—</template>
       <template v-else>{{ value }}<span v-if="unit" class="kpi-tile-unit">{{ unit }}</span></template>
@@ -21,6 +24,7 @@
 <script setup>
 // Headline number tile. A missing value renders as "—" rather than a made-up 0 or 100 %.
 // With `clickable` it becomes a toggle button (e.g. a status filter) and emits `select`.
+// `marker` (a CSS color) adds a swatch before the label to tie the tile to a chart series.
 defineProps({
   label: { type: String, required: true },
   value: { type: [String, Number], default: null },
@@ -31,6 +35,7 @@ defineProps({
     default: 'neutral',
     validator: (v) => ['neutral', 'up', 'warn', 'down', 'info', 'unknown'].includes(v),
   },
+  marker: { type: String, default: '' },
   clickable: { type: Boolean, default: false },
   active: { type: Boolean, default: false },
 })
@@ -68,11 +73,21 @@ const emit = defineEmits(['select'])
 }
 
 .kpi-tile-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
   font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-secondary);
+}
+
+.kpi-tile-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 
 .kpi-tile-value {

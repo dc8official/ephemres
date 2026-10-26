@@ -23,6 +23,7 @@ from app.services.flow_metrics import (
     ZONE_NORTH_SOUTH_INGRESS,
     bits_per_second,
     classify_zone,
+    configured_speed_mbps,
     dscp_breakdown,
     interface_alias,
     is_internal_address,
@@ -394,8 +395,11 @@ async def compile_bandwidth_report_data(
         avg_out_bps = bits_per_second(out_bytes, total_window_sec)
 
         aliases = getattr(router, "flow_interface_aliases", {}) or {}
-        if_name, speed_mbps = interface_alias(aliases.get(str(if_idx), {}), f"Interface #{if_idx}")
-        util_pct = utilization_pct(peak_rate_bps, speed_mbps)
+        alias_entry = aliases.get(str(if_idx), {})
+        if_name, speed_mbps = interface_alias(alias_entry, f"Interface #{if_idx}")
+        speed_configured = configured_speed_mbps(alias_entry) is not None
+        # Without a configured link speed utilization would be measured against a guess.
+        util_pct = utilization_pct(peak_rate_bps, speed_mbps) if speed_configured else None
 
         exporter_stats[exp_id]["in_bytes"] += in_bytes
         exporter_stats[exp_id]["out_bytes"] += out_bytes
@@ -407,7 +411,8 @@ async def compile_bandwidth_report_data(
             "interface_idx": if_idx,
             "interface_name": if_name,
             "speed_mbps": speed_mbps,
-            "formatted_speed": format_speed(speed_mbps),
+            "formatted_speed": format_speed(speed_mbps) if speed_configured else "Not set",
+            "speed_configured": speed_configured,
             "formatted_in_bps": format_bps(avg_in_bps),
             "formatted_out_bps": format_bps(avg_out_bps),
             "formatted_peak_bps": format_bps(peak_rate_bps),

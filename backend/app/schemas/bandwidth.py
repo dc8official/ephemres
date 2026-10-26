@@ -7,10 +7,11 @@ from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 
 class BandwidthOverview(BaseModel):
-    """Real-time 5-minute snapshot of network flow telemetry across all active exporters.
+    """Snapshot of the last five complete minutes of flow telemetry, fleet-wide or for one exporter.
 
-    Provides fleet-wide ingress/egress bit rates, packet rates (pps), mean packet physics,
-    exporter counts, and detected security anomaly counts (half-open SYN scans or TCP RST bursts).
+    Ingress counts flows towards a monitored endpoint and egress flows from one; a flow between
+    two monitored endpoints counts in both. Transit is traffic with no monitored endpoint on
+    either side; it is reported on its own rather than split into ingress and egress.
     """
     total_ingress_bps: float
     total_egress_bps: float
@@ -19,8 +20,12 @@ class BandwidthOverview(BaseModel):
     total_flows_count: int
     total_ingress_pps: float = 0.0
     total_egress_pps: float = 0.0
+    total_transit_bps: float = 0.0
+    total_transit_pps: float = 0.0
     avg_packet_size: int = 0
     anomaly_flows_count: int = 0
+    window_seconds: int = 300
+    exporter_id: Optional[UUID] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -36,15 +41,24 @@ class TrafficSeriesPoint(BaseModel):
     egress_bps: float
     ingress_pps: float = 0.0
     egress_pps: float = 0.0
+    transit_bps: float = 0.0
+    transit_pps: float = 0.0
     flows_per_sec: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class TrafficSeriesResponse(BaseModel):
-    """Time-series query response encapsulating window metadata and data points."""
+    """Time-series query response encapsulating window metadata and data points.
+
+    `bucket_seconds` is the width of each point. `directional` is False when the rollup tier
+    keeps no endpoint attribution (fleet-wide 30d/1y), in which case all bytes are reported as
+    transit and ingress/egress are zero.
+    """
     window: str
     points: List[TrafficSeriesPoint]
+    bucket_seconds: int = 60
+    directional: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -290,7 +304,9 @@ class ExportersResponse(BaseModel):
 class InterfaceTelemetryItem(BaseModel):
     interface_idx: int
     name: str
+    # Configured link speed, or the 1 Gbps default when `speed_configured` is False.
     speed_mbps: int
+    speed_configured: bool = True
     in_bytes: int
     out_bytes: int
     in_bps: float
@@ -298,7 +314,8 @@ class InterfaceTelemetryItem(BaseModel):
     in_packets: int
     out_packets: int
     flow_count: int
-    utilization_percentage: float
+    # None when the link speed is not configured: utilization against a guessed speed is not shown.
+    utilization_percentage: Optional[float] = None
     is_active: bool
 
     model_config = ConfigDict(from_attributes=True)

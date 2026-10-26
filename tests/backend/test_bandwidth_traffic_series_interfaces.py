@@ -104,13 +104,14 @@ def test_traffic_series_fleet_transit_traffic_preservation(client):
     test_client, mock_session = client
     bucket_dt = datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0)
 
-    # Fleet-wide rollup: total 11 Mbps transit flow (82.5 MB),
-    # but monitored endpoints only captured 60 bytes (8 kbps) of probe ingress
-    total_bytes = 82_500_000
+    # Fleet-wide rollup: 11 Mbps of transit (82.5 MB with no monitored endpoint on either side),
+    # while monitored endpoints only exchanged 60 bytes each way.
+    transit_bytes = 82_500_000
     monitored_in = 60
     monitored_eg = 60
 
-    mock_row = (bucket_dt, total_bytes, monitored_in, monitored_eg)
+    # (bucket, flow_count, ingress bytes/packets, egress bytes/packets, transit bytes/packets)
+    mock_row = (bucket_dt, 3, monitored_in, 1, monitored_eg, 1, transit_bytes, 60_000)
     mock_res = MagicMock()
     mock_res.all.return_value = [mock_row]
     mock_session.execute = AsyncMock(return_value=mock_res)
@@ -120,6 +121,8 @@ def test_traffic_series_fleet_transit_traffic_preservation(client):
     data = res.json()["data"]
     assert len(data["points"]) == 1
     pt = data["points"][0]
-    # The 11 Mbps transit traffic is preserved, split across ingress/egress, instead of being squashed to 8 bps!
-    assert pt["ingress_bps"] > 5000000.0
-    assert pt["egress_bps"] > 5000000.0
+    # The 11 Mbps of transit is preserved as its own series instead of being split 50/50 into
+    # ingress/egress (v3.3.2.v behaviour) or dropped.
+    assert pt["transit_bps"] == 11_000_000.0
+    assert pt["ingress_bps"] == 8.0
+    assert pt["egress_bps"] == 8.0

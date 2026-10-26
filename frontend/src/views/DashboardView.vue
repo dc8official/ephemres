@@ -17,25 +17,11 @@
         </div>
       </div>
       <div class="toolbar-right">
-        <!-- Dual View Switcher -->
-        <div class="view-switcher">
-          <button 
-            class="btn-view" 
-            :class="{ active: viewMode === 'grid' }" 
-            @click="viewMode = 'grid'"
-            title="Visual Card Grid"
-          >
-            ▦ Cards
-          </button>
-          <button 
-            class="btn-view" 
-            :class="{ active: viewMode === 'table' }" 
-            @click="viewMode = 'table'"
-            title="Dense Sortable Data Table"
-          >
-            ☰ Table
-          </button>
-        </div>
+        <SegmentedControl
+          v-model="viewMode"
+          aria-label="Endpoint view"
+          :options="[{ value: 'grid', label: 'Cards', title: 'Card grid' }, { value: 'table', label: 'Table', title: 'Sortable table' }]"
+        />
 
         <TelemetryExportPopover :endpoints="filteredEndpoints" />
 
@@ -58,58 +44,53 @@
 
     <!-- Global Network Health KPI Strip -->
     <div class="kpi-strip">
-      <div 
-        class="kpi-card" 
-        :class="{ active: statusFilter === 'ALL' }" 
-        @click="statusFilter = 'ALL'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = 'ALL'"
-      >
-        <span class="kpi-label">Total Monitored</span>
-        <span class="kpi-value tnum">{{ kpiStats.total }}</span>
-      </div>
-
-      <div 
-        class="kpi-card kpi-up" 
-        :class="{ active: statusFilter === 'UP' }" 
-        @click="statusFilter = statusFilter === 'UP' ? 'ALL' : 'UP'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'UP' ? 'ALL' : 'UP'"
-      >
-        <span class="kpi-label">🟢 UP</span>
-        <span class="kpi-value tnum text-up">{{ kpiStats.up }}</span>
-      </div>
-
-      <div 
-        class="kpi-card kpi-unstable" 
-        :class="{ active: statusFilter === 'UNSTABLE' }" 
-        @click="statusFilter = statusFilter === 'UNSTABLE' ? 'ALL' : 'UNSTABLE'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'UNSTABLE' ? 'ALL' : 'UNSTABLE'"
-      >
-        <span class="kpi-label">🟡 UNSTABLE</span>
-        <span class="kpi-value tnum text-unstable">{{ kpiStats.unstable }}</span>
-      </div>
-
-      <div 
-        class="kpi-card kpi-down" 
-        :class="{ active: statusFilter === 'DOWN' }" 
-        @click="statusFilter = statusFilter === 'DOWN' ? 'ALL' : 'DOWN'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'DOWN' ? 'ALL' : 'DOWN'"
-      >
-        <span class="kpi-label">🔴 DOWN</span>
-        <span class="kpi-value tnum text-down">{{ kpiStats.down }}</span>
-      </div>
-
-      <div class="kpi-card kpi-sla">
-        <span class="kpi-label">📈 Fleet SLA (24h)</span>
-        <span class="kpi-value tnum text-accent">{{ kpiStats.sla }}%</span>
-      </div>
+      <KpiTile
+        label="Total"
+        :value="kpiStats.total"
+        clickable
+        :active="statusFilter === 'ALL'"
+        @select="statusFilter = 'ALL'"
+      />
+      <KpiTile
+        label="Up"
+        :value="kpiStats.up"
+        :tone="kpiStats.up ? 'up' : 'neutral'"
+        clickable
+        :active="statusFilter === 'UP'"
+        @select="toggleStatusFilter('UP')"
+      />
+      <KpiTile
+        label="Unstable"
+        :value="kpiStats.unstable"
+        :tone="kpiStats.unstable ? 'warn' : 'neutral'"
+        clickable
+        :active="statusFilter === 'UNSTABLE'"
+        @select="toggleStatusFilter('UNSTABLE')"
+      />
+      <KpiTile
+        label="Down"
+        :value="kpiStats.down"
+        :tone="kpiStats.down ? 'down' : 'neutral'"
+        clickable
+        :active="statusFilter === 'DOWN'"
+        @select="toggleStatusFilter('DOWN')"
+      />
+      <KpiTile
+        label="No status"
+        :value="kpiStats.noStatus"
+        tone="unknown"
+        sub="Passive, paused or not probed yet"
+        clickable
+        :active="statusFilter === 'NO_STATUS'"
+        @select="toggleStatusFilter('NO_STATUS')"
+      />
+      <KpiTile
+        label="Mean uptime (24h)"
+        :value="kpiStats.meanUptime"
+        :unit="kpiStats.meanUptime === null ? '' : '%'"
+        :tone="kpiStats.meanUptime === null ? 'unknown' : uptimeTone(kpiStats.meanUptimeRaw)"
+        :sub="kpiStats.uptimeCount ? `${kpiStats.uptimeCount} monitored · target ${DEFAULT_SLA_TARGET}%` : 'No monitored targets'"
+      />
     </div>
 
     <!-- Endpoints Content -->
@@ -132,7 +113,7 @@
       </div>
 
       <div v-else-if="filteredEndpoints.length === 0" class="empty-state">
-        <p class="empty-title">No endpoints match filter "{{ statusFilter }}"</p>
+        <p class="empty-title">No endpoints match filter "{{ statusFilterLabel }}"</p>
         <button class="btn-secondary" @click="statusFilter = 'ALL'">Clear Filter</button>
       </div>
 
@@ -158,13 +139,15 @@
           <table class="dense-table" aria-label="Monitored Endpoints Table">
             <thead>
               <tr>
-                <th style="width: 40px;">
-                  <input 
-                    type="checkbox" 
-                    :checked="isAllSelected" 
-                    @change="toggleSelectAll"
-                    aria-label="Select all endpoints" 
-                  />
+                <th style="width: 44px;">
+                  <label class="select-target">
+                    <input
+                      type="checkbox"
+                      :checked="isAllSelected"
+                      @change="toggleSelectAll"
+                      aria-label="Select all endpoints"
+                    />
+                  </label>
                 </th>
                 <th @click="handleSort('hostname')" class="sortable-th">
                   Hostname {{ sortKey === 'hostname' ? (sortAsc ? '▲' : '▼') : '' }}
@@ -181,14 +164,14 @@
                 <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right">
                   Avg Latency {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('packet_loss_pct')" class="sortable-th text-right">
-                  Loss % {{ sortKey === 'packet_loss_pct' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th class="text-right" title="Packet loss needs per-probe history, which is not recorded yet">
+                  Loss %
                 </th>
                 <th @click="handleSort('uptime_pct')" class="sortable-th text-right">
                   24h Uptime {{ sortKey === 'uptime_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('last_seen')" class="sortable-th">
-                  Last Seen {{ sortKey === 'last_seen' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('last_seen')" class="sortable-th" title="When the current state began">
+                  In state since {{ sortKey === 'last_seen' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
                 <th class="text-right">Actions</th>
               </tr>
@@ -202,12 +185,14 @@
                 @click="navigateTo(ep.id)"
               >
                 <td @click.stop>
-                  <input 
-                    type="checkbox" 
-                    :checked="selectedIdSet.has(ep.id)" 
-                    @change="toggleEndpointSelect(ep.id)"
-                    aria-label="Select endpoint" 
-                  />
+                  <label class="select-target">
+                    <input
+                      type="checkbox"
+                      :checked="selectedIdSet.has(ep.id)"
+                      @change="toggleEndpointSelect(ep.id)"
+                      :aria-label="`Select ${ep.hostname}`"
+                    />
+                  </label>
                 </td>
                 <td class="font-bold">{{ ep.hostname }}</td>
                 <td class="font-mono tnum">{{ ep.ip_address }}</td>
@@ -221,20 +206,18 @@
                 <td class="font-mono tnum text-right">
                   {{ ep.avg_rtt_ms != null ? ep.avg_rtt_ms.toFixed(1) + ' ms' : (ep.current_state?.avg_rtt_ms != null ? ep.current_state.avg_rtt_ms.toFixed(1) + ' ms' : '—') }}
                 </td>
-                <td class="font-mono tnum text-right">
-                  {{ getLossPct(ep) }}
-                </td>
-                <td class="font-mono tnum text-right font-bold">
+                <td class="font-mono tnum text-right text-muted">—</td>
+                <td class="font-mono tnum text-right font-bold" :style="{ color: toneVar(uptimeTone(uptimeValue(ep))) }">
                   {{ getUptimePct(ep) }}
                 </td>
                 <td class="font-mono tnum text-muted">
-                  {{ formatTimeAgo(ep.last_seen) }}
+                  {{ isMonitored(ep) ? formatTimeAgo(ep.last_seen) : 'Not monitored' }}
                 </td>
                 <td class="text-right" @click.stop>
                   <div class="table-actions">
-                    <button class="btn-action inspect" @click="openInspector(ep)" title="Quick Diagnostics">🔍</button>
-                    <button v-if="isAdmin" class="btn-action" @click="openEditDialog(ep)" title="Edit">✎</button>
-                    <button v-if="isAdmin" class="btn-action text-down" @click="confirmDeleteEndpoint(ep.id)" title="Delete">✕</button>
+                    <button class="btn-action inspect" @click="openInspector(ep)" title="Quick Diagnostics" :aria-label="`Quick diagnostics for ${ep.hostname}`">🔍</button>
+                    <button v-if="isAdmin" class="btn-action" @click="openEditDialog(ep)" title="Edit" :aria-label="`Edit ${ep.hostname}`">✎</button>
+                    <button v-if="isAdmin" class="btn-action text-down" @click="confirmDeleteEndpoint(ep.id)" title="Delete" :aria-label="`Delete ${ep.hostname}`">✕</button>
                   </div>
                 </td>
               </tr>
@@ -375,6 +358,10 @@ import StatusBadge from '../components/StatusBadge.vue'
 import EndpointInspectorDrawer from '../components/EndpointInspectorDrawer.vue'
 import TelemetryExportPopover from '../components/TelemetryExportPopover.vue'
 import { useSSE } from '../composables/useSSE.js'
+import KpiTile from '../components/ui/KpiTile.vue'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import { endpointStateBucket, isMonitored, meanUptime, uptimeValue } from '../utils/endpointState.js'
+import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 
 const router = useRouter()
 const toast = useToast()
@@ -462,40 +449,35 @@ const form = ref({
 })
 
 const kpiStats = computed(() => {
-  const total = endpoints.value.length
-  let up = 0
-  let unstable = 0
-  let down = 0
-
-  endpoints.value.forEach(ep => {
-    const op = ep.current_operational_state || ep.endpoint_status || 'UP'
-    const det = ep.current_detailed_state || op
-    if (det === 'UP' || (op === 'UP' && !det.includes('UNSTABLE'))) {
-      up++
-    } else if (det === 'UP-UNSTABLE' || det === 'DOWN-UNSTABLE' || op === 'UNSTABLE') {
-      unstable++
-    } else if (det === 'DOWN' || op === 'DOWN') {
-      down++
-    } else {
-      up++
-    }
+  const counts = { UP: 0, UNSTABLE: 0, DOWN: 0, NO_STATUS: 0 }
+  endpoints.value.forEach((ep) => {
+    counts[endpointStateBucket(ep)]++
   })
-
-  const totalSla = endpoints.value.reduce((sum, ep) => sum + (parseFloat(ep.uptime_percentage_24h) || 100.0), 0)
-  const fleetSla = total > 0 ? (totalSla / total).toFixed(2) : '100.00'
-  return { total, up, unstable, down, sla: fleetSla }
+  // Mean 24h uptime of actively monitored endpoints only; passive or paused ones have no uptime.
+  const mean = meanUptime(endpoints.value)
+  const uptimeCount = endpoints.value.filter((ep) => uptimeValue(ep) !== null).length
+  return {
+    total: endpoints.value.length,
+    up: counts.UP,
+    unstable: counts.UNSTABLE,
+    down: counts.DOWN,
+    noStatus: counts.NO_STATUS,
+    meanUptimeRaw: mean,
+    meanUptime: mean === null ? null : mean.toFixed(2),
+    uptimeCount,
+  }
 })
+
+const STATUS_FILTER_LABELS = { ALL: 'All', UP: 'Up', UNSTABLE: 'Unstable', DOWN: 'Down', NO_STATUS: 'No status' }
+const statusFilterLabel = computed(() => STATUS_FILTER_LABELS[statusFilter.value] || statusFilter.value)
+
+function toggleStatusFilter(bucket) {
+  statusFilter.value = statusFilter.value === bucket ? 'ALL' : bucket
+}
 
 const filteredEndpoints = computed(() => {
   if (statusFilter.value === 'ALL') return endpoints.value
-  return endpoints.value.filter(ep => {
-    const op = ep.current_operational_state || ep.endpoint_status || 'UP'
-    const det = ep.current_detailed_state || op
-    if (statusFilter.value === 'UP') return det === 'UP' || (op === 'UP' && !det.includes('UNSTABLE'))
-    if (statusFilter.value === 'UNSTABLE') return det === 'UP-UNSTABLE' || det === 'DOWN-UNSTABLE' || op === 'UNSTABLE'
-    if (statusFilter.value === 'DOWN') return det === 'DOWN' || op === 'DOWN'
-    return true
-  })
+  return endpoints.value.filter((ep) => endpointStateBucket(ep) === statusFilter.value)
 })
 
 const sortedEndpoints = computed(() => {
@@ -507,12 +489,10 @@ const sortedEndpoints = computed(() => {
       sortVal = ep.current_detailed_state || ep.current_operational_state || ep.endpoint_status || ''
     } else if (key === 'avg_rtt_ms') {
       sortVal = ep.avg_rtt_ms ?? (ep.current_state?.avg_rtt_ms ?? 99999)
-    } else if (key === 'packet_loss_pct') {
-      sortVal = ep.failed_count ?? (ep.current_state?.failed_count ?? 0)
     } else if (key === 'uptime_pct') {
-      sortVal = parseFloat(ep.uptime_percentage_24h) || 100
+      sortVal = uptimeValue(ep)
     } else if (key === 'last_seen') {
-      sortVal = ep.last_seen ? (Date.parse(ep.last_seen) || 0) : 0
+      sortVal = ep.last_seen ? (Date.parse(ep.last_seen) || null) : null
     } else {
       sortVal = ep[key] ?? ''
     }
@@ -520,6 +500,10 @@ const sortedEndpoints = computed(() => {
   })
 
   decorated.sort((a, b) => {
+    // Missing values (no uptime, never seen) sort last in both directions.
+    const aMissing = a.sortVal === null || a.sortVal === undefined
+    const bMissing = b.sortVal === null || b.sortVal === undefined
+    if (aMissing || bMissing) return aMissing === bMissing ? 0 : aMissing ? 1 : -1
     if (a.sortVal < b.sortVal) return -1 * asc
     if (a.sortVal > b.sortVal) return 1 * asc
     return 0
@@ -570,22 +554,10 @@ function formatTimeAgo(dateStr) {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-function getLossPct(ep) {
-  const succ = ep.success_count ?? ep.current_state?.success_count ?? 5
-  const fail = ep.failed_count ?? ep.current_state?.failed_count ?? 0
-  const tot = succ + fail
-  if (tot === 0) return '0%'
-  return `${Math.round((fail / tot) * 100)}%`
-}
-
 function getUptimePct(ep) {
-  if (ep.uptime_percentage_24h != null) {
-    const val = parseFloat(ep.uptime_percentage_24h)
-    return !isNaN(val) ? `${val.toFixed(1)}%` : '100.0%'
-  }
-  const hs = ep.current_health_score ?? ep.current_state?.health_score
-  if (hs != null) return `${hs.toFixed(1)}%`
-  return '100.0%'
+  if (!isMonitored(ep)) return '—'
+  const value = uptimeValue(ep)
+  return value === null ? '—' : `${value.toFixed(1)}%`
 }
 
 const toggleEndpointSelect = (id) => {
@@ -871,33 +843,6 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-.view-switcher {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-view {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-view.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
 /* ── KPI Strip ── */
 .kpi-strip {
   display: grid;
@@ -907,52 +852,35 @@ onUnmounted(() => {
 
 @media (min-width: 768px) {
   .kpi-strip {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
-.kpi-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+@media (min-width: 1100px) {
+  .kpi-strip {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+.text-down { color: var(--status-text-down); }
+
+/* 24 px hit area around native checkboxes */
+.select-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target-min);
+  min-height: var(--target-min);
   cursor: pointer;
-  transition: all 0.15s ease;
-  user-select: none;
 }
 
-.kpi-card:hover {
-  border-color: var(--border-color-strong);
-  background: var(--bg-surface-hover);
+.select-target input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
-
-.kpi-card.active {
-  border-color: var(--text-primary);
-  background: var(--bg-surface-selected);
-  box-shadow: 0 0 0 1px var(--text-primary);
-}
-
-.kpi-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.kpi-value {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.text-up { color: #10B981; }
-.text-unstable { color: #F59E0B; }
-.text-down { color: #EF4444; }
-.text-accent { color: #3B82F6; }
 
 .tnum {
   font-feature-settings: "tnum";
@@ -1121,6 +1049,11 @@ onUnmounted(() => {
 }
 
 .btn-action {
+  min-width: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 1px solid var(--border-color, #374151);
   color: var(--text-secondary, #9ca3af);

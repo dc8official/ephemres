@@ -139,56 +139,16 @@
         <!-- Date Query & Filter Toolbar -->
         <div class="toolbar-card">
           <div class="toolbar-left">
-            <span class="toolbar-title">Analysis Period:</span>
-            <div class="range-buttons">
-              <Button 
-                label="Last 24h" 
-                :outlined="filterRange !== '24h'" 
-                severity="success" 
-                size="small"
-                @click="setRange('24h')" 
-              />
-              <Button 
-                label="Last 7 Days" 
-                :outlined="filterRange !== '7d'" 
-                severity="success" 
-                size="small"
-                @click="setRange('7d')" 
-              />
-              <Button 
-                label="Last 30 Days" 
-                :outlined="filterRange !== '30d'" 
-                severity="success" 
-                size="small"
-                @click="setRange('30d')" 
-              />
-              <Button 
-                label="Custom Range" 
-                :outlined="filterRange !== 'custom'" 
-                severity="success" 
-                size="small"
-                @click="setRange('custom')" 
-              />
-            </div>
-          </div>
-
-          <!-- Custom range calendar controls -->
-          <div v-if="filterRange === 'custom'" class="toolbar-right">
-            <div class="date-input-group">
-              <label for="start_date">Start</label>
-              <input type="datetime-local" id="start_date" v-model="customStartDate" class="date-picker-input" />
-            </div>
-            <div class="date-input-group">
-              <label for="end_date">End</label>
-              <input type="datetime-local" id="end_date" v-model="customEndDate" class="date-picker-input" />
-            </div>
-            <Button 
-              label="Query" 
-              icon="pi pi-search" 
-              severity="success" 
-              size="small"
-              :loading="loading" 
-              @click="loadData" 
+            <span class="toolbar-title">Analysis period</span>
+            <TimeRangePicker
+              :model-value="filterRange"
+              :windows="['24h', '7d', '30d']"
+              allow-custom
+              v-model:start="customStartDate"
+              v-model:end="customEndDate"
+              aria-label="Analysis period"
+              @update:model-value="setRange"
+              @apply="loadData()"
             />
           </div>
         </div>
@@ -202,10 +162,16 @@
               <i class="pi pi-percentage"></i>
             </div>
             <div class="metric-body">
-              <span class="value" :class="getUptimeClass(uptimeReport.uptime_percentage)">
-                {{ uptimeReport.uptime_percentage }}%
-              </span>
-              <span class="subtext">SLA Target: 99.90%</span>
+              <template v-if="icmpMonitored">
+                <span class="value" :class="getUptimeClass(uptimeReport.uptime_percentage)">
+                  {{ uptimeReport.uptime_percentage }}%
+                </span>
+                <span class="subtext">SLA target: {{ DEFAULT_SLA_TARGET }}%</span>
+              </template>
+              <template v-else>
+                <span class="value value-muted">—</span>
+                <span class="subtext">Not ICMP-monitored</span>
+              </template>
             </div>
           </div>
 
@@ -218,7 +184,7 @@
               <span class="value" :class="uptimeReport.incident_count > 0 ? 'alert' : 'clean'">
                 {{ uptimeReport.incident_count }}
               </span>
-              <span class="subtext">Unstable transitions recorded</span>
+              <span class="subtext">Times the endpoint went DOWN</span>
             </div>
           </div>
 
@@ -257,7 +223,10 @@
         <div class="visualizer-container">
           <div class="panel-header">
             <h3><i class="pi pi-align-left header-icon"></i>State Transition Timeline</h3>
-            <span class="panel-desc">Visual timeline showing transitions between UP, UNSTABLE, and DOWN states</span>
+            <span class="panel-desc">
+              UP, UNSTABLE and DOWN periods across the analysis period
+              <template v-if="chartEventsTruncated"> · showing the latest {{ chartSourceEvents.length.toLocaleString() }} of {{ chartEventsTotal.toLocaleString() }} state records</template>
+            </span>
           </div>
           <StateTimeline 
             :events="chartEvents" 
@@ -271,7 +240,7 @@
         <div class="visualizer-container">
           <div class="panel-header">
             <h3><i class="pi pi-chart-line header-icon"></i>ICMP Latency & Jitter Trend (RTT)</h3>
-            <span class="panel-desc">Line graph representing round-trip-time (ms) averages per cycle</span>
+            <span class="panel-desc">Average round-trip time recorded for each state period</span>
           </div>
           <RTTTrendPanel :events="chartEvents" />
         </div>
@@ -374,37 +343,17 @@
           <!-- Flow Telemetry Header & Mode Switcher -->
           <div class="toolbar-card">
             <div class="toolbar-left">
-              <span class="toolbar-title">Telemetry Perspective:</span>
-              <div class="range-buttons">
-                <Button
-                  label="Device as Exporter"
-                  :outlined="flowMode !== 'exporter'"
-                  severity="success"
-                  size="small"
-                  @click="flowMode = 'exporter'; loadFlowTelemetry()"
-                />
-                <Button
-                  label="Device as Participant"
-                  :outlined="flowMode !== 'participant'"
-                  severity="success"
-                  size="small"
-                  @click="flowMode = 'participant'; loadFlowTelemetry()"
-                />
-              </div>
+              <span class="toolbar-title">Perspective</span>
+              <SegmentedControl :model-value="flowMode" :options="flowModeOptions" aria-label="Flow perspective" @update:model-value="setFlowMode" />
             </div>
 
             <div class="toolbar-right">
-              <div class="range-buttons">
-                <Button
-                  v-for="w in ['1h', '6h', '24h', '7d']"
-                  :key="w"
-                  :label="w"
-                  :outlined="flowWindow !== w"
-                  severity="secondary"
-                  size="small"
-                  @click="flowWindow = w; loadFlowTelemetry()"
-                />
-              </div>
+              <TimeRangePicker
+                :model-value="flowWindow"
+                :windows="['1h', '6h', '24h', '7d']"
+                aria-label="Flow time window"
+                @update:model-value="setFlowWindow"
+              />
             </div>
           </div>
 
@@ -445,7 +394,8 @@
                       <div class="iface-title">
                         <span class="iface-tag tnum">if{{ iface.idx }}</span>
                         <span class="iface-name" :title="iface.name">{{ iface.name }}</span>
-                        <span v-if="iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
+                        <span v-if="iface.speedConfigured && iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
+                        <span v-else class="iface-speed iface-speed-unset text-xs" title="Set the link speed to see utilization">(speed not set)</span>
                       </div>
                       <span class="iface-status-pill" :class="iface.active ? 'status-active' : 'status-idle'">
                         {{ iface.active ? 'ACTIVE' : 'IDLE' }}
@@ -462,11 +412,16 @@
                       </div>
                     </div>
                     <div class="meter-bar-track">
-                      <div class="meter-bar-fill" :style="{ width: Math.min(100, iface.utilization) + '%' }" :class="getUtilColorClass(iface.utilization)"></div>
+                      <div
+                        v-if="iface.utilization != null"
+                        class="meter-bar-fill"
+                        :style="{ width: Math.min(100, iface.utilization) + '%' }"
+                        :class="getUtilColorClass(iface.utilization)"
+                      ></div>
                     </div>
                     <div class="meter-meta tnum">
-                      <span>Est. Utilization</span>
-                      <span>{{ (iface.utilization || 0).toFixed(1) }}%</span>
+                      <span>Avg utilization</span>
+                      <span>{{ iface.utilization != null ? `${iface.utilization.toFixed(1)}%` : '—' }}</span>
                     </div>
                   </div>
                 </div>
@@ -479,50 +434,18 @@
 
           <!-- Flow Telemetry Sub-View Switcher -->
           <div class="flow-subview-switcher">
-            <button
-              class="subview-btn"
-              :class="{ active: flowSubView === 'bandwidth' }"
-              @click="flowSubView = 'bandwidth'"
-            >
-              <i class="pi pi-chart-line"></i>
-              <span>Flow Bandwidth</span>
-            </button>
-            <button
-              class="subview-btn"
-              :class="{ active: flowSubView === 'correlated' }"
-              @click="flowSubView = 'correlated'"
-            >
-              <i class="pi pi-sliders-h"></i>
-              <span>Correlated Incident View (RTT vs Bandwidth)</span>
-            </button>
+            <SegmentedControl v-model="flowSubView" :options="flowSubViewOptions" aria-label="Flow chart view" />
           </div>
 
           <!-- Flow Bandwidth Chart -->
           <div v-if="flowSubView === 'bandwidth'" class="table-card p-4">
             <div class="section-header section-header-split">
               <div>
-                <span class="font-bold text-base">Node Flow Bandwidth ({{ flowMode === 'exporter' ? 'Exported Transit' : 'Participant Traffic' }})</span>
-                <span class="badge-window tnum ml-2">{{ flowWindow }} Window</span>
+                <span class="font-bold text-base">{{ flowMode === 'exporter' ? 'Traffic exported by this device' : 'Traffic to and from this device' }}</span>
+                <span class="text-muted text-xs block mt-1">Last {{ flowWindow }}</span>
               </div>
               <div class="header-controls">
-                <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
-                  <button
-                    class="btn-pill btn-pill-sm"
-                    :class="{ active: nodeChartMetricMode === 'bps' }"
-                    @click="nodeChartMetricMode = 'bps'"
-                    title="Throughput in bits per second"
-                  >
-                    Throughput (bps)
-                  </button>
-                  <button
-                    class="btn-pill btn-pill-sm"
-                    :class="{ active: nodeChartMetricMode === 'pps' }"
-                    @click="nodeChartMetricMode = 'pps'"
-                    title="Packet rate in packets per second"
-                  >
-                    Packet Rate (pps)
-                  </button>
-                </div>
+                <SegmentedControl v-model="nodeChartMetricMode" :options="nodeMetricOptions" aria-label="Chart metric" size="sm" />
               </div>
             </div>
             <div class="flow-chart-box">
@@ -542,8 +465,8 @@
           <div v-else-if="flowSubView === 'correlated'" class="table-card p-4">
             <div class="section-header">
               <div>
-                <span class="font-bold text-base">Correlated Incident Analysis (ICMP RTT Latency vs Flow Bandwidth)</span>
-                <p class="text-xs text-muted mt-1">Cross-correlates ICMP ping spikes with network saturation to pinpoint whether latency spikes are induced by heavy link utilization.</p>
+                <span class="font-bold text-base">Latency vs bandwidth</span>
+                <p class="text-xs text-muted mt-1">ICMP latency per state period against flow throughput. Latency has one value per state period until per-probe history is recorded.</p>
               </div>
               <div class="header-controls">
                 <div v-if="interfaceTelemetry && interfaceTelemetry.length > 0" class="interface-filter-wrapper">
@@ -560,11 +483,10 @@
                       :key="iface.interface_idx" 
                       :value="iface.interface_idx"
                     >
-                      #{{ iface.interface_idx }} {{ iface.interface_name }}
+                      #{{ iface.interface_idx }} {{ iface.name }}
                     </option>
                   </select>
                 </div>
-                <span class="badge-window tnum">{{ flowWindow }} Window</span>
               </div>
             </div>
             <div class="flow-chart-box">
@@ -584,8 +506,8 @@
           <div class="table-card">
             <div class="section-header section-header-split p-4">
               <div>
-                <span class="font-bold text-base">Forensic Node Conversations</span>
-                <span class="text-muted text-xs block mt-1">Granular 1-minute rollup pairs with packet physics &amp; threat telemetry</span>
+                <span class="font-bold text-base">Conversations</span>
+                <span class="text-muted text-xs block mt-1">The 50 largest IP pairs in this window</span>
               </div>
               <div class="header-controls">
                 <input
@@ -605,10 +527,10 @@
                     <th>Destination Host / IP</th>
                     <th>Protocol</th>
                     <th>Service Port</th>
-                    <th>Packet Physics &amp; Profile</th>
+                    <th>Profile &amp; avg packet</th>
                     <th>Flags &amp; QoS</th>
                     <th class="text-right">Volume</th>
-                    <th class="text-right">Burst Count</th>
+                    <th class="text-right">Flows</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -924,6 +846,12 @@ ChartJS.register(
 import Card from 'primevue/card'
 import Button from 'primevue/button'
 import { useSSE } from '../composables/useSSE.js'
+import { useChartTheme } from '../composables/useChartTheme.js'
+import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
+import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
+import { isMonitored } from '../utils/endpointState.js'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -971,6 +899,34 @@ const filteredNodeConversations = computed(() => {
 // - 'bps': Standard bandwidth throughput (bits/sec).
 // - 'pps': Packet rate (packets/sec) for detecting packet flooding or bursty micro-bursts.
 const nodeChartMetricMode = ref('bps')
+
+const { theme, withAlpha } = useChartTheme()
+
+const flowModeOptions = [
+  { value: 'exporter', label: 'As exporter', title: 'Traffic this device exported (all interfaces)' },
+  { value: 'participant', label: 'As participant', title: 'Traffic to or from this device' },
+]
+const flowSubViewOptions = [
+  { value: 'bandwidth', label: 'Bandwidth' },
+  { value: 'correlated', label: 'Latency vs bandwidth' },
+]
+const nodeMetricOptions = [
+  { value: 'bps', label: 'Throughput', title: 'Bits per second' },
+  { value: 'pps', label: 'Packets', title: 'Packets per second' },
+]
+
+function setFlowMode(mode) {
+  flowMode.value = mode
+  loadFlowTelemetry()
+}
+
+function setFlowWindow(w) {
+  flowWindow.value = w
+  loadFlowTelemetry()
+}
+
+// Not ICMP-monitored (passive flow exporter, paused): availability does not apply.
+const icmpMonitored = computed(() => isMonitored(endpoint.value))
 
 const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
@@ -1035,124 +991,65 @@ async function loadFlowTelemetry() {
   }
 }
 
-const flowChartData = computed(() => {
-  const labels = flowSeriesPoints.value.map((p) => {
-    const d = new Date(p.timestamp)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  })
+function formatAxisTime(ts, windowKey) {
+  const d = new Date(ts)
+  if (windowKey === '7d') return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
-  if (nodeChartMetricMode.value === 'pps') {
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Ingress (pps)',
-          data: flowSeriesPoints.value.map((p) => p.ingress_pps || 0),
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16, 185, 129, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-        },
-        {
-          label: 'Egress (pps)',
-          data: flowSeriesPoints.value.map((p) => p.egress_pps || 0),
-          borderColor: '#0ea5e9',
-          backgroundColor: 'rgba(14, 165, 233, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-        },
-      ],
-    }
-  }
-
+function flowDataset(label, data, color, opts = {}) {
   return {
-    labels,
-    datasets: [
-      {
-        label: 'Ingress (bps)',
-        data: flowSeriesPoints.value.map((p) => p.ingress_bps),
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-      },
-      {
-        label: 'Egress (bps)',
-        data: flowSeriesPoints.value.map((p) => p.egress_bps),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-      },
-    ],
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: withAlpha(color, 0.2),
+    borderWidth: 2,
+    fill: opts.fill ?? true,
+    tension: 0.3,
+    pointRadius: data.length > 100 ? 0 : 2,
+    ...opts.extra,
   }
+}
+
+const flowChartData = computed(() => {
+  const points = flowSeriesPoints.value
+  const labels = points.map((p) => formatAxisTime(p.timestamp, flowWindow.value))
+  const unit = nodeChartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const series = theme.value.series
+  const datasets = [
+    flowDataset(`Ingress (${unit})`, points.map((p) => p[`ingress_${unit}`] || 0), series.in),
+    flowDataset(`Egress (${unit})`, points.map((p) => p[`egress_${unit}`] || 0), series.out),
+  ]
+  const transit = points.map((p) => p[`transit_${unit}`] || 0)
+  if (transit.some((v) => v)) {
+    datasets.push(flowDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
+  }
+  return { labels, datasets }
 })
 
-const flowChartOptions = computed(() => ({
-  responsive: true,
-  maintainAspectRatio: false,
-  animation: false,
-  normalized: true,
-  scales: {
-    x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
-    y: {
-      grid: { color: 'rgba(128, 128, 128, 0.1)' },
-      ticks: {
-        color: '#888',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => {
-          if (!val || val <= 0) return nodeChartMetricMode.value === 'pps' ? '0 pps' : '0 bps'
-          if (nodeChartMetricMode.value === 'pps') return formatPps(val)
-          return formatBps(val)
-        },
+const flowChartOptions = computed(() => {
+  const t = theme.value
+  const fmt = (val) => (nodeChartMetricMode.value === 'pps' ? formatPps(val) : formatBps(val))
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    normalized: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 12 } },
+      y: {
+        beginAtZero: true,
+        grid: { color: t.grid },
+        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => fmt(val) },
       },
     },
-  },
-  plugins: {
-    legend: { position: 'top', labels: { color: '#888', font: { size: 11 } } },
-    tooltip: {
-      callbacks: {
-        label: (ctx) => {
-          if (nodeChartMetricMode.value === 'pps') {
-            return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
-          }
-          return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
-        },
-      },
+    plugins: {
+      legend: { position: 'top', labels: { color: t.text, font: { size: 11 } } },
+      tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt(ctx.raw)}` } },
     },
-  },
-}))
-
-function formatPps(pps) {
-  if (!pps || pps <= 0) return '0 pps'
-  if (pps >= 1e6) return `${(pps / 1e6).toFixed(2)} Mpps`
-  if (pps >= 1e3) return `${(pps / 1e3).toFixed(1)} kpps`
-  return `${Math.round(pps)} pps`
-}
-
-function formatNumber(num) {
-  if (!num) return '0'
-  return new Intl.NumberFormat().format(num)
-}
-
-function formatPortLabel(port, proto) {
-  const p = Number(port)
-  switch (p) {
-    case 443: return '443 / HTTPS'
-    case 80: return '80 / HTTP'
-    case 53: return '53 / DNS'
-    case 22: return '22 / SSH'
-    case 123: return '123 / NTP'
-    case 161: return '161 / SNMP'
-    case 2055: return '2055 / NetFlow'
-    case 4739: return '4739 / IPFIX'
-    default: return `${port}`
   }
-}
+})
 
 function getPortBadgeClass(port) {
   const p = Number(port)
@@ -1174,28 +1071,12 @@ function getTrafficProfileBadgeClass(profile) {
   }
 }
 
-function formatBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(2)} MB`
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
-  return `${bytes} B`
-}
-
 const flowSubView = ref('bandwidth')
 
-function formatBps(bps) {
-  if (!bps || bps <= 0) return '0 bps'
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(0)} kbps`
-  return `${Math.round(bps)} bps`
-}
+const UTIL_CLASS_BY_TONE = { up: 'util-healthy', warn: 'util-warning', down: 'util-danger', unknown: 'util-healthy' }
 
 function getUtilColorClass(util) {
-  if (util >= 85) return 'util-danger'
-  if (util >= 60) return 'util-warning'
-  return 'util-healthy'
+  return UTIL_CLASS_BY_TONE[utilizationTone(util)]
 }
 
 function formatSpeedLabel(mbps) {
@@ -1210,6 +1091,7 @@ const interfaceMeters = computed(() => {
       idx: item.interface_idx,
       name: item.name,
       speed_mbps: item.speed_mbps,
+      speedConfigured: item.speed_configured !== false,
       ingressBps: item.in_bps,
       egressBps: item.out_bps,
       utilization: item.utilization_percentage,
@@ -1221,20 +1103,21 @@ const interfaceMeters = computed(() => {
   const aliases = endpoint.value.flow_interface_aliases
   return Object.entries(aliases).map(([idx, val]) => {
     let name = `if${idx}`
-    let speed = 1000
+    let speed = null
     if (typeof val === 'string') {
       name = val
     } else if (val && typeof val === 'object') {
       name = val.name || `if${idx}`
-      speed = val.speed_mbps || 1000
+      speed = val.speed_mbps || null
     }
     return {
       idx,
       name,
       speed_mbps: speed,
+      speedConfigured: speed !== null,
       ingressBps: 0,
       egressBps: 0,
-      utilization: 0,
+      utilization: null,
       active: false,
     }
   })
@@ -1307,10 +1190,16 @@ async function saveInterfaces() {
 }
 
 const events = shallowRef([])
+// Charts (timeline, RTT trend, correlated view) read the whole period, independent of which
+// audit-table page is showing. Capped at CHART_EVENT_LIMIT state records, most recent first.
+const CHART_EVENT_LIMIT = 1500
+const chartSourceEvents = shallowRef([])
+const chartEventsTotal = ref(0)
+const chartEventsTruncated = computed(() => chartEventsTotal.value > chartSourceEvents.value.length)
 
 const indexedEvents = computed(() => {
   const nowMs = Date.now()
-  return events.value.map((ev) => ({
+  return chartSourceEvents.value.map((ev) => ({
     raw: ev,
     startMs: Date.parse(ev.start_time) || 0,
     endMs: ev.end_time ? (Date.parse(ev.end_time) || nowMs) : nowMs,
@@ -1324,9 +1213,7 @@ const chartEvents = computed(() => {
 })
 
 const sortedEvents = computed(() => {
-  return [...indexedEvents.value]
-    .sort((a, b) => b.startMs - a.startMs)
-    .map((item) => item.raw)
+  return [...events.value].sort((a, b) => (Date.parse(b.start_time) || 0) - (Date.parse(a.start_time) || 0))
 })
 
 const correlatedChartData = computed(() => {
@@ -1349,7 +1236,7 @@ const correlatedChartData = computed(() => {
     const p = points[i]
     const pTime = Date.parse(p.timestamp) || 0
     const d = new Date(pTime)
-    labels[i] = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    labels[i] = formatAxisTime(pTime, flowWindow.value)
     inData[i] = p.ingress_bps
     outData[i] = p.egress_bps
 
@@ -1390,8 +1277,8 @@ const correlatedChartData = computed(() => {
       {
         label: 'ICMP Latency (ms)',
         data: rttData,
-        borderColor: '#f59e0b',
-        backgroundColor: 'rgba(245, 158, 11, 0.15)',
+        borderColor: theme.value.series.rtt,
+        backgroundColor: withAlpha(theme.value.series.rtt, 0.15),
         borderWidth: 2,
         yAxisID: 'y_rtt',
         tension: 0.2,
@@ -1400,8 +1287,8 @@ const correlatedChartData = computed(() => {
       {
         label: inLabel,
         data: inData,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.15)',
+        borderColor: theme.value.series.in,
+        backgroundColor: withAlpha(theme.value.series.in, 0.15),
         borderWidth: 2,
         yAxisID: 'y_bandwidth',
         fill: true,
@@ -1411,8 +1298,8 @@ const correlatedChartData = computed(() => {
       {
         label: outLabel,
         data: outData,
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.15)',
+        borderColor: theme.value.series.out,
+        backgroundColor: withAlpha(theme.value.series.out, 0.15),
         borderWidth: 2,
         yAxisID: 'y_bandwidth',
         fill: true,
@@ -1423,60 +1310,48 @@ const correlatedChartData = computed(() => {
   }
 })
 
-const correlatedChartOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  animation: false,
-  normalized: true,
-  scales: {
-    x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
-    y_rtt: {
-      type: 'linear',
-      position: 'left',
-      grid: { color: 'rgba(245, 158, 11, 0.15)' },
-      title: {
-        display: true,
-        text: 'ICMP Latency (ms)',
-        color: '#f59e0b',
-        font: { family: 'JetBrains Mono', size: 11 },
+const correlatedChartOptions = computed(() => {
+  const t = theme.value
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    normalized: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 12 } },
+      y_rtt: {
+        type: 'linear',
+        position: 'left',
+        beginAtZero: true,
+        grid: { color: t.grid },
+        title: { display: true, text: 'ICMP latency (ms)', color: t.text, font: { family: t.fontMono, size: 11 } },
+        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => `${val} ms` },
       },
-      ticks: {
-        color: '#f59e0b',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => `${val} ms`,
-      },
-    },
-    y_bandwidth: {
-      type: 'linear',
-      position: 'right',
-      grid: { drawOnChartArea: false },
-      title: {
-        display: true,
-        text: 'Bandwidth (bps)',
-        color: '#0ea5e9',
-        font: { family: 'JetBrains Mono', size: 11 },
-      },
-      ticks: {
-        color: '#0ea5e9',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => formatBps(val),
+      y_bandwidth: {
+        type: 'linear',
+        position: 'right',
+        beginAtZero: true,
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'Bandwidth', color: t.text, font: { family: t.fontMono, size: 11 } },
+        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => formatBps(val) },
       },
     },
-  },
-  plugins: {
-    legend: { position: 'top', labels: { color: '#888', font: { size: 11 } } },
-    tooltip: {
-      callbacks: {
-        label: (context) => {
-          if (context.dataset.yAxisID === 'y_rtt') {
-            return `ICMP Latency: ${context.parsed.y} ms`
-          }
-          return `${context.dataset.label}: ${formatBps(context.parsed.y)}`
+    plugins: {
+      legend: { position: 'top', labels: { color: t.text, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          label: (context) => {
+            if (context.dataset.yAxisID === 'y_rtt') {
+              return `ICMP latency: ${context.parsed.y} ms`
+            }
+            return `${context.dataset.label}: ${formatBps(context.parsed.y)}`
+          },
         },
       },
     },
-  },
-}
+  }
+})
 
 const toggleTheme = () => {
   isDarkMode.value = !isDarkMode.value
@@ -1652,31 +1527,40 @@ const onDensityChange = () => {
   loadTableEvents()
 }
 
-const loadData = async () => {
+let perspectiveChosen = false
+
+// `refresh` (the 60 s poll) keeps the audit table on its current page.
+const loadData = async ({ refresh = false } = {}) => {
   loading.value = true
   error.value = null
-  tablePage.value = 1
-  
+  if (!refresh) tablePage.value = 1
+
   const { start, end } = getQueryRange()
   periodStartStr.value = start
   periodEndStr.value = end
-  
+
   try {
-    const [endpointRes, uptimeRes, tableEventsRes] = await Promise.all([
+    const [endpointRes, uptimeRes, tableEventsRes, chartEventsRes] = await Promise.all([
       getEndpoint(endpointId),
       getUptimeReport(endpointId, start, end),
-      getEndpointEvents(endpointId, start, end, 1, tableSize.value) // Fetch paginated events starting from page 1
+      getEndpointEvents(endpointId, start, end, tablePage.value, tableSize.value),
+      getEndpointEvents(endpointId, start, end, 1, CHART_EVENT_LIMIT),
     ])
-    
+
     endpoint.value = endpointRes.data.data
     uptimeReport.value = uptimeRes.data.data
     events.value = tableEventsRes.data.data
-    
     totalEvents.value = tableEventsRes.data.meta?.total || 0
     totalPages.value = tableEventsRes.data.meta?.total_pages || 1
+    chartSourceEvents.value = chartEventsRes.data.data || []
+    chartEventsTotal.value = chartEventsRes.data.meta?.total || chartSourceEvents.value.length
 
-    if (endpoint.value.device_role === 'FLOW_EXPORTER') {
-      activePerspective.value = 'flow'
+    // Open flow exporters on the flow tab once; later refreshes keep the tab the user chose.
+    if (!perspectiveChosen) {
+      perspectiveChosen = true
+      if (endpoint.value.device_role === 'FLOW_EXPORTER') {
+        activePerspective.value = 'flow'
+      }
     }
     if (activePerspective.value === 'flow') {
       await loadFlowTelemetry()
@@ -1716,12 +1600,9 @@ const formatDate = (isoString) => {
   return new Date(isoString).toLocaleString()
 }
 
-const getUptimeClass = (pct) => {
-  if (pct >= 99.9) return 'perfect'
-  if (pct >= 99.0) return 'good'
-  if (pct >= 95.0) return 'warning'
-  return 'critical'
-}
+const UPTIME_CLASS_BY_TONE = { up: 'perfect', warn: 'warning', down: 'critical', unknown: '' }
+
+const getUptimeClass = (pct) => UPTIME_CLASS_BY_TONE[uptimeTone(pct)]
 
 const getHealthClass = (score) => {
   if (score >= 95) return 'text-success'
@@ -1759,10 +1640,7 @@ onMounted(() => {
   // Establish a 60-second polling interval to fetch fresh telemetry data
   pollInterval = setInterval(() => {
     if (!loading.value) {
-      loadData()
-      if (activePerspective.value === 'flow') {
-        loadFlowTelemetry()
-      }
+      loadData({ refresh: true })
     }
   }, 60000)
 
@@ -1801,6 +1679,15 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.value-muted {
+  color: var(--status-text-unknown);
+}
+
+.iface-speed-unset {
+  color: var(--status-text-warn);
+  font-weight: 600;
+}
+
 .detail-wrapper {
   min-height: 100vh;
   background-color: var(--canvas-bg);

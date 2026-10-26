@@ -2,7 +2,8 @@
 
 The dataset is small enough to compute by hand; the expected values below are those
 hand calculations. Assertions marked CHARACTERIZATION pin current behaviour that the v3.4 plan
-(docs/architecture/v3.4-dashboard-data-and-design-plan.md) intends to change.
+(docs/architecture/v3.4-dashboard-data-and-design-plan.md) intends to change; assertions marked
+CHANGED IN v3.4 PHASE 1 record behaviour that phase deliberately changed.
 """
 import datetime
 import json
@@ -106,11 +107,27 @@ def test_overview_counts_last_five_minutes(api_client, run_sql):
     assert ov["total_flows_count"] == 95
     assert ov["active_exporters_count"] == 1
     assert ov["anomaly_flows_count"] == 50  # SYN-only scanner row
+    # CHANGED IN v3.4 PHASE 1: transit (no monitored endpoint on either side) is its own figure.
+    assert ov["total_transit_bps"] == pytest.approx(1_200_000 * 8 / 300)
+    assert ov["total_transit_pps"] == pytest.approx(1_000 / 300, abs=0.01)
+    assert ov["window_seconds"] == 300
 
 
-def test_fleet_series_splits_unattributed_transit_evenly(api_client, run_sql):
+def test_overview_scoped_to_one_exporter(api_client, run_sql):
+    _seed(run_sql)
+    mine = _data(api_client.get("/api/v1/bandwidth/overview", params={"exporter_id": str(ROUTER_ID)}))
+    assert mine["exporter_id"] == str(ROUTER_ID)
+    assert mine["total_flows_count"] == 95
+
+    other = _data(api_client.get("/api/v1/bandwidth/overview", params={"exporter_id": str(HOST_A_ID)}))
+    assert (other["total_flows_count"], other["total_ingress_bps"], other["active_exporters_count"]) == (0, 0, 0)
+
+
+def test_fleet_series_reports_transit_separately(api_client, run_sql):
     m1, m2 = _seed(run_sql)
-    points = _data(api_client.get("/api/v1/bandwidth/traffic-series", params={"window": "1h"}))["points"]
+    series = _data(api_client.get("/api/v1/bandwidth/traffic-series", params={"window": "1h"}))
+    assert (series["bucket_seconds"], series["directional"]) == (60, True)
+    points = series["points"]
     by_ts = {datetime.datetime.fromisoformat(p["timestamp"]): p for p in points}
     assert set(by_ts) == {m1, m2}
 
@@ -118,12 +135,14 @@ def test_fleet_series_splits_unattributed_transit_evenly(api_client, run_sql):
     assert p1["ingress_bps"] == pytest.approx(15_003_000 * 8 / 60)
     assert p1["egress_bps"] == pytest.approx(9_000_000 * 8 / 60)
     assert p1["flows_per_sec"] == pytest.approx(75 / 60, abs=0.01)
+    assert p1["transit_bps"] == 0
 
-    # CHARACTERIZATION: a bucket holding only transit traffic (no known endpoint on either
-    # side) is split 50/50 into ingress and egress. Phase 1 reports it as transit instead.
+    # CHANGED IN v3.4 PHASE 1: a bucket holding only transit traffic used to be split 50/50 into
+    # ingress and egress; it is now reported as transit.
     p2 = by_ts[m2]
-    assert p2["ingress_bps"] == pytest.approx(600_000 * 8 / 60)
-    assert p2["egress_bps"] == pytest.approx(600_000 * 8 / 60)
+    assert (p2["ingress_bps"], p2["egress_bps"]) == (0, 0)
+    assert p2["transit_bps"] == pytest.approx(1_200_000 * 8 / 60)
+    assert p2["transit_pps"] == pytest.approx(1_000 / 60, abs=0.01)
 
 
 def test_hourly_window_lags_behind_fresh_data(api_client, run_sql):
@@ -162,12 +181,14 @@ def test_interfaces_average_over_the_whole_window(api_client, run_sql):
     assert wan["in_bps"] == pytest.approx(9_000_000 * 8 / 3600, abs=0.01)
     assert wan["out_bps"] == pytest.approx(3_000_000 * 8 / 3600, abs=0.01)
     assert wan["utilization_percentage"] == pytest.approx(0.02)
+    assert wan["speed_configured"] is True
     assert wan["is_active"] is True
 
-    # CHARACTERIZATION: a string alias carries no speed, so utilization assumes 1 Gbps.
+    # CHANGED IN v3.4 PHASE 1: a string alias carries no speed. speed_mbps still reports the
+    # 1 Gbps default, but utilization is withheld instead of measured against that guess.
     lan = rows[2]
     assert lan["name"] == "LAN"
-    assert lan["speed_mbps"] == 1000
+    assert (lan["speed_mbps"], lan["speed_configured"], lan["utilization_percentage"]) == (1000, False, None)
 
     dmz = rows[3]
     assert (dmz["name"], dmz["speed_mbps"], dmz["in_bytes"], dmz["is_active"]) == ("DMZ", 10000, 0, False)
@@ -219,3 +240,17 @@ def test_applications_qos_and_zones(api_client, run_sql):
         "North-South Ingress": 12_003_000,
         "External / Transit": 1_200_000,
     }
+
+
+def test_endpoint_detail_returns_flow_exporter_fields(api_client, run_sql):
+    # CHANGED IN v3.4 PHASE 1: GET /endpoints/{id} used to drop these, so the detail page never
+    # showed the passive-exporter banner or the configured exporter IPs.
+    _seed(run_sql)
+    ep = _data(api_client.get(f"/api/v1/endpoints/{ROUTER_ID}"))
+    assert ep["device_role"] == "FLOW_EXPORTER"
+    assert ep["monitoring_enabled"] is False
+    assert ep["flow_exporter_ips"] == ["10.0.0.1"]
+    assert ep["flow_interface_aliases"]["1"] == {"name": "WAN", "speed_mbps": 100}
+
+    host = _data(api_client.get(f"/api/v1/endpoints/{HOST_A_ID}"))
+    assert (host["device_role"], host["flow_exporter_ips"]) == ("ACTIVE_HOST", [])

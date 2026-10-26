@@ -320,8 +320,10 @@ export function getAlertHistory(page = 1, pageSize = 50) {
   })
 }
 
-export function getBandwidthOverview() {
-  return api.get('/bandwidth/overview')
+export function getBandwidthOverview(exporterId = null) {
+  const params = {}
+  if (exporterId) params.exporter_id = exporterId
+  return api.get('/bandwidth/overview', { params })
 }
 
 export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null) {

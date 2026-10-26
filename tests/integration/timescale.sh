@@ -20,8 +20,11 @@ case "${1:-}" in
         -e POSTGRES_HOST_AUTH_METHOD=trust \
         -p "127.0.0.1:${PORT}:5432" "$IMAGE" >/dev/null
     fi
+    # The image runs a temporary server during first-time init and then restarts it, so wait
+    # for the init-complete log line before trusting a successful query.
     for _ in $(seq 1 60); do
-      if docker exec "$NAME" psql -U postgres -c 'SELECT 1' >/dev/null 2>&1; then
+      if docker logs "$NAME" 2>&1 | grep -q 'PostgreSQL init process complete' \
+        && docker exec "$NAME" psql -U postgres -c 'SELECT 1' >/dev/null 2>&1; then
         echo "export EPHEMRES_TEST_TIMESCALE_DSN=${DSN}"
         exit 0
       fi

@@ -621,11 +621,11 @@ async def test_bandwidth_active_exporters_excludes_sentinel():
 
     mock_db = AsyncMock()
     mock_result_scalar = MagicMock()
-    # row = [total_bytes, ingress_bytes, egress_bytes, total_flows, active_exporters]
-    mock_result_scalar.one_or_none.return_value = [1000, 500, 500, 10, 2]
+    # row = [total, ingress, egress, transit bytes; the same for packets; total_flows, active_exporters]
+    mock_result_scalar.one_or_none.return_value = [1000, 500, 500, 0, 10, 5, 5, 0, 10, 2]
     mock_db.execute.return_value = mock_result_scalar
 
-    res = await get_bandwidth_overview(current_user={"username": "admin"}, db=mock_db)
+    res = await get_bandwidth_overview(exporter_id=None, current_user={"username": "admin"}, db=mock_db)
     assert res.status == "success"
 
     queries = [str(call[0][0]) for call in mock_db.execute.call_args_list]

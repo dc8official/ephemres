@@ -104,7 +104,7 @@ def run_sql(timescale_dsn):
 
 @pytest.fixture
 def api_client(timescale_dsn, monkeypatch):
-    """TestClient for the bandwidth router backed by the test database.
+    """TestClient for the bandwidth and endpoints routers backed by the test database.
 
     The in-process TestClient runs every request in a new event loop, so each request gets its
     own engine instead of sharing a pool bound to a dead loop. FastStore is disabled.
@@ -112,7 +112,7 @@ def api_client(timescale_dsn, monkeypatch):
     from app.core.asgi import FastAPI, TestClient
     from app.core.orm import AsyncSession, async_sessionmaker, create_async_engine
     from app.database import get_db
-    from app.routers import bandwidth
+    from app.routers import bandwidth, endpoints
     from app.routers.auth import get_current_user, require_admin
 
     engine_url = timescale_dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -137,6 +137,7 @@ def api_client(timescale_dsn, monkeypatch):
 
     app = FastAPI()
     app.include_router(bandwidth.router, prefix="/api/v1")
+    app.include_router(endpoints.router, prefix="/api/v1")
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_user
     app.dependency_overrides[require_admin] = override_user

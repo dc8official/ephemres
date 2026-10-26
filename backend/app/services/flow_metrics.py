@@ -63,6 +63,20 @@ def interface_alias(alias_data: Any, default_name: str) -> Tuple[str, int]:
     return default_name, DEFAULT_LINK_SPEED_MBPS
 
 
+def configured_speed_mbps(alias_data: Any) -> Optional[int]:
+    """Link speed an admin actually set for an interface, or None when it would be a guess.
+
+    Legacy string aliases and dicts without a positive `speed_mbps` carry no speed.
+    """
+    if not isinstance(alias_data, dict):
+        return None
+    try:
+        speed = int(alias_data.get("speed_mbps") or 0)
+    except (TypeError, ValueError):
+        return None
+    return speed if speed > 0 else None
+
+
 def dscp_from_tos(tos: Optional[int]) -> int:
     """6-bit DSCP codepoint from the 8-bit ToS / Traffic Class byte (RFC 2474)."""
     return ((tos or 0) & 0xFF) >> 2

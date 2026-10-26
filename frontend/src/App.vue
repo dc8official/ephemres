@@ -665,7 +665,7 @@ h1, h2, h3, h4, h5, h6,
 /* Status States */
 .status-up {
   background: var(--color-up-bg);
-  color: var(--color-up);
+  color: var(--status-text-up);
   border: 1px solid rgba(22, 163, 74, 0.35);
 }
 .status-up .status-dot {
@@ -675,7 +675,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-unstable {
   background: var(--color-up-unstable-bg);
-  color: var(--color-up-unstable);
+  color: var(--status-text-warn);
   border: 1px solid rgba(217, 119, 6, 0.35);
 }
 .status-unstable .status-dot {
@@ -685,7 +685,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-down {
   background: var(--color-down-bg);
-  color: var(--color-down);
+  color: var(--status-text-down);
   border: 1px solid rgba(220, 38, 38, 0.35);
 }
 .status-down .status-dot {
@@ -695,7 +695,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-unknown {
   background: var(--color-unknown-bg);
-  color: var(--color-unknown);
+  color: var(--status-text-unknown);
   border: 1px solid rgba(107, 114, 128, 0.35);
 }
 .status-unknown .status-dot {

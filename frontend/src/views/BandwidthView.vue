@@ -75,19 +75,12 @@
           </select>
         </div>
 
-        <!-- Window Filter Pills -->
-        <div class="window-pills" role="group" aria-label="Time Window Selector">
-          <button
-            v-for="w in windowOptions"
-            :key="w"
-            class="btn-pill"
-            :class="{ active: selectedWindow === w }"
-            @click="setWindow(w)"
-            :aria-pressed="selectedWindow === w"
-          >
-            {{ w }}
-          </button>
-        </div>
+        <TimeRangePicker
+          :model-value="selectedWindow"
+          :windows="windowOptions"
+          aria-label="Time window"
+          @update:model-value="setWindow"
+        />
 
         <button
           class="btn-secondary"
@@ -186,75 +179,57 @@
       </div>
     </div>
 
-    <!-- Top KPI Metric Strip (5 Cards) -->
+    <template v-if="!isUnmatchedScope">
+    <!-- KPI strip: last five complete minutes for the selected scope -->
+    <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
     <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Total Ingress Rate</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum ingress-text">
-            {{ formatBps(overview.total_ingress_bps) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="font-mono tnum">{{ formatPps(overview.total_ingress_pps) }}</span> packet rate (5m avg)
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Total Egress Rate</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum egress-text">
-            {{ formatBps(overview.total_egress_bps) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="font-mono tnum">{{ formatPps(overview.total_egress_pps) }}</span> packet rate (5m avg)
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Packet Physics (Avg Size)</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum text-accent">
-            {{ overview.avg_packet_size || 0 }} <span class="kpi-unit">B/pkt</span>
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="badge-packet-profile" :class="getPacketProfileClass(overview.avg_packet_size)">
+      <KpiTile
+        label="Ingress"
+        :value="formatBps(overview.total_ingress_bps)"
+        :marker="theme.series.in"
+        :sub="`${formatPps(overview.total_ingress_pps)} · to monitored hosts`"
+      />
+      <KpiTile
+        label="Egress"
+        :value="formatBps(overview.total_egress_bps)"
+        :marker="theme.series.out"
+        :sub="`${formatPps(overview.total_egress_pps)} · from monitored hosts`"
+      />
+      <KpiTile
+        label="Transit"
+        :value="formatBps(overview.total_transit_bps)"
+        :marker="theme.series.transit"
+        :sub="`${formatPps(overview.total_transit_pps)} · no monitored host on either side`"
+      />
+      <KpiTile label="Avg packet size" :value="overview.avg_packet_size || null" unit="B">
+        <template #sub>
+          <span
+            v-if="overview.avg_packet_size"
+            class="badge-packet-profile"
+            :class="getPacketProfileClass(overview.avg_packet_size)"
+          >
             {{ getPacketProfileLabel(overview.avg_packet_size) }}
           </span>
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Active Flow Exporters</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum">
-            {{ overview.active_exporters_count }}
-          </span>
-          <span class="kpi-denom">/ {{ totalEndpointsCount }} nodes</span>
-        </div>
-        <div class="kpi-subtext">Cisco, Juniper, Fortinet, Linux</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Monitored Flows &amp; Anomalies</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum">
-            {{ formatNumber(overview.total_flows_count) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
+          <span v-else class="text-xs">No packets in this window</span>
+        </template>
+      </KpiTile>
+      <KpiTile
+        label="Flow exporters sending"
+        :value="overview.active_exporters_count"
+        :sub="exporterSummary"
+      />
+      <KpiTile label="Flows" :value="formatNumber(overview.total_flows_count)">
+        <template #sub>
           <span
             v-if="overview.anomaly_flows_count"
             class="badge-anomaly-kpi"
-            title="SYN/RST scan or reset bursts in last 5m"
+            title="SYN-only or RST-without-FIN flows in the last 5 minutes"
           >
-            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} bursts
+            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} SYN/RST anomalies
           </span>
-          <span v-else class="text-success text-xs">✓ Normal flow profile</span>
-        </div>
-      </div>
+          <span v-else class="text-success text-xs">✓ No SYN/RST anomalies</span>
+        </template>
+      </KpiTile>
     </div>
 
     <!-- Main Section: Stacked Area Traffic Chart -->
@@ -264,47 +239,21 @@
           <div class="section-title">
             {{ chartTitle }}
           </div>
-          <span class="section-hint">{{ selectedWindow }} aggregated series</span>
+          <span class="section-hint">{{ chartHint }}</span>
         </div>
         <div class="chart-header-actions">
-          <!-- Metric Mode Switcher Pills -->
-          <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'bps' }"
-              @click="chartMetricMode = 'bps'"
-              title="Throughput in bits per second"
-            >
-              Throughput (bps)
-            </button>
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'pps' }"
-              @click="chartMetricMode = 'pps'"
-              title="Packet rate in packets per second"
-            >
-              Packet Rate (pps)
-            </button>
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'fps' }"
-              @click="chartMetricMode = 'fps'"
-              title="Flow burst rate in flows per second"
-            >
-              Flow Rate (fps)
-            </button>
-          </div>
-          <span class="badge-window tnum">{{ selectedWindow }} Window</span>
+          <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
         </div>
       </div>
       <div class="chart-container">
         <LineChart
-          v-if="chartData.labels.length > 0"
+          v-if="seriesPoints.length > 0"
           :data="chartData"
           :options="chartOptions"
         />
         <div v-else-if="!loading" class="no-chart-data">
-          No flow records accumulated for the selected {{ selectedWindow }} window.
+          <template v-if="['1h', '6h'].includes(selectedWindow)">No flow records in the last {{ selectedWindow }}.</template>
+          <template v-else>No {{ selectedWindow === '30d' ? 'daily' : 'hourly' }} totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
         </div>
         <div v-else class="loading-spinner">Loading telemetry series...</div>
       </div>
@@ -371,11 +320,15 @@
                   </button>
                 </div>
               </td>
-              <td class="text-right tnum text-muted">{{ formatSpeed(item.speed_mbps) }}</td>
+              <td class="text-right tnum text-muted">
+                <span v-if="item.speed_configured !== false">{{ formatSpeed(item.speed_mbps) }}</span>
+                <span v-else class="speed-unset" title="Set the link speed to see utilization">Not set</span>
+              </td>
               <td class="text-right tnum ingress-text">{{ formatBps(item.in_bps) }}</td>
               <td class="text-right tnum egress-text">{{ formatBps(item.out_bps) }}</td>
               <td>
-                <div class="util-cell">
+                <span v-if="item.utilization_percentage == null" class="text-muted text-xs">— set link speed</span>
+                <div v-else class="util-cell">
                   <div class="util-bar-bg">
                     <div
                       class="util-bar-fill"
@@ -405,8 +358,8 @@
       <div class="table-card talkers-panel">
         <div class="section-header section-header-split">
           <div>
-            <div class="section-title">Top Communicating Endpoints</div>
-            <span class="section-hint">Ranked by volume · Click row to filter conversations</span>
+            <div class="section-title">Top talkers</div>
+            <span class="section-hint">Hosts and external addresses by volume · Click a row to filter conversations</span>
           </div>
           <div v-if="selectedIpFilter" class="active-filter-badge">
             <span class="badge-active-filter">Filtered: {{ selectedIpFilter }}</span>
@@ -417,11 +370,11 @@
           <table class="dense-table interactive-table" aria-label="Top Talkers Table">
             <thead>
               <tr>
-                <th>Target Node</th>
+                <th>Host</th>
                 <th class="text-right">Ingress</th>
                 <th class="text-right">Egress</th>
                 <th class="text-right">Total Bytes</th>
-                <th class="text-right">Flows / Physics</th>
+                <th class="text-right">Flows / Avg packet</th>
               </tr>
             </thead>
             <tbody>
@@ -456,33 +409,7 @@
       <!-- Multi-Tab Telemetry Breakdown Card -->
       <div class="table-card breakdown-panel">
         <div class="section-header section-header-split">
-          <div class="breakdown-tabs" role="tablist">
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'apps' }"
-              @click="analyticsTab = 'apps'"
-              role="tab"
-            >
-              L4 Apps
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'qos' }"
-              @click="analyticsTab = 'qos'"
-              role="tab"
-            >
-              QoS / DSCP
-              <span v-if="qosClasses.length > 0" class="tab-badge">{{ qosClasses.length }}</span>
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'zones' }"
-              @click="analyticsTab = 'zones'"
-              role="tab"
-            >
-              Traffic Zones
-            </button>
-          </div>
+          <SegmentedControl v-model="analyticsTab" :options="analyticsOptions" aria-label="Traffic breakdown" size="sm" />
           <span class="section-hint text-xs">
             {{ analyticsTab === 'apps' ? 'Layer 4 / Service Port' : (analyticsTab === 'qos' ? 'DiffServ Classes' : 'Perimeter vs Internal') }}
           </span>
@@ -501,14 +428,14 @@
           <div v-if="applicationStats.length > 0" class="apps-quick-list">
             <div
               v-for="app in applicationStats.slice(0, 6)"
-              :key="app.dst_port"
+              :key="`${app.protocol_name}-${app.port}`"
               class="app-chip cursor-pointer"
-              :class="{ active: selectedPortFilter === app.dst_port }"
-              @click="togglePortFilter(app.dst_port)"
-              :title="`Filter conversations on port ${app.dst_port}`"
+              :class="{ active: selectedPortFilter === app.port }"
+              @click="togglePortFilter(app.port)"
+              :title="`Filter conversations on port ${app.port}`"
             >
-              <span class="service-port-badge" :class="getPortBadgeClass(app.dst_port)">
-                {{ formatPortLabel(app.dst_port, app.protocol) }}
+              <span class="service-port-badge" :class="getPortBadgeClass(app.port)">
+                {{ formatPortLabel(app.port) }}
               </span>
               <span class="app-chip-bytes tnum">{{ formatBytes(app.total_bytes) }}</span>
             </div>
@@ -579,41 +506,11 @@
     <div class="table-card conversations-panel">
       <div class="section-header section-header-split">
         <div>
-          <div class="section-title">Top Forensic Conversations (IP-to-IP Pairs)</div>
-          <span class="section-hint">Forensic tier granularity with packet physics profiling</span>
+          <div class="section-title">Top conversations</div>
+          <span class="section-hint">The 25 largest IP pairs in this window; filters apply to these 25</span>
         </div>
         <div class="conversations-top-actions">
-          <!-- Quick Triage Pills -->
-          <div class="triage-pills" role="group" aria-label="Conversation Triage Filters">
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: conversationQuickFilter === 'all' }"
-              @click="conversationQuickFilter = 'all'"
-            >
-              All ({{ topConversations.length }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-anomalies"
-              :class="{ active: conversationQuickFilter === 'anomalies' }"
-              @click="conversationQuickFilter = 'anomalies'"
-            >
-              Anomalies ({{ anomalyConversationsCount }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-qos"
-              :class="{ active: conversationQuickFilter === 'qos' }"
-              @click="conversationQuickFilter = 'qos'"
-            >
-              QoS Tagged ({{ qosConversationsCount }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-bulk"
-              :class="{ active: conversationQuickFilter === 'bulk' }"
-              @click="conversationQuickFilter = 'bulk'"
-            >
-              Bulk Transfers ({{ bulkConversationsCount }})
-            </button>
-          </div>
+          <SegmentedControl v-model="conversationQuickFilter" :options="triageOptions" aria-label="Conversation filter" size="sm" />
           <div class="conversation-filter-box">
             <input 
               v-model="conversationFilter" 
@@ -656,10 +553,10 @@
               <th>Destination IP</th>
               <th>Protocol</th>
               <th>Service Port</th>
-              <th>Packet Physics &amp; Profile</th>
+              <th>Profile &amp; avg packet</th>
               <th>Flags &amp; QoS</th>
               <th class="text-right">Volume</th>
-              <th class="text-right">Burst Count</th>
+              <th class="text-right">Flows</th>
             </tr>
           </thead>
           <tbody>
@@ -736,6 +633,8 @@
         </table>
       </div>
     </div>
+
+    </template>
 
     <!-- Mapping Modal for Unmatched Exporter -->
     <div v-if="showMappingModal" class="modal-overlay" @click.self="showMappingModal = false">
@@ -966,6 +865,10 @@ import {
 } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
 import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
+import { useChartTheme } from '../composables/useChartTheme.js'
+import KpiTile from '../components/ui/KpiTile.vue'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 
 ChartJS.register(
   CategoryScale,
@@ -1062,6 +965,8 @@ const overview = ref({
   total_egress_bps: 0,
   total_ingress_pps: 0,
   total_egress_pps: 0,
+  total_transit_bps: 0,
+  total_transit_pps: 0,
   avg_packet_size: 0,
   active_exporters_count: 0,
   unmatched_exporters_count: 0,
@@ -1076,7 +981,14 @@ const overview = ref({
 const chartMetricMode = ref('bps') // 'bps', 'pps', 'fps'
 const analyticsTab = ref('apps') // 'apps', 'qos', 'zones'
 
-const totalEndpointsCount = ref(0)
+const { theme, withAlpha } = useChartTheme()
+
+const metricOptions = [
+  { value: 'bps', label: 'Throughput', title: 'Bits per second' },
+  { value: 'pps', label: 'Packets', title: 'Packets per second' },
+  { value: 'fps', label: 'Flows', title: 'Flow records per second' },
+]
+
 const availableEndpoints = shallowRef([])
 const unmatchedExporters = shallowRef([])
 
@@ -1097,6 +1009,33 @@ const conversationQuickFilter = ref('all') // 'all', 'anomalies', 'qos', 'bulk'
 
 // Top conversations live triage search filter (UI-09)
 const conversationFilter = ref('')
+
+const analyticsOptions = computed(() => [
+  { value: 'apps', label: 'Applications', title: 'Layer 4 service ports' },
+  { value: 'qos', label: qosClasses.value.length ? `QoS (${qosClasses.value.length})` : 'QoS', title: 'DiffServ classes' },
+  { value: 'zones', label: 'Zones', title: 'Internal vs perimeter traffic' },
+])
+
+const triageOptions = computed(() => [
+  { value: 'all', label: `All (${topConversations.value.length})` },
+  { value: 'anomalies', label: `Anomalies (${anomalyConversationsCount.value})` },
+  { value: 'qos', label: `QoS tagged (${qosConversationsCount.value})` },
+  { value: 'bulk', label: `Bulk (${bulkConversationsCount.value})` },
+])
+
+const scopeLabel = computed(() => {
+  if (!selectedExporterId.value) return 'all exporters'
+  const exp = flowExporters.value.find((e) => e.id === selectedExporterId.value)
+  return exp ? exp.hostname : 'selected exporter'
+})
+
+const exporterSummary = computed(() => {
+  const configured = flowExporters.value.length
+  const unregistered = unmatchedExporters.value.length
+  const parts = [`of ${configured} configured`]
+  if (unregistered) parts.push(`${unregistered} unregistered`)
+  return parts.join(' · ')
+})
 
 const anomalyConversationsCount = computed(() => {
   return topConversations.value.filter(
@@ -1175,7 +1114,7 @@ function getPortBadgeClass(port) {
 }
 
 function formatSpeed(speedMbps) {
-  if (!speedMbps) return '1 Gbps'
+  if (!speedMbps) return 'Not set'
   if (speedMbps >= 1000000) return `${(speedMbps / 1000000).toFixed(0)} Tbps`
   if (speedMbps >= 1000) return `${(speedMbps / 1000).toFixed(0)} Gbps`
   return `${speedMbps} Mbps`
@@ -1202,9 +1141,7 @@ async function fetchTrafficSeriesData() {
   try {
     const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
     const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value)
-    if (seriesRes.data?.data?.points) {
-      seriesPoints.value = seriesRes.data.data.points
-    }
+    applySeries(seriesRes.data?.data)
   } catch (err) {
     console.error('Failed to load traffic series for interface isolation:', err)
   }
@@ -1358,160 +1295,143 @@ const chartTitle = computed(() => {
 
 // Chart Data
 const seriesPoints = shallowRef([])
+const seriesMeta = ref({ bucket_seconds: 60, directional: true })
+
+function applySeries(data) {
+  if (!data?.points) return
+  seriesPoints.value = data.points
+  seriesMeta.value = {
+    bucket_seconds: data.bucket_seconds || 60,
+    directional: data.directional !== false,
+  }
+}
+
+const WINDOW_SECONDS = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 }
+const MAX_FILLED_BUCKETS = 3000
+
+// Lay the points on a regular bucket grid covering the whole window, with null where no data
+// arrived, so outages and aggregation lag show as gaps instead of a continuous line.
+const filledPoints = computed(() => {
+  const points = seriesPoints.value
+  const step = (seriesMeta.value.bucket_seconds || 60) * 1000
+  const span = (WINDOW_SECONDS[selectedWindow.value] || 3600) * 1000
+  const now = Date.now()
+  const lastBucket = Math.floor(now / step) * step - step
+  const firstBucket = lastBucket - span + step
+  const byTime = new Map(points.map((p) => [Date.parse(p.timestamp), p]))
+  if ((lastBucket - firstBucket) / step + 1 > MAX_FILLED_BUCKETS) {
+    return points.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  }
+  const grid = []
+  for (let t = firstBucket; t <= lastBucket; t += step) {
+    grid.push({ t, p: byTime.get(t) || null })
+  }
+  // Keep any point that falls off the grid (e.g. a bucket still being filled).
+  for (const [t, p] of byTime) {
+    if (t > lastBucket) grid.push({ t, p })
+  }
+  return grid
+})
+
+const chartHint = computed(() => {
+  const bucket = seriesMeta.value.bucket_seconds || 60
+  const res = bucket >= 86400 ? '1-day' : bucket >= 3600 ? '1-hour' : '1-minute'
+  const direction = seriesMeta.value.directional ? '' : ' · direction not kept at this resolution'
+  return `Last ${selectedWindow.value} · ${res} averages · gaps mean no data${direction}`
+})
+
+function formatAxisTime(t) {
+  const d = new Date(t)
+  const span = WINDOW_SECONDS[selectedWindow.value] || 3600
+  if (span <= 86400) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (span <= 604800) return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+function lineDataset(label, data, color, opts = {}) {
+  return {
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: withAlpha(color, 0.2),
+    borderWidth: 2,
+    fill: opts.fill ?? true,
+    tension: 0.3,
+    spanGaps: false,
+    pointRadius: data.length > 100 ? 0 : 2,
+  }
+}
 
 const chartData = computed(() => {
-  const labels = seriesPoints.value.map((p) => {
-    const d = new Date(p.timestamp)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  })
+  const grid = filledPoints.value
+  const labels = grid.map((g) => formatAxisTime(g.t))
+  const pick = (key) => grid.map((g) => (g.p ? g.p[key] || 0 : null))
+  const series = theme.value.series
 
   const matched = selectedInterfaceIdx.value !== null
     ? interfaceList.value.find(i => i.interface_idx === selectedInterfaceIdx.value)
     : null
-  const ifDisplayName = matched
-    ? (matched.alias?.name || matched.name || `Interface #${selectedInterfaceIdx.value}`)
-    : `Interface #${selectedInterfaceIdx.value}`
-
-  if (chartMetricMode.value === 'pps') {
-    const inData = seriesPoints.value.map((p) => p.ingress_pps || 0)
-    const outData = seriesPoints.value.map((p) => p.egress_pps || 0)
-    const inLabel = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Ingress (pps)`
-      : 'Ingress (pps)'
-    const outLabel = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Egress (pps)`
-      : 'Egress (pps)'
-
-    return {
-      labels,
-      datasets: [
-        {
-          label: inLabel,
-          data: inData,
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16, 185, 129, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-        {
-          label: outLabel,
-          data: outData,
-          borderColor: '#0ea5e9',
-          backgroundColor: 'rgba(14, 165, 233, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-      ],
-    }
-  }
+  const prefix = selectedInterfaceIdx.value !== null
+    ? `${matched?.alias?.name || matched?.name || `Interface #${selectedInterfaceIdx.value}`} `
+    : ''
 
   if (chartMetricMode.value === 'fps') {
-    const flowData = seriesPoints.value.map((p) => p.flows_per_sec || 0)
-    const label = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Flow Rate (fps)`
-      : 'Flow Rate (fps)'
+    return { labels, datasets: [lineDataset(`${prefix}Flows (per second)`, pick('flows_per_sec'), series.flows)] }
+  }
 
-    return {
-      labels,
-      datasets: [
-        {
-          label,
-          data: flowData,
-          borderColor: '#8b5cf6',
-          backgroundColor: 'rgba(139, 92, 246, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-      ],
+  const unit = chartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const datasets = []
+  if (seriesMeta.value.directional) {
+    datasets.push(lineDataset(`${prefix}Ingress (${unit})`, pick(`ingress_${unit}`), series.in))
+    datasets.push(lineDataset(`${prefix}Egress (${unit})`, pick(`egress_${unit}`), series.out))
+    const transit = pick(`transit_${unit}`)
+    if (transit.some((v) => v)) {
+      datasets.push(lineDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
     }
+  } else {
+    datasets.push(lineDataset(`Total (${unit})`, pick(`transit_${unit}`), series.transit))
   }
-
-  // Default: 'bps'
-  const inData = seriesPoints.value.map((p) => p.ingress_bps)
-  const outData = seriesPoints.value.map((p) => p.egress_bps)
-
-  const inLabel = selectedInterfaceIdx.value !== null
-    ? `${ifDisplayName} Ingress (bps)`
-    : 'Ingress (bps)'
-  const outLabel = selectedInterfaceIdx.value !== null
-    ? `${ifDisplayName} Egress (bps)`
-    : 'Egress (bps)'
-
-  return {
-    labels,
-    datasets: [
-      {
-        label: inLabel,
-        data: inData,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-      },
-      {
-        label: outLabel,
-        data: outData,
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-      },
-    ],
-  }
+  return { labels, datasets }
 })
 
-// Dynamic theme-adaptive Chart.js options (UI-08)
 const chartOptions = computed(() => {
-  const isDark = typeof document !== 'undefined' && 
-    (document.documentElement.classList.contains('dark') || !document.documentElement.classList.contains('light'))
-  const textColor = isDark ? '#9ca3af' : '#4b5563'
-  const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)'
+  const t = theme.value
+  const formatValue = (val) => {
+    if (val === null || val === undefined) return 'no data'
+    if (chartMetricMode.value === 'pps') return formatPps(val)
+    if (chartMetricMode.value === 'fps') return `${val} fps`
+    return formatBps(val)
+  }
 
   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     normalized: true,
+    interaction: { mode: 'index', intersect: false },
     scales: {
       x: {
         grid: { display: false },
-        ticks: { color: textColor, font: { family: 'Inter', size: 11 } },
+        ticks: { color: t.text, font: { family: t.fontSans, size: 11 }, maxTicksLimit: 12, autoSkip: true },
       },
       y: {
+        beginAtZero: true,
         ticks: {
-          color: textColor,
-          font: { family: 'JetBrains Mono', size: 11 },
-          callback: (val) => {
-            if (chartMetricMode.value === 'pps') return formatPps(val)
-            if (chartMetricMode.value === 'fps') return `${val} fps`
-            return formatBps(val)
-          },
+          color: t.text,
+          font: { family: t.fontMono, size: 11 },
+          callback: (val) => formatValue(val),
         },
-        grid: { color: gridColor },
+        grid: { color: t.grid },
       },
     },
     plugins: {
       legend: {
         position: 'top',
-        labels: { color: textColor, font: { family: 'Inter', size: 12 } },
+        labels: { color: t.text, font: { family: t.fontSans, size: 12 } },
       },
       tooltip: {
         callbacks: {
-          label: (ctx) => {
-            if (chartMetricMode.value === 'pps') return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
-            if (chartMetricMode.value === 'fps') return `${ctx.dataset.label}: ${ctx.raw} fps`
-            return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
-          },
+          label: (ctx) => `${ctx.dataset.label}: ${formatValue(ctx.raw)}`,
         },
       },
     },
@@ -1521,32 +1441,27 @@ const chartOptions = computed(() => {
 const donutData = computed(() => {
   const labels = applicationStats.value.map((a) => a.service_label)
   const data = applicationStats.value.map((a) => a.total_bytes)
-  const colors = [
-    '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
-    '#EC4899', '#06B6D4', '#14B8A6', '#84CC16', '#6366F1',
-    '#F97316', '#A855F7', '#0EA5E9', '#D946EF', '#EAB308',
-    '#64748B'
-  ]
+  const palette = theme.value.palette
 
   return {
     labels,
     datasets: [
       {
         data,
-        backgroundColor: labels.map((_, i) => colors[i % colors.length]),
+        backgroundColor: labels.map((_, i) => palette[i % palette.length]),
         borderWidth: 1,
       },
     ],
   }
 })
 
-const donutOptions = {
+const donutOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   plugins: {
     legend: {
       position: 'right',
-      labels: { color: '#888888', font: { size: 11 } },
+      labels: { color: theme.value.text, font: { size: 11 } },
     },
     tooltip: {
       callbacks: {
@@ -1554,7 +1469,7 @@ const donutOptions = {
       },
     },
   },
-}
+}))
 
 function setWindow(w) {
   selectedWindow.value = w
@@ -1669,9 +1584,23 @@ async function submitExporterMapping() {
 async function refreshData() {
   loading.value = true
   try {
-    const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
+    // An unregistered source has no data of its own yet: load only the inventory for the
+    // enrol / link actions instead of showing fleet-wide numbers under its name.
+    if (isUnmatchedScope.value) {
+      const [expRes, epListRes] = await Promise.all([getFlowExporters(), getEndpoints()])
+      if (expRes.data?.data) {
+        unmatchedExporters.value = expRes.data.data.unmatched || []
+        flowExporters.value = expRes.data.data.exporters || []
+      }
+      if (epListRes.data?.data) {
+        availableEndpoints.value = epListRes.data.data
+      }
+      return
+    }
+
+    const expId = selectedExporterId.value || null
     const [ovRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
-      getBandwidthOverview(),
+      getBandwidthOverview(expId),
       getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value),
       getTopTalkers(selectedWindow.value, 25, null, expId),
       getApplicationDistribution(selectedWindow.value, expId),
@@ -1683,9 +1612,7 @@ async function refreshData() {
     if (ovRes.data?.data) {
       overview.value = ovRes.data.data
     }
-    if (seriesRes.data?.data?.points) {
-      seriesPoints.value = seriesRes.data.data.points
-    }
+    applySeries(seriesRes.data?.data)
     if (talkersRes.data?.data) {
       topEndpoints.value = talkersRes.data.data.top_endpoints || []
       topConversations.value = talkersRes.data.data.top_conversations || []
@@ -1701,7 +1628,6 @@ async function refreshData() {
     }
     if (epListRes.data?.data) {
       availableEndpoints.value = epListRes.data.data
-      totalEndpointsCount.value = epListRes.data.data.length
     }
     if (ifRes?.data?.data?.interfaces) {
       interfaceList.value = ifRes.data.data.interfaces
@@ -1775,32 +1701,6 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.window-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-pill.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: var(--shadow);
-}
-
 /* Unmatched Discovery Alert */
 .unmatched-banner {
   display: flex;
@@ -1851,49 +1751,21 @@ html.dark .unmatched-banner {
 }
 
 /* KPI Metric Strip */
+.kpi-scope-note {
+  margin: 0 0 0.5rem;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.speed-unset {
+  color: var(--status-text-warn);
+  font-weight: 600;
+}
+
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
-}
-
-.kpi-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius, 8px);
-  padding: 16px;
-  box-shadow: var(--shadow);
-}
-
-.kpi-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-}
-
-.kpi-value-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 6px 0 2px 0;
-}
-
-.kpi-value {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.kpi-denom {
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-}
-
-.kpi-subtext {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
 }
 
 .ingress-text {
@@ -1925,15 +1797,6 @@ html.dark .unmatched-banner {
 .section-hint {
   font-size: 0.75rem;
   color: var(--text-muted);
-}
-
-.badge-window {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--bg-surface-selected);
-  color: var(--text-secondary);
-  font-weight: 600;
 }
 
 .chart-container {
@@ -2485,13 +2348,6 @@ html.dark .unmatched-scope-badge {
 .interface-config-row .speed-col { width: 100px; }
 .interface-config-row .remove-col { width: 36px; display: flex; align-items: flex-end; }
 
-/* Flow Analytics Workbench UI Enhancements */
-.kpi-unit {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text-muted);
-}
-
 .text-accent {
   color: var(--accent-primary, #3b82f6);
 }
@@ -2540,19 +2396,6 @@ html.dark .unmatched-scope-badge {
   gap: 12px;
 }
 
-.metric-mode-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill-sm {
-  font-size: 0.6875rem;
-  padding: 3px 8px;
-}
-
 .active-filter-badge {
   display: flex;
   align-items: center;
@@ -2586,48 +2429,6 @@ html.dark .unmatched-scope-badge {
 /* Multi-Tab Breakdown Panel */
 .breakdown-panel {
   padding: 16px;
-}
-
-.breakdown-tabs {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.tab-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tab-btn:hover {
-  color: var(--text-primary);
-}
-
-.tab-btn.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: var(--shadow);
-}
-
-.tab-badge {
-  background: rgba(99, 102, 241, 0.2);
-  color: #818cf8;
-  padding: 1px 5px;
-  border-radius: 8px;
-  font-size: 0.65rem;
-  font-weight: 700;
 }
 
 .apps-quick-list {
@@ -2785,26 +2586,6 @@ html.dark .unmatched-scope-badge {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-}
-
-.triage-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.triage-pills .pill-anomalies.active {
-  color: #ef4444;
-}
-
-.triage-pills .pill-qos.active {
-  color: #8b5cf6;
-}
-
-.triage-pills .pill-bulk.active {
-  color: #10b981;
 }
 
 .filter-chips-row {

@@ -6,20 +6,21 @@
   >
     <div class="card-header">
       <div class="card-title-row">
-        <div class="card-checkbox" @click.stop>
-          <input 
-            type="checkbox" 
-            :checked="selected" 
-            @change="handleCheckboxChange" 
+        <label class="card-checkbox" @click.stop>
+          <input
+            type="checkbox"
+            :checked="selected"
+            :aria-label="`Select ${endpoint.hostname}`"
+            @change="handleCheckboxChange"
           />
-        </div>
+        </label>
         <h3 class="card-hostname" :title="endpoint.hostname">{{ endpoint.hostname }}</h3>
       </div>
       
       <div class="card-actions" @click.stop>
-        <button class="btn-icon inspect" @click="handleInspect" title="Quick Diagnostics">🔍</button>
-        <button v-if="isAdmin" class="btn-icon" @click="handleEdit" title="Edit Endpoint">✎</button>
-        <button v-if="isAdmin" class="btn-icon delete" @click="handleDelete" title="Delete Endpoint">🗑</button>
+        <button class="btn-icon inspect" @click="handleInspect" title="Quick Diagnostics" :aria-label="`Quick diagnostics for ${endpoint.hostname}`">🔍</button>
+        <button v-if="isAdmin" class="btn-icon" @click="handleEdit" title="Edit Endpoint" :aria-label="`Edit ${endpoint.hostname}`">✎</button>
+        <button v-if="isAdmin" class="btn-icon delete" @click="handleDelete" title="Delete Endpoint" :aria-label="`Delete ${endpoint.hostname}`">🗑</button>
       </div>
     </div>
 
@@ -43,11 +44,13 @@
       <div class="card-footer">
         <div class="uptime-row">
           <span class="uptime-label">Uptime</span>
-          <span class="uptime-value" :class="uptimeClass">
+          <span class="uptime-value" :style="{ color: toneVar(uptimeTone(uptime)) }">
             {{ formattedUptime }}
           </span>
         </div>
-        <span class="last-seen">Seen {{ timeAgo }}</span>
+        <span class="last-seen" :title="monitored ? 'When the current state began' : ''">
+          {{ monitored ? `State since ${timeAgo}` : 'Not monitored' }}
+        </span>
       </div>
     </div>
   </div>
@@ -56,6 +59,8 @@
 <script setup>
 import { computed } from 'vue'
 import StatusBadge from './StatusBadge.vue'
+import { isMonitored, uptimeValue } from '../utils/endpointState.js'
+import { toneVar, uptimeTone } from '../utils/statusTone.js'
 
 const props = defineProps({
   endpoint: { type: Object, required: true },
@@ -85,27 +90,12 @@ const handleDelete = () => {
   emit('delete', props.endpoint.id)
 }
 
-const statusClass = computed(() => {
-  const s = props.endpoint.current_detailed_state || props.endpoint.current_operational_state
-  if (s === 'UP') return 'status-up'
-  if (s === 'UP-UNSTABLE' || s === 'DOWN-UNSTABLE') return 'status-unstable'
-  if (s === 'DOWN') return 'status-down'
-  return 'status-unknown'
-})
+const monitored = computed(() => isMonitored(props.endpoint))
 
-const formattedUptime = computed(() => {
-  const v = props.endpoint.uptime_percentage_24h
-  if (v == null) return '—'
-  return `${parseFloat(v).toFixed(2)}%`
-})
+// Passive or paused endpoints have no uptime; show "—" rather than a red 0 %.
+const uptime = computed(() => uptimeValue(props.endpoint))
 
-const uptimeClass = computed(() => {
-  const v = parseFloat(props.endpoint.uptime_percentage_24h)
-  if (isNaN(v)) return ''
-  if (v >= 99) return 'uptime-good'
-  if (v >= 95) return 'uptime-warn'
-  return 'uptime-bad'
-})
+const formattedUptime = computed(() => (uptime.value === null ? '—' : `${uptime.value.toFixed(2)}%`))
 
 const timeAgo = computed(() => {
   if (!props.endpoint.last_seen) return 'never'
@@ -167,9 +157,20 @@ const timeAgo = computed(() => {
   flex: 1;
 }
 
+.card-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target-min);
+  min-height: var(--target-min);
+  margin: -4px 0 -4px -4px;
+  cursor: pointer;
+}
+
 .card-checkbox input {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
   cursor: pointer;
   flex-shrink: 0;
   accent-color: var(--accent);
@@ -194,13 +195,14 @@ const timeAgo = computed(() => {
 }
 
 .endpoint-card:hover .card-actions,
+.endpoint-card:focus-within .card-actions,
 .endpoint-card:hover .admin-actions {
   opacity: 1;
 }
 
 .btn-icon {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 4px;
   display: flex;
   align-items: center;
@@ -291,10 +293,6 @@ const timeAgo = computed(() => {
   font-size: 13px;
   font-weight: 700;
 }
-
-.uptime-good { color: var(--color-up); }
-.uptime-warn { color: var(--color-up-unstable); }
-.uptime-bad { color: var(--color-down); }
 
 .last-seen {
   font-size: 12px;

@@ -181,6 +181,17 @@ const chartData = computed(() => {
   }
 })
 
+// The x axis runs 0..1 across the period; label ticks with the clock time they stand for.
+function formatTick(fraction) {
+  const pStart = new Date(props.periodStart).getTime()
+  const pEnd = new Date(props.periodEnd).getTime()
+  const span = pEnd - pStart
+  const d = new Date(pStart + fraction * span)
+  if (span <= 36 * 3600 * 1000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (span <= 8 * 86400 * 1000) return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 const chartOptions = computed(() => {
   const gridColor = isDark.value ? '#3a3a3a' : '#e2e8f0'
   const textColor = isDark.value ? '#D0D0D0' : '#0f172a'
@@ -240,9 +251,8 @@ const chartOptions = computed(() => {
             family: 'monospace',
             size: 12
           },
-          callback: function(value) {
-            return (value * 100) + '%'
-          }
+          maxTicksLimit: 8,
+          callback: (value) => formatTick(value)
         },
         title: {
           display: false
@@ -261,7 +271,7 @@ const chartOptions = computed(() => {
   height: 200px;
   width: 100%;
   padding: 1rem;
-  background: #000000;
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 4px;
   box-shadow: none;
@@ -270,8 +280,3 @@ const chartOptions = computed(() => {
 }
 </style>
 
-<style>
-html:not(.dark) .state-timeline {
-  background: #ffffff;
-}
-</style>

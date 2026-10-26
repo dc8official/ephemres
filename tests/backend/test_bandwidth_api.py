@@ -55,25 +55,31 @@ def test_bandwidth_overview(client):
     test_client, mock_session = client
 
     mock_res = MagicMock()
-    # (total_bytes, total_flows, active_exporters)
-    mock_res.one_or_none.return_value = (50000000, 12000, 3)
+    # (total, ingress, egress, transit bytes; total, ingress, egress, transit packets; flows; exporters)
+    mock_res.one_or_none.return_value = (50_000_000, 30_000_000, 15_000_000, 5_000_000, 40_000, 24_000, 12_000, 4_000, 12000, 3)
     mock_session.execute.return_value = mock_res
 
     resp = test_client.get("/api/v1/bandwidth/overview")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
-    assert data["data"]["active_exporters_count"] == 3
-    assert data["data"]["total_flows_count"] == 12000
-    assert data["data"]["total_ingress_bps"] > 0
-    assert data["data"]["total_egress_bps"] > 0
+    ov = data["data"]
+    assert ov["active_exporters_count"] == 3
+    assert ov["total_flows_count"] == 12000
+    assert ov["total_ingress_bps"] == 30_000_000 * 8 / 300
+    assert ov["total_egress_bps"] == 15_000_000 * 8 / 300
+    assert ov["total_transit_bps"] == round(5_000_000 * 8 / 300, 2)
+    assert ov["total_transit_pps"] == round(4_000 / 300, 2)
+    assert ov["avg_packet_size"] == 50_000_000 // 40_000
+    assert ov["window_seconds"] == 300
 
 
 def test_bandwidth_traffic_series(client):
     test_client, mock_session = client
 
     now_dt = datetime.now(timezone.utc)
-    mock_row1 = (now_dt, 10000)
+    # (bucket, flow_count, ingress bytes/packets, egress bytes/packets, transit bytes/packets)
+    mock_row1 = (now_dt, 4, 10000, 10, 5000, 5, 0, 0)
     mock_result = MagicMock()
     mock_result.all.return_value = [mock_row1]
 
@@ -84,8 +90,12 @@ def test_bandwidth_traffic_series(client):
     data = resp.json()
     assert data["status"] == "success"
     assert len(data["data"]["points"]) == 1
-    assert data["data"]["points"][0]["ingress_bps"] > 0
-    assert data["data"]["points"][0]["egress_bps"] > 0
+    point = data["data"]["points"][0]
+    assert point["ingress_bps"] == round(10000 * 8 / 60, 2)
+    assert point["egress_bps"] == round(5000 * 8 / 60, 2)
+    assert point["transit_bps"] == 0
+    assert data["data"]["bucket_seconds"] == 60
+    assert data["data"]["directional"] is True
 
 
 def test_bandwidth_top_talkers(client):
@@ -349,7 +359,7 @@ def test_bandwidth_overview_unmatched_zset_and_fallback(mock_get_store, client):
     test_client, mock_session = client
 
     mock_res = MagicMock()
-    mock_res.one_or_none.return_value = (50000000, 12000, 3)
+    mock_res.one_or_none.return_value = (50000000, 0, 0, 50000000, 40000, 0, 0, 40000, 12000, 3)
     mock_session.execute.return_value = mock_res
 
     # 1. Primary: zcard succeeds with non-zero

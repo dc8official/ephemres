@@ -128,8 +128,8 @@
       <td class="text-right font-mono tnum color-rate-in">{{ iface.formatted_in_bps }}</td>
       <td class="text-right font-mono tnum color-rate-out">{{ iface.formatted_out_bps }}</td>
       <td class="text-right font-mono tnum" style="font-weight: 700;">{{ iface.formatted_peak_bps }}</td>
-      <td class="text-right font-mono tnum {% if iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}" style="font-weight: 700;">
-        {{ "%.1f"|format(iface.utilization_pct) }}%
+      <td class="text-right font-mono tnum {% if iface.utilization_pct is none %}text-muted{% elif iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}" style="font-weight: 700;">
+        {% if iface.utilization_pct is none %}—{% else %}{{ "%.1f"|format(iface.utilization_pct) }}%{% endif %}
       </td>
     </tr>
     {% endfor %}
