@@ -1,7 +1,7 @@
 """Ephemres Network Monitoring Platform — Cross-Version Database Backup Restore Engine.
 
 Restores PostgreSQL and TimescaleDB database dumps created by pg_dump across
-different platform generations (v3.1.35s, v3.3.0, v3.3.1n, v3.3.2v+).
+different platform generations (v3.1.35s, v3.2.0, v3.3.0, v3.3.1n, v3.3.2v+).
 
 Key Capabilities:
 1. TimescaleDB Chunk Remapping:

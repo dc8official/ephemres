@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Ephemres Network Monitoring Platform — Database Backup Restore Utility
-# Cross-Version Restoration Engine (v3.1.35s, v3.3.0, v3.3.1n, v3.3.2v -> v3.3.5)
+# Cross-Version Restoration Engine (v3.1.35s, v3.2.0, v3.3.0, v3.3.1n, v3.3.2v -> v3.3.5)
 # ==============================================================================
 set -eo pipefail
 
@@ -148,6 +148,26 @@ echo -e "${GREEN}[OK] Selected backup archive:${NC} ${BACKUP_FILE}"
 if [[ -z "${ADMIN_PASS}" ]]; then
     read -r -s -p "New admin password (leave blank to keep the password from the backup): " ADMIN_PASS
     echo ""
+fi
+
+# Load this install's settings (database credentials, current SECRET_KEY) the same way
+# reset-admin-password.sh and uninstall.sh do. The restore engine runs as root and otherwise only
+# sees /opt/ephemres/backend/.env, which installs migrated from the netmon layout do not have.
+ENV_FILE=""
+for candidate in "/etc/ephemres/ephemres.env" "${INSTALL_DIR}/backend/.env" "${INSTALL_DIR}/.env" "/etc/netmon/netmon.env"; do
+    if [[ -f "${candidate}" ]]; then
+        ENV_FILE="${candidate}"
+        break
+    fi
+done
+if [[ -n "${ENV_FILE}" ]]; then
+    echo -e "${GREEN}[INFO] Loading environment configuration from ${ENV_FILE}${NC}"
+    # shellcheck disable=SC1090
+    set -a
+    source "${ENV_FILE}"
+    set +a
+else
+    echo -e "${YELLOW}[WARN] No /etc/ephemres/ephemres.env found; the restore engine relies on its own config lookup.${NC}"
 fi
 
 # Locate Python binary

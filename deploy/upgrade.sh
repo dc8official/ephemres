@@ -58,7 +58,11 @@ if [[ -n "${ENV_FILE}" ]]; then
     echo -e "${GREEN}[INFO] Loading environment configuration from ${ENV_FILE}${NC}"
     if [[ ${DRY_RUN:-0} -eq 0 ]]; then
         chmod 0600 "${ENV_FILE}"
-        chown ephemres:ephemres "${ENV_FILE}" 2>/dev/null || true
+        # The legacy /etc/netmon/netmon.env stays owned by netmon so the old install can still be
+        # started for a rollback; the migrated copy in /etc/ephemres is owned by ephemres.
+        if [[ "${ENV_FILE}" != "/etc/netmon/netmon.env" ]]; then
+            chown ephemres:ephemres "${ENV_FILE}" 2>/dev/null || true
+        fi
     fi
     # shellcheck disable=SC1090
     set -a
@@ -70,6 +74,16 @@ elif [[ -f "${PROJECT_ROOT}/backend/.env" ]]; then
     set -a
     source "${PROJECT_ROOT}/backend/.env"
     set +a
+fi
+
+# Legacy netmon layout (v3.2.0 / v3.3.0): code in /opt/netmon/noop, venv in /opt/netmon/venv,
+# config and env in /etc/netmon, user netmon, units netmon-*. The ephemres units run
+# /opt/ephemres/venv as user ephemres and read /etc/ephemres, so such an install is moved over
+# (see migrate_legacy_config and migrate_legacy_services below).
+LEGACY_NETMON=0
+if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
+    LEGACY_NETMON=1
+    echo -e "${YELLOW}[INFO] Legacy netmon install detected (/etc/netmon/netmon.env, no /etc/ephemres/ephemres.env): it will be migrated to the ephemres layout.${NC}"
 fi
 
 DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}}"
@@ -123,6 +137,53 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     fi
 else
     echo -e "[DRY-RUN] Would generate SQL dump to ${BACKUP_FILE}"
+fi
+
+# 3b. Legacy netmon install: user, directories, env file and config for the ephemres units.
+# Runs after the backup so nothing changes before a verified dump exists. The /etc/netmon files
+# are copied, never moved; together with the pre-upgrade backup they allow a rollback.
+migrate_legacy_config() {
+    echo -e "\n${BLUE}--- Migrating legacy netmon configuration to /etc/ephemres ---${NC}"
+    if ! id ephemres &>/dev/null; then
+        useradd -r -s /usr/sbin/nologin ephemres
+    fi
+    local dir
+    for dir in /etc/ephemres /var/log/ephemres /var/backups/ephemres /run/ephemres; do
+        mkdir -p "${dir}"
+        chown ephemres:ephemres "${dir}"
+    done
+
+    # NETMON_* keys are written again as EPHEMRES_* with the same values (as install.sh writes
+    # both), so the database password and the key that encrypts alert channel secrets carry over.
+    # A NETMON_CONFIG_PATH would point the ephemres units back at /etc/netmon, which user ephemres
+    # cannot read; the config now lives in /etc/ephemres/config.toml, so that key is dropped.
+    local new_env="/etc/ephemres/ephemres.env"
+    {
+        echo "# Migrated from /etc/netmon/netmon.env by upgrade.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        awk '/^NETMON_CONFIG_PATH=/ { next }
+             /^NETMON_[A-Za-z0-9_]+=/ { key = $0; sub(/=.*/, "", key); sub(/^NETMON_/, "EPHEMRES_", key);
+                                        print key substr($0, index($0, "=")) }
+             { print }' /etc/netmon/netmon.env
+    } > "${new_env}.tmp"
+    chmod 0600 "${new_env}.tmp"
+    chown ephemres:ephemres "${new_env}.tmp"
+    mv -f "${new_env}.tmp" "${new_env}"
+    echo -e "${GREEN}[INFO] Created ${new_env} from /etc/netmon/netmon.env.${NC}"
+
+    if [[ -f /etc/netmon/config.toml && ! -f /etc/ephemres/config.toml ]]; then
+        sed 's#^log_dir = "/var/log/netmon"#log_dir = "/var/log/ephemres"#' /etc/netmon/config.toml > /etc/ephemres/config.toml
+        chown root:ephemres /etc/ephemres/config.toml
+        chmod 640 /etc/ephemres/config.toml
+        echo -e "${GREEN}[INFO] Copied /etc/netmon/config.toml to /etc/ephemres/config.toml (log_dir -> /var/log/ephemres).${NC}"
+    fi
+}
+
+if [[ ${LEGACY_NETMON} -eq 1 ]]; then
+    if [[ ${DRY_RUN} -eq 0 ]]; then
+        migrate_legacy_config
+    else
+        echo -e "[DRY-RUN] Would create user ephemres, /etc/ephemres/ephemres.env (from /etc/netmon/netmon.env) and /etc/ephemres/config.toml (from /etc/netmon/config.toml)"
+    fi
 fi
 
 # 4. Smart Config Migration (In-Place Upgrade)
@@ -350,7 +411,10 @@ echo -e "\n${BLUE}--- Step 6/7: Upgrading Python Dependencies & Database Migrati
 if [[ ${DRY_RUN} -eq 0 ]]; then
     # Determine Python virtual environment path
     VENV_PATH=""
-    if [[ -d "/opt/ephemres/venv" ]]; then
+    if [[ ${LEGACY_NETMON} -eq 1 ]]; then
+        # The ephemres units start /opt/ephemres/venv; the old /opt/netmon/venv stays for a rollback.
+        VENV_PATH="/opt/ephemres/venv"
+    elif [[ -d "/opt/ephemres/venv" ]]; then
         VENV_PATH="/opt/ephemres/venv"
     elif [[ -d "/opt/netmon/venv" ]]; then
         VENV_PATH="/opt/netmon/venv"
@@ -375,7 +439,11 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
             echo -e "${RED}[ERROR] ${VENV_PATH} is incomplete and no Python 3.11+ interpreter was found to rebuild it.${NC}" >&2
             exit 1
         fi
-        echo -e "${YELLOW}[WARN] ${VENV_PATH} is missing its interpreter or pip; rebuilding it with ${VENV_PYTHON}...${NC}"
+        if [[ ${LEGACY_NETMON} -eq 1 ]]; then
+            echo -e "${GREEN}[INFO] Creating ${VENV_PATH} with ${VENV_PYTHON} for the ephemres units...${NC}"
+        else
+            echo -e "${YELLOW}[WARN] ${VENV_PATH} is missing its interpreter or pip; rebuilding it with ${VENV_PYTHON}...${NC}"
+        fi
         "${VENV_PYTHON}" -m venv --clear "${VENV_PATH}"
         chown -R ephemres:ephemres "${VENV_PATH}"
     fi
@@ -475,6 +543,76 @@ else
     echo -e "[DRY-RUN] Would upgrade pip dependencies, compile Vue 3 assets, execute app.core.migrator upgrade head, and apply TimescaleDB decompression tuning"
 fi
 
+# upgrade_failed <reason>: the database is already migrated at this point, so say exactly that,
+# where the backup is, and how to look at the services, then stop with a non-zero exit.
+upgrade_failed() {
+    echo -e "${RED}========================================================================${NC}" >&2
+    echo -e "${RED}[ERROR] UPGRADE INCOMPLETE: $1${NC}" >&2
+    echo -e "${RED}The database schema is already upgraded. Pre-upgrade backup: ${BACKUP_FILE}${NC}" >&2
+    echo -e "${YELLOW}Inspect: systemctl status ephemres-api ephemres-engine; journalctl -u ephemres-api -u ephemres-engine -n 50${NC}" >&2
+    echo -e "${RED}========================================================================${NC}" >&2
+    exit 1
+}
+
+# verify_services_running [extra units...]: ephemres-api, ephemres-engine and any extra units
+# must be active and the API must answer /api/v1/health within about 60 seconds.
+verify_services_running() {
+    local attempt unit health_ok=0
+    for attempt in $(seq 1 30); do
+        sleep 2
+        if systemctl is-active --quiet ephemres-api && systemctl is-active --quiet ephemres-engine; then
+            if ! command -v curl &>/dev/null; then
+                health_ok=1
+                break
+            fi
+            if curl -fsS --max-time 3 http://127.0.0.1:8000/api/v1/health >/dev/null 2>&1; then
+                health_ok=1
+                break
+            fi
+        fi
+    done
+    for unit in ephemres-api ephemres-engine "$@"; do
+        if ! systemctl is-active --quiet "${unit}"; then
+            upgrade_failed "${unit} is not running after the restart."
+        fi
+    done
+    if [[ ${health_ok} -ne 1 ]]; then
+        upgrade_failed "ephemres-api is running but http://127.0.0.1:8000/api/v1/health did not answer."
+    fi
+}
+
+# migrate_legacy_services: retire the netmon-* units (stopped and disabled; the files stay so a
+# rollback with the pre-upgrade backup is possible) and point the existing netmon nginx site at /opt/ephemres. The site keeps its own
+# certificates and any local edits; only the /opt/netmon/noop paths change.
+migrate_legacy_services() {
+    echo -e "${GREEN}[INFO] Disabling legacy netmon-api, netmon-engine and netmon-flowd units...${NC}"
+    systemctl stop netmon-api netmon-engine netmon-flowd 2>/dev/null || true
+    systemctl disable netmon-api netmon-engine netmon-flowd 2>/dev/null || true
+
+    local site="/etc/nginx/sites-available/netmon"
+    if [[ -f "${site}" ]] && grep -q "/opt/netmon/noop" "${site}"; then
+        cp -p "${site}" "${site}.pre-ephemres"
+        sed -i 's#/opt/netmon/noop#/opt/ephemres#g' "${site}"
+        if command -v nginx &>/dev/null && ! nginx -t 2>>"${UPGRADE_LOG}"; then
+            cp -p "${site}.pre-ephemres" "${site}"
+            upgrade_failed "nginx rejected ${site} after pointing it at /opt/ephemres (restored the original; see ${UPGRADE_LOG})."
+        fi
+        echo -e "${GREEN}[INFO] Pointed nginx site ${site} at /opt/ephemres (original saved as ${site}.pre-ephemres).${NC}"
+    fi
+
+    # install.sh keeps a copy in backend/.env (rsync never touches it); keep a migrated install
+    # identical so tools run by hand from /opt/ephemres/backend see the same settings.
+    if [[ ! -f "${INSTALL_DIR}/backend/.env" ]]; then
+        cp /etc/ephemres/ephemres.env "${INSTALL_DIR}/backend/.env"
+        chmod 0600 "${INSTALL_DIR}/backend/.env"
+        chown ephemres:ephemres "${INSTALL_DIR}/backend/.env"
+    fi
+
+    if [[ -f "${INSTALL_DIR}/deploy/logrotate.conf" && ! -f /etc/logrotate.d/ephemres && -d /etc/logrotate.d ]]; then
+        cp "${INSTALL_DIR}/deploy/logrotate.conf" /etc/logrotate.d/ephemres
+    fi
+}
+
 # 9. Service Unit Refresh, Auto-Start Enablement & Restart
 echo -e "\n${BLUE}--- Step 7/7: Refreshing Systemd Units, Enabling Auto-Start & Starting Services ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
@@ -499,10 +637,16 @@ EOF
         chmod 0440 /etc/sudoers.d/ephemres
     fi
 
+    if [[ ${LEGACY_NETMON} -eq 1 ]]; then
+        migrate_legacy_services
+    fi
+
     echo -e "${GREEN}[INFO] Reloading systemd daemons and enabling auto-start on boot...${NC}"
     systemctl daemon-reload
     systemctl enable ephemres-api ephemres-engine || true
-    systemctl restart ephemres-api ephemres-engine
+    if ! systemctl restart ephemres-api ephemres-engine; then
+        upgrade_failed "systemctl could not start ephemres-api / ephemres-engine."
+    fi
     systemctl restart nginx || true
 
     # Network Flow Telemetry Ingestion
@@ -532,12 +676,12 @@ EOF
         echo -e "${YELLOW}[INFO] Flow telemetry is disabled in settings. ephemres-flowd service installed and ready for UI activation.${NC}"
     fi
 
-    sleep 2
-    if systemctl is-active --quiet ephemres-api && systemctl is-active --quiet ephemres-engine; then
-        echo -e "${GREEN}[SUCCESS] Primary platform services (ephemres-api, ephemres-engine) are active, enabled on boot, and healthy.${NC}"
+    if [[ "${FLOW_ENABLED}" == "true" ]]; then
+        verify_services_running ephemres-flowd
     else
-        echo -e "${YELLOW}[WARN] Check service status via: systemctl status ephemres-api ephemres-engine${NC}"
+        verify_services_running
     fi
+    echo -e "${GREEN}[SUCCESS] Primary platform services (ephemres-api, ephemres-engine) are active, enabled on boot, and the API answers its health check.${NC}"
 else
     echo -e "[DRY-RUN] Would run: systemctl enable & restart ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
 fi
@@ -546,3 +690,10 @@ echo -e "\n${GREEN}=============================================================
 echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.5 Platform upgraded successfully!     ${NC}"
 echo -e "${GREEN}   Pre-Upgrade Database Backup Saved At: ${BACKUP_FILE}${NC}"
 echo -e "${GREEN}========================================================================${NC}"
+if [[ ${LEGACY_NETMON} -eq 1 ]]; then
+    echo -e "${YELLOW}[NOTICE] This install was migrated from the netmon layout. The old /opt/netmon, /etc/netmon and${NC}"
+    echo -e "${YELLOW}         netmon-* units (now disabled) were kept: with the pre-upgrade backup above they allow a${NC}"
+    echo -e "${YELLOW}         rollback (the database itself is migrated). Remove them once you are satisfied.${NC}"
+    echo -e "${YELLOW}[NOTICE] Passwords from v3.2/v3.3.0 cannot be carried over: users were given temporary passwords${NC}"
+    echo -e "${YELLOW}         (see the seeding output above and /opt/ephemres/legacy_password_resets.txt).${NC}"
+fi
