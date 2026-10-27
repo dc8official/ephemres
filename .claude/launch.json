@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ui-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--prefix", "frontend", "vite", "preview", "frontend", "--outDir", "/tmp/claude-1000/-home-creme-Learn-ephemres/cecd2d2f-44a3-4028-8bd6-1d8eff6be823/scratchpad/dist-v340", "--port", "5173", "--strictPort"],
+      "port": 5173
+    }
+  ]
+}
