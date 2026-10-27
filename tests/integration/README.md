@@ -20,9 +20,10 @@ a database you care about.
 
 ## Characterization tests
 
-`test_flow_dashboard_characterization.py` pins what the flow endpoints return today for a
-small hand-computed dataset, including behaviour the v3.4 plan
-(`docs/architecture/v3.4-dashboard-data-and-design-plan.md`) intends to change, such as the
-50/50 split of transit traffic and the materialized-only lag of the hourly aggregate. When a
-phase changes one of those behaviours, update the matching assertion in the same commit and
-say why.
+`test_flow_dashboard_characterization.py` pins what the flow endpoints return for a small
+hand-computed dataset. Assertions marked `CHANGED IN v3.4 PHASE n` record behaviour the v3.3.5
+dashboard rework changed (it was developed under the working name v3.4; see
+`docs/release-notes/v3.3.5.md`), such as transit traffic reported on its own instead of split
+50/50 and the hourly aggregate reading in real time. Assertions marked `CHARACTERIZATION` pin
+behaviour that was kept as it was. When a change alters one of these behaviours, update the
+matching assertion in the same commit and say why.

@@ -18,7 +18,7 @@ By replacing 13 third-party runtime frameworks with 12 in-tree standard library 
 * **Cycle Timing Budget (5 pings @ 8.0s):** Each sweep sends `ping_count` probes (default 5) spaced `ping_interval_seconds` apart (default 8.0s), each waiting up to 2.0s for its reply. A sweep typically takes ~32s and at most `count × 2s + (count − 1) × interval` = 42s with the defaults.
 * **Cycle Headroom:** The cycle is a fixed 60 seconds. At startup the engine rejects any configured ping plan whose worst-case sweep exceeds 55s (leaving at least 5s for the database write and slot realignment), logs an error, and falls back to 5 pings @ 8.0s.
 * **Deterministic Slot Staggering:** Each endpoint is assigned a fixed second within the minute (`UUID mod 60`) and every cycle starts on that slot, so sweeps spread evenly across the minute instead of all firing at once. There is no random jitter.
-* **Per-Cycle Probe History (`endpoint_probe_samples` & `endpoint_probe_hourly`):** Each 60-second sweep computes `rtt_min_ms`, `rtt_avg_ms`, `rtt_max_ms`, `jitter_ms`, and `sent`/`received` counts (`PingResult`), writing a row to the `endpoint_probe_samples` hypertable (compressed after 7 days, retained 30 days) with an hourly continuous aggregate `endpoint_probe_hourly` (retained 365 days).
+* **Per-Cycle Probe History (`endpoint_probe_samples` & `endpoint_probe_hourly`):** Each 60-second sweep computes `rtt_min_ms`, `rtt_avg_ms`, `rtt_max_ms`, `jitter_ms`, and `sent`/`received` counts (`PingResult`), writing a row to the `endpoint_probe_samples` hypertable (compressed after 2 days, retained 30 days) with an hourly continuous aggregate `endpoint_probe_hourly` (retained 365 days).
 * **Dynamic In-Memory Registry:** `EndpointRegistry` maintains a thread-safe, concurrent registry allowing sub-minute endpoint additions, updates, and removals with zero engine downtime.
 
 ### 3. Dual-Driver Storage Architecture
@@ -94,7 +94,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **4-Tier Hierarchical Storage Lifecycle:**
   1. *Tier 1 (Real-Time Raw Buffer):* FastStore Stream (`stream:netflow:raw`), sliding 2-hour retention for real-time forensic inspection.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
-  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`in_peak_bytes`, `out_peak_bytes`), retained for 365 days.
+  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`peak_in_minute_bytes`, `peak_out_minute_bytes`), retained for 365 days.
   4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups` (`materialized_only = false`), refreshed daily, retained for 365 days for long-term capacity planning.
 
 ---

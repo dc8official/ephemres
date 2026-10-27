@@ -1,9 +1,9 @@
 """Characterization of the flow dashboard endpoints against real TimescaleDB SQL.
 
 The dataset is small enough to compute by hand; the expected values below are those
-hand calculations. Assertions marked CHARACTERIZATION pin current behaviour that the v3.4 plan
-(docs/architecture/v3.4-dashboard-data-and-design-plan.md) intends to change; assertions marked
-CHANGED IN v3.4 PHASE 1 record behaviour that phase deliberately changed.
+hand calculations. Assertions marked CHANGED IN v3.4 PHASE n record behaviour the v3.3.5
+dashboard rework deliberately changed (v3.4 was its working name; see
+docs/release-notes/v3.3.5.md); assertions marked CHARACTERIZATION pin behaviour kept as it was.
 """
 import datetime
 import json

@@ -1,9 +1,8 @@
 # UI primitives
 
-Shared controls for the v3.4 dashboard work
-(`docs/architecture/v3.4-dashboard-data-and-design-plan.md`). They use only the CSS variables
-defined in `App.vue`, so they follow light and dark mode without extra code. New or reworked
-screens use these instead of page-specific toggle, heading and KPI styles.
+Shared controls from the v3.3.5 dashboard rework (`docs/release-notes/v3.3.5.md`). They use
+only the CSS variables defined in `App.vue`, so they follow light and dark mode without extra
+code. New or reworked screens use these instead of page-specific toggle, heading and KPI styles.
 
 | Component | Use it for |
 |---|---|

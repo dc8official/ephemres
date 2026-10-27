@@ -56,7 +56,7 @@ Stores per-cycle ICMP sweep metrics (one row per monitored endpoint per 60-secon
 * `received` (`SMALLINT`, Not Null) — Replies received in the sweep cycle.
 * `rtt_min_ms` / `rtt_avg_ms` / `rtt_max_ms` (`REAL`, Nullable) — Minimum, arithmetic mean, and maximum RTT (ms) across received replies (`NULL` when `received = 0`).
 * `jitter_ms` (`REAL`, Nullable) — Mean absolute consecutive RTT difference across received replies.
-* *Policies*: 1-day chunk interval, columnar compression after 7 days (`compress_segmentby = 'endpoint_id'`, `compress_orderby = 'sampled_at DESC'`), 30-day retention policy. Rolled up into `endpoint_probe_hourly` (continuous aggregate with `materialized_only = false`, 365-day retention).
+* *Policies*: 1-day chunk interval, columnar compression after 2 days (`compress_segmentby = 'endpoint_id'`, `compress_orderby = 'sampled_at DESC'`), 30-day retention policy. Rolled up into `endpoint_probe_hourly` (continuous aggregate with `materialized_only = false`, 365-day retention).
 
 ### `flow_path_observations` & `flow_route_changes` (Migration `0017`)
 Track forwarding paths observed in NetFlow/IPFIX records to and from monitored endpoints:
@@ -273,7 +273,7 @@ SELECT add_retention_policy('flow_daily_rollups', INTERVAL '365 days', if_not_ex
 Migration `0014` sets `timescaledb.materialized_only = false` on both `flow_hourly_rollups` and `flow_daily_rollups` so queries over `24h`, `7d`, and `30d` windows automatically merge the newest unmaterialized minutes from `flow_minute_rollups`.
 
 ### Hourly Interface Continuous Aggregate (`flow_interface_hourly_rollups` — Migration `0016`)
-Pre-aggregates per-interface minute rollups into 1-hour windows while retaining the busiest single minute (`in_peak_bytes`, `out_peak_bytes`) for accurate peak utilization over 30-day windows (retained 365 days, `materialized_only = false`).
+Pre-aggregates per-interface minute rollups into 1-hour windows while retaining the busiest single minute (`peak_in_minute_bytes`, `peak_out_minute_bytes`) for accurate peak utilization over 30-day windows (retained 365 days, `materialized_only = false`).
 
 ### Hourly Probe Continuous Aggregate (`endpoint_probe_hourly` — Migration `0015`)
 Pre-aggregates `endpoint_probe_samples` into 1-hour buckets (`sample_count`, `sent`, `received`, `rtt_min_ms`, reply-weighted `rtt_sum_ms`/`rtt_weight`, `rtt_max_ms`, `jitter_avg_ms`), retained for 365 days (`materialized_only = false`).
