@@ -1,12 +1,12 @@
-# Ephemres User & Operator Guide — Version 3.3.2.v
+# Ephemres User & Operator Guide — Version 3.3.5
 
-Welcome to the Ephemres Network Monitoring Platform v3.3.2.v user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet bandwidth telemetry, configure multi-channel enterprise alert notifications, use the CSV report customizer, interpret multi-protocol probes, and manage system settings.
+Welcome to the Ephemres Network Monitoring Platform v3.3.5 user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet Traffic Analytics and WAN edge capacity, configure multi-channel enterprise alert notifications, use the CSV/PDF report generators, and manage system settings.
 
 ---
 
 ## 1. Authentication & Session Security
 
-Ephemres v3.3.2.v provides enterprise-grade session protection:
+Ephemres v3.3.5 provides enterprise-grade session protection:
 * **Browser Password Autofill:** The login page supports native browser credential managers (Chrome, Edge, Safari, Firefox, Bitwarden, 1Password) for 1-click authentication.
 * **Session Timeout:** Sessions expire after the configured session timeout (default 120 minutes; **Admin Settings → Security & Discovery**), after which you are asked to log in again.
 * **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions by default (configurable by the operator); a further login signs out the oldest session.
@@ -17,29 +17,33 @@ Ephemres v3.3.2.v provides enterprise-grade session protection:
 
 ## 2. Real-Time Dashboard Overview (`/`)
 
-The v3.3.2.v dashboard provides instantaneous fleet telemetry:
+The v3.3.5 dashboard provides instantaneous fleet telemetry with URL-persisted filters and severity-first sorting:
 
 ### Global Network Health KPI Strip
-* **Summary Ribbon:** Displays total monitored devices, count of `🟢 UP`, `🟡 UNSTABLE`, `🔴 DOWN` devices, and the aggregate **Fleet SLA %**.
-* **Interactive Filter Pills:** Clicking any state card (e.g. `🔴 DOWN`) instantly filters the endpoint list without triggering a page reload.
+* **Summary Ribbon:** Displays total monitored devices, counts of `UP`, `UNSTABLE`, `DOWN`, and **Not Monitored** (passive flow exporters or paused devices), plus the aggregate **Fleet SLA %** (computed strictly across ICMP-monitored endpoints).
+* **Interactive Filter Pills:** Clicking any state tile filters the endpoint list and updates the URL query parameters so filtered views can be bookmarked or shared.
 
 ### Dual View Switcher
-* **Visual Card Grid:** Rich visual cards showcasing live status badges, latency indicators, packet loss bars, and quick diagnostic links.
-* **Dense Sortable Data Table:** High-density tabular view displaying Hostname, IP, Detailed Operational State, Average Latency, Packet Loss %, and 30-Day SLA Uptime %. Columns are sortable for rapid fleet triage.
+* **Visual Card Grid:** Rich visual cards showcasing live status badges, latency indicators, packet loss, and quick diagnostic links, sorted by severity by default (`DOWN` first).
+* **Dense Sortable Data Table:** High-density tabular view displaying Hostname, IP, Detailed Operational State, Average/p95 Latency, 24h RTT Sparkline, Packet Loss %, In-State-Since duration, and 24h SLA Uptime %.
 
 ### Real-Time Telemetry Stream
-* Connected directly to Server-Sent Events (SSE). An indicator badge in the top right confirms connection status (`🟢 Live SSE` / `🟡 Reconnecting...`).
+* Connected directly to Server-Sent Events (SSE). An indicator badge in the header confirms connection status.
 
 ---
 
 ## 3. Interactive Topology Map (`/topology`)
 
-Visualizes the parent-child network hierarchy with crossing-free routing:
+Visualizes the parent-child network hierarchy with crossing-free routing and NetFlow link verification:
 
 ### Features & Controls
-* **Layout Switcher:** Toggle between **Vertical View (Top-to-Bottom)** and **Horizontal View (Left-to-Right)**.
+* **Layout Switcher & Actions Menu:** Toggle between **Vertical View (Top-to-Bottom)** and **Horizontal View (Left-to-Right)**, fit the graph to the viewport, refresh, or open the Admin actions menu (**Discover All Routes**, **Rebuild Graph**).
+* **NetFlow Link Verification:** Links traversed by flow-exporting routers are checked every 5 minutes against live traffic next hops:
+  - **Confirmed by traffic:** Solid link indicating flow next-hop matches the traceroute hop.
+  - **Traffic takes another path (`differs`):** Highlighted link when flows leave for a different next hop than the baseline traceroute.
+  - **Inferred from flow data (`inferred`):** Names anonymous `* * *` traceroute hops using the router's exported next-hop address.
 * **Frozen-Physics Real-Time Recoloring:** State changes update node colors in real time via SSE without recalculating coordinates or causing canvas movement.
-* **Dynamic Legend Badges:** Glowing count badges in the legend show live counts of Root, UP, UNSTABLE, DOWN, and Transit nodes.
+* **Collapsible Legend:** Displays live counts of node states and link verification styles.
 * **Topological Root Cause Analysis (RCA):**
   - When an upstream transit gateway fails, dependent nodes are automatically classified as `INFERRED_DOWN`, preventing alert fatigue.
 
@@ -47,14 +51,17 @@ Visualizes the parent-child network hierarchy with crossing-free routing:
 
 ## 4. Endpoint Details & Perspective Tabs (`/endpoints/:id`)
 
-Clicking any endpoint opens its detailed forensic view with an accessible perspective switcher:
+Clicking any endpoint opens its detailed forensic view with a live status bar (State, Current Latency, 24h Loss %, Jitter, Time in State, Last Probe) and perspective switcher:
 * **Tab 1: Health & Diagnostics:**
-  - **24-Hour Telemetry Graphs:** Interactive ICMP latency and packet loss curves with TimescaleDB continuous aggregate baselines.
-  - **High-Fidelity Traceroutes:** View hop-by-hop latency breakdowns and identify failure transit boundaries.
+  - **Per-Cycle Probe Latency & Loss (`ProbeTrendPanel`):** Interactive time-series chart showing average RTT with a min/max latency band and packet-loss markers across the selected window, backed by `endpoint_probe_samples` and `endpoint_probe_hourly`.
+  - **State Timeline & Audit Log:** Visual state timeline and paginated transition history.
+  - **High-Fidelity Traceroutes & RCA:** View hop-by-hop latency breakdowns, baseline vs. failure trace comparisons, and **Flow Evidence** showing whether traffic continued flowing across routers after ICMP probes failed.
 * **Tab 2: Flow Telemetry & Bandwidth:**
-  - **Endpoint Traffic Volume:** Ingress vs. Egress stacked bandwidth curves specific to this device.
-  - **Top Communicating Peers:** Ranks remote internal and external IPs sending or receiving traffic with this endpoint.
-  - **Application Breakdown:** Protocol and service port distribution attributed to this endpoint.
+  - **Role Mode Switcher:** View traffic **As exporter** (all traffic traversing this router) or **As participant** (traffic to or from this endpoint).
+  - **Bandwidth vs. Correlated View:** Switch between **Bandwidth** (Ingress, Egress, and Transit throughput/packet rate) and **Latency vs. bandwidth** (dual time-aligned charts comparing per-probe ICMP latency/loss directly above flow throughput, filterable by SNMP interface).
+  - **Per-Interface Utilization Cards:** Displays average, 95th-percentile (`p95`), and busiest-minute (`peak`) utilization, WAN role badges, and a **Configure Interfaces** modal.
+  - **Paths Seen in Flows:** Lists where exporting routers forwarded this endpoint's traffic in the last 24h (`in_if`, `out_if`, `next_hop`, volume, active status) and any sustained route changes recorded over the last 7 days.
+  - **Server-Filtered Conversations Panel:** Drill down into conversations through or with this device with instant IP, service port, DSCP, and quick-triage filters (`All`, `Anomalies`, `QoS`, `Bulk`).
 
 ---
 
@@ -71,7 +78,7 @@ Administrators can configure platform behavior across five dedicated tabs:
 
 ## 6. Configuring Enterprise Alert Channels
 
-Ephemres v3.3.2.v includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
+Ephemres v3.3.5 includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
 
 ### Microsoft Teams Workflows Setup
 Microsoft Teams supports two integration patterns:
@@ -109,7 +116,7 @@ Always verify channel reachability before saving:
 
 ## 7. Reports, Auditing & Compliance Documentation
 
-Ephemres v3.3.2.v provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
+Ephemres v3.3.5 provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
 
 ### 7.1 CSV Telemetry Export Stream
 Operators and Administrators can export raw or customized time-series telemetry to CSV:
@@ -146,20 +153,17 @@ Administrators can customize corporate identity settings to brand all compiled P
 
 ---
 
-## 8. Fleet Bandwidth Monitoring & Flow Analytics (`/bandwidth`)
+## 8. Traffic Analytics & Fleet Bandwidth Monitoring (`/bandwidth`)
 
-Ephemres v3.3.2.v introduces passive network flow ingestion supporting NetFlow v5, NetFlow v9, and IPFIX along with per-interface telemetry and link utilization tracking. The dedicated `/bandwidth` dashboard provides complete visibility into network traffic volumes, protocol usage, router interfaces, and top communicating entities.
+Ephemres v3.3.5 provides a multi-view **Traffic Analytics** cockpit at `/bandwidth` (accessible via **Traffic** in the top navigation bar), supporting NetFlow v5, NetFlow v9, and IPFIX with WAN edge accounting, per-interface percentile utilization, and server-side conversation forensics.
 
-### Accessing the Bandwidth Dashboard
-Click the **🌊 Bandwidth** item in the main navigation header or navigate directly to `/bandwidth`.
-
-### 1. Fleet KPI Ribbon
-At the top of the dashboard, five real-time KPI cards present current network traffic state (evaluated over a sliding 5-minute window):
-* **Total Ingress Bandwidth:** Real-time incoming throughput in bits per second (`Mbps` / `Gbps`).
-* **Total Egress Bandwidth:** Real-time outgoing throughput in bits per second.
-* **Active Exporters:** Count of network routers/switches actively streaming flow datagrams to the collector.
-* **Total Flows Ingested:** Cumulative count of discrete flow sessions processed in the selected window.
-* **Unmatched Candidates:** Count of unrecognized exporter IPs streaming flows to Ephemres.
+### 1. Views & URL Navigation
+Switch between five dedicated views (persisted in `?view=` in the URL):
+* **Overview:** Fleet or single-exporter KPI ribbon (WAN In/Out when WAN links are marked, Ingress, Egress, Transit, Avg Packet Size, Flows, Active Exporters), WAN Links breakdown card, stacked traffic chart (**WAN edge** vs. **All flows**, **Throughput** / **Packets** / **Flows**), Top Talkers, Application distribution (including `"Other"`), and Traffic Zones.
+* **Interfaces:** Per-interface ingress/egress rates, average / `p95` / `peak` (busiest-minute) utilization, WAN/LAN role tags, and 1-click interface speed & role configuration (`⚙ Configure Interfaces`).
+* **Conversations:** Server-filtered, counted, sorted (`Bytes`, `Flows`, `Packets`), and paginated IP-to-IP conversation table with quick filters (`All`, `Anomalies`, `QoS`, `Bulk`) and cross-filtering by IP, port, or DSCP class.
+* **QoS:** DiffServ / DSCP class distribution with click-to-filter QoS-marked conversations.
+* **Security:** TCP flag anomaly KPIs (SYN-without-ACK scans and RST-without-FIN connection refusals) and suspicious conversation forensics.
 
 ### 2. Time Window Selection
 Select your analysis horizon using the time range switcher:

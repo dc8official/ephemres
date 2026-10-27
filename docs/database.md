@@ -1,6 +1,6 @@
-# Ephemres Database & TimescaleDB Architecture — Version 3.3.2.v
+# Ephemres Database & TimescaleDB Architecture — Version 3.3.5
 
-This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.2.v.
+This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.5.
 
 ---
 
@@ -8,12 +8,15 @@ This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable p
 
 ```mermaid
 erDiagram
-    endpoints ||--o{ endpoint_events : "records telemetry (Hypertable)"
+    endpoints ||--o{ endpoint_events : "records state periods (Hypertable)"
+    endpoints ||--o{ endpoint_probe_samples : "records per-cycle RTT/loss (Hypertable)"
     endpoints ||--o{ endpoint_baseline_routes : "stores baseline traceroute"
     endpoints ||--o{ endpoint_diagnostic_traces : "stores ephemeral JSONB traces"
     endpoints ||--o{ endpoint_rca_incidents : "tracks root cause outages"
     endpoints ||--o{ flow_minute_rollups : "attributes traffic (Hypertable)"
     endpoints ||--o{ flow_interface_minute_rollups : "attributes interface traffic (Hypertable)"
+    endpoints ||--o{ flow_path_observations : "tracks flow forwarding paths"
+    endpoints ||--o{ flow_route_changes : "records dominant path changes"
     alert_channels ||--o{ alert_delivery_logs : "records dispatch audit"
     users ||--o{ user_sessions : "maintains active sessions"
     users ||--o{ audit_logs : "records admin actions"
@@ -43,7 +46,33 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `created_by` (`UUID`, Foreign Key to `users.id`, Nullable)
 * `created_at` / `updated_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null) and `deleted_at` (`TIMESTAMPTZ`, Nullable; soft delete)
 * `flow_exporter_ips` (`INET[]`, Default: `'{}'::inet[]`, Not Null) — Secondary exporter IP addresses aliased to this endpoint. Indexed via GIN index `idx_endpoints_flow_exporter_ips` for high-speed array containment queries (`flow_exporter_ips @> ARRAY['192.168.1.1'::inet]`).
-* `flow_interface_aliases` (`JSONB`, Default: `'{}'::jsonb`, Not Null) — Key-value dictionary mapping SNMP interface indexes (`ifIndex`) to human-readable labels and operational speeds (e.g. `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`).
+* `flow_interface_aliases` (`JSONB`, Default: `'{}'::jsonb`, Not Null) — Key-value dictionary mapping SNMP interface indexes (`ifIndex`) to human-readable labels, provisioned speeds (optional/`null` when unset), and link roles (`"wan"` or `"lan"`, default `"lan"`), e.g. `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan"}}`.
+
+### `endpoint_probe_samples` (TimescaleDB Hypertable — Migration `0015`)
+Stores per-cycle ICMP sweep metrics (one row per monitored endpoint per 60-second sweep cycle).
+* `endpoint_id` (`UUID`, Primary Key, Foreign Key to `endpoints.id` `ON DELETE CASCADE`, Not Null)
+* `sampled_at` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null)
+* `sent` (`SMALLINT`, Not Null) — Probes transmitted in the sweep cycle.
+* `received` (`SMALLINT`, Not Null) — Replies received in the sweep cycle.
+* `rtt_min_ms` / `rtt_avg_ms` / `rtt_max_ms` (`REAL`, Nullable) — Minimum, arithmetic mean, and maximum RTT (ms) across received replies (`NULL` when `received = 0`).
+* `jitter_ms` (`REAL`, Nullable) — Mean absolute consecutive RTT difference across received replies.
+* *Policies*: 1-day chunk interval, columnar compression after 7 days (`compress_segmentby = 'endpoint_id'`, `compress_orderby = 'sampled_at DESC'`), 30-day retention policy. Rolled up into `endpoint_probe_hourly` (continuous aggregate with `materialized_only = false`, 365-day retention).
+
+### `flow_path_observations` & `flow_route_changes` (Migration `0017`)
+Track forwarding paths observed in NetFlow/IPFIX records to and from monitored endpoints:
+* **`flow_path_observations`**:
+  - `exporter_id` (`UUID`, Foreign Key to `endpoints.id` `ON DELETE CASCADE`, Not Null)
+  - `endpoint_id` (`UUID`, Foreign Key to `endpoints.id` `ON DELETE CASCADE`, Not Null)
+  - `direction` (`VARCHAR(4)`, Not Null: `'to'` or `'from'`)
+  - `in_if` / `out_if` (`INTEGER`, Not Null) — Input and output SNMP interface indices.
+  - `next_hop` (`INET`, Nullable) — Forwarding next-hop router IP (`NULL` when `0.0.0.0`/`::` or not exported).
+  - `first_seen` / `last_seen` (`TIMESTAMPTZ`, Not Null)
+  - `bytes` (`BIGINT`, Not Null) and `flow_count` (`BIGINT`, Not Null)
+  - Indexed via unique expression index `uq_flow_path_observations_key` on `(exporter_id, endpoint_id, direction, in_if, out_if, COALESCE(next_hop, '0.0.0.0'::inet))`. Pruned after 30 days of inactivity.
+* **`flow_route_changes`**:
+  - Records sustained dominant path shifts (`detected_at`, `exporter_id`, `endpoint_id`, `direction`, `old_out_if`, `old_next_hop`, `new_out_if`, `new_next_hop`, `sample_minutes`). Retained for 90 days.
+* **`endpoint_rca_incidents.flow_evidence`** (`JSONB`, Nullable):
+  - Stores flow path and route-change evidence alongside RCA incidents (`paths`, `route_changes`, `traffic_after_failure`, `summary`).
 
 ### `endpoint_events` (TimescaleDB Hypertable)
 Stores state periods: one row per confirmed state, extended while the state persists (`end_time`, `duration_seconds`, `monitoring_cycle_count`) and closed when the state changes.
@@ -132,8 +161,8 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1** | FastStore Shared-Memory Stream (`stream:netflow:raw` in `/dev/shm`) | 2 Hours | Flow Record | Sliding in-memory buffer (`MAXLEN ~100000`) | Real-time forensic packet/flow inspection, live anomaly triage. |
 | **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 90 Days / 7 Days | 1 Minute | `flow_minute_rollups`: native columnar compression after 1 day (85%+ disk savings). `flow_interface_minute_rollups`: uncompressed | Short-term forensic queries, detailed talker attribution, interface throughput. |
-| **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`) | 30 Days | 1 Hour | Materialized View with auto-refresh policy (`start_offset: 3d`, `end_offset: 1h`) | Weekly / monthly capacity trends, application mix shifts, bandwidth forecasting. |
-| **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View with auto-refresh policy (`start_offset: 7d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
+| **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`, `flow_interface_hourly_rollups`, `endpoint_probe_hourly`) | 30 Days / 365 Days | 1 Hour | Materialized Views with `materialized_only = false` and auto-refresh policies | Weekly / monthly capacity trends, 30-day interface p95/peak utilization, and long-term probe RTT/loss trends. |
+| **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View (`materialized_only = false`) with auto-refresh policy (`start_offset: 7d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
 
 ---
 
@@ -241,6 +270,13 @@ SELECT add_continuous_aggregate_policy(
 
 SELECT add_retention_policy('flow_daily_rollups', INTERVAL '365 days', if_not_exists => TRUE);
 ```
+Migration `0014` sets `timescaledb.materialized_only = false` on both `flow_hourly_rollups` and `flow_daily_rollups` so queries over `24h`, `7d`, and `30d` windows automatically merge the newest unmaterialized minutes from `flow_minute_rollups`.
+
+### Hourly Interface Continuous Aggregate (`flow_interface_hourly_rollups` — Migration `0016`)
+Pre-aggregates per-interface minute rollups into 1-hour windows while retaining the busiest single minute (`in_peak_bytes`, `out_peak_bytes`) for accurate peak utilization over 30-day windows (retained 365 days, `materialized_only = false`).
+
+### Hourly Probe Continuous Aggregate (`endpoint_probe_hourly` — Migration `0015`)
+Pre-aggregates `endpoint_probe_samples` into 1-hour buckets (`sample_count`, `sent`, `received`, `rtt_min_ms`, reply-weighted `rtt_sum_ms`/`rtt_weight`, `rtt_max_ms`, `jitter_avg_ms`), retained for 365 days (`materialized_only = false`).
 
 ### Historical Baseline View (`node_historical_baselines`)
 TimescaleDB continuous aggregates must group by `time_bucket()` on the partition column and cannot contain non-monotonic expressions such as `EXTRACT(dow FROM start_time)`. Migration `0009` therefore builds the 168-slot (day-of-week × hour) latency profile in two layers when TimescaleDB is available:

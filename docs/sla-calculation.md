@@ -10,10 +10,12 @@ Traditional monitoring tools send a single ICMP Echo Request every 60 seconds. I
 Ephemres eliminates false-positive SLA penalties through **5-Ping Sub-Cycle Burst Sweeping**:
 * **1-Minute Master Cycle**: Every monitored endpoint is evaluated once per 60-second window.
 * **5-Ping Sub-Cycle Sweep**: Within each 60-second window, `ephemres-engine` (`monitoring/engine.py`) dispatches **5 ICMP Echo Requests** spaced **8.0 seconds apart**, each with a **2.0-second reply timeout** (~32s typical, 42s worst case). Count and spacing come from `[monitoring] ping_count` / `ping_interval_seconds`.
-* **Metrics Captured per Cycle** (`PingResult` in `monitoring/ping.py`, stored on `endpoint_events`):
+* **Metrics Captured per Cycle** (`PingResult` in `monitoring/ping.py`, stored on `endpoint_events` and per-cycle in `endpoint_probe_samples`):
   * `success_count`: replies received (`0` to `5`)
   * `failed_count`: probes without a reply
   * `avg_rtt_ms`: arithmetic mean RTT of the received replies (`NULL` when none)
+  * `min_rtt_ms` / `max_rtt_ms`: minimum and maximum RTT across the received replies (`endpoint_probe_samples`)
+  * `jitter_ms`: mean absolute difference between consecutive received reply RTTs (`endpoint_probe_samples`)
   * `health_score`: `success_count / (success_count + failed_count) × 100`
 
 ---
@@ -68,5 +70,6 @@ Where:
 * `T_online`: Cumulative minutes where `operational_state = 'UP'`.
 * `T_monitored_lifetime`: Total elapsed minutes since the endpoint was onboarded.
 * `T_blackout_neutralized`: Server downtime or excluded maintenance periods during which the monitoring engine was offline.
+* **Passive / Unmonitored Endpoint Exclusion**: Endpoints with `monitoring_enabled = false` (such as passive `FLOW_EXPORTER` routers or paused devices) are excluded from Fleet SLA averages, report uptime durations, and executive PDF SLA summaries so non-pingable devices never artificially inflate or penalize fleet availability.
 
 This guarantees mathematically sound SLA compliance reports for client reporting, audits, and executive reviews.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Ephemres Network Monitoring Platform — Database Backup Restore Utility
-# Cross-Version Restoration Engine (v3.1.35s, v3.3.0, v3.3.1n -> v3.3.2v+)
+# Cross-Version Restoration Engine (v3.1.35s, v3.3.0, v3.3.1n, v3.3.2v -> v3.3.5)
 # ==============================================================================
 set -eo pipefail
 

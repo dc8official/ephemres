@@ -1,6 +1,6 @@
-# Ephemres API Reference — Version 3.3.2.v
+# Ephemres API Reference — Version 3.3.5
 
-Ephemres v3.3.2.v exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
+Ephemres v3.3.5 exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
 
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
@@ -26,17 +26,17 @@ Returns the current platform version metadata (no authentication required).
   ```json
   {
     "status": "success",
-    "data": { "version": "3.3.2.v", "platform": "Ephemres v3.3.2.v" },
+    "data": { "version": "3.3.5", "platform": "Ephemres v3.3.5" },
     "meta": null,
     "error": null
   }
   ```
 
 ### `GET /api/v1/health`
-Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.2.v"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
+Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.5"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
 
 ### `GET /api/v1/health/liveness` (also `/health/liveness`)
-Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.2.v"}`.
+Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.5"}`.
 
 ### `GET /api/v1/health/readiness` (also `/health/readiness`)
 Readiness probe that runs `SELECT 1` against PostgreSQL and pings FastStore when it is enabled. Returns `200` with `"status": "ready"` or `503` with `"status": "degraded"`, plus per-dependency `database` and `redis` (FastStore) objects with `status` and `error`.
@@ -50,6 +50,7 @@ Connects to the real-time Server-Sent Events (SSE) telemetry stream.
   - `STATE_TRANSITION`: Emitted on endpoint state changes (`UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`).
   - `NODE_STATE_CHANGE`: Emitted for real-time topology canvas node recoloring.
   - `RCA_INCIDENT`: Emitted on root-cause analysis triggers and resolutions.
+  - `ROUTE_CHANGE`: Emitted when NetFlow route augmentation detects a sustained dominant path change for a monitored endpoint.
   - `: heartbeat\n\n`: Emitted every 15 seconds if idle to prevent proxy timeouts.
 
 ---
@@ -132,7 +133,7 @@ Onboards a new endpoint for ICMP monitoring.
 Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000, "role": "wan"}}`) for a specific endpoint. `speed_mbps` is `null` when no link speed was set (legacy name-only aliases included), and `role` is `"wan"` or `"lan"`.
 
 ### `GET /endpoints/probe-summary`
-Per-endpoint ICMP statistics from the per-cycle probe history (v3.4) over the last `hours` (query param, default `24`, max `168`): `loss_pct`, reply-weighted `rtt_avg_ms`, `rtt_p95_ms` (95th percentile of per-cycle averages), `jitter_ms`, `sample_count`, `last_probe_at`, and `rtt_sparkline` (hourly mean RTT, oldest first, `null` for hours without replies). Endpoints without samples (passive, paused, not yet probed) are absent.
+Per-endpoint ICMP statistics from the per-cycle probe history (v3.3.5) over the last `hours` (query param, default `24`, max `168`): `loss_pct`, reply-weighted `rtt_avg_ms`, `rtt_p95_ms` (95th percentile of per-cycle averages), `jitter_ms`, `sample_count`, `last_probe_at`, and `rtt_sparkline` (hourly mean RTT, oldest first, `null` for hours without replies). Endpoints without samples (passive, paused, not yet probed) are absent.
 
 ### `GET /endpoints/{id}/probe-series`
 RTT min/avg/max, jitter and loss over time for one endpoint.

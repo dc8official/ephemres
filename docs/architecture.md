@@ -1,8 +1,8 @@
-# Ephemres Architecture Overview — Version 3.3.2.v
+# Ephemres Architecture Overview — Version 3.3.5
 
-Ephemres v3.3.2.v is engineered around a **Vertical Integration Architecture** — a decoupled, asynchronous, high-performance monitoring platform built entirely on pure Python Standard Library primitives, native Linux kernel sockets, and TimescaleDB/PostgreSQL storage. 
+Ephemres v3.3.5 is engineered around a **Vertical Integration Architecture** — a decoupled, asynchronous, high-performance monitoring platform built entirely on pure Python Standard Library primitives, native Linux kernel sockets, and TimescaleDB/PostgreSQL storage. 
 
-By replacing 13 third-party runtime frameworks with 12 in-tree standard library engines (`backend/app/core/`), v3.3.2.v achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust multi-protocol network observability.
+By replacing 13 third-party runtime frameworks with 12 in-tree standard library engines (`backend/app/core/`), Ephemres achieves sub-second cold starts, microsecond caching latency, complete immunity from C-extension dependency drift, and robust active/passive multi-protocol network observability.
 
 ---
 
@@ -18,6 +18,7 @@ By replacing 13 third-party runtime frameworks with 12 in-tree standard library 
 * **Cycle Timing Budget (5 pings @ 8.0s):** Each sweep sends `ping_count` probes (default 5) spaced `ping_interval_seconds` apart (default 8.0s), each waiting up to 2.0s for its reply. A sweep typically takes ~32s and at most `count × 2s + (count − 1) × interval` = 42s with the defaults.
 * **Cycle Headroom:** The cycle is a fixed 60 seconds. At startup the engine rejects any configured ping plan whose worst-case sweep exceeds 55s (leaving at least 5s for the database write and slot realignment), logs an error, and falls back to 5 pings @ 8.0s.
 * **Deterministic Slot Staggering:** Each endpoint is assigned a fixed second within the minute (`UUID mod 60`) and every cycle starts on that slot, so sweeps spread evenly across the minute instead of all firing at once. There is no random jitter.
+* **Per-Cycle Probe History (`endpoint_probe_samples` & `endpoint_probe_hourly`):** Each 60-second sweep computes `rtt_min_ms`, `rtt_avg_ms`, `rtt_max_ms`, `jitter_ms`, and `sent`/`received` counts (`PingResult`), writing a row to the `endpoint_probe_samples` hypertable (compressed after 7 days, retained 30 days) with an hourly continuous aggregate `endpoint_probe_hourly` (retained 365 days).
 * **Dynamic In-Memory Registry:** `EndpointRegistry` maintains a thread-safe, concurrent registry allowing sub-minute endpoint additions, updates, and removals with zero engine downtime.
 
 ### 3. Dual-Driver Storage Architecture
@@ -36,7 +37,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 
 ### 4. Real-Time Telemetry & Server-Sent Events (SSE)
 * **Native ASGI 3.0 SSE Stream (`GET /api/v1/events/stream`):** Delivers continuous telemetry directly to web browsers using `text/event-stream` mediated by `EventSourceResponse` in `app.core.asgi`.
-* **Structured Event Envelopes:** Emits strongly typed JSON events on every monitoring transition (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`).
+* **Structured Event Envelopes:** Emits strongly typed JSON events on every monitoring transition (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_CHANGE`).
 * **Connection Heartbeat:** Emits a 15-second heartbeat comment (`: heartbeat\n\n`) to keep reverse-proxy connections (Nginx, Traefik, HAProxy) alive.
 
 ### 5. Multi-Protocol Synthetic Probes & SSRF Defense
@@ -49,10 +50,14 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
   - `SSL_EXPIRY`: Inspects remote TLS certificates and computes days until expiration.
 * **Probe Target Restrictions:** Probe targets are resolved and the connection is pinned to the validated IP. Loopback (`127.0.0.0/8`, `::1`), link-local and cloud metadata (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`), and `0.0.0.0/8` are rejected. RFC 1918 private addresses are **allowed**, because probing internal appliances is the purpose of synthetic monitoring. (Outbound alert webhooks use the stricter `app.core.http_client` policy, which also rejects private ranges.)
 
-### 6. High-Fidelity Route Diagnostics & RCA Engine
+### 6. High-Fidelity Route Diagnostics, NetFlow Route Augmentation & RCA Engine
 * **High-Fidelity Traceroute:** Uses `traceroute -n -q 2 -w 3 -m 30 -I` with `CAP_NET_RAW` capability for accurate ICMP route tracing and multi-probe latency parsing.
 * **Layer-2 Auto-Bypass:** Automatically skips redundant multi-hop traceroutes for devices located on the same direct Layer-2 subnet broadcast domain.
-* **Topological RCA (`INFERRED_DOWN`):** When an upstream aggregation node fails, downstream dependent devices are marked `INFERRED_DOWN`, preventing cascading alert storms.
+* **NetFlow Route Augmentation (`flow_path_observations`, `flow_route_changes`, `ROUTE_HINT`):**
+  - `ephemres-flowd` decodes IPv4/IPv6 next-hop addresses from NetFlow v5/v9 and IPFIX and records each exporter's forwarding path `(in_if, out_if, next_hop)` per monitored endpoint in `flow_path_observations`.
+  - `PathTracker` (`monitoring/flow/path_tracker.py`) tracks the dominant forwarding path per arrival minute. When a new path dominates for `[flow] route_change_minutes` consecutive minutes (default `3`, ignoring multi-path ECMP load-balancing above `[flow] route_ecmp_share`), it records a `flow_route_changes` row and emits a `ROUTE_HINT` event.
+  - The leader `ephemres-api` worker's `TelemetryRelay` receives `ROUTE_HINT` and queues a targeted background traceroute for the endpoint (only while `UP` and `enable_scheduled_discovery` is enabled, with a 15-minute per-endpoint cooldown and a 10/minute global cap).
+* **Topological RCA (`INFERRED_DOWN` & `flow_evidence`):** When an upstream aggregation node fails, downstream dependent devices are marked `INFERRED_DOWN`, preventing cascading alert storms. Each RCA incident also records a `flow_evidence` JSONB snapshot showing the last observed flow paths, recent route changes, and whether traffic continued flowing after ICMP probes started failing.
 
 ### 7. Interactive Crossing-Free Topology Map
 * **4-Phase Sugiyama & Gansner Framework**:
@@ -60,6 +65,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
   2. **Phase 2: Crossing Reduction (`edgeMinimization: true`)**: Sugiyama barycenter reordering of sibling nodes to eliminate overlapping diagonal links.
   3. **Phase 3: Coordinate Assignment (`blockShifting: true`, `parentCentralization: true`)**: Gansner coordinate alignment centering parents directly over child clusters.
   4. **Phase 4: Directional Spline Routing (`cubicBezier`)**: Tangent-constrained spline channels with Horizontal (`LR`) ⇄ Vertical (`UD`) switching.
+* **NetFlow Link Verification (`refresh_flow_status`):** Every 5 minutes (and across topology rebuilds), `TopologyGraphManager` compares baseline traceroute hops against recent `flow_path_observations` (last 15 minutes), annotating edges as `confirmed`, `differs`, or `inferred` (naming silent `* * *` hops via `flow_inferred_ip`).
 * **Frozen Physics Real-Time Recoloring:** Updates node state colors in place on SSE `NODE_STATE_CHANGE` events with `physics: { enabled: false }` to prevent canvas shaking.
 
 ### 8. Enterprise Alerting Subsystem & Decoupling Invariant
@@ -88,14 +94,14 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **4-Tier Hierarchical Storage Lifecycle:**
   1. *Tier 1 (Real-Time Raw Buffer):* FastStore Stream (`stream:netflow:raw`), sliding 2-hour retention for real-time forensic inspection.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
-  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups`, refreshed every hour, retained for 30 days.
-  4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups`, refreshed daily, retained for 365 days for long-term capacity planning.
+  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`in_peak_bytes`, `out_peak_bytes`), retained for 365 days.
+  4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups` (`materialized_only = false`), refreshed daily, retained for 365 days for long-term capacity planning.
 
 ---
 
 ## 10. Layer 0 Core Foundation (Zero-Dependency Engines)
 
-At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 12 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
+At the bedrock of Ephemres v3.3.5 is **Layer 0 (`backend/app/core/`)** — 12 specialized, zero-dependency engines crafted strictly from the Python Standard Library and native Linux system calls:
 
 | Module | Engine Functionality | Technical Mechanics & Stdlib Primitives |
 | :--- | :--- | :--- |
@@ -103,7 +109,7 @@ At the bedrock of Ephemres v3.3.2.v is **Layer 0 (`backend/app/core/`)** — 12 
 | **`app.core.orm`** | Native Async Object-Relational Mapper | Replaces `sqlalchemy`. Pure-stdlib async ORM over `asyncpg`: `DeclarativeBase`, `Column`, SQL type compilation, relationship loading, Unit-of-Work `AsyncSession`, and query compilers (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`, `or_`). |
 | **`app.core.schema`** | Pure-Stdlib Type Validation & Serialization | Replaces `pydantic`. Implements `SchemaModel`, `Field`, `validator`, `field_validator`, `model_validator`, `ConfigDict`, and `to_camel` using stdlib `typing`, `inspect`, and `re`. |
 | **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/dev/shm` SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
-| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0013` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
+| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0017` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
 | **`app.core.crypto`** | Secret Encryption Engine | Replaces `cryptography` for secrets at rest. AES-256-GCM encryption of alert-channel credentials (`ENC:v1:` envelope) with pure-Python HKDF-SHA256 key derivation and legacy-salt fallback decryption. The AES-GCM primitive is called through `ctypes` from the system OpenSSL `libcrypto` (already required by Python's `ssl`/`hashlib`); no Python package is involved. Password hashing is separate: scrypt (`hashlib.scrypt`, `$scrypt$n=131072,r=8,p=1$`, constant-time `hmac.compare_digest`) lives in `app.services.auth_service.ScryptPasswordHasher`, replacing `argon2-cffi`. |
 | **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
 | **`app.core.http_client`** | Socket-Level SSRF-Immune HTTP Client | Replaces `httpx`. Asynchronous raw socket HTTP/1.1 client (`asyncio.open_connection`, `ssl`) performing pre-connection DNS validation against RFC 1918, RFC 3927 (cloud metadata `169.254.169.254`), and loopback IPs. |

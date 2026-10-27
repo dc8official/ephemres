@@ -1575,7 +1575,7 @@ class EphemresApp:
         self,
         title: str = "Ephemres Platform",
         description: str = "",
-        version: str = "3.3.2.v",
+        version: str = "3.3.5",
         docs_url: Optional[str] = "/docs",
         redoc_url: Optional[str] = "/redoc",
         openapi_url: Optional[str] = "/openapi.json",

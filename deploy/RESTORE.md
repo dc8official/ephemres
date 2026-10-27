@@ -1,6 +1,9 @@
-# Ephemres v3.3.2.v — Disaster Recovery & Database Restoration Runbook
+# Ephemres v3.3.5 — Disaster Recovery & Database Restoration Runbook
 
-This runbook describes the standard operating procedures for restoring the Ephemres database and platform configuration from timestamped backup archives, supporting both current `v3.3.2v+` installations and legacy releases (`v3.1.35s`, `v3.3.0`, and `v3.3.1n`).
+This runbook describes the standard operating procedures for restoring the Ephemres database and platform configuration from timestamped backup archives across current (`v3.3.5`, `v3.3.2v`), Long-Term Support (`v3.3.0`), and legacy (`v3.1.35s`, `v3.3.1n`) releases.
+
+> [!NOTE]
+> **Version Support Policy**: `v3.3.5` is the active current standard, `v3.3.2v` remains supported (upgrade to `v3.3.5` recommended), and `v3.3.0` is the supported Enterprise LTS track. `v3.1.35s` has reached End of Support; `app.core.restore` continues to read `v3.1.35s` backups so operators can migrate directly to `v3.3.0` or `v3.3.5`.
 
 ---
 
@@ -98,7 +101,7 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
 
 ## 4. Workflow B: Clean Database Rebuild & Same-Version Manual Restore
 
-Use this workflow only if performing a clean manual rebuild or restoring a backup generated from the identical `v3.3.2v` release.
+Use this workflow only if performing a clean manual rebuild or restoring a backup generated from the identical `v3.3.5` release.
 
 ### Step 1: Stop Services
 ```bash
@@ -168,6 +171,6 @@ Expected output:
 ```json
 {
   "status": "ok",
-  "version": "3.3.2.v"
+  "version": "3.3.5"
 }
 ```

@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
     )
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     logger.info(
-        "Ephemres v3.3.2.v started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
+        "Ephemres v3.3.5 started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
     )
     yield
     watchdog_task.cancel()
@@ -104,13 +104,13 @@ async def lifespan(app: FastAPI):
     midnight_task.cancel()
     cleanup_task.cancel()
     await scheduler_leader.stop()
-    logger.info("Ephemres v3.3.2.v platform shutting down cleanly.")
+    logger.info("Ephemres v3.3.5 platform shutting down cleanly.")
 
 
 app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
-    version="3.3.2.v",
+    version="3.3.5",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -226,19 +226,19 @@ app.include_router(telemetry_router)
 @app.get("/api/v1/version", tags=["system"])
 async def get_version():
     return APIResponse.success(
-        data={"version": "3.3.2.v", "platform": "Ephemres v3.3.2.v"}
+        data={"version": "3.3.5", "platform": "Ephemres v3.3.5"}
     )
 
 
 @app.get("/api/v1/health", tags=["system"])
 async def health_check():
-    return APIResponse.success(data={"status": "ok", "version": "3.3.2.v"})
+    return APIResponse.success(data={"status": "ok", "version": "3.3.5"})
 
 
 @app.get("/health/liveness", tags=["system"])
 @app.get("/api/v1/health/liveness", tags=["system"])
 async def health_liveness():
-    return {"status": "ok", "process": "healthy", "version": "3.3.2.v"}
+    return {"status": "ok", "process": "healthy", "version": "3.3.5"}
 
 
 @app.get("/health/readiness", tags=["system"])
@@ -286,6 +286,6 @@ async def health_readiness():
                 "enabled": settings.redis.enabled,
                 "error": redis_err,
             },
-            "version": "3.3.2.v",
+            "version": "3.3.5",
         },
     )

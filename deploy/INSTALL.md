@@ -1,6 +1,6 @@
-# Ephemres v3.3.2.v — Installation & Deployment Quick Start
+# Ephemres v3.3.5 — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.2.v**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.5**.
 
 ---
 
@@ -19,7 +19,7 @@ Elevate to root and run the automated installer:
 
 ```bash
 sudo -i
-git clone -b v3.3.2v https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.5 https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```

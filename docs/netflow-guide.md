@@ -1,12 +1,12 @@
-# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.2.v)
+# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.5)
 
-This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** in Ephemres v3.3.2.v.
+This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** and **NetFlow Route Augmentation** in Ephemres v3.3.5.
 
 ---
 
 ## 1. Architectural Overview
 
-Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-interface throughput accounting completely isolated from ICMP polling daemons:
+Ephemres v3.3.5 provides real-time, high-volume flow ingestion, per-interface throughput and WAN edge accounting, and flow-assisted route discovery completely isolated from ICMP polling daemons:
 
 ```
 +-------------------------------------------------------------------------------+
@@ -34,10 +34,11 @@ Ephemres v3.3.2.v introduces real-time, high-volume flow ingestion and per-inter
                                         |
                                         v
 +-------------------------------------------------------------------------------+
-|                    TIMESCALEDB MULTI-TIER ROLLUPS                             |
+|                    TIMESCALEDB MULTI-TIER ROLLUPS & PATHS                     |
 |  - flow_minute_rollups (Hypertable: 1-day chunk, 1d compression, 90d retain) |
-|  - flow_hourly_rollups (Continuous Aggregate: 30-day retention)               |
-|  - flow_daily_rollups  (Continuous Aggregate: 365-day retention)              |
+|  - flow_interface_minute_rollups (Hypertable: 7d retain) & hourly (365d)      |
+|  - flow_hourly_rollups (30d retain) & flow_daily_rollups (365d, real-time)    |
+|  - flow_path_observations (30d retain) & flow_route_changes (90d retain)      |
 +-------------------------------------------------------------------------------+
 ```
 

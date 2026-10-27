@@ -6,7 +6,7 @@
       <div class="header-inner">
         <div class="brand">
           <span class="brand-name">Ephemres</span>
-          <span class="brand-version">{{ appVersion || 'v3.3.2.v' }}</span>
+          <span class="brand-version">{{ appVersion || 'v3.3.5' }}</span>
         </div>
         <!-- Below ~1000 px the links collapse into a disclosure menu instead of wrapping. -->
         <button
@@ -138,7 +138,7 @@ const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 const isDark = ref(true)
-const appVersion = ref('v3.3.2.v')
+const appVersion = ref('v3.3.5')
 const liveAnnouncement = ref('')
 const { subscribe } = useSSE()
 let unsubscribeSSE = null
@@ -193,7 +193,7 @@ onMounted(async () => {
       appVersion.value = `v${res.data.data.version.replace(/^v/, '')}`
     }
   } catch (err) {
-    appVersion.value = 'v3.3.2.v'
+    appVersion.value = 'v3.3.5'
   }
 
   // Global SSE listener for accessibility screen reader announcements
