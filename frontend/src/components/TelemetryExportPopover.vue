@@ -73,6 +73,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { uptimeValue } from '../utils/endpointState.js'
 
 const props = defineProps({
   endpoints: {
@@ -107,7 +108,7 @@ function executeExport() {
           ip_address: ep.ip_address,
           status: ep.current_detailed_state || ep.current_operational_state,
           health_score: ep.current_health_score,
-          uptime_percentage: ep.uptime_percentage,
+          uptime_percentage: uptimeValue(ep),
           avg_rtt_ms: ep.avg_rtt_ms,
           last_seen: ep.last_seen
         }))
@@ -116,15 +117,18 @@ function executeExport() {
     } else {
       mimeType = 'text/csv;charset=utf-8;'
       const headers = ['Hostname', 'IP_Address', 'Status', 'Health_Score', 'Uptime_Percent', 'Avg_RTT_ms', 'Last_Seen']
-      const rows = props.endpoints.map(ep => [
-        `"${ep.hostname || ''}"`,
-        `"${ep.ip_address || ''}"`,
-        `"${ep.current_detailed_state || ep.current_operational_state || ''}"`,
-        ep.current_health_score !== undefined ? ep.current_health_score : '',
-        ep.uptime_percentage !== undefined ? ep.uptime_percentage : '',
-        ep.avg_rtt_ms !== undefined ? ep.avg_rtt_ms : '',
-        `"${ep.last_seen || ''}"`
-      ])
+      const rows = props.endpoints.map(ep => {
+        const up = uptimeValue(ep)
+        return [
+          `"${ep.hostname || ''}"`,
+          `"${ep.ip_address || ''}"`,
+          `"${ep.current_detailed_state || ep.current_operational_state || ''}"`,
+          ep.current_health_score !== undefined && ep.current_health_score !== null ? ep.current_health_score : '',
+          up !== null ? up : '',
+          ep.avg_rtt_ms !== undefined && ep.avg_rtt_ms !== null ? ep.avg_rtt_ms : '',
+          `"${ep.last_seen || ''}"`
+        ]
+      })
       content = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
     }
 

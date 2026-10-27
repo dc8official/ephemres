@@ -465,6 +465,8 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "bytes": "int8",
             "packets": "int8",
             "flow_count": "int4",
+            "tcp_flags": "int2",
+            "tos": "int2",
         },
         "flow_interface_minute_rollups": {
             "bucket": "timestamptz",
@@ -941,6 +943,12 @@ def scan_backup_metadata_and_configs(
                             ):
                                 parent = "endpoint_events"
                             elif (
+                                "sampled_at" in data_cols
+                                and "sent" in data_cols
+                                and "received" in data_cols
+                            ):
+                                parent = "endpoint_probe_samples"
+                            elif (
                                 "interface_idx" in data_cols
                                 or ("in_bytes" in data_cols and "out_bytes" in data_cols)
                                 or "input_snmp" in data_cols
@@ -1368,6 +1376,8 @@ async def reconcile_and_restore_database(
             for row in rows:
                 if "endpoint_id" in row and row["endpoint_id"] and str(row["endpoint_id"]) not in valid_endpoint_ids:
                     continue
+                if "exporter_id" in row and row["exporter_id"] and str(row["exporter_id"]) not in valid_endpoint_ids:
+                    continue
                 if "channel_id" in row and row["channel_id"] and valid_channel_ids and str(row["channel_id"]) not in valid_channel_ids:
                     continue
                 if "user_id" in row and row["user_id"]:
@@ -1459,8 +1469,8 @@ async def reconcile_and_restore_database(
 
                             t_cols = target_schema[current_target_table]
                             for row_dict in tuples:
-                                # Filter FK-constrained endpoint_events by valid_endpoint_ids
-                                if current_target_table == "endpoint_events":
+                                # Filter FK-constrained endpoint_events and endpoint_probe_samples by valid_endpoint_ids
+                                if current_target_table in ("endpoint_events", "endpoint_probe_samples"):
                                     ep_id = row_dict.get("endpoint_id")
                                     if ep_id and str(ep_id) not in valid_endpoint_ids:
                                         continue

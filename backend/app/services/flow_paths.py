@@ -66,7 +66,7 @@ async def flow_evidence(
                    o.exporter_id, e.hostname AS exporter_hostname, e.flow_interface_aliases AS aliases,
                    o.direction, o.in_if, o.out_if, host(o.next_hop) AS next_hop, o.last_seen
             FROM flow_path_observations o
-            JOIN endpoints e ON e.id = o.exporter_id
+            JOIN endpoints e ON e.id = o.exporter_id AND e.deleted_at IS NULL AND e.endpoint_status != 'DELETED'
             WHERE o.endpoint_id = CAST(:endpoint_id AS uuid)
               AND o.last_seen >= :since
             ORDER BY o.exporter_id, o.direction, o.last_seen DESC, o.bytes DESC
@@ -104,7 +104,7 @@ async def flow_evidence(
                    c.old_out_if, host(c.old_next_hop) AS old_next_hop,
                    c.new_out_if, host(c.new_next_hop) AS new_next_hop
             FROM flow_route_changes c
-            JOIN endpoints e ON e.id = c.exporter_id
+            JOIN endpoints e ON e.id = c.exporter_id AND e.deleted_at IS NULL AND e.endpoint_status != 'DELETED'
             WHERE c.endpoint_id = CAST(:endpoint_id AS uuid)
               AND c.detected_at >= :since
             ORDER BY c.detected_at DESC
@@ -156,7 +156,7 @@ async def exporter_ip_map(db: AsyncSession) -> Dict[str, str]:
             SELECT DISTINCT o.exporter_id, host(e.ip_address) AS ip, e.flow_exporter_ips
             FROM (SELECT DISTINCT exporter_id FROM flow_path_observations) o
             JOIN endpoints e ON e.id = o.exporter_id
-            WHERE e.deleted_at IS NULL
+            WHERE e.deleted_at IS NULL AND e.endpoint_status != 'DELETED'
         """)
     )
     mapping: Dict[str, str] = {}
@@ -252,7 +252,7 @@ async def endpoint_flow_paths(
                    o.direction, o.in_if, o.out_if, host(o.next_hop) AS next_hop,
                    o.first_seen, o.last_seen, o.bytes, o.flow_count
             FROM flow_path_observations o
-            JOIN endpoints e ON e.id = o.exporter_id
+            JOIN endpoints e ON e.id = o.exporter_id AND e.deleted_at IS NULL AND e.endpoint_status != 'DELETED'
             WHERE o.endpoint_id = CAST(:endpoint_id AS uuid) AND o.last_seen >= :since
             ORDER BY o.last_seen DESC, o.bytes DESC
             LIMIT 100
@@ -285,7 +285,7 @@ async def endpoint_flow_paths(
                    c.direction, c.old_out_if, host(c.old_next_hop) AS old_next_hop,
                    c.new_out_if, host(c.new_next_hop) AS new_next_hop
             FROM flow_route_changes c
-            JOIN endpoints e ON e.id = c.exporter_id
+            JOIN endpoints e ON e.id = c.exporter_id AND e.deleted_at IS NULL AND e.endpoint_status != 'DELETED'
             WHERE c.endpoint_id = CAST(:endpoint_id AS uuid) AND c.detected_at >= :since
             ORDER BY c.detected_at DESC
             LIMIT 50

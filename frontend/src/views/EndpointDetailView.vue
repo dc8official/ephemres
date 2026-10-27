@@ -829,7 +829,7 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries, getEndpointFlowPaths } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
@@ -928,6 +928,7 @@ const nodeMetricOptions = [
 
 function setFlowMode(mode) {
   flowMode.value = mode
+  selectedCorrelatedInterfaceIdx.value = null
   loadFlowTelemetry()
 }
 
@@ -1024,11 +1025,14 @@ async function loadFlowTelemetry() {
   try {
     const epId = endpoint.value.id
     const isExporter = flowMode.value === 'exporter'
+    const ifIdx = isExporter && flowSubView.value === 'correlated'
+      ? selectedCorrelatedInterfaceIdx.value
+      : null
     const res = await getTrafficSeries(
       flowWindow.value,
       isExporter ? epId : null,
       !isExporter ? epId : null,
-      selectedCorrelatedInterfaceIdx.value
+      ifIdx
     )
     if (res.data?.data?.points) {
       flowSeriesPoints.value = res.data.data.points
@@ -1123,6 +1127,12 @@ const flowChartOptions = computed(() => {
 
 const flowSubView = ref('bandwidth')
 
+watch(flowSubView, () => {
+  if (selectedCorrelatedInterfaceIdx.value !== null) {
+    loadFlowTelemetry()
+  }
+})
+
 const UTIL_CLASS_BY_TONE = { up: 'util-healthy', warn: 'util-warning', down: 'util-danger', unknown: 'util-healthy' }
 
 function getUtilColorClass(util) {
@@ -1180,7 +1190,16 @@ const interfaceMeters = computed(() => {
 })
 
 function openInterfaceModal() {
-  const rows = rowsFromAliases(endpoint.value?.flow_interface_aliases)
+  const current = interfaceTelemetry.value || []
+  let rows = current.map((item) => editRow(
+    Number(item.interface_idx) || 1,
+    item.name || `GigabitEthernet0/${item.interface_idx}`,
+    item.speed_configured === false ? null : item.speed_mbps,
+    item.role,
+  ))
+  if (rows.length === 0) {
+    rows = rowsFromAliases(endpoint.value?.flow_interface_aliases)
+  }
   if (rows.length === 0) {
     rows.push(editRow(1, 'GigabitEthernet0/1', null, 'lan'))
   }

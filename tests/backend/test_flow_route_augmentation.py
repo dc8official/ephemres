@@ -125,3 +125,38 @@ async def test_route_hint_global_cap(relay_env):
         assert results.count(True) == ROUTE_HINT_MAX_PER_MINUTE
         # A minute later the window has room again.
         assert await relay._handle_route_hint({"endpoint_id": str(uuid4())}, now=111.0) is True
+
+
+@pytest.mark.anyio
+async def test_route_hint_skips_standby_worker(relay_env):
+    from app.services.scheduler_leader import scheduler_leader
+
+    relay, queue, _ = relay_env
+    ep = str(uuid4())
+    with patch("app.services.telemetry_relay.AsyncSessionLocal", _session_returning(("10.9.9.9",))), patch.object(
+        scheduler_leader, "_task", MagicMock()
+    ), patch.object(scheduler_leader, "_is_leader", False):
+        assert await relay._handle_route_hint({"endpoint_id": ep}, now=200.0) is False
+    queue.put.assert_not_awaited()
+
+
+def test_topology_apply_inferred_nodes_retains_inferred_ip():
+    from app.services.topology import TopologyGraphManager
+
+    mgr = TopologyGraphManager()
+    anon_id = "anon_10_0_0_1_to_ep123456"
+    mgr._nodes = {
+        "transit:10.0.0.1": {"id": "transit:10.0.0.1", "type": "transit"},
+        anon_id: {"id": anon_id, "type": "anonymous"},
+    }
+    mgr._edges = {("transit:10.0.0.1", anon_id)}
+    mgr._edge_flow = {
+        ("transit:10.0.0.1", anon_id): {
+            "flow_status": EDGE_INFERRED,
+            "inferred_ip": "10.0.0.2",
+        }
+    }
+    mgr._apply_inferred_nodes()
+    assert mgr._nodes[anon_id].get("flow_inferred_ip") == "10.0.0.2"
+
+

@@ -632,10 +632,12 @@ class FlowAggregator:
                 INSERT INTO flow_path_observations (
                     exporter_id, endpoint_id, direction, in_if, out_if, next_hop,
                     first_seen, last_seen, bytes, flow_count
-                ) VALUES (
+                )
+                SELECT
                     :exporter_id, :endpoint_id, :direction, :in_if, :out_if, CAST(:next_hop AS inet),
                     :first_seen, :last_seen, :bytes, :flow_count
-                )
+                WHERE EXISTS (SELECT 1 FROM endpoints WHERE id = :exporter_id)
+                  AND EXISTS (SELECT 1 FROM endpoints WHERE id = :endpoint_id)
                 ON CONFLICT (exporter_id, endpoint_id, direction, in_if, out_if, (COALESCE(next_hop, '0.0.0.0'::inet)))
                 DO UPDATE SET
                     first_seen = LEAST(flow_path_observations.first_seen, EXCLUDED.first_seen),
@@ -647,10 +649,12 @@ class FlowAggregator:
                 INSERT INTO flow_route_changes (
                     detected_at, exporter_id, endpoint_id, direction,
                     old_out_if, old_next_hop, new_out_if, new_next_hop
-                ) VALUES (
+                )
+                SELECT
                     :detected_at, :exporter_id, :endpoint_id, :direction,
                     :old_out_if, CAST(:old_next_hop AS inet), :new_out_if, CAST(:new_next_hop AS inet)
-                );
+                WHERE EXISTS (SELECT 1 FROM endpoints WHERE id = :exporter_id)
+                  AND EXISTS (SELECT 1 FROM endpoints WHERE id = :endpoint_id);
             """)
             try:
                 async with self.db_factory() as session:

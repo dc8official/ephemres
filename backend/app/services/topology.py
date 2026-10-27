@@ -422,6 +422,7 @@ class TopologyGraphManager:
             self._failed_hop_ips = failed_hop_ips
             self._failed_endpoint_ids = failed_endpoint_ids
 
+            self._apply_inferred_nodes()
             self._cached_graph = {
                 "nodes": list(nodes.values()),
                 "edges": self._edges_payload(edges),
@@ -622,6 +623,7 @@ class TopologyGraphManager:
             for nid, node_data in self._nodes.items():
                 node_data["level"] = levels.get(nid, 1 if nid != "root" else 0)
 
+            self._apply_inferred_nodes()
             self._cached_graph = {
                 "nodes": list(self._nodes.values()),
                 "edges": self._edges_payload(self._edges),
@@ -644,6 +646,18 @@ class TopologyGraphManager:
 
     def _edges_payload(self, edges: Set[Tuple[str, str]]) -> List[Dict[str, Any]]:
         return [{"source": src, "target": tgt, **self._edge_flow.get((src, tgt), {})} for src, tgt in edges]
+
+    def _apply_inferred_nodes(self) -> None:
+        inferred = {
+            tgt: v["inferred_ip"]
+            for (src, tgt), v in self._edge_flow.items()
+            if "inferred_ip" in v and (src, tgt) in self._edges
+        }
+        for node_id, node in self._nodes.items():
+            if node_id in inferred:
+                node["flow_inferred_ip"] = inferred[node_id]
+            else:
+                node.pop("flow_inferred_ip", None)
 
     def _route_paths(self) -> List[Tuple[str, List[Tuple[str, Optional[str]]]]]:
         """Per traced endpoint, its path as (node_id, hop_ip) from the first hop to the endpoint,
@@ -687,12 +701,7 @@ class TopologyGraphManager:
             self._edge_flow = (
                 classify_route_edges(self._route_paths(), exporter_by_ip, next_hops) if next_hops else {}
             )
-            inferred = {tgt: v["inferred_ip"] for (_, tgt), v in self._edge_flow.items() if "inferred_ip" in v}
-            for node_id, node in self._nodes.items():
-                if node_id in inferred:
-                    node["flow_inferred_ip"] = inferred[node_id]
-                else:
-                    node.pop("flow_inferred_ip", None)
+            self._apply_inferred_nodes()
             self._cached_graph = {
                 "nodes": list(self._nodes.values()),
                 "edges": self._edges_payload(self._edges),

@@ -604,11 +604,11 @@ async function loadAllReports() {
       operational_state: ep.operational_state || 'UP',
       detailed_state: ep.detailed_state || 'UP',
       monitoring_enabled: ep.monitoring_enabled,
-      // null when not measured (monitoring off or no data): never shown or averaged as 100 %.
+      // null when not measured (monitoring off or no data): never shown or averaged as 100 %, and sorted last.
       uptime_percentage: ep.monitoring_enabled !== false && ep.uptime_percentage != null ? Number(ep.uptime_percentage) : null,
-      incident_count: ep.incident_count || 0,
-      uptime_seconds: ep.uptime_seconds || 0,
-      downtime_seconds: ep.downtime_seconds || 0,
+      incident_count: ep.monitoring_enabled !== false ? (ep.incident_count || 0) : null,
+      uptime_seconds: ep.monitoring_enabled !== false ? (ep.uptime_seconds || 0) : null,
+      downtime_seconds: ep.monitoring_enabled !== false ? (ep.downtime_seconds || 0) : null,
       total_seconds: ep.total_seconds || 0,
     }))
   } catch (err) {

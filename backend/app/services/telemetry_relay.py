@@ -155,6 +155,12 @@ class TelemetryRelay:
         from uuid import UUID
 
         from app.services.baseline_route import discovery_in_progress, discovery_route_queue
+        from app.services.scheduler_leader import scheduler_leader
+
+        # Every API worker listens on the pub/sub channel so SSE clients on any worker receive
+        # the event, but only the elected leader worker enqueues the active traceroute.
+        if scheduler_leader._task is not None and not scheduler_leader.is_leader:
+            return False
 
         try:
             ep_uuid = UUID(endpoint_id)
@@ -163,29 +169,34 @@ class TelemetryRelay:
         if ep_uuid in discovery_in_progress:
             return False
 
-        async with AsyncSessionLocal() as session:
-            res = await session.execute(
-                text("""
-                    SELECT host(e.ip_address) AS ip_address
-                    FROM endpoints e
-                    LEFT JOIN LATERAL (
-                        SELECT operational_state FROM endpoint_events
-                        WHERE endpoint_id = e.id ORDER BY start_time DESC LIMIT 1
-                    ) ev ON TRUE
-                    WHERE e.id = CAST(:endpoint_id AS uuid)
-                      AND e.endpoint_status != 'DELETED'
-                      AND e.enable_scheduled_discovery = TRUE
-                      AND COALESCE(ev.operational_state, 'UP') = 'UP'
-                """),
-                {"endpoint_id": endpoint_id},
-            )
-            row = res.fetchone()
+        discovery_in_progress.add(ep_uuid)
+        try:
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(
+                    text("""
+                        SELECT host(e.ip_address) AS ip_address
+                        FROM endpoints e
+                        LEFT JOIN LATERAL (
+                            SELECT operational_state FROM endpoint_events
+                            WHERE endpoint_id = e.id ORDER BY start_time DESC LIMIT 1
+                        ) ev ON TRUE
+                        WHERE e.id = CAST(:endpoint_id AS uuid)
+                          AND e.endpoint_status != 'DELETED'
+                          AND e.enable_scheduled_discovery = TRUE
+                          AND COALESCE(ev.operational_state, 'UP') = 'UP'
+                    """),
+                    {"endpoint_id": endpoint_id},
+                )
+                row = res.fetchone()
+        except Exception:
+            discovery_in_progress.discard(ep_uuid)
+            raise
         if row is None:
+            discovery_in_progress.discard(ep_uuid)
             return False
 
         self._route_hint_last[endpoint_id] = now
         self._route_hint_recent.append(now)
-        discovery_in_progress.add(ep_uuid)
         await discovery_route_queue.put((ep_uuid, str(row[0])))
         logger.info(
             "Route change seen in flows for %s (exporter %s, out if%s via %s): re-tracing its route.",
@@ -209,6 +220,10 @@ class TelemetryRelay:
                 discovery_in_progress,
                 discovery_route_queue,
             )
+            from app.services.scheduler_leader import scheduler_leader
+
+            if scheduler_leader._task is not None and not scheduler_leader.is_leader:
+                return
 
             ep_uuid = UUID(endpoint_id_str)
             if ep_uuid in discovery_in_progress:

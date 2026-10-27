@@ -248,7 +248,8 @@ async def compile_availability_report_data(
 
         total_downtime_sec += down_sec
         total_incidents += inc_count
-        uptime_sum += uptime_pct
+        if ep.monitoring_enabled is not False:
+            uptime_sum += uptime_pct
 
         endpoint_rows.append({
             "id": ep.id,
@@ -256,6 +257,7 @@ async def compile_availability_report_data(
             "ip_address": ep.ip_address,
             "device_type": ep.device_type,
             "operational_state": op_state,
+            "monitoring_enabled": ep.monitoring_enabled,
             "uptime_percentage": uptime_pct,
             "incident_count": inc_count,
             "formatted_downtime": format_duration(down_sec),
@@ -316,9 +318,17 @@ async def compile_availability_report_data(
             "rca_summary": rca_summary,
         })
 
-    num_eps = len(endpoints) or 1
-    mean_uptime = round(uptime_sum / num_eps, 3)
-    avg_rtt_group = round(sum(r["avg_rtt_ms"] for r in endpoint_rows) / num_eps, 2)
+    monitored_rows = [
+        r for r in endpoint_rows
+        if r.get("monitoring_enabled", True) is not False
+    ]
+    num_monitored = len(monitored_rows)
+    mean_uptime = round(uptime_sum / num_monitored, 3) if num_monitored else 100.0
+    avg_rtt_group = (
+        round(sum(r["avg_rtt_ms"] for r in monitored_rows) / num_monitored, 2)
+        if num_monitored
+        else 0.0
+    )
 
     return {
         "endpoints": endpoint_rows,
