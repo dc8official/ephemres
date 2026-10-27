@@ -162,7 +162,7 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 | **Tier 1** | FastStore Shared-Memory Stream (`stream:netflow:raw` in `/dev/shm`) | 2 Hours | Flow Record | Sliding in-memory buffer (`MAXLEN ~100000`) | Real-time forensic packet/flow inspection, live anomaly triage. |
 | **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 90 Days / 7 Days | 1 Minute | `flow_minute_rollups`: native columnar compression after 1 day (85%+ disk savings). `flow_interface_minute_rollups`: uncompressed | Short-term forensic queries, detailed talker attribution, interface throughput. |
 | **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`, `flow_interface_hourly_rollups`, `endpoint_probe_hourly`) | 30 Days / 365 Days | 1 Hour | Materialized Views with `materialized_only = false` and auto-refresh policies | Weekly / monthly capacity trends, 30-day interface p95/peak utilization, and long-term probe RTT/loss trends. |
-| **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View (`materialized_only = false`) with auto-refresh policy (`start_offset: 7d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
+| **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View (`materialized_only = false`) with auto-refresh policy (`start_offset: 60d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
 
 ---
 
@@ -234,7 +234,7 @@ WITH NO DATA;
 
 SELECT add_continuous_aggregate_policy(
     'flow_hourly_rollups',
-    start_offset => INTERVAL '3 days',
+    start_offset => INTERVAL '29 days',  -- 3 days before migration 0018
     end_offset => INTERVAL '1 hour',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE
@@ -262,7 +262,7 @@ WITH NO DATA;
 
 SELECT add_continuous_aggregate_policy(
     'flow_daily_rollups',
-    start_offset => INTERVAL '7 days',
+    start_offset => INTERVAL '60 days',  -- 7 days before migration 0018
     end_offset => INTERVAL '1 day',
     schedule_interval => INTERVAL '1 day',
     if_not_exists => TRUE
@@ -274,6 +274,8 @@ Migration `0014` sets `timescaledb.materialized_only = false` on both `flow_hour
 
 ### Hourly Interface Continuous Aggregate (`flow_interface_hourly_rollups` — Migration `0016`)
 Pre-aggregates per-interface minute rollups into 1-hour windows while retaining the busiest single minute (`peak_in_minute_bytes`, `peak_out_minute_bytes`) for accurate peak utilization over 30-day windows (retained 365 days, `materialized_only = false`).
+
+Refresh windows (Migration `0018`): each refresh policy materializes only the buckets inside its window and then moves the aggregate's watermark, below which the real-time view reads materialized data only. Hours the job scheduler misses for longer than the window (workers disabled, database down) would never be filled in, so the windows reach as far back as retention allows: `endpoint_probe_hourly` and `flow_hourly_rollups` 29 days, `flow_daily_rollups` 60 days, `flow_interface_hourly_rollups` 6 days (its source keeps 7), `node_historical_baselines_cagg` 28 days. A refresh only recomputes missing or invalidated buckets, so a normal hourly run still processes about one hour of data.
 
 ### Hourly Probe Continuous Aggregate (`endpoint_probe_hourly` — Migration `0015`)
 Pre-aggregates `endpoint_probe_samples` into 1-hour buckets (`sample_count`, `sent`, `received`, `rtt_min_ms`, reply-weighted `rtt_sum_ms`/`rtt_weight`, `rtt_max_ms`, `jitter_avg_ms`), retained for 365 days (`materialized_only = false`).

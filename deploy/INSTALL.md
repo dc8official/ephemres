@@ -58,7 +58,7 @@ sudo bash ~/ephemres/deploy/upgrade.sh
 The script detects the old layout (`/etc/netmon/netmon.env` and no `/etc/ephemres/ephemres.env`) and, after taking the pre-upgrade backup:
 
 * creates the `ephemres` user, `/etc/ephemres/ephemres.env` (the `NETMON_*` keys written again as `EPHEMRES_*` with the same values, so the database password and the key that encrypts alert channel secrets carry over) and `/etc/ephemres/config.toml` (`log_dir` moved to `/var/log/ephemres`);
-* builds a new `/opt/ephemres/venv`, migrates the database (`0012` to `0017`), disables the `netmon-*` units and points the existing `/etc/nginx/sites-available/netmon` site at `/opt/ephemres` (the original is saved as `netmon.pre-ephemres`; certificates and local edits are kept);
+* builds a new `/opt/ephemres/venv`, migrates the database (`0012` to `0018`), disables the `netmon-*` units and points the existing `/etc/nginx/sites-available/netmon` site at `/opt/ephemres` (the original is saved as `netmon.pre-ephemres`; certificates and local edits are kept);
 * starts `ephemres-api` and `ephemres-engine` and checks that the API answers `/api/v1/health`.
 
 Passwords cannot be carried over: v3.2/v3.3.0 stored argon2 hashes. The admin gets `DEFAULT_ADMIN_PASSWORD` from the old `netmon.env` (or a generated password printed in the upgrade output), other users get temporary passwords listed in `/opt/ephemres/legacy_password_resets.txt` (root only), and everyone must change their password at the next login.
