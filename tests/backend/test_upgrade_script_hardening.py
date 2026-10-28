@@ -14,7 +14,7 @@ def test_upgrade_script_hardening():
 
     # 3. seed_admin is checked and not suppressed with || true
     assert "app.seed_admin || true" not in content
-    assert 'if ! PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin; then' in content
+    assert 'if ! PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin --if-missing; then' in content
 
     # 4. Decompression block redirects stderr to upgrade log instead of /dev/null
     decompression_start = content.find("Applying TimescaleDB hypertable decompression safety configuration")

@@ -103,3 +103,15 @@ def test_flow_collection_carries_over_when_netmon_flowd_was_receiving():
     # ... before the step 7 check that decides whether ephemres-flowd is started.
     flow_check = UPGRADE.index("SELECT setting_value FROM app_settings WHERE setting_key = 'flow_ingestion_enabled'")
     assert UPGRADE.index("        migrate_legacy_services\n") < flow_check
+
+
+def test_upgrade_gives_a_legacy_admin_a_random_password_not_the_install_default():
+    # seed_admin only creates a missing admin; the argon2 admin is reset by reset_legacy_passwords
+    # (random, recorded in the root-only report), and a failure there stops the upgrade.
+    seed = UPGRADE.index("-m app.seed_admin --if-missing; then")
+    reset = UPGRADE.index('if ! EPHEMRES_RESET_REPORT="${RESET_REPORT}" PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.reset_legacy_passwords; then')
+    assert seed < reset
+    assert "-m app.seed_admin;" not in UPGRADE
+    complete = UPGRADE.index("[UPGRADE COMPLETE]")
+    notice = UPGRADE.index("sudo grep '^admin' /opt/ephemres/legacy_password_resets.txt")
+    assert complete < notice

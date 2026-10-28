@@ -82,6 +82,7 @@ fi
 # (see migrate_legacy_config and migrate_legacy_services below).
 LEGACY_NETMON=0
 LEGACY_FLOWD_ENABLED=0
+ADMIN_TEMP_PASSWORD=0
 if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
     LEGACY_NETMON=1
     echo -e "${YELLOW}[INFO] Legacy netmon install detected (/etc/netmon/netmon.env, no /etc/ephemres/ephemres.env): it will be migrated to the ephemres layout.${NC}"
@@ -502,16 +503,28 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${MIGRATOR_CMD[@]}" upgrade head
         
         if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
+            # --if-missing: an existing admin keeps its password. The install-time
+            # DEFAULT_ADMIN_PASSWORD (often "admin" on v3.2/v3.3.0) must not replace it.
             echo -e "${GREEN}[INFO] Verifying default admin account seeding...${NC}"
-            if ! PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin; then
+            if ! PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin --if-missing; then
                 echo -e "${RED}[ERROR] Default admin seeding failed.${NC}" >&2
                 exit 1
             fi
 
+            # A legacy (argon2) admin gets its random temporary password here, so a failure
+            # would leave nobody able to sign in.
             echo -e "${GREEN}[INFO] Checking and resetting legacy password hashes...${NC}"
             RESET_REPORT="/opt/ephemres/legacy_password_resets.txt"
-            PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.reset_legacy_passwords
-            if [[ -s "${RESET_REPORT}" ]]; then
+            RESET_REPORT_BEFORE=$(stat -c %Y "${RESET_REPORT}" 2>/dev/null || echo 0)
+            if ! EPHEMRES_RESET_REPORT="${RESET_REPORT}" PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.reset_legacy_passwords; then
+                echo -e "${RED}[ERROR] Resetting legacy password hashes failed: accounts with argon2 hashes cannot sign in.${NC}" >&2
+                exit 1
+            fi
+            # A report left by an earlier upgrade is not news: only announce one written now.
+            if [[ -s "${RESET_REPORT}" && $(stat -c %Y "${RESET_REPORT}") != "${RESET_REPORT_BEFORE}" ]]; then
+                if grep -q $'^admin\t' "${RESET_REPORT}"; then
+                    ADMIN_TEMP_PASSWORD=1
+                fi
                 RESET_COUNT=$(wc -l < "${RESET_REPORT}")
                 echo -e "${YELLOW}========================================================================${NC}"
                 echo -e "${YELLOW}[NOTICE] ${RESET_COUNT} users had legacy password hashes and were assigned temporary passwords.${NC}"
@@ -724,5 +737,10 @@ if [[ ${LEGACY_NETMON} -eq 1 ]]; then
     echo -e "${YELLOW}         netmon-* units (now disabled) were kept: with the pre-upgrade backup above they allow a${NC}"
     echo -e "${YELLOW}         rollback (the database itself is migrated). Remove them once you are satisfied.${NC}"
     echo -e "${YELLOW}[NOTICE] Passwords from v3.2/v3.3.0 cannot be carried over: users were given temporary passwords${NC}"
-    echo -e "${YELLOW}         (see the seeding output above and /opt/ephemres/legacy_password_resets.txt).${NC}"
+    echo -e "${YELLOW}         listed in /opt/ephemres/legacy_password_resets.txt.${NC}"
+fi
+if [[ ${ADMIN_TEMP_PASSWORD} -eq 1 ]]; then
+    echo -e "${YELLOW}[NOTICE] Sign in as 'admin' with the random temporary password from the root-only report:${NC}"
+    echo -e "${YELLOW}           sudo grep '^admin' /opt/ephemres/legacy_password_resets.txt${NC}"
+    echo -e "${YELLOW}         You must choose a new password at that first login.${NC}"
 fi
