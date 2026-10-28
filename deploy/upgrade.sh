@@ -603,21 +603,71 @@ verify_services_running() {
 # migrate_legacy_services: retire the netmon-* units (stopped and disabled; the files stay so a
 # rollback with the pre-upgrade backup is possible) and point the existing netmon nginx site at /opt/ephemres. The site keeps its own
 # certificates and any local edits; only the /opt/netmon/noop paths change.
+# The netmon nginx site lacks the ephemres template's gzip, asset caching and http2. A site the
+# installer generated and nobody edited (certbot's "managed by Certbot" lines aside) is replaced
+# by a new ephemres site from the template that keeps its server_name and certificates. An
+# edited site is only pointed at /opt/ephemres, so local changes are never lost.
+nginx_site_body() {
+    # Directives without comments, blank lines, certbot's lines and the per-server values.
+    grep -v "managed by Certbot" "$1" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        | grep -vE '^$|^(server_name|ssl_certificate|ssl_certificate_key)[[:space:]]'
+}
+
+render_nginx_site() {
+    # render_nginx_site TEMPLATE SERVER_NAMES CERTIFICATE KEY
+    awk -v names="$2" -v cert="$3" -v key="$4" '
+        /^[[:space:]]*server_name YOUR_DOMAIN;/ { sub(/YOUR_DOMAIN/, names) }
+        /^[[:space:]]*ssl_certificate[[:space:]]/ { sub(/ssl_certificate[[:space:]]+[^;]+/, "ssl_certificate     " cert) }
+        /^[[:space:]]*ssl_certificate_key[[:space:]]/ { sub(/ssl_certificate_key[[:space:]]+[^;]+/, "ssl_certificate_key " key) }
+        { print }' "$1"
+}
+
+migrate_legacy_nginx_site() {
+    local site="/etc/nginx/sites-available/netmon"
+    local old_template="/opt/netmon/noop/deploy/nginx.conf.template"
+    local new_site="/etc/nginx/sites-available/ephemres"
+    [[ -f "${site}" ]] && grep -q "/opt/netmon/noop" "${site}" || return 0
+
+    if [[ -f "${old_template}" && ! -e "${new_site}" ]] \
+        && diff -q <(nginx_site_body "${site}") <(nginx_site_body "${old_template}") >/dev/null; then
+        local names cert key
+        names=$(awk '/^[[:space:]]*server[[:space:]]*\{/ { name = ""; ssl = 0 }
+                     /^[[:space:]]*listen[[:space:]].*443/ { ssl = 1 }
+                     /^[[:space:]]*server_name[[:space:]]/ { name = $0; sub(/^[[:space:]]*server_name[[:space:]]+/, "", name); sub(/[[:space:]]*;.*$/, "", name) }
+                     /^\}/ { if (ssl && name != "") { print name; exit } }' "${site}")
+        cert=$(awk '$1 == "ssl_certificate" { v = $2; sub(/;$/, "", v); print v; exit }' "${site}")
+        key=$(awk '$1 == "ssl_certificate_key" { v = $2; sub(/;$/, "", v); print v; exit }' "${site}")
+        if [[ -n "${names}" && -n "${cert}" && -n "${key}" ]]; then
+            render_nginx_site "${INSTALL_DIR}/deploy/nginx.conf.template" "${names}" "${cert}" "${key}" > "${new_site}"
+            ln -sf "${new_site}" /etc/nginx/sites-enabled/ephemres
+            rm -f /etc/nginx/sites-enabled/netmon
+            if command -v nginx &>/dev/null && ! nginx -t 2>>"${UPGRADE_LOG}"; then
+                rm -f /etc/nginx/sites-enabled/ephemres "${new_site}"
+                ln -sf "${site}" /etc/nginx/sites-enabled/netmon
+                upgrade_failed "nginx rejected the new ephemres site for ${names} (the netmon site is enabled again; see ${UPGRADE_LOG})."
+            fi
+            echo -e "${GREEN}[INFO] Replaced nginx site netmon with ${new_site} from the ephemres template (server_name ${names}, certificates kept; ${site} is kept, unlinked).${NC}"
+            return 0
+        fi
+    fi
+
+    cp -p "${site}" "${site}.pre-ephemres"
+    sed -i 's#/opt/netmon/noop#/opt/ephemres#g' "${site}"
+    if command -v nginx &>/dev/null && ! nginx -t 2>>"${UPGRADE_LOG}"; then
+        cp -p "${site}.pre-ephemres" "${site}"
+        upgrade_failed "nginx rejected ${site} after pointing it at /opt/ephemres (restored the original; see ${UPGRADE_LOG})."
+    fi
+    echo -e "${GREEN}[INFO] Pointed nginx site ${site} at /opt/ephemres (original saved as ${site}.pre-ephemres).${NC}"
+    echo -e "${YELLOW}[WARN] ${site} was edited after install, so it was kept: it lacks the gzip, asset caching and http2${NC}"
+    echo -e "${YELLOW}       of ${INSTALL_DIR}/deploy/nginx.conf.template. Merge them in by hand when convenient.${NC}"
+}
+
 migrate_legacy_services() {
     echo -e "${GREEN}[INFO] Disabling legacy netmon-api, netmon-engine and netmon-flowd units...${NC}"
     systemctl stop netmon-api netmon-engine netmon-flowd 2>/dev/null || true
     systemctl disable netmon-api netmon-engine netmon-flowd 2>/dev/null || true
 
-    local site="/etc/nginx/sites-available/netmon"
-    if [[ -f "${site}" ]] && grep -q "/opt/netmon/noop" "${site}"; then
-        cp -p "${site}" "${site}.pre-ephemres"
-        sed -i 's#/opt/netmon/noop#/opt/ephemres#g' "${site}"
-        if command -v nginx &>/dev/null && ! nginx -t 2>>"${UPGRADE_LOG}"; then
-            cp -p "${site}.pre-ephemres" "${site}"
-            upgrade_failed "nginx rejected ${site} after pointing it at /opt/ephemres (restored the original; see ${UPGRADE_LOG})."
-        fi
-        echo -e "${GREEN}[INFO] Pointed nginx site ${site} at /opt/ephemres (original saved as ${site}.pre-ephemres).${NC}"
-    fi
+    migrate_legacy_nginx_site
 
     # v3.2/v3.3.0 collected flows whenever netmon-flowd was enabled; v3.3.5 starts ephemres-flowd
     # only when flow ingestion is switched on, which also needs FastStore performance mode. A server
@@ -733,9 +783,9 @@ echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.5 Platform upgraded success
 echo -e "${GREEN}   Pre-Upgrade Database Backup Saved At: ${BACKUP_FILE}${NC}"
 echo -e "${GREEN}========================================================================${NC}"
 if [[ ${LEGACY_NETMON} -eq 1 ]]; then
-    echo -e "${YELLOW}[NOTICE] This install was migrated from the netmon layout. The old /opt/netmon, /etc/netmon and${NC}"
-    echo -e "${YELLOW}         netmon-* units (now disabled) were kept: with the pre-upgrade backup above they allow a${NC}"
-    echo -e "${YELLOW}         rollback (the database itself is migrated). Remove them once you are satisfied.${NC}"
+    echo -e "${YELLOW}[NOTICE] This install was migrated from the netmon layout. The old /opt/netmon, /etc/netmon,${NC}"
+    echo -e "${YELLOW}         netmon-* units (now disabled) and nginx site netmon were kept: with the pre-upgrade backup${NC}"
+    echo -e "${YELLOW}         above they allow a rollback (the database itself is migrated). Remove them once you are satisfied.${NC}"
     echo -e "${YELLOW}[NOTICE] Passwords from v3.2/v3.3.0 cannot be carried over: users were given temporary passwords${NC}"
     echo -e "${YELLOW}         listed in /opt/ephemres/legacy_password_resets.txt.${NC}"
 fi

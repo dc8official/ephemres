@@ -56,6 +56,8 @@ def test_netmon_keys_are_carried_over_as_ephemres_keys():
 def test_netmon_units_are_disabled_and_nginx_repointed_with_a_backup():
     body = UPGRADE[UPGRADE.index("migrate_legacy_services() {"):]
     assert "systemctl disable netmon-api netmon-engine netmon-flowd" in body
+    assert "    migrate_legacy_nginx_site\n" in body
+    body = UPGRADE[UPGRADE.index("migrate_legacy_nginx_site() {"):UPGRADE.index("migrate_legacy_services() {")]
     assert 'cp -p "${site}" "${site}.pre-ephemres"' in body
     assert "sed -i 's#/opt/netmon/noop#/opt/ephemres#g'" in body
     assert 'cp -p "${site}.pre-ephemres" "${site}"' in body  # restored when nginx -t fails
@@ -115,3 +117,83 @@ def test_upgrade_gives_a_legacy_admin_a_random_password_not_the_install_default(
     complete = UPGRADE.index("[UPGRADE COMPLETE]")
     notice = UPGRADE.index("sudo grep '^admin' /opt/ephemres/legacy_password_resets.txt")
     assert complete < notice
+
+
+# The site v3.2.0 and v3.3.0 install.sh generated (both shipped the same template).
+NETMON_SITE = """server {
+    listen 80;
+    server_name 10.20.0.5;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name 10.20.0.5;
+    
+    ssl_certificate     /etc/ssl/certs/netmon.crt;
+    ssl_certificate_key /etc/ssl/private/netmon.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+    }
+
+    location / {
+        root /opt/netmon/noop/frontend/dist;
+        try_files $uri $uri/ /index.html;
+    }
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+}
+"""
+
+
+def _shell_function(name):
+    return re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", UPGRADE, re.S | re.M).group(0)
+
+
+def _site_body(tmp_path, text):
+    site = tmp_path / "site"
+    site.write_text(text, encoding="utf-8")
+    script = _shell_function("nginx_site_body") + f'nginx_site_body "{site}"\n'
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout
+
+
+def test_an_unedited_netmon_site_matches_its_template(tmp_path):
+    old_template = NETMON_SITE.replace("10.20.0.5", "YOUR_DOMAIN")
+    assert _site_body(tmp_path, NETMON_SITE) == _site_body(tmp_path, old_template)
+    # certbot --nginx swaps the certificates and adds its own lines: still the installer's site.
+    certbot = NETMON_SITE.replace(
+        "    ssl_certificate     /etc/ssl/certs/netmon.crt;\n    ssl_certificate_key /etc/ssl/private/netmon.key;\n",
+        "    ssl_certificate /etc/letsencrypt/live/mon.example/fullchain.pem; # managed by Certbot\n"
+        "    ssl_certificate_key /etc/letsencrypt/live/mon.example/privkey.pem; # managed by Certbot\n"
+        "    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot\n",
+    ).replace("10.20.0.5", "mon.example")
+    assert _site_body(tmp_path, certbot) == _site_body(tmp_path, old_template)
+    # A local change keeps the site as it is.
+    edited = NETMON_SITE.replace("    location / {", "    client_max_body_size 50m;\n\n    location / {")
+    assert _site_body(tmp_path, edited) != _site_body(tmp_path, old_template)
+
+
+def test_the_new_site_keeps_server_name_and_certificates(tmp_path):
+    template = ROOT / "deploy" / "nginx.conf.template"
+    script = (_shell_function("render_nginx_site")
+              + f'render_nginx_site "{template}" "mon.example mon" '
+              + '/etc/letsencrypt/live/mon.example/fullchain.pem /etc/letsencrypt/live/mon.example/privkey.pem\n')
+    site = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout
+    assert site.count("server_name mon.example mon;") == 2
+    assert "YOUR_DOMAIN" not in site
+    assert "ssl_certificate     /etc/letsencrypt/live/mon.example/fullchain.pem;" in site
+    assert "ssl_certificate_key /etc/letsencrypt/live/mon.example/privkey.pem;" in site
+    assert "gzip on;" in site and "location /assets/" in site and "root /opt/ephemres/frontend/dist;" in site
