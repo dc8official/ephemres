@@ -163,6 +163,33 @@ def test_load_balancing_is_not_a_change():
     assert change.new_out_if == 3
 
 
+def test_switch_inside_a_minute_is_reported():
+    # Routes rarely switch on a minute boundary: the switch minute carries both paths, which must
+    # not be learned as load balancing (that adopted the new path without ever reporting it).
+    tracker, clock = _tracker(minutes=3)
+    _minute(tracker, clock, {PATH_A: 1000})
+    _minute(tracker, clock, {PATH_A: 1000})
+    _minute(tracker, clock, {PATH_A: 500, PATH_B: 500})  # switched half way through the minute
+    _minute(tracker, clock, {PATH_B: 1000})
+    assert tracker.drain_changes() == []
+    _minute(tracker, clock, {PATH_B: 1000})
+    (change,) = tracker.drain_changes()
+    assert (change.old_out_if, change.old_next_hop) == PATH_A
+    assert (change.new_out_if, change.new_next_hop) == PATH_B
+    _minute(tracker, clock, {PATH_B: 1000})
+    assert tracker.drain_changes() == []
+
+
+def test_short_split_that_falls_back_is_not_a_change():
+    tracker, clock = _tracker(minutes=3)
+    _minute(tracker, clock, {PATH_A: 1000})
+    _minute(tracker, clock, {PATH_A: 500, PATH_B: 500})
+    _minute(tracker, clock, {PATH_B: 1000})
+    _minute(tracker, clock, {PATH_A: 1000})  # back before the new path lasted 3 minutes
+    _minute(tracker, clock, {PATH_A: 1000})
+    assert tracker.drain_changes() == []
+
+
 def test_idle_keys_are_forgotten():
     clock = Clock()
     tracker = PathTracker(change_minutes=1, idle_minutes=5, clock=clock)

@@ -81,8 +81,7 @@ class TelemetryRelay:
         """Listens to a broker channel with automatic reconnection loop."""
         while self._running:
             try:
-                broker = driver_manager.get_event_broker()
-                async for event in broker.subscribe(channel):
+                async for event in driver_manager.subscribe(channel):
                     if not self._running:
                         break
                     await self._handle_relayed_event(channel, event)

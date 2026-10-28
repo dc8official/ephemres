@@ -286,6 +286,7 @@ async def monitor_endpoint(
 
 async def main() -> None:
     logger.info("Ephemres monitoring engine starting.")
+    driver_manager.migrate_sessions = False
     await driver_manager.initialize()
     async with AsyncSessionLocal() as db:
         await resolve_startup_state(db)
@@ -302,6 +303,11 @@ async def main() -> None:
     # Admin UI settings used by the engine (Layer-2 auto-bypass for incident traceroutes).
     runtime_settings_task = await start_runtime_settings_refresh_task(AsyncSessionLocal, interval_seconds=30)
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
+    # FastStore switched in Settings: follow the API onto the new event broker, or the state
+    # changes published here would go where the API no longer listens.
+    from app.services.settings_sync import start_settings_sync_listener
+
+    settings_sync_task = asyncio.create_task(start_settings_sync_listener(AsyncSessionLocal), name="settings_sync_listener")
 
     state_machine = StateMachine(
         confirmation_threshold=settings.monitoring.state_confirmation_cycles
@@ -367,6 +373,7 @@ async def main() -> None:
             await asyncio.sleep(30)
     finally:
         runtime_settings_task.cancel()
+        settings_sync_task.cancel()
         watchdog_task.cancel()
         try:
             await watchdog_task

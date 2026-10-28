@@ -81,6 +81,7 @@ async def run_flow_daemon() -> None:
     # monitoring engine uses, so initialize it the same way.
     from app.services.driver_manager import driver_manager
 
+    driver_manager.migrate_sessions = False
     await driver_manager.initialize()
     path_tracker = PathTracker(
         change_minutes=getattr(flow_cfg, "route_change_minutes", 3) if flow_cfg else 3,
@@ -91,7 +92,8 @@ async def run_flow_daemon() -> None:
         correlator=correlator,
         db_session_factory=AsyncSessionLocal,
         path_tracker=path_tracker,
-        event_publisher=driver_manager.get_event_broker().publish,
+        # Resolved per event: the broker changes when FastStore is switched in Settings.
+        event_publisher=lambda channel, payload: driver_manager.get_event_broker().publish(channel, payload),
     )
 
     await correlator.start()
@@ -99,6 +101,10 @@ async def run_flow_daemon() -> None:
     await aggregator.start()
 
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
+    # FastStore switched in Settings: follow the API onto the new event broker (route hints).
+    from app.services.settings_sync import start_settings_sync_listener
+
+    settings_sync_task = asyncio.create_task(start_settings_sync_listener(AsyncSessionLocal), name="settings_sync_listener")
 
     logger.info(
         "ephemres-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d).",
@@ -120,6 +126,7 @@ async def run_flow_daemon() -> None:
     logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
     watchdog_task.cancel()
     runtime_settings_task.cancel()
+    settings_sync_task.cancel()
     try:
         await watchdog_task
     except asyncio.CancelledError:

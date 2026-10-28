@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.orm import select
 from app.config import settings
@@ -39,6 +40,12 @@ class StorageDriverManager:
         self._event_broker: Optional[EventBroker] = None
         self._store_client = None
         self._driver_mode: str = "postgres"  # "postgres" | "redis"
+        # One future per active subscribe(), resolved when initialize() swaps the event broker so
+        # the subscription moves to the new one. Futures, not an Event, as they belong to the loop
+        # that created them.
+        self._broker_waiters: List[asyncio.Future] = []
+        # Login sessions live in the API; the engine and flowd switch drivers without copying them.
+        self.migrate_sessions = True
 
     async def initialize(self) -> None:
         """Initializes drivers based on system settings and FastStore connectivity."""
@@ -95,7 +102,7 @@ class StorageDriverManager:
                 await client.ping()
 
                 # If switching from PostgreSQL to FastStore, perform warm session migration
-                if previous_mode == "postgres":
+                if previous_mode == "postgres" and self.migrate_sessions:
                     try:
                         await migrate_sessions_pg_to_faststore(AsyncSessionLocal, client)
                     except Exception as mig_err:
@@ -110,7 +117,7 @@ class StorageDriverManager:
 
                 self._store_client = client
                 self._session_store = FastStoreSessionStore(client)
-                self._event_broker = FastStoreEventBroker(client)
+                self._set_event_broker(FastStoreEventBroker(client))
                 self._driver_mode = "redis"
                 logger.info(
                     "StorageDriverManager: FastStore-Accelerated driver initialized successfully at %s:%d/%d",
@@ -126,7 +133,7 @@ class StorageDriverManager:
                 )
 
         # If switching from FastStore to PostgreSQL, perform warm session migration
-        if previous_mode == "redis" and previous_store is not None:
+        if previous_mode == "redis" and previous_store is not None and self.migrate_sessions:
             try:
                 await migrate_sessions_faststore_to_pg(previous_store, AsyncSessionLocal)
             except Exception as mig_err:
@@ -141,7 +148,7 @@ class StorageDriverManager:
 
         # Fallback to PostgreSQL-Native driver
         self._session_store = PostgresSessionStore(AsyncSessionLocal)
-        self._event_broker = PostgresEventBroker(AsyncSessionLocal)
+        self._set_event_broker(PostgresEventBroker(AsyncSessionLocal))
         self._driver_mode = "postgres"
         logger.info("StorageDriverManager: PostgreSQL-Native driver active.")
 
@@ -149,6 +156,51 @@ class StorageDriverManager:
         if self._session_store is None:
             self._session_store = PostgresSessionStore(AsyncSessionLocal)
         return self._session_store
+
+    def _set_event_broker(self, broker: EventBroker) -> None:
+        self._event_broker = broker
+        waiters, self._broker_waiters = self._broker_waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def subscribe(self, channel: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """Events on `channel` from the current event broker, following it when it is replaced.
+
+        Switching FastStore on or off in Settings re-initializes every process (settings_sync), and
+        a subscription kept on the old broker would wait where nobody publishes any more: route
+        hints, state changes and alerts from the other processes would be lost.
+        """
+        while True:
+            waiter = asyncio.get_running_loop().create_future()
+            self._broker_waiters.append(waiter)
+            events = self.get_event_broker().subscribe(channel)
+            pending: Optional[asyncio.Future] = None
+            ended = False
+            try:
+                while True:
+                    pending = asyncio.ensure_future(events.__anext__())
+                    await asyncio.wait({pending, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    if not pending.done():
+                        break  # broker replaced: subscribe again on the new one
+                    nxt, pending = pending, None
+                    try:
+                        event = nxt.result()
+                    except StopAsyncIteration:
+                        ended = True
+                        break
+                    yield event
+            finally:
+                replaced = waiter.done() and not waiter.cancelled()
+                waiter.cancel()
+                if waiter in self._broker_waiters:
+                    self._broker_waiters.remove(waiter)
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                await events.aclose()
+            if ended and not replaced:
+                await asyncio.sleep(1.0)  # the broker closed the subscription: do not spin
 
     def get_event_broker(self) -> EventBroker:
         if self._event_broker is None:

@@ -55,6 +55,8 @@ git clone --branch v3.3.5 https://github.com/dc8official/ephemres.git ~/ephemres
 sudo bash ~/ephemres/deploy/upgrade.sh
 ```
 
+v3.2.0 and v3.3.0 also installed on Python 3.10, but v3.3.5 needs Python 3.11+ (see Requirements). The script checks this before it changes anything and stops with the command to run if the server has no Python 3.11+ (on Ubuntu 22.04: `sudo apt-get install python3.11 python3.11-venv`, which installs 3.11.0rc1; Ubuntu 24.04 or Debian 12 is the better target).
+
 The script detects the old layout (`/etc/netmon/netmon.env` and no `/etc/ephemres/ephemres.env`) and, after taking the pre-upgrade backup:
 
 * creates the `ephemres` user, `/etc/ephemres/ephemres.env` (the `NETMON_*` keys written again as `EPHEMRES_*` with the same values, so the database password and the key that encrypts alert channel secrets carry over) and `/etc/ephemres/config.toml` (`log_dir` moved to `/var/log/ephemres`);

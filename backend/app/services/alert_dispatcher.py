@@ -216,8 +216,7 @@ class AlertDispatcher:
         """Subscribes to Redis / Postgres LISTEN/NOTIFY channels."""
         while self._running:
             try:
-                broker = driver_manager.get_event_broker()
-                async for event in broker.subscribe(channel):
+                async for event in driver_manager.subscribe(channel):
                     if not self._running:
                         break
                     await self.enqueue_event(channel, event)

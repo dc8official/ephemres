@@ -197,3 +197,19 @@ def test_the_new_site_keeps_server_name_and_certificates(tmp_path):
     assert "ssl_certificate     /etc/letsencrypt/live/mon.example/fullchain.pem;" in site
     assert "ssl_certificate_key /etc/letsencrypt/live/mon.example/privkey.pem;" in site
     assert "gzip on;" in site and "location /assets/" in site and "root /opt/ephemres/frontend/dist;" in site
+
+
+def test_python_311_is_checked_before_anything_changes():
+    # v3.2/v3.3.0 ran on Python 3.10 (Ubuntu 22.04); v3.3.5 needs 3.11 (tomllib). The check runs
+    # before the backup and the legacy migration, and also in --dry-run.
+    check = UPGRADE.index('if [[ -z "${UPGRADE_PYTHON}" ]]; then')
+    assert check < UPGRADE.index("--- Step 1/7: Executing Pre-Upgrade Database Backup ---")
+    assert check < UPGRADE.index("        migrate_legacy_config\n")
+    assert "sys.exit(sys.version_info < (3, 11))" in UPGRADE
+    assert "Nothing was changed: services are still running the current version." in UPGRADE
+
+
+def test_a_venv_older_than_python_311_is_rebuilt():
+    assert ('&& { [[ ! -x "${VENV_PATH}/bin/python3" || ! -x "${VENV_PATH}/bin/pip" ]] '
+            '|| ! python_is_311 "${VENV_PATH}/bin/python3"; }; then') in UPGRADE
+    assert 'VENV_PYTHON="${UPGRADE_PYTHON}"' in UPGRADE

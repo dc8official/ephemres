@@ -93,6 +93,31 @@ if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
     fi
 fi
 
+# Python 3.11 is the floor (app.config imports the stdlib tomllib module), but v3.2/v3.3.0
+# installed on Python 3.10 too (Ubuntu 22.04). Check before the backup, so such a server is left
+# exactly as it was instead of failing in step 6 with its services stopped.
+python_is_311() {
+    "$1" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null
+}
+UPGRADE_PYTHON=""
+if [[ ${LEGACY_NETMON} -eq 0 && -x /opt/ephemres/venv/bin/python3 && -x /opt/ephemres/venv/bin/pip ]] \
+    && python_is_311 /opt/ephemres/venv/bin/python3; then
+    UPGRADE_PYTHON="/opt/ephemres/venv/bin/python3"
+else
+    for ver in 3.14 3.13 3.12 3.11; do
+        if command -v "python${ver}" &>/dev/null && "python${ver}" -c 'import venv, ensurepip' 2>/dev/null; then
+            UPGRADE_PYTHON="python${ver}"
+            break
+        fi
+    done
+fi
+if [[ -z "${UPGRADE_PYTHON}" ]]; then
+    echo -e "${RED}[ERROR] Ephemres v3.3.5 needs Python 3.11 or newer with its venv module, and this server has none.${NC}" >&2
+    echo -e "${RED}        Install it and run the upgrade again, e.g.: sudo apt-get install python3.11 python3.11-venv${NC}" >&2
+    echo -e "${RED}        Nothing was changed: services are still running the current version.${NC}" >&2
+    exit 1
+fi
+
 DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}}"
 DB_USER="${EPHEMRES_DB_USER:-${NETMON_DB_USER:-${POSTGRES_USER:-netmon_user}}}"
 DB_PASS="${EPHEMRES_DB_PASSWORD:-${NETMON_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}}"
@@ -446,23 +471,14 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
 
     # Upgrades before v3.3.2v synced with --delete and emptied /opt/ephemres/venv, leaving a
     # directory without bin/python3 or bin/pip. Rebuild it instead of failing with services stopped.
-    if [[ "${VENV_PATH}" == "/opt/ephemres/venv" ]] && [[ ! -x "${VENV_PATH}/bin/python3" || ! -x "${VENV_PATH}/bin/pip" ]]; then
-        VENV_PYTHON=""
-        # Python 3.11 is the floor: app.config imports the stdlib tomllib module.
-        for ver in 3.14 3.13 3.12 3.11; do
-            if command -v "python${ver}" &>/dev/null; then
-                VENV_PYTHON="python${ver}"
-                break
-            fi
-        done
-        if [[ -z "${VENV_PYTHON}" ]]; then
-            echo -e "${RED}[ERROR] ${VENV_PATH} is incomplete and no Python 3.11+ interpreter was found to rebuild it.${NC}" >&2
-            exit 1
-        fi
+    # A venv built on Python 3.10 (allowed before v3.3.2v) is rebuilt with the pre-flight's 3.11+.
+    if [[ "${VENV_PATH}" == "/opt/ephemres/venv" ]] \
+        && { [[ ! -x "${VENV_PATH}/bin/python3" || ! -x "${VENV_PATH}/bin/pip" ]] || ! python_is_311 "${VENV_PATH}/bin/python3"; }; then
+        VENV_PYTHON="${UPGRADE_PYTHON}"
         if [[ ${LEGACY_NETMON} -eq 1 ]]; then
             echo -e "${GREEN}[INFO] Creating ${VENV_PATH} with ${VENV_PYTHON} for the ephemres units...${NC}"
         else
-            echo -e "${YELLOW}[WARN] ${VENV_PATH} is missing its interpreter or pip; rebuilding it with ${VENV_PYTHON}...${NC}"
+            echo -e "${YELLOW}[WARN] ${VENV_PATH} is incomplete or older than Python 3.11; rebuilding it with ${VENV_PYTHON}...${NC}"
         fi
         "${VENV_PYTHON}" -m venv --clear "${VENV_PATH}"
         chown -R ephemres:ephemres "${VENV_PATH}"

@@ -9,7 +9,10 @@ next hop. PathTracker keeps two things:
 - A change detector: per (exporter, endpoint, direction) the dominant (out_if, next_hop) of
   each arrival minute, by bytes. A different path must stay dominant for `change_minutes`
   minutes with traffic, with the old path below `ecmp_share`, before a change is reported.
-  Two or more paths that each keep `ecmp_share` of the bytes are load balancing, not a change.
+  Two or more paths that each keep `ecmp_share` of the bytes are load balancing, not a change,
+  once the split has lasted `change_minutes` minutes. A shorter split that brings in a new path
+  is the minute a route switched (a switch rarely falls on a minute boundary): it counts towards
+  that new path, and the change is reported when the new path then carries the traffic alone.
 
 Minutes are arrival minutes (wall clock), not flow start times: exporters report long flows
 late, so a flow-time minute is never known to be complete.
@@ -63,6 +66,9 @@ class _DetectorState:
     candidate: Optional[Path] = None
     streak: int = 0
     last_minute: int = 0
+    # A split between known and new paths, and for how many minutes in a row it was seen.
+    split: Optional[FrozenSet[Path]] = None
+    split_streak: int = 0
 
 
 class PathTracker:
@@ -172,11 +178,32 @@ class PathTracker:
         state.last_minute = minute
 
         if len(significant) > 1:
-            # Load balancing: learn the set, never report it as a change.
-            state.current = significant
-            state.candidate, state.streak = None, 0
+            new_paths = significant - state.current
+            if not new_paths:
+                # The known load-balanced paths (or some of them) share the traffic.
+                state.current = significant
+                state.candidate, state.streak = None, 0
+                state.split, state.split_streak = None, 0
+                return
+            if state.split == significant:
+                state.split_streak += 1
+            else:
+                state.split, state.split_streak = significant, 1
+            if state.split_streak >= self.change_minutes:
+                # A lasting split is load balancing: learn the set, never report it as a change.
+                state.current = significant
+                state.candidate, state.streak = None, 0
+                state.split, state.split_streak = None, 0
+                return
+            # Possibly the minute a route switched: count it towards the new path, report nothing yet.
+            newest = max(new_paths, key=lambda p: (paths[p], p[0], p[1] or ""))
+            if state.candidate == newest:
+                state.streak += 1
+            else:
+                state.candidate, state.streak = newest, 1
             return
 
+        state.split, state.split_streak = None, 0
         if dominant in state.current:
             if len(state.current) > 1:
                 state.current = frozenset([dominant])  # one leg of a load-balanced set remains
