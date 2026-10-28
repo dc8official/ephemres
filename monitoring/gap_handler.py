@@ -6,6 +6,8 @@ from uuid import UUID
 from app.core.orm import text
 from app.core.orm import AsyncSession
 
+from monitoring.probe_samples import closed_event_stats_sql
+
 logger = logging.getLogger(__name__)
 
 async def open_monitoring_gap(
@@ -44,7 +46,8 @@ async def open_monitoring_gap(
             end_time = :gap_time,
             duration_seconds = EXTRACT(
                 EPOCH FROM (:gap_time - start_time)
-            )::BIGINT
+            )::BIGINT,
+    """ + closed_event_stats_sql(":gap_time") + """
         WHERE end_time IS NULL
           AND start_time >= :window_start
     """)
@@ -131,7 +134,8 @@ async def resolve_startup_state(db: AsyncSession) -> None:
             end_time = :close_time,
             duration_seconds = EXTRACT(
                 EPOCH FROM (:close_time - start_time)
-            )::BIGINT
+            )::BIGINT,
+    """ + closed_event_stats_sql(":close_time") + """
         WHERE end_time IS NULL
           AND start_time >= :window_start
     """)

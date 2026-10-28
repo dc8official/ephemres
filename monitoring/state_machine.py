@@ -11,6 +11,7 @@ from app.core.orm import text
 from app.core.orm import AsyncSession
 
 from monitoring.ping import PingResult, classify_ping_result
+from monitoring.probe_samples import closed_event_stats_sql
 
 logger = logging.getLogger(__name__)
 
@@ -468,8 +469,13 @@ class StateMachine:
                             monitoring_cycle_count = monitoring_cycle_count + 1,
                             success_count = success_count + :success_count,
                             failed_count = failed_count + :failed_count,
-                            avg_rtt_ms = :avg_rtt_ms,
-                            health_score = :health_score
+                        """
+                        + closed_event_stats_sql(
+                            ":execution_time",
+                            success="success_count + :success_count",
+                            failed="failed_count + :failed_count",
+                        )
+                        + """
                         WHERE id = CAST(:active_event_id AS uuid) AND end_time IS NULL
                         """
                     ),
@@ -477,8 +483,6 @@ class StateMachine:
                         "execution_time": execution_time,
                         "success_count": result.success_count,
                         "failed_count": result.failed_count,
-                        "avg_rtt_ms": result.avg_rtt_ms,
-                        "health_score": result.health_score,
                         "active_event_id": str(state.active_event_id),
                     },
                 )
@@ -608,7 +612,10 @@ class StateMachine:
                     """
                     UPDATE endpoint_events
                     SET end_time = :execution_time,
-                        duration_seconds = EXTRACT(EPOCH FROM (:execution_time - start_time))::integer
+                        duration_seconds = EXTRACT(EPOCH FROM (:execution_time - start_time))::integer,
+                    """
+                    + closed_event_stats_sql(":execution_time", closed_by_cycle=True)
+                    + """
                     WHERE endpoint_id = CAST(:endpoint_id AS uuid) AND end_time IS NULL
                     """
                 ),

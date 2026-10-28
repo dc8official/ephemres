@@ -272,6 +272,7 @@ async def get_bandwidth_overview(
     store_client = await get_flow_store()
     if store_client:
         try:
+            await _forget_registered_exporters(store_client, db)
             unmatched_count = await store_client.zcard("flow:unmatched:zset")
             if not unmatched_count:
                 unmatched_count = await store_client.scard("flow:unmatched:set")
@@ -911,6 +912,35 @@ async def get_applications_breakdown(
     )
 
 
+async def _forget_registered_exporters(store_client: Any, db: AsyncSession) -> None:
+    """Drops addresses that now belong to an endpoint from the unmatched exporter lists.
+
+    The flow daemon lists an exporter it cannot match for 24 h; once the address is enrolled
+    or linked as an alias its flows are matched, so the warning must not linger for a day.
+    Same rule as the correlator: any endpoint's primary IP or one of its flow_exporter_ips.
+    """
+    res = await db.execute(
+        text("""
+            SELECT host(ip_address) AS ip, flow_exporter_ips
+            FROM endpoints
+            WHERE deleted_at IS NULL AND endpoint_status != 'DELETED'
+        """)
+    )
+    registered = set()
+    for ip, aliases in res.all():
+        registered.add(str(ip))
+        registered.update(str(a).split("/")[0].strip() for a in (aliases or []))
+    for key in ("flow:unmatched:zset", "flow:unmatched:set"):
+        members = (
+            await store_client.zrangebyscore(key, "-inf", "+inf")
+            if key.endswith("zset")
+            else await store_client.smembers(key)
+        )
+        stale = [m for m in members or [] if (m.decode("utf-8") if isinstance(m, bytes) else str(m)) in registered]
+        if stale:
+            await (store_client.zrem(key, *stale) if key.endswith("zset") else store_client.srem(key, *stale))
+
+
 async def _unmatched_flow_rate(store_client: Any, ip: str) -> Optional[float]:
     """Recent flows/s the flow daemon recorded for an unregistered exporter, if any."""
     try:
@@ -1008,6 +1038,7 @@ async def list_flow_exporters(
     store_client = await get_flow_store()
     if store_client:
         try:
+            await _forget_registered_exporters(store_client, db)
             now_ts = time.time()
             cutoff_ts = now_ts - 86400.0
             # 1. Prune and query FastStore ZSET flow:unmatched:zset (sliding 24h window)

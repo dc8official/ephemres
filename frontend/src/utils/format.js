@@ -47,3 +47,14 @@ export function formatPortLabel(port) {
   const name = PORT_LABELS[Number(port)]
   return name ? `${Number(port)} / ${name}` : `${port}`
 }
+
+/** "just now", "12m ago", "3h 5m ago", "4d ago" for an ISO timestamp; "—" when missing. */
+export function formatTimeAgo(iso) {
+  if (!iso) return '—'
+  const secs = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000))
+  if (Number.isNaN(secs)) return '—'
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}

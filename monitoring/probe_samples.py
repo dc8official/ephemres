@@ -48,6 +48,47 @@ def sample_params(endpoint_id: UUID, sampled_at: datetime, result: PingResult) -
     }
 
 
+def closed_event_stats_sql(
+    close_time: str,
+    success: str = "success_count",
+    failed: str = "failed_count",
+    closed_by_cycle: bool = False,
+) -> str:
+    """SET clauses that give a closing endpoint_events row the health and RTT of its whole period.
+
+    While an event is open its health_score and avg_rtt_ms are the latest cycle's (the dashboard
+    shows them as current values), so without this a closed UP period that ended in an outage
+    kept the failed last cycle: 0 % health and no RTT, and a DOWN period kept the first good
+    probe of the recovery. Health is exact from the accumulated counts; RTT is the probe-weighted
+    mean of the period's samples.
+
+    Each endpoint is probed in a fixed slot once a minute and its sample is stamped when the
+    cycle starts, while the event time is taken after the ping, up to a cycle later when probes
+    time out. So a cycle's sample lies in the minute before its event time: the period's samples
+    are those after start_time - 1 minute, up to end_time - 1 minute when the close is a state
+    change (`closed_by_cycle`: that confirming cycle belongs to the next event), or up to
+    end_time otherwise (engine stop/start, 24 h split). `success` / `failed` are the SQL for the
+    final counts, `close_time` the parameter holding end_time.
+    """
+    upper = (
+        f"s.sampled_at <= CAST({close_time} AS timestamptz) - INTERVAL '1 minute'"
+        if closed_by_cycle
+        else f"s.sampled_at < CAST({close_time} AS timestamptz)"
+    )
+    return f"""
+        health_score = CASE WHEN ({success}) + ({failed}) > 0
+            THEN ROUND(100.0 * ({success}) / (({success}) + ({failed})), 2)
+            ELSE health_score END,
+        avg_rtt_ms = CASE WHEN ({success}) = 0 THEN NULL ELSE COALESCE((
+            SELECT ROUND((SUM(s.rtt_avg_ms * s.received)
+                          / NULLIF(SUM(s.received) FILTER (WHERE s.rtt_avg_ms IS NOT NULL), 0))::numeric, 2)
+            FROM endpoint_probe_samples s
+            WHERE s.endpoint_id = endpoint_events.endpoint_id
+              AND s.sampled_at > endpoint_events.start_time - INTERVAL '1 minute'
+              AND {upper}
+        ), avg_rtt_ms) END"""
+
+
 async def record_probe_sample(endpoint_id: UUID, sampled_at: datetime, result: PingResult) -> bool:
     """Store one cycle's result. Returns False (and logs once) when the write fails."""
     global _write_failure_logged

@@ -232,6 +232,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { Network } from 'vis-network'
+// Positions the link and node tooltips (without it they render below the canvas, clipped).
+import 'vis-network/styles/vis-network.min.css'
 import { DataSet } from 'vis-data'
 import { getTopology, rebuildTopology, discoverAllTopologyRoutes, refreshEndpointBaseline } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
@@ -797,10 +799,14 @@ async function fetchTopology() {
 
       if (isLargeGraph) {
         stabilized.value = true
+        network.once('afterDrawing', () => network.fit())
       } else {
         network.on('stabilizationIterationsDone', () => {
           network.setOptions({ physics: { enabled: false } })
           stabilized.value = true
+          // vis-network's own fit can run before the hierarchical layout settles and leave the
+          // graph outside the canvas: open on the whole graph.
+          network.fit()
         })
       }
 
@@ -1094,6 +1100,21 @@ onUnmounted(() => {
 .vis-network-canvas {
   width: 100%;
   height: 100%;
+}
+
+/* vis-network's tooltip in the app's colours (its default is pale yellow on black text). */
+.vis-network-canvas :deep(.vis-tooltip) {
+  max-width: 320px;
+  white-space: normal;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .loading-overlay, .error-overlay {

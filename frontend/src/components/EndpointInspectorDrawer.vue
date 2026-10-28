@@ -59,8 +59,8 @@
                 </span>
               </div>
               <div class="metric-box">
-                <span class="metric-lbl">Last Contact</span>
-                <span class="metric-val text-sm tnum">
+                <span class="metric-lbl">In State Since</span>
+                <span class="metric-val text-sm tnum" :title="stateSinceExact">
                   {{ formattedLastSeen }}
                 </span>
               </div>
@@ -165,6 +165,7 @@ import { useRouter } from 'vue-router'
 import StatusBadge from './StatusBadge.vue'
 import { getEndpointTraces, getProbeSeries } from '../services/api.js'
 import { isMonitored, uptimeValue } from '../utils/endpointState.js'
+import { formatTimeAgo } from '../utils/format.js'
 
 const props = defineProps({
   visible: {
@@ -287,15 +288,11 @@ const healthScoreClass = computed(() => {
   return 'text-rose'
 })
 
-const formattedLastSeen = computed(() => {
-  if (!props.endpoint?.last_seen) return 'Never'
-  try {
-    const d = new Date(props.endpoint.last_seen)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  } catch {
-    return 'Recent'
-  }
-})
+// last_seen is when the current state began (the latest event's start), not the last probe.
+const formattedLastSeen = computed(() => formatTimeAgo(props.endpoint?.last_seen))
+const stateSinceExact = computed(() =>
+  props.endpoint?.last_seen ? new Date(props.endpoint.last_seen).toLocaleString() : undefined
+)
 
 // Sparkline points derived from real probe RTT history or genuine trace samples
 const sparklinePoints = computed(() => {

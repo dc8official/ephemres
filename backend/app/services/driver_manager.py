@@ -46,6 +46,10 @@ class StorageDriverManager:
         self._broker_waiters: List[asyncio.Future] = []
         # Login sessions live in the API; the engine and flowd switch drivers without copying them.
         self.migrate_sessions = True
+        # Sessions are copied between stores only when a running process switches drivers. On
+        # the first initialize() there is no previous driver: copying PostgreSQL's sessions over
+        # FastStore's would sign out everyone who logged in while FastStore was on.
+        self._initialized = False
 
     async def initialize(self) -> None:
         """Initializes drivers based on system settings and FastStore connectivity."""
@@ -88,6 +92,8 @@ class StorageDriverManager:
 
         previous_mode = self._driver_mode
         previous_store = self._store_client
+        switching = self._initialized and self.migrate_sessions
+        self._initialized = True
 
         if redis_enabled:
             try:
@@ -102,7 +108,7 @@ class StorageDriverManager:
                 await client.ping()
 
                 # If switching from PostgreSQL to FastStore, perform warm session migration
-                if previous_mode == "postgres" and self.migrate_sessions:
+                if previous_mode == "postgres" and switching:
                     try:
                         await migrate_sessions_pg_to_faststore(AsyncSessionLocal, client)
                     except Exception as mig_err:
@@ -133,7 +139,7 @@ class StorageDriverManager:
                 )
 
         # If switching from FastStore to PostgreSQL, perform warm session migration
-        if previous_mode == "redis" and previous_store is not None and self.migrate_sessions:
+        if previous_mode == "redis" and previous_store is not None and switching:
             try:
                 await migrate_sessions_faststore_to_pg(previous_store, AsyncSessionLocal)
             except Exception as mig_err:
