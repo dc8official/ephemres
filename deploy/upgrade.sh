@@ -257,14 +257,23 @@ EOF
     fi
 fi
 
+# Fingerprint of a frontend's sources (everything but node_modules and dist), so step 4 can
+# reuse the pre-flight bundle when the git pull left the frontend unchanged.
+frontend_source_hash() {
+    (cd "$1" && find . \( -path ./node_modules -o -path ./dist \) -prune -o -type f -print0 \
+        | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+}
+
 # Pre-Flight: Build Frontend Assets Before Service Pause
 echo -e "\n${BLUE}--- Pre-Flight: Verifying & Compiling Frontend Production Bundle ---${NC}"
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"
+PREFLIGHT_FRONTEND_HASH=""
 if [[ ${DRY_RUN} -eq 0 && -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
     if command -v npm &>/dev/null; then
         echo -e "${GREEN}[INFO] Building Vue 3 frontend bundle in pre-flight (${FRONTEND_DIR})...${NC}"
         if (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build); then
             echo -e "${GREEN}[SUCCESS] Pre-flight frontend build completed successfully.${NC}"
+            PREFLIGHT_FRONTEND_HASH=$(frontend_source_hash "${FRONTEND_DIR}")
         elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
             echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding with pre-built assets.${NC}"
         else
@@ -359,7 +368,11 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     # Rebuild Vue 3 frontend in SOURCE_DIR if needed
     FRONTEND_DIR="${SOURCE_DIR}/frontend"
     if [[ -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
-        if command -v npm &>/dev/null; then
+        if [[ "${FRONTEND_DIR}" == "${PROJECT_ROOT}/frontend" && -n "${PREFLIGHT_FRONTEND_HASH}" \
+              && -f "${FRONTEND_DIR}/dist/index.html" \
+              && "$(frontend_source_hash "${FRONTEND_DIR}")" == "${PREFLIGHT_FRONTEND_HASH}" ]]; then
+            echo -e "${GREEN}[INFO] Frontend sources unchanged since the pre-flight build; reusing that bundle.${NC}"
+        elif command -v npm &>/dev/null; then
             echo -e "${GREEN}[INFO] Rebuilding production Vue 3 frontend bundle in ${FRONTEND_DIR}...${NC}"
             (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build) || {
                 if [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
