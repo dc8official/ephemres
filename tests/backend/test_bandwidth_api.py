@@ -414,3 +414,22 @@ def test_bandwidth_map_exporter_with_cidr_suffix(client):
 
 
 
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/bandwidth/traffic-series",
+        "/api/v1/bandwidth/top-talkers",
+        "/api/v1/bandwidth/conversations",
+        "/api/v1/bandwidth/applications",
+        f"/api/v1/bandwidth/interfaces?exporter_id={uuid4()}",
+    ],
+)
+def test_unknown_window_is_rejected(client, path):
+    # It used to fall back to 1h while the response echoed the unknown window.
+    test_client, _ = client
+    sep = "&" if "?" in path else "?"
+    resp = test_client.get(f"{path}{sep}window=2h")
+    assert resp.status_code == 400
+    assert "1h, 6h, 24h, 7d, 30d, 1y" in resp.text

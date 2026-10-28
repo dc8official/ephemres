@@ -93,3 +93,23 @@ def test_drawer_labels_last_seen_as_the_state_start():
     drawer = (ROOT / "frontend/src/components/EndpointInspectorDrawer.vue").read_text(encoding="utf-8")
     assert "Last Contact" not in drawer
     assert "In State Since" in drawer and "formatTimeAgo(props.endpoint?.last_seen)" in drawer
+
+
+def test_unwritable_log_dir_logs_to_the_console_without_files(tmp_path, monkeypatch):
+    # The fallback used to create ./logs in the working directory (the repository root in
+    # tests and dev runs); the console, which systemd sends to the journal, is enough.
+    import logging
+
+    from app.logging_config import setup_logging
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.chdir(tmp_path)
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    try:
+        setup_logging("ephemres-test", log_dir=str(blocker / "logs"))
+        assert not any(isinstance(h, logging.FileHandler) for h in root.handlers)
+    finally:
+        root.handlers[:] = saved
+    assert not (tmp_path / "logs").exists()

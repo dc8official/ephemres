@@ -1,6 +1,5 @@
 from __future__ import annotations
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -42,14 +41,10 @@ def setup_logging(service_name: str = "ephemres-api", log_dir: Optional[str] = N
         test_file.unlink()
         use_file_logging = True
     except Exception:
-        # Fallback to local logs directory for dev/unprivileged environments
-        fallback_dir = Path(os.getcwd()) / "logs"
-        try:
-            fallback_dir.mkdir(parents=True, exist_ok=True)
-            target_dir = fallback_dir
-            use_file_logging = True
-        except Exception:
-            use_file_logging = False
+        # Not writable (dev checkouts, tests): the console is enough, and under systemd it is
+        # the journal. Writing to ./logs instead left log files in whatever directory the
+        # process ran from, the repository root included.
+        use_file_logging = False
 
     if use_file_logging:
         try:
@@ -90,5 +85,8 @@ def setup_logging(service_name: str = "ephemres-api", log_dir: Optional[str] = N
             )
 
     logger = logging.getLogger(service_name)
-    logger.info("Initialized %s logging (Dual Console + Rotating File Handlers in %s)", service_name, target_dir)
+    if use_file_logging:
+        logger.info("Initialized %s logging (Dual Console + Rotating File Handlers in %s)", service_name, target_dir)
+    else:
+        logger.warning("%s logs to the console only: %s is not writable.", service_name, target_dir)
     return logger

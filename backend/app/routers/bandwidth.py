@@ -134,21 +134,23 @@ PORT_LABEL_MAP = {
 }
 
 
+WINDOWS = {
+    "1h": datetime.timedelta(hours=1),
+    "6h": datetime.timedelta(hours=6),
+    "24h": datetime.timedelta(hours=24),
+    "7d": datetime.timedelta(days=7),
+    "30d": datetime.timedelta(days=30),
+    "1y": datetime.timedelta(days=365),
+}
+
+
 def _get_window_delta(window: str) -> datetime.timedelta:
-    w = window.lower().strip()
-    if w == "1h":
-        return datetime.timedelta(hours=1)
-    if w == "6h":
-        return datetime.timedelta(hours=6)
-    if w == "24h":
-        return datetime.timedelta(hours=24)
-    if w == "7d":
-        return datetime.timedelta(days=7)
-    if w == "30d":
-        return datetime.timedelta(days=30)
-    if w == "1y":
-        return datetime.timedelta(days=365)
-    return datetime.timedelta(hours=1)
+    """The window's length; 400 for any other value (it used to fall back to 1h silently while
+    the response still echoed the unknown window)."""
+    delta = WINDOWS.get(window.lower().strip())
+    if delta is None:
+        raise HTTPException(status_code=400, detail=f"window must be one of {', '.join(WINDOWS)}.")
+    return delta
 
 
 def _select_rollup_model_and_bucket_seconds(
