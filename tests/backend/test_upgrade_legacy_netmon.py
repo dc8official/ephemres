@@ -88,3 +88,18 @@ def test_restore_sh_loads_the_install_env_before_running_the_engine():
     engine = restore.index("-m app.core.restore")
     assert load < engine
     assert 'source "${ENV_FILE}"' in restore[load:engine]
+
+
+def test_flow_collection_carries_over_when_netmon_flowd_was_receiving():
+    # v3.2/v3.3.0 always ran netmon-flowd; v3.3.5 only starts ephemres-flowd when flow ingestion
+    # (which needs performance mode) is on, so the upgrade must switch both on for such servers.
+    detect = UPGRADE.index("LEGACY_FLOWD_ENABLED=0")
+    stop = UPGRADE.index("--- Step 1/7: Executing Pre-Upgrade Database Backup ---")
+    assert detect < stop  # recorded before the netmon units are stopped or disabled
+    assert "if systemctl is-enabled --quiet netmon-flowd 2>/dev/null; then\n        LEGACY_FLOWD_ENABLED=1" in UPGRADE
+    body = UPGRADE[UPGRADE.index("migrate_legacy_services() {"):UPGRADE.index("# 9. Service Unit Refresh")]
+    assert "('performance_mode', 'true'), ('flow_ingestion_enabled', 'true')" in body
+    assert "ON CONFLICT (setting_key) DO UPDATE" in body
+    # ... before the step 7 check that decides whether ephemres-flowd is started.
+    flow_check = UPGRADE.index("SELECT setting_value FROM app_settings WHERE setting_key = 'flow_ingestion_enabled'")
+    assert UPGRADE.index("        migrate_legacy_services\n") < flow_check

@@ -81,9 +81,15 @@ fi
 # /opt/ephemres/venv as user ephemres and read /etc/ephemres, so such an install is moved over
 # (see migrate_legacy_config and migrate_legacy_services below).
 LEGACY_NETMON=0
+LEGACY_FLOWD_ENABLED=0
 if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
     LEGACY_NETMON=1
     echo -e "${YELLOW}[INFO] Legacy netmon install detected (/etc/netmon/netmon.env, no /etc/ephemres/ephemres.env): it will be migrated to the ephemres layout.${NC}"
+    # v3.2/v3.3.0 install.sh enabled and started netmon-flowd unconditionally; note it before the
+    # upgrade stops and disables the netmon units (see migrate_legacy_services).
+    if systemctl is-enabled --quiet netmon-flowd 2>/dev/null; then
+        LEGACY_FLOWD_ENABLED=1
+    fi
 fi
 
 DB_NAME="${EPHEMRES_DB_NAME:-${NETMON_DB_NAME:-${POSTGRES_DB:-netmon}}}"
@@ -598,6 +604,29 @@ migrate_legacy_services() {
             upgrade_failed "nginx rejected ${site} after pointing it at /opt/ephemres (restored the original; see ${UPGRADE_LOG})."
         fi
         echo -e "${GREEN}[INFO] Pointed nginx site ${site} at /opt/ephemres (original saved as ${site}.pre-ephemres).${NC}"
+    fi
+
+    # v3.2/v3.3.0 collected flows whenever netmon-flowd was enabled; v3.3.5 starts ephemres-flowd
+    # only when flow ingestion is switched on, which also needs FastStore performance mode. A server
+    # that was receiving flows keeps collecting them: set both, as the Settings page would.
+    if [[ ${LEGACY_FLOWD_ENABLED} -eq 1 ]]; then
+        local recent_flows
+        recent_flows=$(PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
+            "SELECT EXISTS (SELECT 1 FROM flow_minute_rollups WHERE bucket > now() - INTERVAL '7 days')
+                 OR EXISTS (SELECT 1 FROM flow_interface_minute_rollups WHERE bucket > now() - INTERVAL '7 days');" \
+            2>>"${UPGRADE_LOG}" || true)
+        if [[ "${recent_flows}" == "t" ]]; then
+            if PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -qc \
+                "INSERT INTO app_settings (setting_key, setting_value) VALUES ('performance_mode', 'true'), ('flow_ingestion_enabled', 'true')
+                 ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_at = now();" \
+                >/dev/null 2>>"${UPGRADE_LOG}"; then
+                echo -e "${GREEN}[INFO] netmon-flowd was receiving flows: flow ingestion (with FastStore performance mode) stays on under ephemres-flowd.${NC}"
+            else
+                echo -e "${YELLOW}[WARN] netmon-flowd was receiving flows, but flow ingestion could not be switched on (see ${UPGRADE_LOG}). Enable FastStore and Flow Ingestion in Settings to resume collection.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}[INFO] netmon-flowd was enabled but received no flows in the last 7 days: flow ingestion stays off (enable it in Settings when needed).${NC}"
+        fi
     fi
 
     # install.sh keeps a copy in backend/.env (rsync never touches it); keep a migrated install
