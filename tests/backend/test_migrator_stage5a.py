@@ -32,27 +32,27 @@ def test_database_sync_engine_none():
     assert db.sync_engine is None
 
 
-def test_migrator_loads_all_18_revisions():
-    """Ensure all 18 migration files are discovered, loaded, and sorted topologically."""
+def test_migrator_loads_all_19_revisions():
+    """Ensure all 19 migration files are discovered, loaded, and sorted topologically."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 18
-    expected_chain = [f"{i:04d}" for i in range(1, 19)]
+    assert len(ordered) == 19
+    expected_chain = [f"{i:04d}" for i in range(1, 20)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0018"
+    assert ordered[-1].revision == "0019"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 18):
+    for i in range(1, 19):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
-def test_all_18_revisions_upgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 18 revisions and verify generated SQL."""
+def test_all_19_revisions_upgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 19 revisions and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -65,8 +65,8 @@ def test_all_18_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 68 total statements across all 18 migrations
-    assert total_statements == 68
+    # 69 total statements across all 19 migrations
+    assert total_statements == 69
 
     full_sql = "\n".join(all_statements)
 
@@ -141,9 +141,12 @@ def test_all_18_revisions_upgrade_ddl_compilation():
     assert "start_offset => INTERVAL '29 days'" in full_sql
     assert "start_offset => INTERVAL '60 days'" in full_sql
 
+    # 0019 state_since on endpoint_events
+    assert "ALTER TABLE endpoint_events ADD COLUMN IF NOT EXISTS state_since TIMESTAMPTZ" in full_sql
 
-def test_all_18_revisions_downgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 18 downgrades and verify generated SQL."""
+
+def test_all_19_revisions_downgrade_ddl_compilation():
+    """Execute dry-run DDL compilation for all 19 downgrades and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -156,8 +159,8 @@ def test_all_18_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 56 total downgrade statements
-    assert total_statements == 56
+    # 57 total downgrade statements
+    assert total_statements == 57
 
     full_sql = "\n".join(all_statements)
 
@@ -181,13 +184,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0018 (head)" in captured.out
+    assert "0019 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0018 (head)" in captured.out
+    assert "0019 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])

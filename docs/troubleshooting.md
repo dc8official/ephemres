@@ -301,6 +301,27 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
      sudo systemctl start ephemres-api ephemres-engine ephemres-flowd
      ```
 
+### L. Audit log health and latency from before v3.3.5
+* **What you see**: in an endpoint's audit log (state transition history), some older periods show a health or average latency that doesn't fit the period. For example, an UP period of several hours that ended in an outage shows **0 % health** and no latency, or a DOWN period shows a latency.
+* **Why**: before v3.3.5, a period kept the figures of its **last minute** when it ended, not of the whole period. The last minute of an UP period that ends in an outage is the first failed one. v3.3.5 records the whole period's figures, so this only affects periods that ended before the upgrade. Uptime %, incidents and durations were always right; only the health and latency columns of those periods are affected.
+* **Do you need to fix it?** No. Nothing else depends on these figures. Correct them if you or your customers read the audit log of the weeks or months before the upgrade, for example in reports or when investigating past incidents.
+* **What can be corrected**:
+  - **Health:** corrected exactly for the whole history, because every version recorded how many probes were answered in each period.
+  - **Average latency:** corrected only for periods whose per-minute probe history still exists. That history started with v3.3.5 and is kept for 30 days, so periods from before the upgrade keep the latency they show now.
+* **How**:
+  1. **Check first.** This writes nothing: it only tells you how many periods would change, how far back they go, and how many are in compressed storage.
+     ```bash
+     sudo /opt/ephemres/deploy/repair-audit-history.sh
+     ```
+  2. **Correct them**, if you decide to:
+     ```bash
+     sudo /opt/ephemres/deploy/repair-audit-history.sh --apply
+     ```
+     The services can keep running. Work is done in 30-day steps, each saved as it finishes, so if it is interrupted, run the same command again and it carries on. Periods that are already right are never rewritten.
+  3. **Optionally, correct only recent history:** for example `--since 2026-01-01`, together with `--apply` or on its own.
+* **What it costs**: on a server with a long history, most of the affected periods are in compressed storage (older than 7 days). Correcting them makes the database decompress and rewrite that part of the history. It takes longer and temporarily uses extra disk space; the next compression job compresses it again. The check in step 1 tells you how many periods are affected, so you can choose a quiet time, or use `--since` to limit the work. Take a backup first if you want to be able to go back (see section 3).
+* **The upgrade tells you**: when an upgrade to v3.3.5 or later finds such periods, its last lines say so with the command for step 1. If it says nothing, there is nothing to correct.
+
 ---
 
 ## 3. Database Disaster Recovery

@@ -12,7 +12,7 @@ from app.database import AsyncSessionLocal
 from app.models.endpoint import Endpoint
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task
 from app.services.diagnostics import run_throttled_traceroute, save_diagnostic_trace
-from monitoring.gap_handler import resolve_startup_state
+from monitoring.gap_handler import STARTUP_SETTLE_SECONDS, close_startup_gap, resolve_startup_state
 from monitoring.ping import run_ping_cycle
 from monitoring.probe_samples import record_probe_sample
 from monitoring.registry import endpoint_registry, MonitoredEndpoint
@@ -284,14 +284,30 @@ async def monitor_endpoint(
         await asyncio.sleep(delay)
 
 
+async def _close_startup_gap(gap_id, started_at: datetime) -> None:
+    """End the time the engine was not running once every endpoint has run its first cycle."""
+    await asyncio.sleep(STARTUP_SETTLE_SECONDS)
+    try:
+        async with AsyncSessionLocal() as db:
+            await close_startup_gap(db, gap_id, started_at)
+            await db.commit()
+    except Exception as e:
+        # The next start closes it instead (resolve_startup_state).
+        logger.error("Failed to close the startup monitoring gap: %s: %s", type(e).__name__, e)
+
+
 async def main() -> None:
     logger.info("Ephemres monitoring engine starting.")
     driver_manager.migrate_sessions = False
     await driver_manager.initialize()
+    started_at = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as db:
-        await resolve_startup_state(db)
+        startup_gap = await resolve_startup_state(db)
         await baseline_cache.refresh_from_db(db)
         await db.commit()
+    startup_gap_task = None
+    if startup_gap is not None:
+        startup_gap_task = asyncio.create_task(_close_startup_gap(startup_gap, started_at), name="close_startup_gap")
 
     try:
         async with AsyncSessionLocal() as db:
@@ -372,6 +388,8 @@ async def main() -> None:
 
             await asyncio.sleep(30)
     finally:
+        if startup_gap_task is not None:
+            startup_gap_task.cancel()
         runtime_settings_task.cancel()
         settings_sync_task.cancel()
         watchdog_task.cancel()

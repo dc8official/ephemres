@@ -91,7 +91,8 @@ class EndpointRepository(BaseRepository[Endpoint]):
                 EndpointEvent.detailed_state.label("current_detailed_state"),
                 EndpointEvent.health_score.label("current_health_score"),
                 EndpointEvent.avg_rtt_ms.label("avg_rtt_ms"),
-                EndpointEvent.start_time.label("last_seen"),
+                # When the current state began: a 24-hour split or a restart continues it.
+                func.coalesce(EndpointEvent.state_since, EndpointEvent.start_time).label("last_seen"),
             )
             .distinct(EndpointEvent.endpoint_id)
             .order_by(EndpointEvent.endpoint_id, EndpointEvent.start_time.desc())
@@ -206,7 +207,8 @@ class EndpointRepository(BaseRepository[Endpoint]):
                 EndpointEvent.detailed_state.label("current_detailed_state"),
                 EndpointEvent.health_score.label("current_health_score"),
                 EndpointEvent.avg_rtt_ms.label("avg_rtt_ms"),
-                EndpointEvent.start_time.label("last_seen"),
+                # When the current state began: a 24-hour split or a restart continues it.
+                func.coalesce(EndpointEvent.state_since, EndpointEvent.start_time).label("last_seen"),
             )
             .where(EndpointEvent.endpoint_id == endpoint_id)
             .order_by(EndpointEvent.start_time.desc())

@@ -1523,10 +1523,14 @@ const loadData = async ({ refresh = false } = {}) => {
     chartEventsTotal.value = chartEventsRes.data.meta?.total || chartSourceEvents.value.length
 
     // Open flow exporters on the flow tab once; later refreshes keep the tab the user chose.
+    // Other devices export nothing, so their flow tab opens on their own traffic.
     if (!perspectiveChosen) {
       perspectiveChosen = true
-      if (endpoint.value.device_role === 'FLOW_EXPORTER') {
+      const exportsFlows = endpoint.value.device_role === 'FLOW_EXPORTER' || (endpoint.value.flow_exporter_ips || []).length > 0
+      if (exportsFlows) {
         activePerspective.value = 'flow'
+      } else {
+        flowMode.value = 'participant'
       }
     }
     if (activePerspective.value === 'flow') {

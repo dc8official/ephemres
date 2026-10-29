@@ -80,11 +80,12 @@ Stores state periods: one row per confirmed state, extended while the state pers
 * `endpoint_id` (`UUID`, Foreign Key to `endpoints.id`, Not Null)
 * `operational_state` (`VARCHAR(20)`, Not Null: `UP`, `DOWN`)
 * `detailed_state` (`VARCHAR(30)`, Not Null: `UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`)
-* `success_count` / `failed_count` (`SMALLINT`, Not Null) — Replies received / probes lost in the most recent cycle.
-* `health_score` (`NUMERIC(5, 2)`, Not Null) — `success_count / total × 100`.
-* `avg_rtt_ms` (`NUMERIC(10, 2)`, Nullable) — Mean RTT of received replies.
+* `success_count` / `failed_count` (`SMALLINT`, Not Null) — Replies received / probes lost over the period so far.
+* `health_score` (`NUMERIC(5, 2)`, Not Null) — While the period is open, the latest cycle's (the dashboard's current value); once closed, the whole period's: `success_count / total × 100`.
+* `avg_rtt_ms` (`NUMERIC(10, 2)`, Nullable) — Mean RTT of received replies: the latest cycle's while open, the period's (from `endpoint_probe_samples`) once closed. Periods closed before v3.3.5 kept their last cycle's values; see `deploy/repair-audit-history.sh`.
 * `is_split_event` (`BOOLEAN`, Default: `false`, Not Null) — Row created by splitting a long-running period (e.g. at the 24-hour rollover).
 * `start_time` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null)
+* `state_since` (`TIMESTAMPTZ`, Nullable, Migration `0019`) — Start of the unbroken state when this row continues it after a 24-hour split or an engine restart; `NULL` when the row starts the state. "In state since" is `COALESCE(state_since, start_time)` of the latest row.
 * `end_time` (`TIMESTAMPTZ`, Nullable — `NULL` while the period is open)
 * `duration_seconds` (`BIGINT`, Nullable)
 * `monitoring_cycle_count` (`INTEGER`, Default: `1`, Not Null) — Cycles aggregated into this period.
@@ -163,6 +164,58 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 | **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 90 Days / 7 Days | 1 Minute | `flow_minute_rollups`: native columnar compression after 1 day (85%+ disk savings). `flow_interface_minute_rollups`: uncompressed | Short-term forensic queries, detailed talker attribution, interface throughput. |
 | **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`, `flow_interface_hourly_rollups`, `endpoint_probe_hourly`) | 30 Days / 365 Days | 1 Hour | Materialized Views with `materialized_only = false` and auto-refresh policies | Weekly / monthly capacity trends, 30-day interface p95/peak utilization, and long-term probe RTT/loss trends. |
 | **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View (`materialized_only = false`) with auto-refresh policy (`start_offset: 60d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
+
+### A. What each flow table keeps
+
+Each tier above the minute table drops detail to stay small, which limits what it can answer:
+
+| Table | Kept | Addresses (src/dst IP) | Endpoints (src/dst) | Router, protocol, port | QoS, TCP flags | Busiest minute |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| `flow_minute_rollups` | 90 days | Yes | Yes | Yes | Yes | n/a |
+| `flow_hourly_rollups` | 30 days | No | Yes | Yes | No | No |
+| `flow_daily_rollups` | 365 days | No | No | Yes | No | No |
+| `flow_interface_minute_rollups` | 7 days | Per interface: in/out bytes, packets, flows | | | | n/a |
+| `flow_interface_hourly_rollups` | 365 days | Per interface: in/out bytes, packets, flows | | | | Yes |
+
+So the daily tier cannot split traffic into ingress/egress or traffic zones (it knows no endpoints), and no tier above the minute table can name addresses.
+
+### B. Which table each view reads
+
+The window picked in the UI decides the table. The UI only offers windows the tables cover: up to 30 days on the Traffic page and up to 7 days on an endpoint's Bandwidth & Flow tab. The API also accepts `1y`; see the note below the tables.
+
+**Traffic page** (`/bandwidth`):
+
+| View | 1h, 6h | 24h, 7d | 30d |
+| :--- | :--- | :--- | :--- |
+| Overview figures (rates, flows, exporters) | Last 5 minutes of `flow_minute_rollups`, whatever the window | same | same |
+| Network edge (WAN) figures | Last 5 minutes of `flow_interface_minute_rollups` | same | same |
+| Fleet traffic chart | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_daily_rollups`: no ingress/egress split, everything shows as transit |
+| Fleet traffic chart, WAN only | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` | `flow_interface_hourly_rollups` |
+| Applications (protocol/port) | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_daily_rollups` |
+| QoS classes | `flow_minute_rollups` | `flow_minute_rollups` (the aggregates keep no ToS) | `flow_minute_rollups` |
+| Traffic zones | `flow_minute_rollups` | `flow_hourly_rollups` (by endpoint, no addresses) | Not available |
+| Conversations, top talkers, security (anomalies) | `flow_minute_rollups` | `flow_minute_rollups` | `flow_minute_rollups` (complete, the heaviest query) |
+| Interfaces (average, p95, busiest minute) | `flow_interface_minute_rollups` | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (p95 over hourly averages) |
+
+**Endpoint detail, Bandwidth & Flow tab:**
+
+| View | 1h, 6h | 24h, 7d |
+| :--- | :--- | :--- |
+| As participant: chart, applications, zones | `flow_minute_rollups` | `flow_hourly_rollups` |
+| As participant: QoS | `flow_minute_rollups` | `flow_minute_rollups` |
+| As exporter: chart | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` |
+| Conversations (either perspective) | `flow_minute_rollups` | `flow_minute_rollups` |
+
+**PDF bandwidth report** (24 hours, 7 days, 30 days or a custom range):
+
+| Section | Range within the last 7 days | Range reaching further back |
+| :--- | :--- | :--- |
+| Routers, interfaces, network edge (WAN) | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (an hour straddling the start or end counts whole) |
+| Top conversations, QoS, anomalies, traffic zones | `flow_minute_rollups` | `flow_minute_rollups`: covers 90 days, so a longer custom range shows only its last 90 days |
+
+Per-endpoint views, conversations and top talkers count each conversation once per bucket when several routers export it (the largest report). Fleet totals and charts add the routers' reports up; mark the routers' internet-facing interfaces as WAN (interface settings on the Traffic page or the router's endpoint page) for totals counted once at the network edge.
+
+**API-only `1y` window:** the fleet chart and applications read `flow_daily_rollups` (a full year). Per-endpoint charts read `flow_hourly_rollups` (30 days), and conversations and top talkers read `flow_minute_rollups` (90 days), so for those `1y` returns only what the table keeps.
 
 ---
 

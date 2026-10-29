@@ -83,6 +83,7 @@ fi
 LEGACY_NETMON=0
 LEGACY_FLOWD_ENABLED=0
 ADMIN_TEMP_PASSWORD=0
+AUDIT_REPAIR_AVAILABLE=0
 if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
     LEGACY_NETMON=1
     echo -e "${YELLOW}[INFO] Legacy netmon install detected (/etc/netmon/netmon.env, no /etc/ephemres/ephemres.env): it will be migrated to the ephemres layout.${NC}"
@@ -560,6 +561,12 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
                 echo -e "${YELLOW}See ${RESET_REPORT} (root-only). Distribute and delete it.${NC}"
                 echo -e "${YELLOW}========================================================================${NC}"
             fi
+
+            # Periods closed before v3.3.5 kept their last minute's health and latency. The
+            # correction is optional and can take long on a big history: only point it out.
+            if PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m monitoring.repair_event_stats --needed; then
+                AUDIT_REPAIR_AVAILABLE=1
+            fi
         fi
 
         # TimescaleDB Hypertable Decompression Safety & Legacy Row Sanitization
@@ -822,4 +829,10 @@ if [[ ${ADMIN_TEMP_PASSWORD} -eq 1 ]]; then
     echo -e "${YELLOW}[NOTICE] Sign in as 'admin' with the random temporary password from the root-only report:${NC}"
     echo -e "${YELLOW}           sudo grep '^admin' /opt/ephemres/legacy_password_resets.txt${NC}"
     echo -e "${YELLOW}         You must choose a new password at that first login.${NC}"
+fi
+if [[ ${AUDIT_REPAIR_AVAILABLE} -eq 1 ]]; then
+    echo -e "${YELLOW}[OPTIONAL] The audit log has periods recorded before v3.3.5 whose health and latency show${NC}"
+    echo -e "${YELLOW}           only their last minute. To see what a correction would change (nothing is written):${NC}"
+    echo -e "${YELLOW}             sudo /opt/ephemres/deploy/repair-audit-history.sh${NC}"
+    echo -e "${YELLOW}           Details: /opt/ephemres/docs/troubleshooting.md, \"Audit log health and latency from before v3.3.5\".${NC}"
 fi

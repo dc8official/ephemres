@@ -35,17 +35,36 @@ _QUICK_WHERE = {
 }
 
 
+def per_minute_cte(where_sql: str) -> str:
+    """`per_minute`: the matching flow_minute_rollups rows with each conversation counted once
+    per minute. Traffic crossing two exporting routers is reported by both; summing the reports
+    showed it twice, so only the largest one is kept."""
+    return f"""
+        per_minute AS (
+            SELECT bucket, src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, protocol, dst_port,
+                   MAX(bytes) AS bytes,
+                   MAX(flow_count) AS flow_count,
+                   MAX(COALESCE(packets, 0)) AS packets,
+                   BIT_OR(tcp_flags) AS tcp_flags,
+                   MAX(tos) AS tos
+            FROM flow_minute_rollups
+            WHERE {where_sql}
+            GROUP BY bucket, src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, protocol, dst_port
+        )
+    """
+
+
 def _conversation_cte(where_sql: str) -> str:
     return f"""
-        WITH conv AS (
+        WITH {per_minute_cte(where_sql)},
+        conv AS (
             SELECT src_ip, dst_ip, protocol, dst_port,
                    SUM(bytes) AS total_bytes,
                    SUM(flow_count) AS total_flows,
-                   COALESCE(SUM(packets), 0) AS total_packets,
+                   SUM(packets) AS total_packets,
                    BIT_OR(tcp_flags) AS tcp_flags_mask,
                    MAX(tos) AS max_tos
-            FROM flow_minute_rollups
-            WHERE {where_sql}
+            FROM per_minute
             GROUP BY src_ip, dst_ip, protocol, dst_port
         ),
         labelled AS (

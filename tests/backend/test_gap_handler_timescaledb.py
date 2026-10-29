@@ -6,110 +6,58 @@ from uuid import uuid4
 
 from monitoring.gap_handler import (
     open_monitoring_gap,
-    close_monitoring_gap,
     resolve_startup_state,
-    get_active_gap,
 )
 
 
-@pytest.mark.anyio
-async def test_resolve_startup_state_applies_chunk_pruning():
-    """Verify that resolve_startup_state executes TimescaleDB override and bounds cleanup to 7-day window."""
+def _fake_db(executed, newest=None, fail_override=False):
+    """AsyncMock session: no unresolved gap, and `newest` as the newest open period's last cycle."""
     mock_db = AsyncMock()
-    
-    # Track all executed SQL statements and params
-    executed_statements = []
 
     async def fake_execute(statement, params=None):
-        executed_statements.append((str(statement), params or {}))
+        sql = str(statement)
+        if fail_override and "timescaledb.max_tuples_decompressed_per_dml_transaction" in sql:
+            raise Exception("permission denied or extension not available")
+        executed.append((sql, params or {}))
         result = MagicMock()
-        result.fetchone.return_value = None  # No existing unclosed gap
+        result.fetchone.return_value = None
+        if "MAX(" in sql and "open_count" in sql:
+            result.fetchone.return_value = MagicMock(newest=newest, open_count=1 if newest else 0)
+        elif "INSERT INTO monitoring_service_events" in sql:
+            result.fetchone.return_value = MagicMock(id=uuid4())
+        result.scalar.return_value = newest
         result.rowcount = 42
         return result
 
     mock_db.execute.side_effect = fake_execute
-
-    await resolve_startup_state(mock_db)
-
-    # We expect 3 statements:
-    # 1. DO block setting timescaledb.max_tuples_decompressed_per_dml_transaction = 0
-    # 2. SELECT from monitoring_service_events
-    # 3. UPDATE endpoint_events with chunk pruning filter
-    assert len(executed_statements) == 3
-
-    # Check statement 1 (TimescaleDB override)
-    stmt_override, _ = executed_statements[0]
-    assert "timescaledb.max_tuples_decompressed_per_dml_transaction" in stmt_override
-    assert "set_config" in stmt_override
-
-    # Check statement 2 (SELECT monitoring_service_events)
-    stmt_select, _ = executed_statements[1]
-    assert "SELECT id, start_time, event_type" in stmt_select
-    assert "FROM monitoring_service_events" in stmt_select
-
-    # Check statement 3 (UPDATE endpoint_events with partition filter)
-    stmt_update, params_update = executed_statements[2]
-    assert "UPDATE endpoint_events" in stmt_update
-    assert "WHERE end_time IS NULL" in stmt_update
-    assert "AND start_time >= :window_start" in stmt_update
-
-    assert "close_time" in params_update
-    assert "window_start" in params_update
-
-    close_time = params_update["close_time"]
-    window_start = params_update["window_start"]
-    delta = close_time - window_start
-    assert delta.total_seconds() == pytest.approx(7 * 86400, abs=1)
+    return mock_db
 
 
 @pytest.mark.anyio
-async def test_resolve_startup_state_with_active_gap():
-    """Verify that resolve_startup_state closes active gap and computes window from gap start_time."""
-    mock_db = AsyncMock()
-    executed_statements = []
+async def test_resolve_startup_state_applies_chunk_pruning():
+    """The startup lifts the decompression cap and bounds the cleanup to the 7-day window."""
+    executed = []
+    newest = datetime.now(timezone.utc) - timedelta(minutes=3)
+    gap_id = await resolve_startup_state(_fake_db(executed, newest=newest))
 
-    gap_id = uuid4()
-    gap_start = datetime(2026, 9, 10, 14, 30, 0, tzinfo=timezone.utc)
+    assert gap_id is not None
+    assert "timescaledb.max_tuples_decompressed_per_dml_transaction" in executed[0][0]
+    update_sql, update_params = next(e for e in executed if e[0].lstrip().startswith("UPDATE endpoint_events"))
+    assert "WHERE end_time IS NULL" in update_sql
+    assert "AND start_time >= :window_start" in update_sql
+    delta = datetime.now(timezone.utc) - update_params["window_start"]
+    assert delta.total_seconds() == pytest.approx(7 * 86400, abs=5)
+    insert_sql, insert_params = next(e for e in executed if "INSERT INTO monitoring_service_events" in e[0])
+    assert insert_params["event_type"] == "SERVICE_RESTART"
+    assert insert_params["start_time"] == newest
 
-    gap_row = MagicMock()
-    gap_row.id = gap_id
-    gap_row.start_time = gap_start
-    gap_row.event_type = "power_failure"
 
-    step = 0
-
-    async def fake_execute(statement, params=None):
-        nonlocal step
-        executed_statements.append((str(statement), params or {}))
-        result = MagicMock()
-        if "SELECT id, start_time, event_type" in str(statement):
-            result.fetchone.return_value = gap_row
-        else:
-            result.fetchone.return_value = None
-        result.rowcount = 10
-        step += 1
-        return result
-
-    mock_db.execute.side_effect = fake_execute
-
-    await resolve_startup_state(mock_db)
-
-    # Statements:
-    # 1. DO block (TimescaleDB override)
-    # 2. SELECT monitoring_service_events
-    # 3. UPDATE monitoring_service_events (close_monitoring_gap)
-    # 4. UPDATE endpoint_events (chunk pruning with gap_start as close_time)
-    assert len(executed_statements) == 4
-
-    stmt_close_gap, params_close_gap = executed_statements[2]
-    assert "UPDATE monitoring_service_events" in stmt_close_gap
-    assert params_close_gap["gap_id"] == str(gap_id)
-
-    stmt_update_events, params_update_events = executed_statements[3]
-    assert "UPDATE endpoint_events" in stmt_update_events
-    assert "AND start_time >= :window_start" in stmt_update_events
-    assert params_update_events["close_time"] == gap_start
-    assert params_update_events["window_start"] == gap_start - timedelta(days=7)
+@pytest.mark.anyio
+async def test_resolve_startup_state_without_open_periods_records_nothing():
+    executed = []
+    assert await resolve_startup_state(_fake_db(executed)) is None
+    assert not any("INSERT INTO monitoring_service_events" in sql for sql, _ in executed)
+    assert not any(sql.lstrip().startswith("UPDATE endpoint_events") for sql, _ in executed)
 
 
 @pytest.mark.anyio
@@ -160,24 +108,8 @@ async def test_open_monitoring_gap_applies_chunk_pruning():
 @pytest.mark.anyio
 async def test_resolve_startup_state_timescaledb_override_graceful_fallback():
     """Verify that if TimescaleDB override fails (e.g. extension not present), startup continues cleanly."""
-    mock_db = AsyncMock()
-    executed_statements = []
-
-    async def fake_execute(statement, params=None):
-        if "timescaledb.max_tuples_decompressed_per_dml_transaction" in str(statement):
-            raise Exception("permission denied or extension not available")
-        executed_statements.append((str(statement), params or {}))
-        result = MagicMock()
-        result.fetchone.return_value = None
-        result.rowcount = 0
-        return result
-
-    mock_db.execute.side_effect = fake_execute
-
+    executed = []
     # Must NOT raise exception despite the DO block throwing
-    await resolve_startup_state(mock_db)
-
-    # SELECT and UPDATE must still execute successfully
-    assert len(executed_statements) == 2
-    assert "FROM monitoring_service_events" in executed_statements[0][0]
-    assert "UPDATE endpoint_events" in executed_statements[1][0]
+    await resolve_startup_state(_fake_db(executed, newest=datetime.now(timezone.utc), fail_override=True))
+    assert "FROM monitoring_service_events" in executed[0][0]
+    assert any(sql.lstrip().startswith("UPDATE endpoint_events") for sql, _ in executed)

@@ -183,6 +183,24 @@ def _sum_where(condition: Any, column: Any) -> Any:
     return func.coalesce(func.sum(case((condition, column), else_=0)), 0)
 
 
+def _counted_once(model: Any, filters: List[Any], with_tos: bool = False) -> Any:
+    """`model`'s rows matching `filters` with each conversation counted once per bucket (the
+    largest report among the exporters that saw it), as a subquery; see
+    conversation_queries.per_minute_cte. The hourly tier keeps no addresses, so there a
+    conversation is the endpoint pair, protocol and port: only used for one endpoint's traffic."""
+    keys = [model.bucket]
+    if hasattr(model, "src_ip"):
+        keys += [model.src_ip, model.dst_ip]
+    keys += [model.src_endpoint_id, model.dst_endpoint_id, model.protocol, model.dst_port]
+    names = ("bytes", "packets", "flow_count") + (("tos",) if with_tos else ())
+    measures = [func.max(getattr(model, name)).label(name) for name in names]
+    return select(*keys, *measures).where(*filters).group_by(*keys).subquery("counted_once")
+
+
+def _select_from(stmt: Any, subquery: Any) -> Any:
+    return stmt if subquery is None else stmt.select_from(subquery)
+
+
 # The overview averages the last five complete minutes; the current minute is still filling.
 OVERVIEW_WINDOW_SECONDS = 300
 
@@ -404,10 +422,14 @@ async def get_traffic_series(
             | (model.dst_endpoint_id == endpoint_id)
         )
 
+    source, counted_once = model, None
     if endpoint_id and directional:
-        # Every row involves the endpoint, so nothing is transit.
-        to_side = model.dst_endpoint_id == endpoint_id
-        from_side = model.src_endpoint_id == endpoint_id
+        # One endpoint's traffic: each conversation once per bucket, however many routers
+        # export it. Every row involves the endpoint, so nothing is transit.
+        counted_once = _counted_once(model, filters)
+        source, filters = counted_once.c, []
+        to_side = source.dst_endpoint_id == endpoint_id
+        from_side = source.src_endpoint_id == endpoint_id
         transit_side = None
     elif directional:
         to_side = model.dst_endpoint_id.is_not(None)
@@ -419,22 +441,22 @@ async def get_traffic_series(
         transit_side = True
 
     # Only the sides this tier can resolve are queried; the rest stay 0.
-    measures: List[Tuple[str, Any]] = [("flow_count", func.coalesce(func.sum(model.flow_count), 0))]
+    measures: List[Tuple[str, Any]] = [("flow_count", func.coalesce(func.sum(source.flow_count), 0))]
     for side, condition in (("ingress", to_side), ("egress", from_side), ("transit", transit_side)):
         if condition is None:
             continue
-        for unit, column in (("bytes", model.bytes), ("packets", model.packets)):
+        for unit, column in (("bytes", source.bytes), ("packets", source.packets)):
             expr = func.coalesce(func.sum(column), 0) if condition is True else _sum_where(condition, column)
             measures.append((f"{side}_{unit}", expr))
 
     stmt = (
-        select(model.bucket, *(expr.label(name) for name, expr in measures))
+        select(source.bucket, *(expr.label(name) for name, expr in measures))
         .where(*filters)
-        .group_by(model.bucket)
-        .order_by(model.bucket.asc())
+        .group_by(source.bucket)
+        .order_by(source.bucket.asc())
     )
 
-    res = await db.execute(stmt)
+    res = await db.execute(_select_from(stmt, counted_once))
     rows = res.all()
 
     points: List[TrafficSeriesPoint] = []
@@ -541,16 +563,17 @@ async def get_top_talkers(
 
     talkers_res = await db.execute(
         text(f"""
-            WITH sides AS (
+            WITH {conversation_queries.per_minute_cte(where_sql)},
+            sides AS (
                 SELECT src_ip AS ip, src_endpoint_id AS endpoint_id,
                        0::BIGINT AS ingress_bytes, bytes AS egress_bytes,
-                       flow_count, COALESCE(packets, 0) AS packets
-                FROM flow_minute_rollups WHERE {where_sql}
+                       flow_count, packets
+                FROM per_minute
                 UNION ALL
                 SELECT dst_ip, dst_endpoint_id,
                        bytes, 0::BIGINT,
-                       flow_count, COALESCE(packets, 0)
-                FROM flow_minute_rollups WHERE {where_sql}
+                       flow_count, packets
+                FROM per_minute
             )
             SELECT ip,
                    (array_agg(endpoint_id) FILTER (WHERE endpoint_id IS NOT NULL))[1] AS endpoint_id,
@@ -730,25 +753,31 @@ async def get_applications_breakdown(
 
     model, _ = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
     app_filters = _rollup_window_filters(model, start_time, exporter_id, endpoint_id)
+    # One endpoint's traffic counts each conversation once per bucket (see _counted_once).
+    counted_once = endpoint_id is not None and hasattr(model, "src_endpoint_id")
+    source, app_from = model, None
+    if counted_once:
+        app_from = _counted_once(model, app_filters)
+        source, app_filters = app_from.c, []
 
     # 1. Top 15 (protocol, dst_port) Application Services
     stmt = (
         select(
-            model.protocol,
-            model.dst_port,
-            func.sum(model.bytes).label("total_bytes"),
+            source.protocol,
+            source.dst_port,
+            func.sum(source.bytes).label("total_bytes"),
         )
         .where(*app_filters)
-        .group_by(model.protocol, model.dst_port)
-        .order_by(func.sum(model.bytes).desc())
+        .group_by(source.protocol, source.dst_port)
+        .order_by(func.sum(source.bytes).desc())
         .limit(15)
     )
 
-    res = await db.execute(stmt)
+    res = await db.execute(_select_from(stmt, app_from))
     rows = res.all()
 
     # Shares are of all traffic in the window, not of the top 15; the rest becomes "Other".
-    total_res = await db.execute(select(func.coalesce(func.sum(model.bytes), 0)).where(*app_filters))
+    total_res = await db.execute(_select_from(select(func.coalesce(func.sum(source.bytes), 0)).where(*app_filters), app_from))
     overall_bytes = int(total_res.scalar() or 0)
 
     apps: List[ApplicationDistributionItem] = []
@@ -785,23 +814,26 @@ async def get_applications_breakdown(
     # The response reports the tier and start actually used, since a 1y window then only gets
     # 90 days of QoS data next to 365 days of application data.
     qos_model = model
-    qos_filters = app_filters
     qos_start = start_time
     if model is not FlowMinuteRollup and not await _db_table_has_column(db, model.__tablename__, "tos"):
         qos_model = FlowMinuteRollup
         qos_start = max(start_time, now - _MINUTE_ROLLUP_RETENTION)
-        qos_filters = _rollup_window_filters(qos_model, qos_start, exporter_id, endpoint_id)
+    qos_filters = _rollup_window_filters(qos_model, qos_start, exporter_id, endpoint_id)
+    qos_source, qos_from = qos_model, None
+    if counted_once:
+        qos_from = _counted_once(qos_model, qos_filters, with_tos=True)
+        qos_source, qos_filters = qos_from.c, []
     qos_stmt = (
         select(
-            qos_model.tos,
-            func.coalesce(func.sum(qos_model.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(qos_model.packets), 0).label("total_packets"),
-            func.coalesce(func.sum(qos_model.flow_count), 0).label("flow_count"),
+            qos_source.tos,
+            func.coalesce(func.sum(qos_source.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(qos_source.packets), 0).label("total_packets"),
+            func.coalesce(func.sum(qos_source.flow_count), 0).label("flow_count"),
         )
         .where(*qos_filters)
-        .group_by(qos_model.tos)
+        .group_by(qos_source.tos)
     )
-    qos_res = await db.execute(qos_stmt)
+    qos_res = await db.execute(_select_from(qos_stmt, qos_from))
     qos_classes: List[QoSDistributionItem] = [
         QoSDistributionItem(
             dscp=item["dscp"],
@@ -821,22 +853,22 @@ async def get_applications_breakdown(
     if hasattr(model, "src_ip"):
         zone_stmt = (
             select(
-                model.src_ip,
-                model.dst_ip,
-                model.src_endpoint_id,
-                model.dst_endpoint_id,
-                func.sum(model.bytes).label("total_bytes"),
-                func.sum(model.flow_count).label("flow_count"),
+                source.src_ip,
+                source.dst_ip,
+                source.src_endpoint_id,
+                source.dst_endpoint_id,
+                func.sum(source.bytes).label("total_bytes"),
+                func.sum(source.flow_count).label("flow_count"),
             )
             .where(*app_filters)
             .group_by(
-                model.src_ip,
-                model.dst_ip,
-                model.src_endpoint_id,
-                model.dst_endpoint_id,
+                source.src_ip,
+                source.dst_ip,
+                source.src_endpoint_id,
+                source.dst_endpoint_id,
             )
         )
-        zone_res = await db.execute(zone_stmt)
+        zone_res = await db.execute(_select_from(zone_stmt, app_from))
         for z_row in zone_res.all():
             if len(z_row) < 5:
                 continue
@@ -855,18 +887,18 @@ async def get_applications_breakdown(
         # but correlated src_endpoint_id and dst_endpoint_id are preserved.
         zone_stmt = (
             select(
-                model.src_endpoint_id,
-                model.dst_endpoint_id,
-                func.sum(model.bytes).label("total_bytes"),
-                func.sum(model.flow_count).label("flow_count"),
+                source.src_endpoint_id,
+                source.dst_endpoint_id,
+                func.sum(source.bytes).label("total_bytes"),
+                func.sum(source.flow_count).label("flow_count"),
             )
             .where(*app_filters)
             .group_by(
-                model.src_endpoint_id,
-                model.dst_endpoint_id,
+                source.src_endpoint_id,
+                source.dst_endpoint_id,
             )
         )
-        zone_res = await db.execute(zone_stmt)
+        zone_res = await db.execute(_select_from(zone_stmt, app_from))
         for z_row in zone_res.all():
             if len(z_row) < 3:
                 continue

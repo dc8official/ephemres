@@ -18,6 +18,7 @@ _SEEDED_TABLES = (
     "flow_minute_rollups",
     "flow_interface_minute_rollups",
     "endpoint_events",
+    "monitoring_service_events",
     "endpoints",
 )
 

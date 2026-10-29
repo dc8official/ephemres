@@ -70,16 +70,27 @@ def closed_event_stats_sql(
     end_time otherwise (engine stop/start, 24 h split). `success` / `failed` are the SQL for the
     final counts, `close_time` the parameter holding end_time.
     """
+    return f"""
+        health_score = {period_health_sql(success, failed)},
+        avg_rtt_ms = {period_rtt_sql(close_time, success, closed_by_cycle)}"""
+
+
+def period_health_sql(success: str = "success_count", failed: str = "failed_count") -> str:
+    """An endpoint_events row's health over its whole period (see closed_event_stats_sql)."""
+    return f"""CASE WHEN ({success}) + ({failed}) > 0
+            THEN ROUND(100.0 * ({success}) / (({success}) + ({failed})), 2)
+            ELSE health_score END"""
+
+
+def period_rtt_sql(close_time: str, success: str = "success_count", closed_by_cycle: bool = False) -> str:
+    """An endpoint_events row's RTT over its whole period, its current value when no sample of
+    the period is left (see closed_event_stats_sql)."""
     upper = (
         f"s.sampled_at <= CAST({close_time} AS timestamptz) - INTERVAL '1 minute'"
         if closed_by_cycle
         else f"s.sampled_at < CAST({close_time} AS timestamptz)"
     )
-    return f"""
-        health_score = CASE WHEN ({success}) + ({failed}) > 0
-            THEN ROUND(100.0 * ({success}) / (({success}) + ({failed})), 2)
-            ELSE health_score END,
-        avg_rtt_ms = CASE WHEN ({success}) = 0 THEN NULL ELSE COALESCE((
+    return f"""CASE WHEN ({success}) = 0 THEN NULL ELSE COALESCE((
             SELECT ROUND((SUM(s.rtt_avg_ms * s.received)
                           / NULLIF(SUM(s.received) FILTER (WHERE s.rtt_avg_ms IS NOT NULL), 0))::numeric, 2)
             FROM endpoint_probe_samples s

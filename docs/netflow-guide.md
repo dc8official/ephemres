@@ -347,6 +347,9 @@ sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream
 sqlite3 "${FASTSTORE_DB}" "SELECT entry_id, stream, substr(fields_json, 1, 120) FROM stream_entries ORDER BY id_ms DESC, id_seq DESC LIMIT 2;"
 ```
 
+### Which Data a View Shows
+Each Traffic page view, the endpoint Bandwidth & Flow tab and the PDF bandwidth report read a minute, hourly or daily table depending on the window, and the longer-term tables keep less detail (no addresses, and the daily one no endpoints). See [Database §3](database.md#3-4-tier-hierarchical-storage-lifecycle) for what each table keeps and which one each view reads.
+
 ### Query Database Rollups
 ```bash
 sudo -u postgres psql -d netmon -c "SELECT bucket, COUNT(*), SUM(bytes) FROM flow_minute_rollups GROUP BY bucket ORDER BY bucket DESC LIMIT 5;"

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.core.orm import and_, desc, func, or_, select
+from app.core.orm import and_, desc, func, or_, select, text
 from app.core.orm import AsyncSession
 
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
-from app.models.flow_rollup import FlowHourlyRollup, FlowInterfaceMinuteRollup, FlowMinuteRollup
+from app.models.flow_rollup import FlowHourlyRollup, FlowMinuteRollup
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
@@ -342,6 +342,53 @@ async def compile_availability_report_data(
     }
 
 
+# flow_interface_minute_rollups is kept 7 days. A report reaching further back reads the hourly
+# rollup (kept 365 days), which also stores each hour's busiest minute, so peaks stay per-minute.
+_INTERFACE_MINUTE_RETENTION = timedelta(days=7)
+
+
+async def _interface_totals(
+    db: AsyncSession,
+    exporter_ids: List[UUID],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Any]:
+    """(exporter_id, interface_idx, in_bytes, out_bytes, busiest-minute in, busiest-minute out)
+    per interface over [start_dt, end_dt].
+
+    Reading only the minute table, a 30-day report summed the last week of traffic and then
+    averaged it over 30 days. On the hourly tier an hour that straddles the start or end counts
+    whole, which matters little at that length.
+    """
+    if not exporter_ids:
+        return []
+    if start_dt >= datetime.now(timezone.utc) - _INTERFACE_MINUTE_RETENTION:
+        source, peak_in, peak_out, start = (
+            "flow_interface_minute_rollups", "in_bytes", "out_bytes", "bucket >= :start"
+        )
+    else:
+        source, peak_in, peak_out, start = (
+            "flow_interface_hourly_rollups", "peak_in_minute_bytes", "peak_out_minute_bytes",
+            "bucket > CAST(:start AS timestamptz) - INTERVAL '1 hour'",
+        )
+    # One bind parameter per exporter: list parameters are not passed through as arrays.
+    params: Dict[str, Any] = {f"exporter{i}": str(e) for i, e in enumerate(exporter_ids)}
+    exporters = ", ".join(f"CAST(:{name} AS uuid)" for name in params)
+    res = await db.execute(
+        text(f"""
+            SELECT exporter_id, interface_idx,
+                   SUM(in_bytes) AS tot_in_bytes, SUM(out_bytes) AS tot_out_bytes,
+                   MAX({peak_in}) AS max_in_bytes, MAX({peak_out}) AS max_out_bytes
+            FROM {source}
+            WHERE exporter_id IN ({exporters}) AND {start} AND bucket <= :end
+            GROUP BY exporter_id, interface_idx
+            ORDER BY exporter_id, interface_idx
+        """),
+        {**params, "start": start_dt, "end": end_dt},
+    )
+    return res.all()
+
+
 async def compile_bandwidth_report_data(
     db: AsyncSession,
     exporter_ids: List[UUID],
@@ -364,28 +411,7 @@ async def compile_bandwidth_report_data(
     router_map = {r.id: r for r in routers}
 
     # 1. Interface Metrics Query
-    if_stmt = (
-        select(
-            FlowInterfaceMinuteRollup.exporter_id,
-            FlowInterfaceMinuteRollup.interface_idx,
-            func.sum(FlowInterfaceMinuteRollup.in_bytes).label("tot_in_bytes"),
-            func.sum(FlowInterfaceMinuteRollup.out_bytes).label("tot_out_bytes"),
-            func.max(FlowInterfaceMinuteRollup.in_bytes).label("max_in_bytes"),
-            func.max(FlowInterfaceMinuteRollup.out_bytes).label("max_out_bytes"),
-        )
-        .where(
-            FlowInterfaceMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowInterfaceMinuteRollup.bucket >= start_dt,
-            FlowInterfaceMinuteRollup.bucket <= end_dt,
-        )
-        .group_by(
-            FlowInterfaceMinuteRollup.exporter_id,
-            FlowInterfaceMinuteRollup.interface_idx,
-        )
-        .order_by(FlowInterfaceMinuteRollup.exporter_id, FlowInterfaceMinuteRollup.interface_idx)
-    )
-    if_res = await db.execute(if_stmt)
-    raw_interfaces = if_res.all()
+    raw_interfaces = await _interface_totals(db, exporter_ids, start_dt, end_dt)
 
     total_window_sec = max(60, int((end_dt - start_dt).total_seconds()))
 

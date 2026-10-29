@@ -37,9 +37,9 @@ def _seed(run_sql):
             INSERT INTO endpoint_events (endpoint_id, operational_state, detailed_state, success_count,
                 failed_count, health_score, avg_rtt_ms, is_split_event, start_time, end_time,
                 duration_seconds, monitoring_cycle_count)
-            VALUES ($1, 'UP', 'UP', 8, 2, 0, NULL, false, $2, NULL, 0, 10)
+            VALUES ($1, 'UP', 'UP', 8, 2, 0, NULL, false, $2, NULL, $3, 10)
             """,
-            HOST, start,
+            HOST, start, 580,  # each cycle sets the duration: the latest ran 20 s ago
         )
         minute = datetime.timedelta(minutes=1)
         rows = [(HOST, slot + k * minute, 1, 1, float(10 + k)) for k in range(8)]
