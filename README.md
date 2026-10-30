@@ -45,12 +45,14 @@ Beginning in **Version 3.3.2.v** and expanded in **Version 3.3.5**, Ephemres ope
 | Dimension | Legacy Architecture (`v3.3.1n`) | Vertical Integration (`v3.3.5`) | Operational Benefit |
 | :--- | :--- | :--- | :--- |
 | **Python Dependencies** | 15 external packages (~150MB wheels) | **2 packages** (`uvicorn`, `asyncpg`) | Eliminates dependency rot, transitive CVEs, and installation breakages. |
-| **Cold Startup Latency** | 2.8 seconds | **0.35 seconds** (87% faster) | Near-instant process restarts and rapid test cycle iterations. |
-| **Worker Memory Footprint** | ~185 MB per worker | **~42 MB per worker** (77% reduction) | Enables deployment on edge nodes and ultra-low-memory containers. |
+| **Startup Time** | 2.1–2.4 s until the API answers (code load alone ~2.0 s) | **1.0–1.7 s** until the API answers (code load alone ~0.4 s): about twice as fast | Quicker process restarts and test cycles. |
+| **Worker Memory Footprint** | ~155 MB per worker | **~47 MB per worker** (about 70% less) | Enables deployment on edge nodes and ultra-low-memory containers. |
 | **External Daemons** | PostgreSQL + TimescaleDB + `redis-server` | **PostgreSQL + TimescaleDB** (Redis eliminated) | FastStore runs in `/dev/shm` SQLite WAL mode; zero daemon failure modes. |
 | **System Shared Libraries** | `libpango`, `libharfbuzz`, `cffi`, `python3-dev` | **Zero external C-libraries** | Pure stdlib implementation runs on any vanilla Linux distribution. |
 | **ORM & SQL Overhead** | Heavy SQLAlchemy mapper metamodels | **Direct native asyncpg SQL compilation** | Zero-reflection query generation with sub-millisecond execution. |
 | **Schema Validation** | Pydantic v2 Rust binary extension | **Pure-stdlib `app.core.schema` engine** | Native Python typing with zero binary ABI incompatibilities. |
+
+Startup time and memory were measured on v3.3.0 against v3.3.5, running the API as its systemd unit does (uvicorn, 2 workers), two runs each. "Until the API answers" is the time from launch to the first successful `/api/v1/health` response; "code load" is the time to import the application.
 
 ---
 
