@@ -6,13 +6,29 @@
       <div class="header-inner">
         <div class="brand">
           <span class="brand-name">Ephemres</span>
-          <span class="brand-version">{{ appVersion || 'v3.3.2.v' }}</span>
+          <span class="brand-version">{{ appVersion || 'v3.3.5' }}</span>
         </div>
-        <nav class="header-nav" aria-label="Main Navigation">
+        <!-- Below ~1000 px the links collapse into a disclosure menu instead of wrapping. -->
+        <button
+          type="button"
+          class="nav-toggle"
+          :aria-expanded="navOpen"
+          aria-controls="main-nav"
+          @click="navOpen = !navOpen"
+        >
+          <span aria-hidden="true">☰</span> Menu
+        </button>
+        <nav
+          id="main-nav"
+          ref="navEl"
+          class="header-nav"
+          :class="{ open: navOpen }"
+          aria-label="Main Navigation"
+        >
           <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
           <RouterLink to="/topology" class="nav-link">Topology Map</RouterLink>
           <RouterLink to="/reports" class="nav-link">Reports & SLA</RouterLink>
-          <RouterLink to="/bandwidth" class="nav-link">Bandwidth</RouterLink>
+          <RouterLink to="/bandwidth" class="nav-link">Traffic</RouterLink>
           <RouterLink to="/settings" class="nav-link" v-if="isAdmin">Admin Settings</RouterLink>
         </nav>
         <div class="header-actions">
@@ -24,7 +40,7 @@
           >
             {{ isDark ? '☀' : '☾' }}
           </button>
-          <span class="user-badge" v-if="currentUser">
+          <span class="user-badge" v-if="currentUser" :title="isAdmin ? `${currentUser} (admin)` : currentUser">
             {{ currentUser }} <span class="role-tag" v-if="isAdmin">(ADMIN)</span>
           </span>
           <button class="btn-sign-out" @click="handleLogout">
@@ -109,7 +125,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import Toast from 'primevue/toast'
 import ConfirmDialog from 'primevue/confirmdialog'
@@ -122,12 +138,27 @@ const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 const isDark = ref(true)
-const appVersion = ref('v3.3.2.v')
+const appVersion = ref('v3.3.5')
 const liveAnnouncement = ref('')
 const { subscribe } = useSSE()
 let unsubscribeSSE = null
 
 const noNavRoutes = ['/login', '/change-password']
+
+// Collapsed navigation (narrow screens): closes on navigation, Escape and outside clicks.
+const navOpen = ref(false)
+const navEl = ref(null)
+watch(() => route.fullPath, () => { navOpen.value = false })
+
+function onDocumentKeydown(event) {
+  if (event.key === 'Escape' && navOpen.value) navOpen.value = false
+}
+
+function onDocumentClick(event) {
+  if (!navOpen.value) return
+  const toggle = event.target.closest?.('.nav-toggle')
+  if (!toggle && navEl.value && !navEl.value.contains(event.target)) navOpen.value = false
+}
 const showNav = computed(() => !noNavRoutes.includes(route.path))
 
 const displayPasswordModal = computed(() => {
@@ -143,6 +174,8 @@ const changePasswordForm = ref({
 })
 
 onMounted(async () => {
+  document.addEventListener('keydown', onDocumentKeydown)
+  document.addEventListener('click', onDocumentClick)
   const saved = localStorage.getItem('theme') || 'dark'
   if (saved === 'dark') {
     isDark.value = true
@@ -160,7 +193,7 @@ onMounted(async () => {
       appVersion.value = `v${res.data.data.version.replace(/^v/, '')}`
     }
   } catch (err) {
-    appVersion.value = 'v3.3.2.v'
+    appVersion.value = 'v3.3.5'
   }
 
   // Global SSE listener for accessibility screen reader announcements
@@ -181,6 +214,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (unsubscribeSSE) unsubscribeSSE()
+  document.removeEventListener('keydown', onDocumentKeydown)
+  document.removeEventListener('click', onDocumentClick)
 })
 
 function toggleTheme() {
@@ -361,6 +396,35 @@ button { cursor: pointer; border: none; background: none; }
 
   --topo-edge-stroke: #94a3b8;
   --topo-edge-highlight: #2563eb;
+
+  /* ── Status Text (AA contrast for small text on surfaces and status tints) ── */
+  --status-text-up: #15803d;
+  --status-text-warn: #b45309;
+  --status-text-down: #b91c1c;
+  --status-text-info: #1d4ed8;
+  --status-text-unknown: #4b5563;
+
+  /* ── Chart & Data Series Tokens (read by composables/useChartTheme.js) ── */
+  --chart-text: #4b5563;
+  --chart-grid: rgba(0, 0, 0, 0.08);
+  --series-in: #10b981;
+  --series-out: #0ea5e9;
+  --series-flows: #8b5cf6;
+  --series-rtt: #f59e0b;
+  --series-transit: #64748b;
+  --series-1: #3b82f6;
+  --series-2: #10b981;
+  --series-3: #f59e0b;
+  --series-4: #ef4444;
+  --series-5: #8b5cf6;
+  --series-6: #ec4899;
+  --series-7: #06b6d4;
+  --series-8: #64748b;
+
+  /* ── Control Sizing ── */
+  --control-height-sm: 28px;
+  --control-height: 32px;
+  --target-min: 24px;
 }
 
 /* ── Focus Outlines for Keyboard Accessibility (WCAG 2.1 AA) ── */
@@ -443,6 +507,17 @@ html.dark {
 
   --topo-edge-stroke: #475569;
   --topo-edge-highlight: #60a5fa;
+
+  /* ── Status Text (Dark Mode) ── */
+  --status-text-up: #4ade80;
+  --status-text-warn: #f59e0b;
+  --status-text-down: #f87171;
+  --status-text-info: #60a5fa;
+  --status-text-unknown: #a3a3a3;
+
+  /* ── Chart & Data Series Tokens (Dark Mode) ── */
+  --chart-text: #9ca3af;
+  --chart-grid: rgba(255, 255, 255, 0.08);
 }
 
 /* ── Base ── */
@@ -543,6 +618,80 @@ h1, h2, h3, h4, h5, h6,
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
+}
+
+.nav-toggle {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--control-height);
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.nav-toggle[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: var(--bg-surface-selected);
+}
+
+.user-badge {
+  max-width: 14rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1000px) {
+  .header-inner {
+    position: relative;
+    gap: 12px;
+  }
+
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .header-nav {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 16px 12px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: var(--shadow-hover);
+  }
+
+  .header-nav.open {
+    display: flex;
+  }
+
+  .header-nav .nav-link {
+    padding: 10px 12px;
+  }
+
+  .role-tag {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .header-inner {
+    padding: 0 16px;
+  }
+
+  .brand-version,
+  .user-badge {
+    display: none;
+  }
 }
 
 .theme-toggle {
@@ -625,7 +774,7 @@ h1, h2, h3, h4, h5, h6,
 /* Status States */
 .status-up {
   background: var(--color-up-bg);
-  color: var(--color-up);
+  color: var(--status-text-up);
   border: 1px solid rgba(22, 163, 74, 0.35);
 }
 .status-up .status-dot {
@@ -635,7 +784,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-unstable {
   background: var(--color-up-unstable-bg);
-  color: var(--color-up-unstable);
+  color: var(--status-text-warn);
   border: 1px solid rgba(217, 119, 6, 0.35);
 }
 .status-unstable .status-dot {
@@ -645,7 +794,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-down {
   background: var(--color-down-bg);
-  color: var(--color-down);
+  color: var(--status-text-down);
   border: 1px solid rgba(220, 38, 38, 0.35);
 }
 .status-down .status-dot {
@@ -655,7 +804,7 @@ h1, h2, h3, h4, h5, h6,
 
 .status-unknown {
   background: var(--color-unknown-bg);
-  color: var(--color-unknown);
+  color: var(--status-text-unknown);
   border: 1px solid rgba(107, 114, 128, 0.35);
 }
 .status-unknown .status-dot {

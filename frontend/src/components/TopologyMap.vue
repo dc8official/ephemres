@@ -4,7 +4,7 @@
     <div class="topology-toolbar">
       <div class="toolbar-left">
         <h2 class="topology-title">
-          <span class="icon">🕸</span> Live Network Topology Map
+          Network topology
         </h2>
         <span class="status-badge" :class="stabilized ? 'badge-stabilized' : 'badge-stabilizing'">
           {{ stabilized ? (layoutDirection === 'UD' ? '● Layout Fixed (Vertical)' : '● Layout Fixed (Horizontal)') : '◌ Stabilizing Hierarchical Layout...' }}
@@ -18,33 +18,54 @@
         </span>
       </div>
       <div class="toolbar-right">
-        <button 
-          v-if="isAdmin" 
-          class="btn-primary" 
-          :disabled="isDiscoveringAll" 
-          @click="handleDiscoverAll"
-          title="Run throttled background traceroute discovery across all endpoints"
-        >
-          {{ isDiscoveringAll ? '◌ Discovering Fleet...' : '⚡ Discover Fleet Routes' }}
-        </button>
-        <button 
-          v-if="isAdmin" 
-          class="btn-secondary" 
-          :disabled="isRebuilding" 
-          @click="handleRebuildHierarchy"
-          title="Reconstruct in-memory graph from current database baseline routes"
-        >
-          {{ isRebuilding ? 'Rebuilding...' : '↻ Rebuild Hierarchy' }}
-        </button>
-        <button class="btn-secondary" @click="toggleLayoutDirection" :title="layoutDirection === 'UD' ? 'Switch to Horizontal (Left-to-Right) view' : 'Switch to Vertical (Top-to-Bottom) view'">
-          {{ layoutDirection === 'UD' ? '↔ Horizontal View' : '↕ Vertical View' }}
-        </button>
-        <button class="btn-secondary" @click="resetView" title="Center and zoom map to fit all nodes">
-          🔍 Reset View
+        <SegmentedControl
+          :model-value="layoutDirection"
+          :options="[{ value: 'UD', label: 'Vertical', title: 'Top-to-bottom layout' }, { value: 'LR', label: 'Horizontal', title: 'Left-to-right layout' }]"
+          aria-label="Map layout"
+          size="sm"
+          @update:model-value="(dir) => dir !== layoutDirection && toggleLayoutDirection()"
+        />
+        <button class="btn-secondary" @click="resetView" title="Center and zoom the map to fit all nodes">
+          Fit view
         </button>
         <button class="btn-secondary" @click="fetchTopology" :disabled="loading">
-          {{ loading ? 'Updating...' : '↻ Refresh Topology' }}
+          {{ loading ? 'Updating...' : '↻ Refresh' }}
         </button>
+        <div v-if="isAdmin" ref="actionsMenuEl" class="actions-menu">
+          <button
+            type="button"
+            class="btn-secondary"
+            aria-haspopup="menu"
+            :aria-expanded="actionsOpen"
+            @click="actionsOpen = !actionsOpen"
+          >
+            Actions ▾
+          </button>
+          <div v-if="actionsOpen" class="actions-list" role="menu" @keydown.esc="actionsOpen = false">
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-item"
+              :disabled="isDiscoveringAll"
+              title="Run throttled background traceroute discovery across all endpoints"
+              @click="actionsOpen = false; handleDiscoverAll()"
+            >
+              {{ isDiscoveringAll ? 'Discovering fleet routes…' : 'Discover fleet routes' }}
+              <span class="actions-hint">Background traceroutes to every endpoint</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-item"
+              :disabled="isRebuilding"
+              title="Reconstruct the in-memory graph from the stored baseline routes"
+              @click="actionsOpen = false; handleRebuildHierarchy()"
+            >
+              {{ isRebuilding ? 'Rebuilding…' : 'Rebuild hierarchy' }}
+              <span class="actions-hint">From stored baseline routes</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -63,9 +84,17 @@
       </div>
 
       <!-- Dynamic Legend Overlay -->
-      <div class="map-legend">
-        <div class="legend-title">Topology Legend</div>
-        <div class="legend-items">
+      <div class="map-legend" :class="{ collapsed: !legendOpen }">
+        <button
+          type="button"
+          class="legend-title"
+          :aria-expanded="legendOpen"
+          aria-controls="topology-legend-items"
+          @click="toggleLegend"
+        >
+          Legend <span aria-hidden="true">{{ legendOpen ? '▾' : '▸' }}</span>
+        </button>
+        <div v-show="legendOpen" id="topology-legend-items" class="legend-items">
           <div class="legend-item">
             <span class="node-icon square state-root"></span>
             <span>Ephemres Engine</span>
@@ -110,6 +139,21 @@
             <span class="node-icon box state-subnet"></span>
             <span>Subnet Hub (L2)</span>
             <span class="count-badge glow-subnet">{{ legendCounts.subnet }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.flowConfirmed > 0" title="An exporter's flows send traffic along this traceroute link">
+            <span class="edge-swatch confirmed"></span>
+            <span>Link confirmed by traffic</span>
+            <span class="count-badge">{{ legendCounts.flowConfirmed }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.flowDiffers > 0" title="Flows show this router sending the traffic to a different next hop">
+            <span class="edge-swatch differs"></span>
+            <span>Traffic takes another path</span>
+            <span class="count-badge">{{ legendCounts.flowDiffers }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.flowInferred > 0" title="The hop did not answer traceroute; flows name it">
+            <span class="edge-swatch inferred"></span>
+            <span>Silent hop named by flows</span>
+            <span class="count-badge">{{ legendCounts.flowInferred }}</span>
           </div>
         </div>
       </div>
@@ -188,10 +232,13 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { Network } from 'vis-network'
+// Positions the link and node tooltips (without it they render below the canvas, clipped).
+import 'vis-network/styles/vis-network.min.css'
 import { DataSet } from 'vis-data'
 import { getTopology, rebuildTopology, discoverAllTopologyRoutes, refreshEndpointBaseline } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
 import EndpointRcaDetail from './EndpointRcaDetail.vue'
+import SegmentedControl from './ui/SegmentedControl.vue'
 import { useSSE } from '../composables/useSSE.js'
 
 const container = ref(null)
@@ -200,6 +247,38 @@ const error = ref(null)
 const networkInitialized = ref(false)
 const stabilized = ref(false)
 const layoutDirection = ref('UD')
+
+// Admin actions menu: closes on Escape (handled on the menu) and on clicks outside it.
+const actionsOpen = ref(false)
+const actionsMenuEl = ref(null)
+
+function onDocumentClick(event) {
+  if (actionsOpen.value && actionsMenuEl.value && !actionsMenuEl.value.contains(event.target)) {
+    actionsOpen.value = false
+  }
+}
+
+// Legend: open by default on wide screens; the user's choice is remembered.
+const LEGEND_KEY = 'topologyLegendOpen'
+function initialLegendOpen() {
+  try {
+    const saved = localStorage.getItem(LEGEND_KEY)
+    if (saved !== null) return saved === '1'
+  } catch {
+    // storage unavailable: fall through to the width default
+  }
+  return typeof window === 'undefined' || window.innerWidth >= 900
+}
+const legendOpen = ref(initialLegendOpen())
+
+function toggleLegend() {
+  legendOpen.value = !legendOpen.value
+  try {
+    localStorage.setItem(LEGEND_KEY, legendOpen.value ? '1' : '0')
+  } catch {
+    // storage unavailable: keep the choice for this page only
+  }
+}
 const { sseConnected, subscribe, subscribeBatched } = useSSE()
 let unsubscribeSSE = null
 
@@ -255,6 +334,9 @@ const legendCounts = reactive({
   inferredDown: 0,
   l2: 0,
   subnet: 0,
+  flowConfirmed: 0,
+  flowDiffers: 0,
+  flowInferred: 0,
 })
 
 let network = null
@@ -285,11 +367,9 @@ watch(isDark, () => {
     nodesDataSet.update(updatedNodes)
   }
   if (edgesDataSet) {
-    const edgeStroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
-    const edgeHighlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
     const updatedEdges = edgesDataSet.get().map(edge => ({
       ...edge,
-      color: { color: edgeStroke, highlight: edgeHighlight }
+      ...edgeFlowStyle(edge.rawEdge || {})
     }))
     edgesDataSet.update(updatedEdges)
   }
@@ -338,6 +418,34 @@ function updateLegendCounts() {
   legendCounts.inferredDown = inferredDown
   legendCounts.l2 = l2
   legendCounts.subnet = subnet
+
+  const flowCounts = { confirmed: 0, differs: 0, inferred: 0 }
+  for (const e of edgesDataSet ? edgesDataSet.get() : []) {
+    const status = e.rawEdge?.flow_status
+    if (status in flowCounts) flowCounts[status]++
+  }
+  legendCounts.flowConfirmed = flowCounts.confirmed
+  legendCounts.flowDiffers = flowCounts.differs
+  legendCounts.flowInferred = flowCounts.inferred
+}
+
+// Traceroute links checked against the next hops exporters report in flows (flow_status):
+// confirmed, differs (traffic leaves for another next hop) or inferred (a silent hop named by
+// flows). Links without a status keep the plain style.
+function edgeFlowStyle(edge) {
+  const stroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
+  const highlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
+  const status = edge.flow_status
+  if (status === 'confirmed') {
+    return { color: { color: getCssVar('--status-text-up', '#15803d'), highlight }, width: 3, dashes: false, title: `Confirmed by traffic. ${edge.flow_detail || ''}`.trim() }
+  }
+  if (status === 'differs') {
+    return { color: { color: getCssVar('--status-text-warn', '#b45309'), highlight }, width: 2, dashes: [8, 5], title: `Traffic takes another path. ${edge.flow_detail || ''}`.trim() }
+  }
+  if (status === 'inferred') {
+    return { color: { color: getCssVar('--status-text-info', '#1d4ed8'), highlight }, width: 2, dashes: [3, 4], title: `Silent hop named by flows. ${edge.flow_detail || ''}`.trim() }
+  }
+  return { color: { color: stroke, highlight }, width: 2, dashes: false, title: undefined }
 }
 
 // Visual Node Styling & Categorization
@@ -543,7 +651,9 @@ function formatVisData(nodesData, edgesData) {
       size = 18
     }
 
-    let labelText = `${node.label}\n(${node.ip_address || ''})`
+    let labelText = node.flow_inferred_ip
+      ? `${node.label}\n(≈ ${node.flow_inferred_ip} from flows)`
+      : `${node.label}\n(${node.ip_address || ''})`
     if (nodeType === 'subnet_hub') {
       labelText = `🌐 ${node.label}`
     } else {
@@ -568,13 +678,12 @@ function formatVisData(nodesData, edgesData) {
     }
   })
 
-  const edgeStroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
-  const edgeHighlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
   const visEdges = edgesData.map(edge => ({
     id: `${edge.source}->${edge.target}`,
     from: edge.source,
     to: edge.target,
-    color: { color: edgeStroke, highlight: edgeHighlight },
+    ...edgeFlowStyle(edge),
+    rawEdge: edge,
     arrows: { to: { enabled: true, scaleFactor: 0.7 } },
     smooth: {
       type: 'cubicBezier',
@@ -690,10 +799,14 @@ async function fetchTopology() {
 
       if (isLargeGraph) {
         stabilized.value = true
+        network.once('afterDrawing', () => network.fit())
       } else {
         network.on('stabilizationIterationsDone', () => {
           network.setOptions({ physics: { enabled: false } })
           stabilized.value = true
+          // vis-network's own fit can run before the hierarchical layout settles and leave the
+          // graph outside the canvas: open on the whole graph.
+          network.fit()
         })
       }
 
@@ -747,6 +860,7 @@ function initSSE() {
         continue
       }
       const isNodeStateChange = payload?.type === 'NODE_STATE_CHANGE'
+      const isStateTransition = payload?.type === 'STATE_TRANSITION'
       const nodeId = payload?.endpoint_id || payload?.node_id || payload?.data?.endpoint_id
       if ((isNodeStateChange || isStateTransition) && nodeId && nodesDataSet) {
         const newState = isNodeStateChange
@@ -802,9 +916,11 @@ onMounted(() => {
 
   fetchTopology()
   initSSE()
+  document.addEventListener('click', onDocumentClick)
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
   if (unsubscribeSSE) unsubscribeSSE()
   if (network) network.destroy()
   if (themeObserver) themeObserver.disconnect()
@@ -825,8 +941,10 @@ onUnmounted(() => {
 
 .topology-toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 10px 16px;
   padding: 16px 20px;
   background: var(--bg-surface-selected);
   border-bottom: 1px solid var(--border-color);
@@ -835,8 +953,13 @@ onUnmounted(() => {
 
 .toolbar-left {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
+}
+
+.topology-title {
+  white-space: nowrap;
 }
 
 .topology-title {
@@ -853,6 +976,7 @@ onUnmounted(() => {
   font-size: 0.8rem;
   padding: 4px 10px;
   border-radius: 9999px;
+  white-space: nowrap;
 }
 
 .badge-stabilized {
@@ -870,6 +994,7 @@ onUnmounted(() => {
 .sse-indicator {
   display: inline-flex;
   align-items: center;
+  white-space: nowrap;
   gap: 6px;
   font-size: 0.75rem;
   font-weight: 600;
@@ -915,7 +1040,54 @@ onUnmounted(() => {
 
 .toolbar-right {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.actions-menu {
+  position: relative;
+}
+
+.actions-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 16rem;
+  padding: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-hover);
+}
+
+.actions-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.actions-item:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+}
+
+.actions-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.actions-hint {
+  font-size: var(--text-xs);
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .canvas-wrapper {
@@ -928,6 +1100,21 @@ onUnmounted(() => {
 .vis-network-canvas {
   width: 100%;
   height: 100%;
+}
+
+/* vis-network's tooltip in the app's colours (its default is pale yellow on black text). */
+.vis-network-canvas :deep(.vis-tooltip) {
+  max-width: 320px;
+  white-space: normal;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .loading-overlay, .error-overlay {
@@ -958,9 +1145,22 @@ onUnmounted(() => {
 }
 
 .legend-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--target-min);
+  padding: 0;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   color: var(--text-primary);
+}
+
+.map-legend.collapsed {
+  padding: 6px 12px;
+}
+
+.map-legend.collapsed .legend-title {
+  margin-bottom: 0;
 }
 
 .legend-items {
@@ -996,6 +1196,17 @@ onUnmounted(() => {
 .state-failure-point { background: var(--topo-node-failure-bg); border: 1px solid var(--topo-node-failure-border); }
 .state-inferred-down { background: var(--topo-node-inferred-bg); border: 1px solid var(--topo-node-inferred-border); }
 .state-subnet { background: var(--topo-node-subnet-bg); border: 1px solid var(--topo-node-subnet-border); }
+
+.edge-swatch {
+  width: 18px;
+  height: 0;
+  flex-shrink: 0;
+  border-top: 3px solid var(--topo-edge-stroke);
+}
+
+.edge-swatch.confirmed { border-top-color: var(--status-text-up); }
+.edge-swatch.differs { border-top: 2px dashed var(--status-text-warn); }
+.edge-swatch.inferred { border-top: 2px dotted var(--status-text-info); }
 
 .count-badge {
   margin-left: auto;

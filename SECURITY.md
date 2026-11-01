@@ -4,11 +4,12 @@
 
 | Version | Supported | Security Notes |
 | :--- | :--- | :--- |
-| **v3.3.2.v** | :white_check_mark: | Active production standard (Vertical Integration Architecture & 12 zero-dependency core engines) |
-| **v3.3.0** | :white_check_mark: | Supported frozen snapshot (Flow Exporter & Interface Telemetry) |
-| **v3.1.35s** | :white_check_mark: | Supported frozen snapshot (Enterprise LTS maintenance track) |
-| **v3.3.1n** | :x: | Transitional rebranding release — superseded by `v3.3.2.v` |
-| **<= v3.2.0** | :x: | Superseded — upgrade to `v3.3.2.v` recommended |
+| **v3.3.5** | :white_check_mark: | Active production standard (Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals & NetFlow Route Augmentation on the Vertical Integration Core) |
+| **v3.3.2.v** | :white_check_mark: | Supported production release (Vertical Integration Architecture & 12 zero-dependency core engines; upgrading to `v3.3.5` is recommended) |
+| **v3.3.0** | :white_check_mark: | Supported Enterprise LTS (Long-Term Support maintenance track with Flow Exporter & Interface Telemetry) |
+| **v3.3.1n** | :x: | Transitional rebranding release — superseded by `v3.3.2.v` and `v3.3.5` |
+| **v3.1.35s** | :x: | End of Support — no longer supported; upgrade to `v3.3.0` (LTS) or `v3.3.5` |
+| **<= v3.2.0** | :x: | Superseded — upgrade to `v3.3.0` (LTS) or `v3.3.5` recommended |
 | **< v3.1** | :x: | End of Life (EOL) |
 
 ## Reporting a Vulnerability

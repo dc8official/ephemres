@@ -1,6 +1,6 @@
-# Ephemres API Reference — Version 3.3.2.v
+# Ephemres API Reference — Version 3.3.5
 
-Ephemres v3.3.2.v exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
+Ephemres v3.3.5 exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
 
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
@@ -26,17 +26,17 @@ Returns the current platform version metadata (no authentication required).
   ```json
   {
     "status": "success",
-    "data": { "version": "3.3.2.v", "platform": "Ephemres v3.3.2.v" },
+    "data": { "version": "3.3.5", "platform": "Ephemres v3.3.5" },
     "meta": null,
     "error": null
   }
   ```
 
 ### `GET /api/v1/health`
-Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.2.v"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
+Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.5"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
 
 ### `GET /api/v1/health/liveness` (also `/health/liveness`)
-Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.2.v"}`.
+Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.5"}`.
 
 ### `GET /api/v1/health/readiness` (also `/health/readiness`)
 Readiness probe that runs `SELECT 1` against PostgreSQL and pings FastStore when it is enabled. Returns `200` with `"status": "ready"` or `503` with `"status": "degraded"`, plus per-dependency `database` and `redis` (FastStore) objects with `status` and `error`.
@@ -50,6 +50,7 @@ Connects to the real-time Server-Sent Events (SSE) telemetry stream.
   - `STATE_TRANSITION`: Emitted on endpoint state changes (`UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`).
   - `NODE_STATE_CHANGE`: Emitted for real-time topology canvas node recoloring.
   - `RCA_INCIDENT`: Emitted on root-cause analysis triggers and resolutions.
+  - `ROUTE_CHANGE`: Emitted when NetFlow route augmentation detects a sustained dominant path change for a monitored endpoint.
   - `: heartbeat\n\n`: Emitted every 15 seconds if idle to prevent proxy timeouts.
 
 ---
@@ -129,13 +130,29 @@ Onboards a new endpoint for ICMP monitoring.
 - Synthetic TCP/HTTP/SSL probe settings are not part of this API (see the note in [Architecture §5](architecture.md)).
 
 ### `GET /endpoints/{id}`
-Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000}}`) for a specific endpoint.
+Retrieves detailed information, status, baseline metrics, secondary exporter IP addresses (`flow_exporter_ips`), and interface aliases (`flow_interface_aliases`, returned as `{"<ifIndex>": {"name": "...", "speed_mbps": 1000, "role": "wan"}}`) for a specific endpoint. `speed_mbps` is `null` when no link speed was set (legacy name-only aliases included), and `role` is `"wan"` or `"lan"`.
+
+### `GET /endpoints/probe-summary`
+Per-endpoint ICMP statistics from the per-cycle probe history (v3.3.5) over the last `hours` (query param, default `24`, max `168`): `loss_pct`, reply-weighted `rtt_avg_ms`, `rtt_p95_ms` (95th percentile of per-cycle averages), `jitter_ms`, `sample_count`, `last_probe_at`, and `rtt_sparkline` (hourly mean RTT, oldest first, `null` for hours without replies). Endpoints without samples (passive, paused, not yet probed) are absent.
+
+### `GET /endpoints/{id}/probe-series`
+RTT min/avg/max, jitter and loss over time for one endpoint.
+- **Query Params:** `start_date`, `end_date` (ISO 8601, optional; default the last 24 hours).
+- Resolution follows the span: one point per monitoring cycle up to 2 days, 10-minute buckets up to 8 days, hourly beyond. The response carries `bucket_seconds` and `source` (`endpoint_probe_samples` or `endpoint_probe_hourly`). Raw samples are kept 30 days, hourly aggregates 365 days.
+- Each point: `timestamp`, `sample_count`, `sent`, `received`, `loss_pct`, `rtt_min_ms`, `rtt_avg_ms`, `rtt_max_ms`, `jitter_ms` (`null` where no reply arrived).
+- **Errors:** `400` when `start_date` is not before `end_date`.
 
 ### `GET /endpoints/{id}/traces`
 Returns the 10 most recent diagnostic traceroutes for the endpoint.
 
 ### `GET /endpoints/{id}/rca`
-Returns root-cause analysis incidents recorded for the endpoint.
+Returns root-cause analysis incidents recorded for the endpoint. `baseline_snapshot` and `failure_trace_snapshot` are hop lists. `flow_evidence` is `null` unless an exporter saw the endpoint's traffic in the 24 h before the RCA; otherwise it holds what flows showed when the RCA ran (evidence only, the verdict comes from traceroute): `paths` (per exporter and direction: `out_if`/`out_if_name`, `next_hop`, `last_seen`, `after_failure`), `traffic_after_failure` (traffic still seen after probes started failing, i.e. the probe path or ICMP is the likely problem), `route_changes` seen from 15 minutes before the failure, and a one-line `summary`.
+
+### `GET /endpoints/{id}/flow-paths`
+Where exporting routers forwarded the endpoint's traffic, from flows (requires the next hop in the export template for `next_hop`; see the NetFlow guide §2.5).
+- `paths`: up to 100 rows from the last 24 h, newest first: `exporter_hostname`, `direction` (`to`/`from` the endpoint), `in_if`/`out_if` with alias names, `next_hop`, `first_seen`, `last_seen`, `bytes`, `flow_count`, and `active` (traffic in the last `active_minutes`, 15).
+- `route_changes`: up to 50 from the last 7 days, newest first: `detected_at`, `exporter_hostname`, `direction`, old and new out interface (with names) and next hop. A change is recorded when a different path carries most of the traffic for 3 minutes in a row; load balancing is not a change.
+- `next_hop_reported`: `false` when none of the paths carries a next hop.
 
 ### `POST /endpoints/{id}/refresh-baseline`
 Re-runs baseline route discovery for the endpoint (requires `Admin` role).
@@ -155,6 +172,7 @@ Removes an endpoint from monitoring and deregisters it from the polling engine.
 ### `GET /topology`
 Retrieves the parent-child topology DAG (nodes with state and hop level, plus edges). The crossing-free hierarchical layout is computed in the browser by vis-network; the API returns graph data only.
 - **Response:** `200 OK` returning an object containing arrays of `nodes` and `edges`.
+- Traceroute links are checked every 5 minutes against the next hops exporters reported in the last 15 minutes. An edge then carries `flow_status`: `confirmed` (traffic goes to the next traceroute hop), `differs` (traffic leaves for another next hop) or `inferred` (the next hop did not answer traceroute; flows name it), with a `flow_detail` sentence. A `* * *` node named by flows carries `flow_inferred_ip`. Edges without a matching exporter or recent flows have no `flow_status`.
 
 ### `POST /topology/rebuild`
 Rebuilds the in-memory topology DAG from the database (requires `Admin` role).
@@ -427,7 +445,8 @@ Deactivates or deletes a user account.
 High-precision passive telemetry endpoints for fleet-wide bandwidth analysis, top talkers, application protocol distribution, exporter health, and conversation drilling.
 
 ### `GET /bandwidth/overview`
-Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps), active exporter count, total flow count, and detected unmatched candidates over the last 5 minutes.
+Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_conversations_count` and `anomaly_flows_count` (conversations whose OR'd TCP flags are SYN without ACK or RST without FIN, and the flows in them), `window_seconds` and `exporter_id`.
+- **Network edge (WAN):** the totals above add up what every exporter saw, so traffic that crosses two monitored routers counts twice. `wan_in_bps`/`wan_out_bps` and `wan_in_pps`/`wan_out_pps` sum only interfaces an admin marked `role: "wan"` (see `PUT /bandwidth/endpoints/{id}/interfaces`), which counts each packet once as it enters or leaves the network; "in" is traffic arriving from outside. `wan_links` has one row per WAN interface, busiest first: `exporter_id`, `exporter_hostname`, `interface_idx`, `name`, in/out rates, `speed_mbps` and `utilization_percentage` (`null` without a configured speed) and `share_percentage` of all WAN bytes. `wan_interfaces_count` is 0, and the WAN fields are zero, until an interface is marked WAN.
 - **Response:** `200 OK`
   ```json
   {
@@ -437,7 +456,16 @@ Retrieves fleet-wide real-time Ingress/Egress bandwidth in bits per second (bps)
       "total_egress_bps": 41732622.00,
       "active_exporters_count": 4,
       "unmatched_exporters_count": 1,
-      "total_flows_count": 128450
+      "total_flows_count": 128450,
+      "total_transit_bps": 3120400.00,
+      "window_seconds": 300,
+      "exporter_id": null,
+      "wan_interfaces_count": 1,
+      "wan_in_bps": 31240000.00,
+      "wan_out_bps": 9870000.00,
+      "wan_links": [
+        {"exporter_hostname": "core-gw-01", "interface_idx": 1, "name": "WAN-Fiber", "in_bps": 31240000.00, "out_bps": 9870000.00, "speed_mbps": 1000, "utilization_percentage": 3.12, "share_percentage": 100.0}
+      ]
     },
     "meta": null,
     "error": null
@@ -450,6 +478,10 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
   - `exporter_id` (UUID, optional): Filter by exporter endpoint UUID.
   - `endpoint_id` (UUID, optional): Filter by source or destination endpoint UUID.
+  - `interface_idx` (int, optional, with `exporter_id`): One interface only.
+  - `wan_only` (bool, default `false`): Fleet or exporter scope only (ignored with `endpoint_id` or `interface_idx`). Returns in/out summed over WAN-role interfaces as `ingress_*`/`egress_*`, from the interface rollups. The response's `wan_only` says whether it applied: with no WAN interface marked it is `false` and the normal series is returned.
+- Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; the fleet-wide 30d tier keeps no endpoint attribution, so it is `false` and all traffic is reported as transit.
+- With `exporter_id`, windows up to 6h read 1-minute interface rollups and longer windows the hourly interface rollup. The 24h/7d/30d flow aggregates use real-time aggregation, so the newest minutes are included.
 - **Response:** `200 OK`
   ```json
   {
@@ -469,11 +501,19 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   }
   ```
 
+### `GET /bandwidth/conversations`
+Conversations (source, destination, protocol, service port) over the window, filtered, counted and paged on the server.
+- **Query Parameters:** `window`, `exporter_id`, `endpoint_id` (either side), `ip` (either side), `port` (service port), `dscp` (0–63), `quick` (`all` | `anomalies` | `qos` | `bulk`), `sort` (`bytes` | `flows` | `packets`), `limit` (1–200, default 25), `offset`.
+- `quick`: `anomalies` = the OR of the conversation's TCP flags over the window is SYN without ACK or RST without FIN (the same rule as the overview KPI and the PDF report); `qos` = DSCP > 0; `bulk` = average packet ≥ 1100 bytes.
+- **Response:** `items` (same fields as `top_conversations` below), `counts` (`all`, `anomalies`, `qos`, `bulk` over every conversation matching the other filters), `total` (count for the requested `quick`), `limit`, `offset`, `window`.
+- **Errors:** `400` for an unknown `quick` or `sort`, or an invalid `ip`.
+
 ### `GET /bandwidth/top-talkers`
-Retrieves the highest-volume communicating endpoints and discrete IP conversations within the specified window.
+Retrieves the highest-volume addresses and the largest conversations within the specified window. Each address's ingress (as destination) and egress (as source) come from one aggregation; `top_conversations` is the first page of `GET /bandwidth/conversations`.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
-  - `limit` (int, default `10`, range `1`–`50`): Maximum records to return.
+  - `limit` (int, default `25`, range `1`–`200`): Maximum records to return.
+  - `exporter_id`, `endpoint_id` (UUID, optional): Scope to one exporter or to flows involving one endpoint.
 - **Response:** `200 OK`
   ```json
   {
@@ -507,7 +547,7 @@ Retrieves the highest-volume communicating endpoints and discrete IP conversatio
   ```
 
 ### `GET /bandwidth/applications`
-Returns protocol and service port volume distribution for donut/pie charts.
+Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). `zones_resolution` says how `traffic_zones` were classified: `ip` (addresses and monitored endpoints, windows up to 6h), `endpoint` (monitored endpoints only, 24h/7d), or `unavailable` (30d+, zones are zero).
 `qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_minute_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
@@ -555,14 +595,19 @@ Lists all configured flow exporters with interface aliases, along with detected 
           "hostname": "core-gw-01",
           "primary_ip": "10.0.0.1",
           "flow_exporter_ips": ["192.168.100.1"],
-          "interface_aliases": { "1": "WAN-Fiber", "2": "LAN-Trunk" },
-          "last_flow_time": null
+          "interface_aliases": {
+            "1": { "name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan" },
+            "2": { "name": "LAN-Trunk", "speed_mbps": null, "role": "lan" }
+          },
+          "last_flow_time": "2026-09-15T20:59:00Z",
+          "flows_per_sec": 41.27
         }
       ],
       "unmatched": [
         {
           "ip_address": "172.16.50.1",
-          "last_seen": "2026-09-15T21:00:00Z"
+          "last_seen": "2026-09-15T21:00:00Z",
+          "flows_per_sec": 12.5
         }
       ]
     },
@@ -601,7 +646,9 @@ Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` ro
 ### `GET /bandwidth/interfaces`
 Per-interface ingress/egress throughput and utilization for one exporter.
 - **Query Params:** `exporter_id` (UUID, required), `window` (default `1h`; same values as the other bandwidth endpoints).
+- Rates average over `covered_seconds`: from the later of the window start and the exporter's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
+- Each interface: average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), and `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`. When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default. `role` is `"wan"` or `"lan"`.
 
 ### `PUT /bandwidth/endpoints/{id}/interfaces`
 Replaces an exporter's interface names and link speeds (requires `Admin` role).
-- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000.
+- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan"}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000, or omitted/`null` to leave the speed unset (utilization is then not shown); `role` is `"wan"` (a link to the internet or a provider, counted in the overview's WAN totals) or `"lan"` (default). The body replaces the whole map, so send every interface with its current values.

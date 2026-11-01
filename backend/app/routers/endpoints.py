@@ -14,6 +14,7 @@ from app.core.orm import AsyncSession
 from app.database import get_db
 from app.repositories.auth_repo import AuthRepository
 from app.repositories.endpoint_repo import EndpointRepository
+from app.services import probe_history
 from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse, PaginationMeta
 from app.services.uptime_calculator import (
@@ -145,9 +146,22 @@ async def get_endpoint_rca(
         "rca_summary": rca.rca_summary,
         "baseline_snapshot": rca.baseline_snapshot,
         "failure_trace_snapshot": rca.failure_trace_snapshot,
+        "flow_evidence": getattr(rca, "flow_evidence", None),
         "is_resolved": rca.is_resolved,
     }
     return APIResponse.success(data=incident_data)
+
+
+@router.get("/{id}/flow-paths", response_model=APIResponse)
+async def get_endpoint_flow_paths(
+    id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Where exporters forwarded this endpoint's traffic (last 24 h) and route changes (7 days)."""
+    from app.services.flow_paths import endpoint_flow_paths
+
+    return APIResponse.success(data=await endpoint_flow_paths(db, id))
 
 
 @router.get("/", response_model=APIResponse)
@@ -246,6 +260,41 @@ async def list_endpoints(
     return APIResponse.success(data=data, meta=meta)
 
 
+@router.get("/probe-summary", response_model=APIResponse)
+async def get_probe_summary(
+    hours: int = Query(default=24, ge=1, le=168),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-endpoint loss %, mean and p95 RTT, jitter, last probe time and an hourly RTT sparkline
+    over the last `hours`, from the per-cycle probe history. Endpoints without samples (passive,
+    paused or not yet probed) are absent."""
+    return APIResponse.success(data=await probe_history.probe_summary(db, hours=hours))
+
+
+@router.get("/{endpoint_id}/probe-series", response_model=APIResponse)
+async def get_probe_series(
+    endpoint_id: UUID,
+    start_date: Optional[datetime] = Query(default=None),
+    end_date: Optional[datetime] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """RTT min/avg/max, jitter and loss over time for one endpoint (default: last 24 hours).
+
+    Resolution follows the span: per cycle up to 2 days, 10-minute buckets up to 8 days, hourly
+    beyond that."""
+    end = end_date or datetime.now(timezone.utc)
+    start = start_date or (end - timedelta(hours=24))
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if start >= end:
+        raise HTTPException(status_code=400, detail="start_date must be before end_date.")
+    return APIResponse.success(data=await probe_history.probe_series(db, endpoint_id, start, end))
+
+
 @router.get("/{endpoint_id}", response_model=APIResponse)
 async def get_endpoint(
     endpoint_id: UUID,
@@ -283,6 +332,9 @@ async def get_endpoint(
         "location": row["location"],
         "description": row["description"],
         "monitoring_enabled": row["monitoring_enabled"],
+        "device_role": row.get("device_role") or "ACTIVE_HOST",
+        "flow_exporter_ips": list(row.get("flow_exporter_ips") or []),
+        "flow_interface_aliases": row.get("flow_interface_aliases") or {},
         "allow_incident_trace": row["allow_incident_trace"],
         "allow_topology_discovery": row["allow_topology_discovery"],
         "enable_rca": row["enable_rca"],

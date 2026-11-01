@@ -59,8 +59,8 @@
                 </span>
               </div>
               <div class="metric-box">
-                <span class="metric-lbl">Last Contact</span>
-                <span class="metric-val text-sm tnum">
+                <span class="metric-lbl">In State Since</span>
+                <span class="metric-val text-sm tnum" :title="stateSinceExact">
                   {{ formattedLastSeen }}
                 </span>
               </div>
@@ -70,8 +70,8 @@
             <div class="section-box">
               <div class="section-title-row">
                 <h3 class="section-title">Telemetry Signal</h3>
-                <span class="signal-subtext tnum" v-if="traces.length > 0">
-                  {{ traces.length }} recent sample(s)
+                <span class="signal-subtext tnum" v-if="sparklinePoints.length > 0">
+                  {{ sparklinePoints.length }} recent sample(s)
                 </span>
               </div>
               <div class="sparkline-wrapper">
@@ -163,7 +163,9 @@
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import StatusBadge from './StatusBadge.vue'
-import { getEndpointTraces } from '../services/api.js'
+import { getEndpointTraces, getProbeSeries } from '../services/api.js'
+import { isMonitored, uptimeValue } from '../utils/endpointState.js'
+import { formatTimeAgo } from '../utils/format.js'
 
 const props = defineProps({
   visible: {
@@ -186,6 +188,7 @@ const router = useRouter()
 const copied = ref(false)
 const runningDiag = ref(false)
 const traces = ref([])
+const probePoints = ref([])
 const loadingTraces = ref(false)
 
 watch(
@@ -193,17 +196,25 @@ watch(
   async (newVal) => {
     if (newVal && props.endpoint?.id) {
       loadingTraces.value = true
+      const endIso = new Date().toISOString()
+      const startIso = new Date(Date.now() - 3600 * 1000).toISOString()
       try {
-        const res = await getEndpointTraces(props.endpoint.id)
-        traces.value = res.data?.data || []
+        const [traceRes, probeRes] = await Promise.allSettled([
+          getEndpointTraces(props.endpoint.id),
+          getProbeSeries(props.endpoint.id, startIso, endIso),
+        ])
+        traces.value = traceRes.status === 'fulfilled' ? (traceRes.value.data?.data || []) : []
+        probePoints.value = probeRes.status === 'fulfilled' ? (probeRes.value.data?.data?.points || []) : []
       } catch (err) {
-        console.warn('Failed to load endpoint traces for drawer:', err)
+        console.warn('Failed to load endpoint telemetry for drawer:', err)
         traces.value = []
+        probePoints.value = []
       } finally {
         loadingTraces.value = false
       }
     } else if (!newVal) {
       traces.value = []
+      probePoints.value = []
     }
   }
 )
@@ -240,21 +251,23 @@ async function triggerDiagnostics() {
 }
 
 const formattedUptime = computed(() => {
-  const val = props.endpoint?.uptime_percentage_24h ?? props.endpoint?.uptime_percentage
-  if (val !== undefined && val !== null && !isNaN(Number(val))) {
-    return `${Number(val).toFixed(2)}%`
+  const val = uptimeValue(props.endpoint)
+  if (val !== null) {
+    return `${val.toFixed(2)}%`
   }
   return '—'
 })
 
 const uptimeClass = computed(() => {
-  const val = Number(props.endpoint?.uptime_percentage_24h ?? props.endpoint?.uptime_percentage ?? 0)
+  const val = uptimeValue(props.endpoint)
+  if (val === null) return ''
   if (val >= 99.0) return 'text-emerald'
   if (val >= 95.0) return 'text-amber'
   return 'text-rose'
 })
 
 const rawHealthScore = computed(() => {
+  if (!isMonitored(props.endpoint)) return null
   return props.endpoint?.current_health_score ?? props.endpoint?.current_state?.health_score
 })
 
@@ -266,24 +279,29 @@ const formattedHealthScore = computed(() => {
 })
 
 const healthScoreClass = computed(() => {
-  const val = Number(rawHealthScore.value || 0)
+  if (rawHealthScore.value === undefined || rawHealthScore.value === null || isNaN(Number(rawHealthScore.value))) {
+    return ''
+  }
+  const val = Number(rawHealthScore.value)
   if (val >= 80) return 'text-emerald'
   if (val >= 50) return 'text-amber'
   return 'text-rose'
 })
 
-const formattedLastSeen = computed(() => {
-  if (!props.endpoint?.last_seen) return 'Never'
-  try {
-    const d = new Date(props.endpoint.last_seen)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  } catch {
-    return 'Recent'
-  }
-})
+// last_seen is when the current state began (the latest event's start), not the last probe.
+const formattedLastSeen = computed(() => formatTimeAgo(props.endpoint?.last_seen))
+const stateSinceExact = computed(() =>
+  props.endpoint?.last_seen ? new Date(props.endpoint.last_seen).toLocaleString() : undefined
+)
 
-// Sparkline points derived from genuine trace samples or baseline
+// Sparkline points derived from real probe RTT history or genuine trace samples
 const sparklinePoints = computed(() => {
+  const probeRtts = (probePoints.value || [])
+    .map((p) => (p.rtt_avg_ms != null ? Number(p.rtt_avg_ms) : null))
+    .filter((v) => v !== null && !isNaN(v))
+  if (probeRtts.length >= 2) {
+    return probeRtts
+  }
   const pts = []
   if (traces.value && traces.value.length > 0) {
     for (const t of traces.value) {
@@ -298,11 +316,7 @@ const sparklinePoints = computed(() => {
   if (pts.length >= 2) {
     return pts
   }
-  const currentRtt = Number(props.endpoint?.avg_rtt_ms)
-  if (!isNaN(currentRtt) && currentRtt > 0) {
-    return [currentRtt, currentRtt * 0.98, currentRtt * 1.02, currentRtt * 0.99, currentRtt * 1.01, currentRtt]
-  }
-  return [0, 0, 0, 0, 0]
+  return []
 })
 
 const sparklinePath = computed(() => {

@@ -56,6 +56,51 @@
         </div>
       </div>
 
+      <!-- Flow evidence: what exporters' flows showed when the RCA ran (traceroute stays the verdict) -->
+      <div v-if="rcaData.flow_evidence" class="path-inspector-card flow-evidence-card">
+        <div class="card-header">
+          <h4>Flow evidence</h4>
+          <span class="subtext">What the routers exporting flows saw for this endpoint when the RCA ran</span>
+        </div>
+        <div class="flow-evidence-body">
+          <p class="flow-evidence-summary" :class="{ 'is-warn': rcaData.flow_evidence.traffic_after_failure }">
+            {{ rcaData.flow_evidence.summary }}
+          </p>
+          <div class="table-responsive">
+            <table class="path-table">
+              <thead>
+                <tr>
+                  <th>Router</th>
+                  <th>Direction</th>
+                  <th>Out interface</th>
+                  <th>Next hop</th>
+                  <th>Last traffic</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in rcaData.flow_evidence.paths" :key="`${p.exporter_id}-${p.direction}`">
+                  <td>{{ p.exporter_hostname }}</td>
+                  <td>{{ p.direction === 'to' ? 'To endpoint' : 'From endpoint' }}</td>
+                  <td>{{ p.out_if_name || '—' }}</td>
+                  <td class="ip-addr">{{ p.next_hop || '—' }}</td>
+                  <td>
+                    {{ formatDate(p.last_seen) }}
+                    <span v-if="p.after_failure" class="flow-after-failure">after probes failed</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <ul v-if="rcaData.flow_evidence.route_changes?.length" class="flow-route-changes">
+            <li v-for="(c, i) in rcaData.flow_evidence.route_changes" :key="i">
+              {{ formatDate(c.detected_at) }}: {{ c.exporter_hostname }} moved traffic {{ c.direction === 'to' ? 'to' : 'from' }} this endpoint
+              from if{{ c.old_out_if }}{{ c.old_next_hop ? ` via ${c.old_next_hop}` : '' }}
+              to if{{ c.new_out_if }}{{ c.new_next_hop ? ` via ${c.new_next_hop}` : '' }}.
+            </li>
+          </ul>
+        </div>
+      </div>
+
       <!-- Side-by-Side Path Inspector Table -->
       <div class="path-inspector-card">
         <div class="card-header">
@@ -174,8 +219,10 @@ function getBannerClass(rca) {
 const combinedHops = computed(() => {
   if (!rcaData.value) return []
 
-  const baselineHops = rcaData.value.baseline_snapshot?.hops || []
-  const failureHops = rcaData.value.failure_trace_snapshot?.hops || []
+  // rca_engine stores the snapshots as plain hop lists; older records may wrap them in { hops }.
+  const hopsOf = (snap) => (Array.isArray(snap) ? snap : snap?.hops || [])
+  const baselineHops = hopsOf(rcaData.value.baseline_snapshot)
+  const failureHops = hopsOf(rcaData.value.failure_trace_snapshot)
 
   const maxHops = Math.max(baselineHops.length, failureHops.length)
   const rows = []
@@ -398,6 +445,39 @@ onMounted(() => {
 }
 
 /* Side-by-side Path Inspector Table */
+.flow-evidence-card {
+  margin: 16px 0;
+}
+
+.flow-evidence-body {
+  padding: 12px 20px 16px;
+}
+
+.flow-evidence-summary {
+  margin: 0 0 12px;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.flow-evidence-summary.is-warn {
+  color: var(--status-text-warn);
+  font-weight: 600;
+}
+
+.flow-after-failure {
+  margin-left: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--status-text-warn);
+}
+
+.flow-route-changes {
+  margin: 12px 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 .path-inspector-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);

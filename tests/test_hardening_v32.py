@@ -98,9 +98,9 @@ def test_flow_aggregator_insert_sql_bindparams():
     from monitoring.flow import aggregator
 
     # Extract insert_sql definition from source
-    src = inspect.getsource(aggregator.FlowAggregator.flush_to_timescaledb)
+    src = inspect.getsource(aggregator.FlowAggregator._flush_rollups)
     m = re.search(r'insert_sql\s*=\s*text\(\s*"""(.*?)"""\s*\)', src, re.DOTALL)
-    assert m is not None, "Could not find insert_sql in flush_to_timescaledb"
+    assert m is not None, "Could not find insert_sql in _flush_rollups"
     sql_text = text(m.group(1))
 
     compiled_params = set(sql_text.compile().params.keys())
@@ -621,11 +621,11 @@ async def test_bandwidth_active_exporters_excludes_sentinel():
 
     mock_db = AsyncMock()
     mock_result_scalar = MagicMock()
-    # row = [total_bytes, ingress_bytes, egress_bytes, total_flows, active_exporters]
-    mock_result_scalar.one_or_none.return_value = [1000, 500, 500, 10, 2]
+    # row = [total, ingress, egress, transit bytes; the same for packets; total_flows, active_exporters]
+    mock_result_scalar.one_or_none.return_value = [1000, 500, 500, 0, 10, 5, 5, 0, 10, 2]
     mock_db.execute.return_value = mock_result_scalar
 
-    res = await get_bandwidth_overview(current_user={"username": "admin"}, db=mock_db)
+    res = await get_bandwidth_overview(exporter_id=None, current_user={"username": "admin"}, db=mock_db)
     assert res.status == "success"
 
     queries = [str(call[0][0]) for call in mock_db.execute.call_args_list]
@@ -639,25 +639,26 @@ async def test_top_talkers_with_endpoint_id_filter():
     Verifies that get_top_talkers applies the endpoint_id filter to both talkers and conversations.
     """
     from app.routers.bandwidth import get_top_talkers
+    from tests.backend.flow_mocks import mapping_result
 
     mock_db = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.all.return_value = []
-    mock_db.execute.return_value = mock_result
+    mock_db.execute.return_value = mapping_result([])
 
     target_ep_id = uuid4()
     res = await get_top_talkers(
         window="1h",
         limit=10,
         endpoint_id=target_ep_id,
+        exporter_id=None,
         current_user={"username": "admin"},
         db=mock_db,
     )
     assert res.status == "success"
 
     queries = [str(call[0][0]) for call in mock_db.execute.call_args_list]
-    found_filter = any("src_endpoint_id = :src_endpoint_id" in q or "dst_endpoint_id = :dst_endpoint_id" in q for q in queries)
-    assert found_filter, f"Endpoint ID filter not found in queries: {queries}"
+    endpoint_filter = "src_endpoint_id = CAST(:endpoint_id AS uuid) OR dst_endpoint_id = CAST(:endpoint_id AS uuid)"
+    # Talkers query plus the conversation count and page queries all carry the filter.
+    assert sum(endpoint_filter in q for q in queries) >= 3, f"Endpoint ID filter missing: {queries}"
 
 
 @pytest.mark.anyio

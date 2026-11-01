@@ -145,6 +145,19 @@ export function getEndpoint(id) {
   return api.get(`/endpoints/${id}`)
 }
 
+// Per-cycle probe history: RTT min/avg/max, jitter and loss over time (v3.4).
+export function getProbeSeries(id, startDate = null, endDate = null) {
+  const params = {}
+  if (startDate) params.start_date = startDate
+  if (endDate) params.end_date = endDate
+  return api.get(`/endpoints/${id}/probe-series`, { params })
+}
+
+// Per-endpoint loss, mean/p95 RTT, last probe time and hourly RTT sparkline.
+export function getProbeSummary(hours = 24) {
+  return api.get('/endpoints/probe-summary', { params: { hours } })
+}
+
 export function getTopology() {
   return api.get('/topology')
 }
@@ -163,6 +176,11 @@ export function getEndpointTraces(id) {
 
 export function getEndpointRca(id) {
   return api.get(`/endpoints/${id}/rca`)
+}
+
+// Where exporters forwarded this endpoint's traffic (24 h) and route changes seen in flows (7 days).
+export function getEndpointFlowPaths(id) {
+  return api.get(`/endpoints/${id}/flow-paths`)
 }
 
 export function refreshEndpointBaseline(id) {
@@ -320,15 +338,19 @@ export function getAlertHistory(page = 1, pageSize = 50) {
   })
 }
 
-export function getBandwidthOverview() {
-  return api.get('/bandwidth/overview')
+export function getBandwidthOverview(exporterId = null) {
+  const params = {}
+  if (exporterId) params.exporter_id = exporterId
+  return api.get('/bandwidth/overview', { params })
 }
 
-export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null) {
+export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null, wanOnly = false) {
   const params = { window }
   if (exporterId) params.exporter_id = exporterId
   if (endpointId) params.endpoint_id = endpointId
   if (interfaceIdx !== null && interfaceIdx !== undefined) params.interface_idx = interfaceIdx
+  // WAN-interface totals; the server falls back to all flows when no interface is marked WAN.
+  if (wanOnly) params.wan_only = true
   return api.get('/bandwidth/traffic-series', { params })
 }
 
@@ -337,6 +359,18 @@ export function getTopTalkers(window = '1h', limit = 25, endpointId = null, expo
   if (endpointId) params.endpoint_id = endpointId
   if (exporterId) params.exporter_id = exporterId
   return api.get('/bandwidth/top-talkers', { params })
+}
+
+// Server-filtered, paged conversations. `filters`: exporterId, endpointId, ip, port, dscp,
+// quick ('all' | 'anomalies' | 'qos' | 'bulk'), sort ('bytes' | 'flows' | 'packets'), limit, offset.
+export function getConversations(window = '1h', filters = {}) {
+  const params = { window }
+  const map = { exporterId: 'exporter_id', endpointId: 'endpoint_id', ip: 'ip', port: 'port', dscp: 'dscp', quick: 'quick', sort: 'sort', limit: 'limit', offset: 'offset' }
+  for (const [key, name] of Object.entries(map)) {
+    const value = filters[key]
+    if (value !== null && value !== undefined && value !== '') params[name] = value
+  }
+  return api.get('/bandwidth/conversations', { params })
 }
 
 export function getApplicationDistribution(window = '1h', exporterId = null, endpointId = null) {

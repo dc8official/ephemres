@@ -11,13 +11,17 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from app.schemas.bandwidth import normalize_interface_aliases
 
 
 class InterfaceConfig(BaseModel):
     """Network router interface configuration attributes."""
 
     name: str = Field(..., max_length=64, pattern=r"^[a-zA-Z0-9_\-\./ :]{1,64}$", description="Interface name label")
-    speed_mbps: int = Field(default=1000, gt=0, le=10000000, description="Interface link capacity speed in Mbps")
+    # None leaves the speed unset: utilization is then not shown rather than measured against a guess.
+    speed_mbps: Optional[int] = Field(default=None, gt=0, le=10000000, description="Interface link capacity speed in Mbps")
+    # "wan": link to the outside (internet or provider uplink); fleet totals count only these.
+    role: Literal["wan", "lan"] = Field(default="lan", description="Interface role")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,22 +79,7 @@ class EndpointDetail(EndpointSummary):
     @field_validator("flow_interface_aliases", mode="before")
     @classmethod
     def normalize_aliases(cls, v):
-        if not isinstance(v, dict):
-            return {}
-        normalized = {}
-        for k, val in v.items():
-            if isinstance(val, str):
-                normalized[str(k)] = {"name": val, "speed_mbps": 1000}
-            elif isinstance(val, dict):
-                normalized[str(k)] = {
-                    "name": str(val.get("name", f"Interface {k}")),
-                    "speed_mbps": int(val.get("speed_mbps", 1000)),
-                }
-            elif hasattr(val, "model_dump"):
-                normalized[str(k)] = val.model_dump()
-            elif isinstance(val, InterfaceConfig):
-                normalized[str(k)] = val
-        return normalized
+        return normalize_interface_aliases(v)
 
     @field_serializer("created_at", "updated_at")
     def serialize_created_updated(self, v: datetime) -> str:

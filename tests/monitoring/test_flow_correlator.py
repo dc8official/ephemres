@@ -77,6 +77,33 @@ class TestFlowCorrelation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args.args[0], f"flow:unmatched:{unknown_ip}")
         self.assertEqual(call_args.kwargs.get("ex"), 900)
 
+    async def test_correlator_unmatched_flow_rate(self):
+        """The second write for an unmatched exporter carries its flows/s since the first."""
+        from unittest.mock import patch
+
+        mock_redis = AsyncMock()
+        correlator = FlowCorrelator(db_session_factory=None, redis_client=mock_redis)
+        ip = "172.31.254.9"
+
+        with patch("monitoring.flow.correlator.time.time", return_value=1000.0):
+            correlator.correlate(exporter_ip=ip, src_ip="10.0.0.1", dst_ip="10.0.0.2")
+        await asyncio.sleep(0.01)
+        fps_writes = [c for c in mock_redis.set.await_args_list if c.args[0].endswith(":fps")]
+        self.assertEqual(fps_writes, [])  # first sighting: no rate yet
+
+        # 59 more flows inside the rate-limit window, then one after it (60 total in 20 s).
+        with patch("monitoring.flow.correlator.time.time", return_value=1005.0):
+            for _ in range(59):
+                correlator.correlate(exporter_ip=ip, src_ip="10.0.0.1", dst_ip="10.0.0.2")
+        with patch("monitoring.flow.correlator.time.time", return_value=1020.0):
+            correlator.correlate(exporter_ip=ip, src_ip="10.0.0.1", dst_ip="10.0.0.2")
+        await asyncio.sleep(0.01)
+
+        fps_writes = [c for c in mock_redis.set.await_args_list if c.args[0].endswith(":fps")]
+        self.assertEqual(len(fps_writes), 1)
+        self.assertEqual(fps_writes[0].args, (f"flow:unmatched:{ip}:fps", "3.0"))
+        self.assertEqual(fps_writes[0].kwargs.get("ex"), 900)
+
     async def test_correlator_sync_from_db(self):
         gw_id = uuid4()
         srv_id = uuid4()

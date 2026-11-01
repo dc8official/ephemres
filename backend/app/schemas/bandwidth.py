@@ -6,11 +6,58 @@ from uuid import UUID
 from app.core.schema import BaseModel, ConfigDict, Field, field_validator
 
 
-class BandwidthOverview(BaseModel):
-    """Real-time 5-minute snapshot of network flow telemetry across all active exporters.
+def normalize_interface_aliases(v: Any) -> Dict[str, Dict[str, Any]]:
+    """Stored `flow_interface_aliases` as {ifIndex: {name, speed_mbps, role}} for API responses.
 
-    Provides fleet-wide ingress/egress bit rates, packet rates (pps), mean packet physics,
-    exporter counts, and detected security anomaly counts (half-open SYN scans or TCP RST bursts).
+    Legacy entries are plain name strings. `speed_mbps` is None unless a positive speed was set
+    (utilization is then not shown), and `role` is "wan" only when an admin set it.
+    """
+    if not isinstance(v, dict):
+        return {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for k, val in v.items():
+        if hasattr(val, "model_dump"):
+            val = val.model_dump()
+        if isinstance(val, str):
+            normalized[str(k)] = {"name": val, "speed_mbps": None, "role": "lan"}
+        elif isinstance(val, dict):
+            try:
+                speed = int(val.get("speed_mbps") or 0)
+            except (TypeError, ValueError):
+                speed = 0
+            normalized[str(k)] = {
+                "name": str(val.get("name", f"Interface {k}")),
+                "speed_mbps": speed if speed > 0 else None,
+                "role": "wan" if val.get("role") == "wan" else "lan",
+            }
+    return normalized
+
+
+class WanLinkItem(BaseModel):
+    """One WAN-role interface over the overview window. In is traffic arriving from outside."""
+    exporter_id: UUID
+    exporter_hostname: str
+    interface_idx: int
+    name: str
+    in_bps: float = 0.0
+    out_bps: float = 0.0
+    in_pps: float = 0.0
+    out_pps: float = 0.0
+    # None when the link speed is not configured.
+    speed_mbps: Optional[int] = None
+    utilization_percentage: Optional[float] = None
+    # Share of all WAN bytes (in + out) carried by this link, 0-100.
+    share_percentage: float = 0.0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BandwidthOverview(BaseModel):
+    """Snapshot of the last five complete minutes of flow telemetry, fleet-wide or for one exporter.
+
+    Ingress counts flows towards a monitored endpoint and egress flows from one; a flow between
+    two monitored endpoints counts in both. Transit is traffic with no monitored endpoint on
+    either side; it is reported on its own rather than split into ingress and egress.
     """
     total_ingress_bps: float
     total_egress_bps: float
@@ -19,8 +66,23 @@ class BandwidthOverview(BaseModel):
     total_flows_count: int
     total_ingress_pps: float = 0.0
     total_egress_pps: float = 0.0
+    total_transit_bps: float = 0.0
+    total_transit_pps: float = 0.0
     avg_packet_size: int = 0
+    # Flows in, and number of, conversations whose OR'd TCP flags are SYN-only or RST-without-FIN.
     anomaly_flows_count: int = 0
+    anomaly_conversations_count: int = 0
+    window_seconds: int = 300
+    exporter_id: Optional[UUID] = None
+    # Edge totals over WAN-role interfaces only. Unlike the totals above, which add up what every
+    # exporter saw, these count a packet once as it enters or leaves the network. All zero, with
+    # `wan_interfaces_count` 0, until an admin marks an interface as WAN.
+    wan_interfaces_count: int = 0
+    wan_in_bps: float = 0.0
+    wan_out_bps: float = 0.0
+    wan_in_pps: float = 0.0
+    wan_out_pps: float = 0.0
+    wan_links: List[WanLinkItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -36,15 +98,26 @@ class TrafficSeriesPoint(BaseModel):
     egress_bps: float
     ingress_pps: float = 0.0
     egress_pps: float = 0.0
+    transit_bps: float = 0.0
+    transit_pps: float = 0.0
     flows_per_sec: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class TrafficSeriesResponse(BaseModel):
-    """Time-series query response encapsulating window metadata and data points."""
+    """Time-series query response encapsulating window metadata and data points.
+
+    `bucket_seconds` is the width of each point. `directional` is False when the rollup tier
+    keeps no endpoint attribution (fleet-wide 30d/1y), in which case all bytes are reported as
+    transit and ingress/egress are zero.
+    """
     window: str
     points: List[TrafficSeriesPoint]
+    bucket_seconds: int = 60
+    directional: bool = True
+    # True when the points are WAN-interface totals (ingress = in on WAN links, egress = out).
+    wan_only: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -189,13 +262,31 @@ class TopTalkersResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ConversationsResponse(BaseModel):
+    """One page of server-filtered conversations.
+
+    `counts` holds the size of each quick filter (all, anomalies, qos, bulk) over every
+    conversation matching the other filters; `total` is the count for the requested filter.
+    """
+    window: str
+    items: List[TopConversationItem]
+    counts: Dict[str, int]
+    total: int
+    limit: int
+    offset: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ApplicationDistributionItem(BaseModel):
     """Protocol and destination port share of overall fleet traffic."""
     protocol_name: str
     port: int
     service_label: str
     total_bytes: int
+    # Share of all traffic in the window (the list holds the top 15 plus an "Other" row).
     percentage: float
+    is_other: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -237,6 +328,10 @@ class ApplicationDistributionResponse(BaseModel):
     qos_source: Optional[str] = None
     qos_window_start: Optional[datetime] = None
     traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)
+    total_bytes: int = 0
+    # How zones were classified: "ip" (addresses + monitored endpoints, minute tier), "endpoint"
+    # (monitored endpoints only, hourly tier) or "unavailable" (daily tier keeps neither).
+    zones_resolution: str = "ip"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -248,34 +343,24 @@ class FlowExporterItem(BaseModel):
     flow_exporter_ips: List[str] = Field(default_factory=list)
     interface_aliases: Dict[str, Any] = Field(default_factory=dict)
     device_role: Optional[str] = "FLOW_EXPORTER"
+    # Newest minute bucket with flows from this exporter in the last 24 h (None: silent for 24 h).
     last_flow_time: Optional[str] = None
+    # Flow records per second over the last five complete minutes.
+    flows_per_sec: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
 
     @field_validator("interface_aliases", mode="before")
     @classmethod
     def normalize_aliases(cls, v):
-        if not isinstance(v, dict):
-            return {}
-        normalized = {}
-        for k, val in v.items():
-            if isinstance(val, str):
-                normalized[str(k)] = {"name": val, "speed_mbps": 1000}
-            elif isinstance(val, dict):
-                normalized[str(k)] = {
-                    "name": str(val.get("name", f"Interface {k}")),
-                    "speed_mbps": int(val.get("speed_mbps", 1000)),
-                }
-            elif hasattr(val, "model_dump"):
-                normalized[str(k)] = val.model_dump()
-            else:
-                normalized[str(k)] = val
-        return normalized
+        return normalize_interface_aliases(v)
 
 
 class UnmatchedExporterItem(BaseModel):
     ip_address: str
     last_seen: str
+    # Recent flow rate reported by the flow daemon; None until it has two sightings.
+    flows_per_sec: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -290,7 +375,10 @@ class ExportersResponse(BaseModel):
 class InterfaceTelemetryItem(BaseModel):
     interface_idx: int
     name: str
+    # Configured link speed, or the 1 Gbps default when `speed_configured` is False.
     speed_mbps: int
+    speed_configured: bool = True
+    role: Literal["wan", "lan"] = "lan"
     in_bytes: int
     out_bytes: int
     in_bps: float
@@ -298,16 +386,33 @@ class InterfaceTelemetryItem(BaseModel):
     in_packets: int
     out_packets: int
     flow_count: int
-    utilization_percentage: float
+    # None when the link speed is not configured: utilization against a guessed speed is not shown.
+    utilization_percentage: Optional[float] = None
     is_active: bool
+    # 95th percentile and busiest minute over the covered period (idle slots count as 0).
+    in_p95_bps: float = 0.0
+    out_p95_bps: float = 0.0
+    in_peak_bps: float = 0.0
+    out_peak_bps: float = 0.0
+    p95_utilization_percentage: Optional[float] = None
+    peak_utilization_percentage: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class InterfaceTelemetryResponse(BaseModel):
+    """Per-interface rates for one exporter.
+
+    Rates average over `covered_seconds`: from the later of the window start and the exporter's
+    first data in it, to now. `p95_resolution_seconds` is 60 when p95 is over minutes and 3600
+    when it is over hourly averages (30-day window); peaks are always the busiest minute.
+    """
     exporter_id: UUID
     window: str
     interfaces: List[InterfaceTelemetryItem]
+    covered_seconds: int = 0
+    p95_resolution_seconds: int = 60
+    source: str = "flow_interface_minute_rollups"
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -1,21 +1,35 @@
 from __future__ import annotations
 
-import ipaddress
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.core.orm import and_, desc, func, or_, select
+from app.core.orm import and_, desc, func, or_, select, text
 from app.core.orm import AsyncSession
 
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
-from app.models.flow_rollup import FlowHourlyRollup, FlowInterfaceMinuteRollup, FlowMinuteRollup
+from app.models.flow_rollup import FlowHourlyRollup, FlowMinuteRollup
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
-from app.schemas.bandwidth import format_dscp_label
+from app.services import conversations as conversation_queries
+from app.services.flow_metrics import (
+    ROLE_WAN,
+    ZONE_EAST_WEST,
+    ZONE_EXTERNAL_TRANSIT,
+    ZONE_NORTH_SOUTH_EGRESS,
+    ZONE_NORTH_SOUTH_INGRESS,
+    bits_per_second,
+    classify_zone,
+    configured_speed_mbps,
+    dscp_breakdown,
+    interface_alias,
+    interface_role,
+    is_internal_address,
+    utilization_pct,
+)
 from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
@@ -234,7 +248,8 @@ async def compile_availability_report_data(
 
         total_downtime_sec += down_sec
         total_incidents += inc_count
-        uptime_sum += uptime_pct
+        if ep.monitoring_enabled is not False:
+            uptime_sum += uptime_pct
 
         endpoint_rows.append({
             "id": ep.id,
@@ -242,6 +257,7 @@ async def compile_availability_report_data(
             "ip_address": ep.ip_address,
             "device_type": ep.device_type,
             "operational_state": op_state,
+            "monitoring_enabled": ep.monitoring_enabled,
             "uptime_percentage": uptime_pct,
             "incident_count": inc_count,
             "formatted_downtime": format_duration(down_sec),
@@ -302,9 +318,17 @@ async def compile_availability_report_data(
             "rca_summary": rca_summary,
         })
 
-    num_eps = len(endpoints) or 1
-    mean_uptime = round(uptime_sum / num_eps, 3)
-    avg_rtt_group = round(sum(r["avg_rtt_ms"] for r in endpoint_rows) / num_eps, 2)
+    monitored_rows = [
+        r for r in endpoint_rows
+        if r.get("monitoring_enabled", True) is not False
+    ]
+    num_monitored = len(monitored_rows)
+    mean_uptime = round(uptime_sum / num_monitored, 3) if num_monitored else 100.0
+    avg_rtt_group = (
+        round(sum(r["avg_rtt_ms"] for r in monitored_rows) / num_monitored, 2)
+        if num_monitored
+        else 0.0
+    )
 
     return {
         "endpoints": endpoint_rows,
@@ -316,6 +340,53 @@ async def compile_availability_report_data(
             "avg_rtt": f"{avg_rtt_group:.2f}",
         },
     }
+
+
+# flow_interface_minute_rollups is kept 7 days. A report reaching further back reads the hourly
+# rollup (kept 365 days), which also stores each hour's busiest minute, so peaks stay per-minute.
+_INTERFACE_MINUTE_RETENTION = timedelta(days=7)
+
+
+async def _interface_totals(
+    db: AsyncSession,
+    exporter_ids: List[UUID],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Any]:
+    """(exporter_id, interface_idx, in_bytes, out_bytes, busiest-minute in, busiest-minute out)
+    per interface over [start_dt, end_dt].
+
+    Reading only the minute table, a 30-day report summed the last week of traffic and then
+    averaged it over 30 days. On the hourly tier an hour that straddles the start or end counts
+    whole, which matters little at that length.
+    """
+    if not exporter_ids:
+        return []
+    if start_dt >= datetime.now(timezone.utc) - _INTERFACE_MINUTE_RETENTION:
+        source, peak_in, peak_out, start = (
+            "flow_interface_minute_rollups", "in_bytes", "out_bytes", "bucket >= :start"
+        )
+    else:
+        source, peak_in, peak_out, start = (
+            "flow_interface_hourly_rollups", "peak_in_minute_bytes", "peak_out_minute_bytes",
+            "bucket > CAST(:start AS timestamptz) - INTERVAL '1 hour'",
+        )
+    # One bind parameter per exporter: list parameters are not passed through as arrays.
+    params: Dict[str, Any] = {f"exporter{i}": str(e) for i, e in enumerate(exporter_ids)}
+    exporters = ", ".join(f"CAST(:{name} AS uuid)" for name in params)
+    res = await db.execute(
+        text(f"""
+            SELECT exporter_id, interface_idx,
+                   SUM(in_bytes) AS tot_in_bytes, SUM(out_bytes) AS tot_out_bytes,
+                   MAX({peak_in}) AS max_in_bytes, MAX({peak_out}) AS max_out_bytes
+            FROM {source}
+            WHERE exporter_id IN ({exporters}) AND {start} AND bucket <= :end
+            GROUP BY exporter_id, interface_idx
+            ORDER BY exporter_id, interface_idx
+        """),
+        {**params, "start": start_dt, "end": end_dt},
+    )
+    return res.all()
 
 
 async def compile_bandwidth_report_data(
@@ -340,33 +411,14 @@ async def compile_bandwidth_report_data(
     router_map = {r.id: r for r in routers}
 
     # 1. Interface Metrics Query
-    if_stmt = (
-        select(
-            FlowInterfaceMinuteRollup.exporter_id,
-            FlowInterfaceMinuteRollup.interface_idx,
-            func.sum(FlowInterfaceMinuteRollup.in_bytes).label("tot_in_bytes"),
-            func.sum(FlowInterfaceMinuteRollup.out_bytes).label("tot_out_bytes"),
-            func.max(FlowInterfaceMinuteRollup.in_bytes).label("max_in_bytes"),
-            func.max(FlowInterfaceMinuteRollup.out_bytes).label("max_out_bytes"),
-        )
-        .where(
-            FlowInterfaceMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowInterfaceMinuteRollup.bucket >= start_dt,
-            FlowInterfaceMinuteRollup.bucket <= end_dt,
-        )
-        .group_by(
-            FlowInterfaceMinuteRollup.exporter_id,
-            FlowInterfaceMinuteRollup.interface_idx,
-        )
-        .order_by(FlowInterfaceMinuteRollup.exporter_id, FlowInterfaceMinuteRollup.interface_idx)
-    )
-    if_res = await db.execute(if_stmt)
-    raw_interfaces = if_res.all()
+    raw_interfaces = await _interface_totals(db, exporter_ids, start_dt, end_dt)
 
     total_window_sec = max(60, int((end_dt - start_dt).total_seconds()))
 
     interface_rows = []
     exporter_stats = {r.id: {"in_bytes": 0, "out_bytes": 0, "peak_bps": 0, "if_count": 0} for r in routers}
+    # Network edge: traffic on WAN-role interfaces, counted once however many routers it crossed.
+    wan = {"count": 0, "in_bytes": 0, "out_bytes": 0}
 
     for exp_id, if_idx, in_b, out_b, max_in_b, max_out_b in raw_interfaces:
         router = router_map.get(exp_id)
@@ -376,24 +428,21 @@ async def compile_bandwidth_report_data(
         in_bytes = int(in_b or 0)
         out_bytes = int(out_b or 0)
         peak_b = max(int(max_in_b or 0), int(max_out_b or 0))
-        peak_rate_bps = (peak_b * 8.0) / 60.0  # minute rollup
-        avg_in_bps = (in_bytes * 8.0) / total_window_sec
-        avg_out_bps = (out_bytes * 8.0) / total_window_sec
+        peak_rate_bps = bits_per_second(peak_b, 60.0)  # minute rollup
+        avg_in_bps = bits_per_second(in_bytes, total_window_sec)
+        avg_out_bps = bits_per_second(out_bytes, total_window_sec)
 
         aliases = getattr(router, "flow_interface_aliases", {}) or {}
         alias_entry = aliases.get(str(if_idx), {})
-        if isinstance(alias_entry, str):
-            if_name = alias_entry
-            speed_mbps = 1000
-        elif isinstance(alias_entry, dict):
-            if_name = alias_entry.get("name", f"Interface #{if_idx}")
-            speed_mbps = int(alias_entry.get("speed_mbps", 1000) or 1000)
-        else:
-            if_name = f"Interface #{if_idx}"
-            speed_mbps = 1000
-
-        speed_bps = speed_mbps * 1e6
-        util_pct = min(100.0, (peak_rate_bps / speed_bps * 100.0) if speed_bps > 0 else 0.0)
+        if_name, speed_mbps = interface_alias(alias_entry, f"Interface #{if_idx}")
+        speed_configured = configured_speed_mbps(alias_entry) is not None
+        # Without a configured link speed utilization would be measured against a guess.
+        util_pct = utilization_pct(peak_rate_bps, speed_mbps) if speed_configured else None
+        is_wan = interface_role(alias_entry) == ROLE_WAN
+        if is_wan:
+            wan["count"] += 1
+            wan["in_bytes"] += in_bytes
+            wan["out_bytes"] += out_bytes
 
         exporter_stats[exp_id]["in_bytes"] += in_bytes
         exporter_stats[exp_id]["out_bytes"] += out_bytes
@@ -405,17 +454,19 @@ async def compile_bandwidth_report_data(
             "interface_idx": if_idx,
             "interface_name": if_name,
             "speed_mbps": speed_mbps,
-            "formatted_speed": format_speed(speed_mbps),
+            "formatted_speed": format_speed(speed_mbps) if speed_configured else "Not set",
+            "speed_configured": speed_configured,
             "formatted_in_bps": format_bps(avg_in_bps),
             "formatted_out_bps": format_bps(avg_out_bps),
             "formatted_peak_bps": format_bps(peak_rate_bps),
             "utilization_pct": util_pct,
+            "is_wan": is_wan,
         })
 
     exporter_rows = []
     for r in routers:
         stats = exporter_stats.get(r.id, {"in_bytes": 0, "out_bytes": 0, "peak_bps": 0, "if_count": 0})
-        mean_in_rate = (stats["in_bytes"] * 8.0) / total_window_sec
+        mean_in_rate = bits_per_second(stats["in_bytes"], total_window_sec)
         exporter_rows.append({
             "hostname": r.hostname,
             "primary_ip": r.ip_address,
@@ -492,32 +543,7 @@ async def compile_bandwidth_report_data(
     try:
         qos_res = await db.execute(qos_stmt)
         raw_qos = qos_res.all() if qos_res else []
-        dscp_buckets: Dict[int, Dict[str, Any]] = {}
-        total_qos_bytes = 0
-        for q_row in raw_qos:
-            if len(q_row) < 2:
-                continue
-            tos_val = int(q_row[0] or 0)
-            q_bytes = int(q_row[1] or 0)
-            q_pkts = int(q_row[2] or 0) if len(q_row) > 2 else 0
-            q_flows = int(q_row[3] or 0) if len(q_row) > 3 else 0
-            dscp_val = (tos_val & 0xFF) >> 2
-            total_qos_bytes += q_bytes
-            if dscp_val not in dscp_buckets:
-                dscp_buckets[dscp_val] = {
-                    "dscp": dscp_val,
-                    "dscp_label": format_dscp_label(tos_val),
-                    "total_bytes": 0,
-                    "total_packets": 0,
-                    "flow_count": 0,
-                }
-            dscp_buckets[dscp_val]["total_bytes"] += q_bytes
-            dscp_buckets[dscp_val]["total_packets"] += q_pkts
-            dscp_buckets[dscp_val]["flow_count"] += q_flows
-
-        sorted_dscp = sorted(dscp_buckets.values(), key=lambda x: x["total_bytes"], reverse=True)
-        for item in sorted_dscp:
-            pct = (item["total_bytes"] / total_qos_bytes * 100.0) if total_qos_bytes > 0 else 0.0
+        for item in dscp_breakdown(raw_qos):
             qos_rows.append({
                 "dscp": item["dscp"],
                 "dscp_label": item["dscp_label"],
@@ -527,54 +553,29 @@ async def compile_bandwidth_report_data(
                 "formatted_packets": f"{item['total_packets']:,}",
                 "flow_count": item["flow_count"],
                 "formatted_flows": f"{item['flow_count']:,}",
-                "percentage": pct,
+                "percentage": item["percentage"],
             })
     except Exception as exc:
         logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
 
     # 4. Security Anomaly Telemetry (RFC 793 TCP Control Bits Analysis)
-    # Identifies forensic security incidents from flow control flags:
-    # - SYN Scan / Probe: SYN flag (0x02) asserted WITHOUT ACK (0x10), characteristic of half-open port scanning.
-    # - TCP RST Burst: RST flag (0x04) asserted WITHOUT FIN (0x01), characteristic of refused/rejected connections.
-    anomaly_stmt = (
-        select(
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.tcp_flags,
-            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
-            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
+    # Same per-conversation rule as the dashboard: a conversation is a SYN scan / probe when the
+    # OR of its TCP flags over the period is SYN without ACK, and a reset when RST without FIN.
+    syn_scan_count = syn_scan_bytes = rst_burst_count = rst_burst_bytes = 0
+    if exporter_ids:
+        exporter_params = {f"exp{i}": str(e) for i, e in enumerate(exporter_ids)}
+        where_sql = (
+            f"exporter_id IN ({', '.join(f'CAST(:{k} AS uuid)' for k in exporter_params)}) "
+            "AND bucket >= :start AND bucket <= :end"
         )
-        .where(
-            FlowMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowMinuteRollup.bucket >= start_dt,
-            FlowMinuteRollup.bucket <= end_dt,
-            FlowMinuteRollup.protocol == 6,
-        )
-        .group_by(FlowMinuteRollup.protocol, FlowMinuteRollup.tcp_flags)
-    )
-    syn_scan_count = 0
-    syn_scan_bytes = 0
-    rst_burst_count = 0
-    rst_burst_bytes = 0
-    try:
-        anomaly_res = await db.execute(anomaly_stmt)
-        raw_anomalies = anomaly_res.all() if anomaly_res else []
-        for a_row in raw_anomalies:
-            if len(a_row) < 3:
-                continue
-            flags = int(a_row[1] or 0)
-            cnt = int(a_row[2] or 0)
-            b_val = int(a_row[3] or 0) if len(a_row) > 3 else 0
-
-            # SYN ONLY (0x02 & ~0x10): Half-open connection initiation without completion
-            if (flags & 0x02) and not (flags & 0x10):
-                syn_scan_count += cnt
-                syn_scan_bytes += b_val
-            # TCP RST (0x04 & ~0x01): Connection reset without graceful close
-            elif (flags & 0x04) and not (flags & 0x01):
-                rst_burst_count += cnt
-                rst_burst_bytes += b_val
-    except Exception as exc:
-        logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
+        try:
+            summary = await conversation_queries.anomaly_summary(
+                db, where_sql, {**exporter_params, "start": start_dt, "end": end_dt}
+            )
+            syn_scan_count, syn_scan_bytes = summary["syn_flows"], summary["syn_bytes"]
+            rst_burst_count, rst_burst_bytes = summary["rst_flows"], summary["rst_bytes"]
+        except Exception as exc:
+            logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
 
     total_anomaly_count = syn_scan_count + rst_burst_count
     anomaly_summary = {
@@ -614,22 +615,11 @@ async def compile_bandwidth_report_data(
         )
     )
     zone_sums = {
-        "East-West (Internal)": {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
-        "North-South Egress": {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
-        "North-South Ingress": {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
-        "External / Transit": {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
+        ZONE_EAST_WEST: {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
+        ZONE_NORTH_SOUTH_EGRESS: {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
+        ZONE_NORTH_SOUTH_INGRESS: {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
+        ZONE_EXTERNAL_TRANSIT: {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
     }
-
-    def _is_internal(ip_val: str, ep_val: Optional[Any]) -> bool:
-        if ep_val is not None:
-            return True
-        try:
-            clean_ip = str(ip_val or "").split("/")[0].strip()
-            if not clean_ip:
-                return False
-            return ipaddress.ip_address(clean_ip).is_private
-        except Exception:
-            return False
 
     zone_rows = []
     try:
@@ -646,18 +636,7 @@ async def compile_bandwidth_report_data(
             z_b = int(z_row[4] or 0)
             z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
 
-            src_int = _is_internal(s_ip, s_ep)
-            dst_int = _is_internal(d_ip, d_ep)
-
-            if src_int and dst_int:
-                z_key = "East-West (Internal)"
-            elif src_int and not dst_int:
-                z_key = "North-South Egress"
-            elif not src_int and dst_int:
-                z_key = "North-South Ingress"
-            else:
-                z_key = "External / Transit"
-
+            z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
             zone_sums[z_key]["bytes"] += z_b
             zone_sums[z_key]["flows"] += z_f
             total_zone_bytes += z_b
@@ -686,9 +665,18 @@ async def compile_bandwidth_report_data(
                 "percentage": 0.0,
             })
 
+    wan_edge = {
+        "interfaces_count": wan["count"],
+        "formatted_in_bytes": format_bytes(wan["in_bytes"]),
+        "formatted_out_bytes": format_bytes(wan["out_bytes"]),
+        "formatted_in_bps": format_bps(bits_per_second(wan["in_bytes"], total_window_sec)),
+        "formatted_out_bps": format_bps(bits_per_second(wan["out_bytes"], total_window_sec)),
+    }
+
     return {
         "exporters": exporter_rows,
         "interfaces": interface_rows,
+        "wan_edge": wan_edge,
         "conversations": conversation_rows,
         "qos_classes": qos_rows,
         "anomalies": anomaly_summary,
@@ -715,6 +703,7 @@ async def compile_master_report_data(
         "summary": avail_data["summary"],
         "exporters": bandwidth_data["exporters"],
         "interfaces": bandwidth_data["interfaces"],
+        "wan_edge": bandwidth_data.get("wan_edge"),
         "conversations": bandwidth_data["conversations"],
         "qos_classes": bandwidth_data.get("qos_classes", []),
         "anomalies": bandwidth_data.get("anomalies", {}),

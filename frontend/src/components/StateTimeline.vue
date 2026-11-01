@@ -1,5 +1,6 @@
 <template>
   <div class="state-timeline">
+    <p class="sr-only">State over the period: {{ summary }}</p>
     <Bar v-if="chartData" :key="isDark" :data="chartData" :options="chartOptions" />
   </div>
 </template>
@@ -7,6 +8,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { Bar } from 'vue-chartjs'
+import { summarizeDurations } from '../utils/chartSummary.js'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -72,6 +74,19 @@ const STATE_COLORS = computed(() => ({
   'DOWN': isDark.value ? '#f87171' : '#dc2626',
   'UNKNOWN': isDark.value ? '#4a4a4a' : '#64748b'
 }))
+
+// Text alternative: share of the period in each state (gaps count as UNKNOWN).
+const summary = computed(() => {
+  const pStart = new Date(props.periodStart).getTime()
+  const pEnd = new Date(props.periodEnd).getTime()
+  const segments = []
+  for (const ev of props.events) {
+    const startMs = Math.max(new Date(ev.start_time).getTime(), pStart)
+    const endMs = Math.min(ev.end_time ? new Date(ev.end_time).getTime() : pEnd, pEnd)
+    if (endMs > startMs) segments.push({ state: ev.detailed_state, startMs, endMs })
+  }
+  return summarizeDurations(segments)
+})
 
 const formatDuration = (ms) => {
   if (ms < 0) return '0m'
@@ -181,6 +196,17 @@ const chartData = computed(() => {
   }
 })
 
+// The x axis runs 0..1 across the period; label ticks with the clock time they stand for.
+function formatTick(fraction) {
+  const pStart = new Date(props.periodStart).getTime()
+  const pEnd = new Date(props.periodEnd).getTime()
+  const span = pEnd - pStart
+  const d = new Date(pStart + fraction * span)
+  if (span <= 36 * 3600 * 1000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (span <= 8 * 86400 * 1000) return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 const chartOptions = computed(() => {
   const gridColor = isDark.value ? '#3a3a3a' : '#e2e8f0'
   const textColor = isDark.value ? '#D0D0D0' : '#0f172a'
@@ -240,9 +266,8 @@ const chartOptions = computed(() => {
             family: 'monospace',
             size: 12
           },
-          callback: function(value) {
-            return (value * 100) + '%'
-          }
+          maxTicksLimit: 8,
+          callback: (value) => formatTick(value)
         },
         title: {
           display: false
@@ -261,7 +286,7 @@ const chartOptions = computed(() => {
   height: 200px;
   width: 100%;
   padding: 1rem;
-  background: #000000;
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 4px;
   box-shadow: none;
@@ -270,8 +295,3 @@ const chartOptions = computed(() => {
 }
 </style>
 
-<style>
-html:not(.dark) .state-timeline {
-  background: #ffffff;
-}
-</style>

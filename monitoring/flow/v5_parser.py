@@ -75,6 +75,8 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
         # Convert IP integers to string
         src_ip = socket.inet_ntoa(struct.pack("!I", src_ip_int))
         dst_ip = socket.inet_ntoa(struct.pack("!I", dst_ip_int))
+        # 0.0.0.0: delivered locally or not routed.
+        next_hop = socket.inet_ntoa(struct.pack("!I", nexthop_int)) if nexthop_int else None
 
         # 32-bit sysUpTime rollover compensation
         # sys_uptime is the current uptime in ms when packet was sent
@@ -111,6 +113,7 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
                 "tos": tos,
                 "input_if": input_if,
                 "output_if": output_if,
+                "next_hop": next_hop,
                 "start_time": start_time,
                 "end_time": end_time,
             }

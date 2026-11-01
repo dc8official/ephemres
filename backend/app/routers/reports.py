@@ -252,7 +252,7 @@ async def get_fleet_summary(
             uptime_percentage = 100.0
             incident_count = 0
             downtime_seconds = 0
-            uptime_seconds = total_seconds
+            uptime_seconds = 0
 
         endpoint_summaries.append(
             FleetEndpointSummary(

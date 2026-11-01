@@ -108,6 +108,13 @@ class EndpointEvent(Base):
         nullable=True,
     )
 
+    # Start of the unbroken state when this row continues it (24-hour split, engine restart);
+    # NULL when the row starts the state. Read as COALESCE(state_since, start_time).
+    state_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # Number of consecutive monitoring cycles this state persisted
     monitoring_cycle_count: Mapped[int] = mapped_column(
         Integer,

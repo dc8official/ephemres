@@ -1,6 +1,6 @@
 {
   "name": "ephemres-frontend",
-  "version": "3.3.2.v",
+  "version": "3.3.5",
   "private": true,
   "scripts": {
     "dev": "vite",

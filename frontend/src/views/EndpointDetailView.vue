@@ -35,10 +35,11 @@
             size="small"
             class="refresh-btn"
           />
-          <StatusBadge :status="endpoint.endpoint_status" />
-          <span class="monitoring-badge" :class="endpoint.monitoring_enabled ? 'enabled' : 'disabled'">
-            <i class="pi" :class="endpoint.monitoring_enabled ? 'pi-eye' : 'pi-eye-slash'"></i>
-            {{ endpoint.monitoring_enabled ? 'Active' : 'Paused' }}
+          <span class="header-chip" title="Inventory record status">
+            Record <strong>{{ (endpoint.endpoint_status || 'unknown').toLowerCase() }}</strong>
+          </span>
+          <span class="header-chip" :class="endpoint.monitoring_enabled ? 'chip-on' : 'chip-off'" title="Active ICMP probing">
+            ICMP monitoring <strong>{{ endpoint.monitoring_enabled ? 'on' : 'off' }}</strong>
           </span>
         </div>
       </div>
@@ -86,6 +87,32 @@
                 <span class="meta-value desc">{{ endpoint.description || 'No description provided.' }}</span>
               </div>
             </div>
+            <dl class="status-bar">
+              <div class="status-cell">
+                <dt>State</dt>
+                <dd><StatusBadge :status="statusBar.state" size="sm" /></dd>
+              </div>
+              <div class="status-cell">
+                <dt>Latency now</dt>
+                <dd class="tnum">{{ statusBar.latency }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Loss (24h)</dt>
+                <dd class="tnum" :style="{ color: statusBar.lossColor }">{{ statusBar.loss }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Jitter (24h)</dt>
+                <dd class="tnum">{{ statusBar.jitter }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>In state since</dt>
+                <dd class="tnum">{{ statusBar.since }}</dd>
+              </div>
+              <div class="status-cell">
+                <dt>Last probe</dt>
+                <dd class="tnum">{{ statusBar.lastProbe }}</dd>
+              </div>
+            </dl>
           </template>
         </Card>
 
@@ -139,56 +166,16 @@
         <!-- Date Query & Filter Toolbar -->
         <div class="toolbar-card">
           <div class="toolbar-left">
-            <span class="toolbar-title">Analysis Period:</span>
-            <div class="range-buttons">
-              <Button 
-                label="Last 24h" 
-                :outlined="filterRange !== '24h'" 
-                severity="success" 
-                size="small"
-                @click="setRange('24h')" 
-              />
-              <Button 
-                label="Last 7 Days" 
-                :outlined="filterRange !== '7d'" 
-                severity="success" 
-                size="small"
-                @click="setRange('7d')" 
-              />
-              <Button 
-                label="Last 30 Days" 
-                :outlined="filterRange !== '30d'" 
-                severity="success" 
-                size="small"
-                @click="setRange('30d')" 
-              />
-              <Button 
-                label="Custom Range" 
-                :outlined="filterRange !== 'custom'" 
-                severity="success" 
-                size="small"
-                @click="setRange('custom')" 
-              />
-            </div>
-          </div>
-
-          <!-- Custom range calendar controls -->
-          <div v-if="filterRange === 'custom'" class="toolbar-right">
-            <div class="date-input-group">
-              <label for="start_date">Start</label>
-              <input type="datetime-local" id="start_date" v-model="customStartDate" class="date-picker-input" />
-            </div>
-            <div class="date-input-group">
-              <label for="end_date">End</label>
-              <input type="datetime-local" id="end_date" v-model="customEndDate" class="date-picker-input" />
-            </div>
-            <Button 
-              label="Query" 
-              icon="pi pi-search" 
-              severity="success" 
-              size="small"
-              :loading="loading" 
-              @click="loadData" 
+            <span class="toolbar-title">Analysis period</span>
+            <TimeRangePicker
+              :model-value="filterRange"
+              :windows="['24h', '7d', '30d']"
+              allow-custom
+              v-model:start="customStartDate"
+              v-model:end="customEndDate"
+              aria-label="Analysis period"
+              @update:model-value="setRange"
+              @apply="loadData()"
             />
           </div>
         </div>
@@ -202,10 +189,16 @@
               <i class="pi pi-percentage"></i>
             </div>
             <div class="metric-body">
-              <span class="value" :class="getUptimeClass(uptimeReport.uptime_percentage)">
-                {{ uptimeReport.uptime_percentage }}%
-              </span>
-              <span class="subtext">SLA Target: 99.90%</span>
+              <template v-if="icmpMonitored">
+                <span class="value" :class="getUptimeClass(uptimeReport.uptime_percentage)">
+                  {{ uptimeReport.uptime_percentage }}%
+                </span>
+                <span class="subtext">SLA target: {{ DEFAULT_SLA_TARGET }}%</span>
+              </template>
+              <template v-else>
+                <span class="value value-muted">—</span>
+                <span class="subtext">Not ICMP-monitored</span>
+              </template>
             </div>
           </div>
 
@@ -218,7 +211,7 @@
               <span class="value" :class="uptimeReport.incident_count > 0 ? 'alert' : 'clean'">
                 {{ uptimeReport.incident_count }}
               </span>
-              <span class="subtext">Unstable transitions recorded</span>
+              <span class="subtext">Times the endpoint went DOWN</span>
             </div>
           </div>
 
@@ -257,7 +250,10 @@
         <div class="visualizer-container">
           <div class="panel-header">
             <h3><i class="pi pi-align-left header-icon"></i>State Transition Timeline</h3>
-            <span class="panel-desc">Visual timeline showing transitions between UP, UNSTABLE, and DOWN states</span>
+            <span class="panel-desc">
+              UP, UNSTABLE and DOWN periods across the analysis period
+              <template v-if="chartEventsTruncated"> · showing the latest {{ chartSourceEvents.length.toLocaleString() }} of {{ chartEventsTotal.toLocaleString() }} state records</template>
+            </span>
           </div>
           <StateTimeline 
             :events="chartEvents" 
@@ -270,10 +266,20 @@
         <!-- RTT Latency Trend Component -->
         <div class="visualizer-container">
           <div class="panel-header">
-            <h3><i class="pi pi-chart-line header-icon"></i>ICMP Latency & Jitter Trend (RTT)</h3>
-            <span class="panel-desc">Line graph representing round-trip-time (ms) averages per cycle</span>
+            <h3><i class="pi pi-chart-line header-icon"></i>ICMP latency and loss</h3>
+            <span class="panel-desc">
+              <template v-if="periodProbe.points.length">Average RTT with min–max range and packet loss, {{ resolutionLabel(periodProbe.bucket_seconds) }}</template>
+              <template v-else>No per-probe history for this period; showing the RTT recorded for each state period</template>
+            </span>
           </div>
-          <RTTTrendPanel :events="chartEvents" />
+          <ProbeTrendPanel
+            v-if="periodProbe.points.length"
+            :points="periodProbe.points"
+            :bucket-seconds="periodProbe.bucket_seconds"
+            :start="periodStartStr"
+            :end="periodEndStr"
+          />
+          <RTTTrendPanel v-else :events="chartEvents" />
         </div>
 
         <!-- Detailed Event Logs Table -->
@@ -374,37 +380,17 @@
           <!-- Flow Telemetry Header & Mode Switcher -->
           <div class="toolbar-card">
             <div class="toolbar-left">
-              <span class="toolbar-title">Telemetry Perspective:</span>
-              <div class="range-buttons">
-                <Button
-                  label="Device as Exporter"
-                  :outlined="flowMode !== 'exporter'"
-                  severity="success"
-                  size="small"
-                  @click="flowMode = 'exporter'; loadFlowTelemetry()"
-                />
-                <Button
-                  label="Device as Participant"
-                  :outlined="flowMode !== 'participant'"
-                  severity="success"
-                  size="small"
-                  @click="flowMode = 'participant'; loadFlowTelemetry()"
-                />
-              </div>
+              <span class="toolbar-title">Perspective</span>
+              <SegmentedControl :model-value="flowMode" :options="flowModeOptions" aria-label="Flow perspective" @update:model-value="setFlowMode" />
             </div>
 
             <div class="toolbar-right">
-              <div class="range-buttons">
-                <Button
-                  v-for="w in ['1h', '6h', '24h', '7d']"
-                  :key="w"
-                  :label="w"
-                  :outlined="flowWindow !== w"
-                  severity="secondary"
-                  size="small"
-                  @click="flowWindow = w; loadFlowTelemetry()"
-                />
-              </div>
+              <TimeRangePicker
+                :model-value="flowWindow"
+                :windows="['1h', '6h', '24h', '7d']"
+                aria-label="Flow time window"
+                @update:model-value="setFlowWindow"
+              />
             </div>
           </div>
 
@@ -445,7 +431,9 @@
                       <div class="iface-title">
                         <span class="iface-tag tnum">if{{ iface.idx }}</span>
                         <span class="iface-name" :title="iface.name">{{ iface.name }}</span>
-                        <span v-if="iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
+                        <span v-if="iface.role === 'wan'" class="iface-wan" title="WAN link: counted in edge totals">WAN</span>
+                        <span v-if="iface.speedConfigured && iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
+                        <span v-else class="iface-speed iface-speed-unset text-xs" title="Set the link speed to see utilization">(speed not set)</span>
                       </div>
                       <span class="iface-status-pill" :class="iface.active ? 'status-active' : 'status-idle'">
                         {{ iface.active ? 'ACTIVE' : 'IDLE' }}
@@ -462,11 +450,19 @@
                       </div>
                     </div>
                     <div class="meter-bar-track">
-                      <div class="meter-bar-fill" :style="{ width: Math.min(100, iface.utilization) + '%' }" :class="getUtilColorClass(iface.utilization)"></div>
+                      <div
+                        v-if="iface.utilization != null"
+                        class="meter-bar-fill"
+                        :style="{ width: Math.min(100, iface.utilization) + '%' }"
+                        :class="getUtilColorClass(iface.utilization)"
+                      ></div>
                     </div>
                     <div class="meter-meta tnum">
-                      <span>Est. Utilization</span>
-                      <span>{{ (iface.utilization || 0).toFixed(1) }}%</span>
+                      <span>Utilization avg · p95 · peak</span>
+                      <span v-if="iface.utilization != null">
+                        {{ iface.utilization.toFixed(1) }} · {{ (iface.p95Utilization ?? 0).toFixed(1) }} · {{ (iface.peakUtilization ?? 0).toFixed(1) }}%
+                      </span>
+                      <span v-else>—</span>
                     </div>
                   </div>
                 </div>
@@ -479,53 +475,22 @@
 
           <!-- Flow Telemetry Sub-View Switcher -->
           <div class="flow-subview-switcher">
-            <button
-              class="subview-btn"
-              :class="{ active: flowSubView === 'bandwidth' }"
-              @click="flowSubView = 'bandwidth'"
-            >
-              <i class="pi pi-chart-line"></i>
-              <span>Flow Bandwidth</span>
-            </button>
-            <button
-              class="subview-btn"
-              :class="{ active: flowSubView === 'correlated' }"
-              @click="flowSubView = 'correlated'"
-            >
-              <i class="pi pi-sliders-h"></i>
-              <span>Correlated Incident View (RTT vs Bandwidth)</span>
-            </button>
+            <SegmentedControl v-model="flowSubView" :options="flowSubViewOptions" aria-label="Flow chart view" />
           </div>
 
           <!-- Flow Bandwidth Chart -->
           <div v-if="flowSubView === 'bandwidth'" class="table-card p-4">
             <div class="section-header section-header-split">
               <div>
-                <span class="font-bold text-base">Node Flow Bandwidth ({{ flowMode === 'exporter' ? 'Exported Transit' : 'Participant Traffic' }})</span>
-                <span class="badge-window tnum ml-2">{{ flowWindow }} Window</span>
+                <span class="font-bold text-base">{{ flowMode === 'exporter' ? 'Traffic exported by this device' : 'Traffic to and from this device' }}</span>
+                <span class="text-muted text-xs block mt-1">Last {{ flowWindow }}</span>
               </div>
               <div class="header-controls">
-                <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
-                  <button
-                    class="btn-pill btn-pill-sm"
-                    :class="{ active: nodeChartMetricMode === 'bps' }"
-                    @click="nodeChartMetricMode = 'bps'"
-                    title="Throughput in bits per second"
-                  >
-                    Throughput (bps)
-                  </button>
-                  <button
-                    class="btn-pill btn-pill-sm"
-                    :class="{ active: nodeChartMetricMode === 'pps' }"
-                    @click="nodeChartMetricMode = 'pps'"
-                    title="Packet rate in packets per second"
-                  >
-                    Packet Rate (pps)
-                  </button>
-                </div>
+                <SegmentedControl v-model="nodeChartMetricMode" :options="nodeMetricOptions" aria-label="Chart metric" size="sm" />
               </div>
             </div>
             <div class="flow-chart-box">
+              <p v-if="flowSeriesPoints.length > 0" class="sr-only">{{ flowSummary }}</p>
               <LineChart
                 v-if="flowSeriesPoints.length > 0"
                 :data="flowChartData"
@@ -542,8 +507,8 @@
           <div v-else-if="flowSubView === 'correlated'" class="table-card p-4">
             <div class="section-header">
               <div>
-                <span class="font-bold text-base">Correlated Incident Analysis (ICMP RTT Latency vs Flow Bandwidth)</span>
-                <p class="text-xs text-muted mt-1">Cross-correlates ICMP ping spikes with network saturation to pinpoint whether latency spikes are induced by heavy link utilization.</p>
+                <span class="font-bold text-base">Latency vs bandwidth</span>
+                <p class="text-xs text-muted mt-1">Per-probe ICMP latency and loss above flow throughput, on the same time axis.</p>
               </div>
               <div class="header-controls">
                 <div v-if="interfaceTelemetry && interfaceTelemetry.length > 0" class="interface-filter-wrapper">
@@ -560,129 +525,94 @@
                       :key="iface.interface_idx" 
                       :value="iface.interface_idx"
                     >
-                      #{{ iface.interface_idx }} {{ iface.interface_name }}
+                      #{{ iface.interface_idx }} {{ iface.name }}
                     </option>
                   </select>
                 </div>
-                <span class="badge-window tnum">{{ flowWindow }} Window</span>
               </div>
             </div>
-            <div class="flow-chart-box">
+            <ProbeTrendPanel
+              compact
+              :points="flowProbe.points"
+              :bucket-seconds="flowProbe.bucket_seconds"
+              :start="flowRange.start"
+              :end="flowRange.end"
+              empty-text="No per-probe latency history in this window (the device may not be ICMP-monitored)."
+            />
+            <div class="flow-chart-box flow-chart-box-compact">
+              <p v-if="flowSeriesPoints.length > 0" class="sr-only">{{ flowSummary }}</p>
               <LineChart
                 v-if="flowSeriesPoints.length > 0"
-                :data="correlatedChartData"
-                :options="correlatedChartOptions"
+                :data="correlatedBandwidthData"
+                :options="correlatedBandwidthOptions"
               />
               <div v-else-if="!loadingFlow" class="no-data-msg">
-                No telemetry recorded for cross-correlation in the selected {{ flowWindow }} window.
+                No flow throughput recorded in the last {{ flowWindow }}.
               </div>
-              <div v-else class="no-data-msg">Correlating RTT and flow points...</div>
+              <div v-else class="no-data-msg">Loading flow throughput...</div>
             </div>
           </div>
 
-          <!-- Top Node Conversations / Flows Table -->
-          <div class="table-card">
-            <div class="section-header section-header-split p-4">
-              <div>
-                <span class="font-bold text-base">Forensic Node Conversations</span>
-                <span class="text-muted text-xs block mt-1">Granular 1-minute rollup pairs with packet physics &amp; threat telemetry</span>
-              </div>
-              <div class="header-controls">
-                <input
-                  v-model="nodeConversationFilter"
-                  class="filter-select"
-                  style="min-width: 220px;"
-                  placeholder="Filter IP, port, flag, profile..."
-                  aria-label="Filter node conversations"
-                />
-              </div>
-            </div>
+          <!-- Paths seen in flows: where exporting routers forwarded this endpoint's traffic -->
+          <div v-if="flowPaths.paths.length || flowPaths.route_changes.length" class="table-card flow-paths-card">
+            <PanelHeader
+              title="Paths seen in flows"
+              :hint="`Where exporting routers forwarded this endpoint's traffic in the last 24 h · greyed rows carried none in the last ${flowPaths.active_minutes} min`"
+            />
+            <p v-if="!flowPaths.next_hop_reported" class="flow-paths-note">
+              These exporters send no next hop, so paths can't be compared with traceroute. Add the next hop to the export template (see the NetFlow guide).
+            </p>
             <div class="table-responsive">
-              <table class="dense-table" aria-label="Forensic Node Conversations Table">
+              <table class="dense-table" aria-label="Paths seen in flows">
                 <thead>
                   <tr>
-                    <th>Source Host / IP</th>
-                    <th>Destination Host / IP</th>
-                    <th>Protocol</th>
-                    <th>Service Port</th>
-                    <th>Packet Physics &amp; Profile</th>
-                    <th>Flags &amp; QoS</th>
+                    <th>Router</th>
+                    <th>Direction</th>
+                    <th>In</th>
+                    <th>Out</th>
+                    <th>Next hop</th>
                     <th class="text-right">Volume</th>
-                    <th class="text-right">Burst Count</th>
+                    <th>Last seen</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(fc, idx) in filteredNodeConversations" :key="idx">
-                    <td>
-                      <span class="tnum font-mono">{{ fc.src_ip }}</span>
-                      <span v-if="fc.src_hostname" class="text-muted text-xs block">({{ fc.src_hostname }})</span>
-                    </td>
-                    <td>
-                      <span class="tnum font-mono">{{ fc.dst_ip }}</span>
-                      <span v-if="fc.dst_hostname" class="text-muted text-xs block">({{ fc.dst_hostname }})</span>
-                    </td>
-                    <td><span class="status-pill status-unknown">{{ fc.protocol }}</span></td>
-                    <td>
-                      <span class="service-port-badge" :class="getPortBadgeClass(fc.dst_port)">
-                        {{ formatPortLabel(fc.dst_port, fc.protocol) }}
-                      </span>
-                    </td>
-                    <td>
-                      <div class="physics-profile-cell">
-                        <span class="badge-profile" :class="getTrafficProfileBadgeClass(fc.traffic_profile)">
-                          {{ fc.traffic_profile || 'Interactive' }}
-                        </span>
-                        <div class="packet-physics-meta text-xs text-muted tnum font-mono">
-                          <span>{{ fc.avg_packet_size || 0 }} B/pkt</span> · 
-                          <span>{{ fc.packets_per_flow || 0 }} pkts/fl</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <div class="metadata-badge-group">
-                        <span
-                          v-if="fc.protocol === 'TCP' && fc.tcp_flags_labels && fc.tcp_flags_labels.length > 0"
-                          class="badge-tcp-flags font-mono"
-                          :title="`TCP Flags: ${fc.tcp_flags_labels.join(', ')} (0x${(fc.tcp_flags || 0).toString(16).padStart(2, '0')})`"
-                        >
-                          {{ fc.tcp_flags_labels.join(' ') }}
-                        </span>
-                        <span
-                          v-if="fc.anomaly_hint === 'SYN_ONLY'"
-                          class="badge-anomaly badge-syn-only"
-                          title="Anomaly: SYN-only packets observed without ACK (potential port scan)"
-                        >
-                          SYN ONLY
-                        </span>
-                        <span
-                          v-else-if="fc.anomaly_hint === 'TCP_RST'"
-                          class="badge-anomaly badge-tcp-rst"
-                          title="Anomaly: Connection reset (RST) observed"
-                        >
-                          RST
-                        </span>
-                        <span
-                          v-if="fc.dscp > 0"
-                          class="badge-dscp"
-                          :class="{ 'badge-dscp-ef': fc.dscp === 46, 'badge-dscp-af': fc.dscp_label && fc.dscp_label.includes('AF') }"
-                          :title="`ToS: 0x${(fc.tos || 0).toString(16).padStart(2, '0')} · DSCP: ${fc.dscp} (${fc.dscp_label})`"
-                        >
-                          {{ fc.dscp_label }}
-                        </span>
-                      </div>
-                    </td>
-                    <td class="text-right tnum font-bold">{{ formatBytes(fc.total_bytes) }}</td>
-                    <td class="text-right tnum text-muted">{{ formatNumber(fc.flow_count) }}</td>
-                  </tr>
-                  <tr v-if="filteredNodeConversations.length === 0">
-                    <td colspan="8" class="text-center text-muted p-4">
-                      {{ nodeConversations.length === 0 ? `No active conversations found for this node in the selected ${flowWindow} window.` : 'No conversations matching current filter.' }}
-                    </td>
+                  <tr v-for="(p, i) in flowPaths.paths" :key="i" :class="{ 'flow-path-stale': !p.active }">
+                    <td>{{ p.exporter_hostname }}</td>
+                    <td>{{ p.direction === 'to' ? 'To' : 'From' }}</td>
+                    <td>{{ p.in_if_name || '—' }}</td>
+                    <td>{{ p.out_if_name || '—' }}</td>
+                    <td class="tnum">{{ p.next_hop || '—' }}</td>
+                    <td class="text-right tnum">{{ formatBytes(p.bytes) }}</td>
+                    <td class="tnum">{{ formatShortTime(p.last_seen) }}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
+            <div v-if="flowPaths.route_changes.length" class="flow-route-changes">
+              <span class="meta-label">Route changes seen in flows (7 days)</span>
+              <ul>
+                <li v-for="(c, i) in flowPaths.route_changes" :key="i">
+                  <span class="tnum">{{ formatShortTime(c.detected_at) }}</span> ·
+                  {{ c.exporter_hostname }} moved traffic {{ c.direction === 'to' ? 'to' : 'from' }} this endpoint from
+                  {{ c.old_out_if_name || `if${c.old_out_if}` }}{{ c.old_next_hop ? ` via ${c.old_next_hop}` : '' }} to
+                  {{ c.new_out_if_name || `if${c.new_out_if}` }}{{ c.new_next_hop ? ` via ${c.new_next_hop}` : '' }}
+                </li>
+              </ul>
+            </div>
           </div>
+
+          <!-- Conversations through (exporter) or with (participant) this device, server-filtered -->
+          <ConversationsPanel
+            :window="flowWindow"
+            :exporter-id="flowMode === 'exporter' ? endpointId : null"
+            :endpoint-id="flowMode === 'participant' ? endpointId : null"
+            v-model:ip="convIp"
+            v-model:port="convPort"
+            v-model:dscp="convDscp"
+            v-model:dscp-label="convDscpLabel"
+            :refresh-key="convRefreshKey"
+            :title="flowMode === 'exporter' ? 'Conversations through this device' : 'Conversations with this device'"
+          />
         </div> <!-- End Tab 2: Flow -->
 
       </div>
@@ -798,6 +728,7 @@
         <form @submit.prevent="saveInterfaces" class="modal-form">
           <p class="modal-subtitle">
             Assign human-readable SNMP interface names and provisioned line speeds for accurate utilization calculation.
+            Mark links to the internet or a provider as WAN: fleet totals then count traffic once, at the network edge.
           </p>
 
           <div class="interface-config-list">
@@ -830,9 +761,18 @@
                 />
               </div>
 
+              <div class="form-group role-col">
+                <label v-if="i === 0" :for="`iface-role-${i}`">Role</label>
+                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select" :aria-label="i === 0 ? undefined : 'Role'">
+                  <option value="lan">Internal</option>
+                  <option value="wan">WAN (edge)</option>
+                </select>
+              </div>
+
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
                 <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                  <option value="unset">Not set</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -889,12 +829,15 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getTopTalkers, getInterfaceTelemetry, updateEndpointInterfaces } from '../services/api.js'
+import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries, getEndpointFlowPaths } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
 import StateTimeline from '../components/StateTimeline.vue'
 import RTTTrendPanel from '../components/RTTTrendPanel.vue'
+import ProbeTrendPanel from '../components/ProbeTrendPanel.vue'
+import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
+import PanelHeader from '../components/ui/PanelHeader.vue'
 import EndpointRcaDetail from '../components/EndpointRcaDetail.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { Line as LineChart } from 'vue-chartjs'
@@ -924,6 +867,14 @@ ChartJS.register(
 import Card from 'primevue/card'
 import Button from 'primevue/button'
 import { useSSE } from '../composables/useSSE.js'
+import { useChartTheme } from '../composables/useChartTheme.js'
+import { formatBps, formatBytes, formatPps } from '../utils/format.js'
+import { summarizeSeries } from '../utils/chartSummary.js'
+import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
+import { isMonitored } from '../utils/endpointState.js'
+import { aliasesPayload, applyPreset, editRow, rowsFromAliases } from '../utils/interfaceConfig.js'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -941,36 +892,112 @@ const flowWindow = ref('1h')
 // Stores time-series points, peer conversations, and triage filter query for this endpoint.
 const loadingFlow = ref(false)
 const flowSeriesPoints = shallowRef([])
-const nodeConversations = shallowRef([])
 
-// Real-time live triage search filter:
-// Matches across remote IPs, hostnames, destination ports, protocols,
-// packet physics profiles ('Bulk Transfer', 'Real-Time / VoIP', 'Micro-Flow'),
-// DiffServ DSCP labels ('EF (VoIP)', 'AF41 (Video)'), and security anomalies ('SYN ONLY', 'RST').
-const nodeConversationFilter = ref('')
-const filteredNodeConversations = computed(() => {
-  const q = nodeConversationFilter.value.trim().toLowerCase()
-  if (!q) return nodeConversations.value
-  return nodeConversations.value.filter((c) => {
-    return (
-      (c.src_ip && c.src_ip.toLowerCase().includes(q)) ||
-      (c.dst_ip && c.dst_ip.toLowerCase().includes(q)) ||
-      (c.src_hostname && c.src_hostname.toLowerCase().includes(q)) ||
-      (c.dst_hostname && c.dst_hostname.toLowerCase().includes(q)) ||
-      String(c.dst_port).includes(q) ||
-      (c.protocol && c.protocol.toLowerCase().includes(q)) ||
-      (c.traffic_profile && c.traffic_profile.toLowerCase().includes(q)) ||
-      (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
-      (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
-      (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
-    )
-  })
-})
+// Filters for the shared conversation panel; bumped on refresh so it reloads with the page.
+const convIp = ref(null)
+const convPort = ref(null)
+const convDscp = ref(null)
+const convDscpLabel = ref('')
+const convRefreshKey = ref(0)
+const flowPaths = ref({ paths: [], route_changes: [], next_hop_reported: true, active_minutes: 15 })
+
+function formatShortTime(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
 
 // Metric mode toggle for endpoint bandwidth chart:
 // - 'bps': Standard bandwidth throughput (bits/sec).
 // - 'pps': Packet rate (packets/sec) for detecting packet flooding or bursty micro-bursts.
 const nodeChartMetricMode = ref('bps')
+
+const { theme, withAlpha } = useChartTheme()
+
+const flowModeOptions = [
+  { value: 'exporter', label: 'As exporter', title: 'Traffic this device exported (all interfaces)' },
+  { value: 'participant', label: 'As participant', title: 'Traffic to or from this device' },
+]
+const flowSubViewOptions = [
+  { value: 'bandwidth', label: 'Bandwidth' },
+  { value: 'correlated', label: 'Latency vs bandwidth' },
+]
+const nodeMetricOptions = [
+  { value: 'bps', label: 'Throughput', title: 'Bits per second' },
+  { value: 'pps', label: 'Packets', title: 'Packets per second' },
+]
+
+function setFlowMode(mode) {
+  flowMode.value = mode
+  selectedCorrelatedInterfaceIdx.value = null
+  loadFlowTelemetry()
+}
+
+function setFlowWindow(w) {
+  flowWindow.value = w
+  loadFlowTelemetry()
+}
+
+// Not ICMP-monitored (passive flow exporter, paused): availability does not apply.
+const icmpMonitored = computed(() => isMonitored(endpoint.value))
+
+// Per-probe history (endpoint_probe_samples): the analysis period for the latency chart, the
+// last 24 h for the status bar, and the flow window for the latency-vs-bandwidth view.
+const EMPTY_PROBE = { points: [], bucket_seconds: 60 }
+const periodProbe = shallowRef(EMPTY_PROBE)
+const probe24h = shallowRef(EMPTY_PROBE)
+const flowProbe = shallowRef(EMPTY_PROBE)
+const flowRange = ref({ start: new Date(Date.now() - 3600 * 1000).toISOString(), end: new Date().toISOString() })
+
+const FLOW_WINDOW_MS = { '1h': 3600e3, '6h': 21600e3, '24h': 86400e3, '7d': 604800e3 }
+
+function resolutionLabel(bucketSeconds) {
+  if (bucketSeconds >= 3600) return 'hourly'
+  if (bucketSeconds >= 600) return 'per 10 minutes'
+  return 'per monitoring cycle'
+}
+
+function relativeTime(iso) {
+  if (!iso) return '—'
+  const secs = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000))
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
+const statusBar = computed(() => {
+  const ep = endpoint.value || {}
+  const monitored = icmpMonitored.value
+  const pts = probe24h.value.points
+  const last = [...pts].reverse().find((p) => p.sent > 0)
+  const lastReply = [...pts].reverse().find((p) => p.rtt_avg_ms != null)
+  const sent = pts.reduce((a, p) => a + p.sent, 0)
+  const received = pts.reduce((a, p) => a + p.received, 0)
+  const jitters = pts.map((p) => p.jitter_ms).filter((v) => v != null)
+  const loss = sent ? (1 - received / sent) * 100 : null
+  const notMonitored = 'Not ICMP-monitored'
+  return {
+    state: ep.current_detailed_state || ep.current_operational_state || (monitored ? 'UNKNOWN' : 'PASSIVE'),
+    latency: !monitored ? notMonitored
+      : lastReply ? `${lastReply.rtt_avg_ms.toFixed(1)} ms`
+      : ep.avg_rtt_ms != null ? `${Number(ep.avg_rtt_ms).toFixed(1)} ms` : '—',
+    loss: !monitored ? '—' : loss === null ? '—' : `${loss.toFixed(loss < 1 && loss > 0 ? 2 : 1)}%`,
+    lossColor: loss > 0 ? 'var(--status-text-down)' : 'inherit',
+    jitter: !monitored || !jitters.length ? '—' : `${(jitters.reduce((a, v) => a + v, 0) / jitters.length).toFixed(1)} ms`,
+    since: monitored ? relativeTime(ep.last_seen) : '—',
+    lastProbe: !monitored ? '—' : last ? relativeTime(last.timestamp) : 'No probe history yet',
+  }
+})
+
+async function loadProbe(start, end) {
+  try {
+    const res = await getProbeSeries(endpointId, start, end)
+    return res.data?.data || EMPTY_PROBE
+  } catch (err) {
+    console.warn('Probe history unavailable:', err)
+    return EMPTY_PROBE
+  }
+}
 
 const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
@@ -988,35 +1015,27 @@ function switchPerspective(persp) {
 async function loadFlowTelemetry() {
   if (!endpoint.value) return
   loadingFlow.value = true
+  const flowEnd = new Date()
+  const flowStart = new Date(flowEnd.getTime() - (FLOW_WINDOW_MS[flowWindow.value] || 3600e3))
+  flowRange.value = { start: flowStart.toISOString(), end: flowEnd.toISOString() }
+  loadProbe(flowRange.value.start, flowRange.value.end).then((data) => { flowProbe.value = data })
+  getEndpointFlowPaths(endpoint.value.id)
+    .then((res) => { if (res.data?.data) flowPaths.value = res.data.data })
+    .catch((err) => console.warn('Failed to load flow paths:', err))
   try {
     const epId = endpoint.value.id
     const isExporter = flowMode.value === 'exporter'
+    const ifIdx = isExporter && flowSubView.value === 'correlated'
+      ? selectedCorrelatedInterfaceIdx.value
+      : null
     const res = await getTrafficSeries(
       flowWindow.value,
       isExporter ? epId : null,
       !isExporter ? epId : null,
-      selectedCorrelatedInterfaceIdx.value
+      ifIdx
     )
     if (res.data?.data?.points) {
       flowSeriesPoints.value = res.data.data.points
-    }
-    const talkersRes = await getTopTalkers(
-      flowWindow.value,
-      50,
-      !isExporter ? epId : null,
-      isExporter ? epId : null
-    )
-    if (talkersRes.data?.data?.top_conversations) {
-      const epIp = String(endpoint.value.ip_address).split('/')[0].trim()
-      if (isExporter) {
-        nodeConversations.value = talkersRes.data.data.top_conversations
-      } else {
-        nodeConversations.value = talkersRes.data.data.top_conversations.filter((c) => {
-          const s = String(c.src_ip || '').split('/')[0].trim()
-          const d = String(c.dst_ip || '').split('/')[0].trim()
-          return s === epIp || d === epIp || !c.src_ip
-        })
-      }
     }
     if (isExporter) {
       try {
@@ -1035,167 +1054,89 @@ async function loadFlowTelemetry() {
   }
 }
 
-const flowChartData = computed(() => {
-  const labels = flowSeriesPoints.value.map((p) => {
-    const d = new Date(p.timestamp)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  })
+function formatAxisTime(ts, windowKey) {
+  const d = new Date(ts)
+  if (windowKey === '7d') return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
-  if (nodeChartMetricMode.value === 'pps') {
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Ingress (pps)',
-          data: flowSeriesPoints.value.map((p) => p.ingress_pps || 0),
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16, 185, 129, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-        },
-        {
-          label: 'Egress (pps)',
-          data: flowSeriesPoints.value.map((p) => p.egress_pps || 0),
-          borderColor: '#0ea5e9',
-          backgroundColor: 'rgba(14, 165, 233, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-        },
-      ],
-    }
-  }
-
+function flowDataset(label, data, color, opts = {}) {
   return {
-    labels,
-    datasets: [
-      {
-        label: 'Ingress (bps)',
-        data: flowSeriesPoints.value.map((p) => p.ingress_bps),
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: withAlpha(color, 0.2),
+    borderWidth: 2,
+    fill: opts.fill ?? true,
+    tension: 0.3,
+    pointRadius: data.length > 100 ? 0 : 2,
+    ...opts.extra,
+  }
+}
+
+const flowChartData = computed(() => {
+  const points = flowSeriesPoints.value
+  const labels = points.map((p) => formatAxisTime(p.timestamp, flowWindow.value))
+  const unit = nodeChartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const series = theme.value.series
+  const datasets = [
+    flowDataset(`Ingress (${unit})`, points.map((p) => p[`ingress_${unit}`] || 0), series.in),
+    flowDataset(`Egress (${unit})`, points.map((p) => p[`egress_${unit}`] || 0), series.out),
+  ]
+  const transit = points.map((p) => p[`transit_${unit}`] || 0)
+  if (transit.some((v) => v)) {
+    datasets.push(flowDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
+  }
+  return { labels, datasets }
+})
+
+// Text alternative for the flow charts (bandwidth and latency-vs-bandwidth views).
+const flowSummary = computed(() => {
+  const unit = nodeChartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const fmt = unit === 'pps' ? formatPps : formatBps
+  const pts = flowSeriesPoints.value.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  return [`Flow traffic, last ${flowWindow.value}.`]
+    .concat([[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress']].map(([key, label]) =>
+      summarizeSeries(label, pts.map(({ t, p }) => ({ t, v: p[key] ?? null })), fmt)))
+    .join(' ')
+})
+
+const flowChartOptions = computed(() => {
+  const t = theme.value
+  const fmt = (val) => (nodeChartMetricMode.value === 'pps' ? formatPps(val) : formatBps(val))
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    normalized: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 12 } },
+      y: {
+        beginAtZero: true,
+        grid: { color: t.grid },
+        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => fmt(val) },
       },
-      {
-        label: 'Egress (bps)',
-        data: flowSeriesPoints.value.map((p) => p.egress_bps),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-      },
-    ],
+    },
+    plugins: {
+      legend: { position: 'top', labels: { color: t.text, font: { size: 11 } } },
+      tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt(ctx.raw)}` } },
+    },
   }
 })
 
-const flowChartOptions = computed(() => ({
-  responsive: true,
-  maintainAspectRatio: false,
-  animation: false,
-  normalized: true,
-  scales: {
-    x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
-    y: {
-      grid: { color: 'rgba(128, 128, 128, 0.1)' },
-      ticks: {
-        color: '#888',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => {
-          if (!val || val <= 0) return nodeChartMetricMode.value === 'pps' ? '0 pps' : '0 bps'
-          if (nodeChartMetricMode.value === 'pps') return formatPps(val)
-          return formatBps(val)
-        },
-      },
-    },
-  },
-  plugins: {
-    legend: { position: 'top', labels: { color: '#888', font: { size: 11 } } },
-    tooltip: {
-      callbacks: {
-        label: (ctx) => {
-          if (nodeChartMetricMode.value === 'pps') {
-            return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
-          }
-          return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
-        },
-      },
-    },
-  },
-}))
-
-function formatPps(pps) {
-  if (!pps || pps <= 0) return '0 pps'
-  if (pps >= 1e6) return `${(pps / 1e6).toFixed(2)} Mpps`
-  if (pps >= 1e3) return `${(pps / 1e3).toFixed(1)} kpps`
-  return `${Math.round(pps)} pps`
-}
-
-function formatNumber(num) {
-  if (!num) return '0'
-  return new Intl.NumberFormat().format(num)
-}
-
-function formatPortLabel(port, proto) {
-  const p = Number(port)
-  switch (p) {
-    case 443: return '443 / HTTPS'
-    case 80: return '80 / HTTP'
-    case 53: return '53 / DNS'
-    case 22: return '22 / SSH'
-    case 123: return '123 / NTP'
-    case 161: return '161 / SNMP'
-    case 2055: return '2055 / NetFlow'
-    case 4739: return '4739 / IPFIX'
-    default: return `${port}`
-  }
-}
-
-function getPortBadgeClass(port) {
-  const p = Number(port)
-  if (p === 443 || p === 80) return 'port-web'
-  if (p === 53) return 'port-dns'
-  if (p === 22) return 'port-ssh'
-  if (p === 2055 || p === 4739) return 'port-telemetry'
-  return 'port-generic'
-}
-
-function getTrafficProfileBadgeClass(profile) {
-  switch (profile) {
-    case 'Bulk Transfer': return 'badge-profile-bulk'
-    case 'SYN Scan / Probe': return 'badge-profile-syn'
-    case 'Reset / Refused': return 'badge-profile-rst'
-    case 'Micro-Flow / Control': return 'badge-profile-micro'
-    case 'Real-Time / VoIP': return 'badge-profile-voip'
-    default: return 'badge-profile-interactive'
-  }
-}
-
-function formatBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(2)} MB`
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
-  return `${bytes} B`
-}
-
 const flowSubView = ref('bandwidth')
 
-function formatBps(bps) {
-  if (!bps || bps <= 0) return '0 bps'
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(0)} kbps`
-  return `${Math.round(bps)} bps`
-}
+watch(flowSubView, () => {
+  if (selectedCorrelatedInterfaceIdx.value !== null) {
+    loadFlowTelemetry()
+  }
+})
+
+const UTIL_CLASS_BY_TONE = { up: 'util-healthy', warn: 'util-warning', down: 'util-danger', unknown: 'util-healthy' }
 
 function getUtilColorClass(util) {
-  if (util >= 85) return 'util-danger'
-  if (util >= 60) return 'util-warning'
-  return 'util-healthy'
+  return UTIL_CLASS_BY_TONE[utilizationTone(util)]
 }
 
 function formatSpeedLabel(mbps) {
@@ -1210,9 +1151,13 @@ const interfaceMeters = computed(() => {
       idx: item.interface_idx,
       name: item.name,
       speed_mbps: item.speed_mbps,
+      speedConfigured: item.speed_configured !== false,
+      role: item.role,
       ingressBps: item.in_bps,
       egressBps: item.out_bps,
       utilization: item.utilization_percentage,
+      p95Utilization: item.p95_utilization_percentage,
+      peakUtilization: item.peak_utilization_percentage,
       active: item.is_active,
     }))
   }
@@ -1221,45 +1166,42 @@ const interfaceMeters = computed(() => {
   const aliases = endpoint.value.flow_interface_aliases
   return Object.entries(aliases).map(([idx, val]) => {
     let name = `if${idx}`
-    let speed = 1000
+    let speed = null
+    let role = 'lan'
     if (typeof val === 'string') {
       name = val
     } else if (val && typeof val === 'object') {
       name = val.name || `if${idx}`
-      speed = val.speed_mbps || 1000
+      speed = val.speed_mbps || null
+      role = val.role === 'wan' ? 'wan' : 'lan'
     }
     return {
       idx,
       name,
       speed_mbps: speed,
+      speedConfigured: speed !== null,
+      role,
       ingressBps: 0,
       egressBps: 0,
-      utilization: 0,
+      utilization: null,
       active: false,
     }
   })
 })
 
 function openInterfaceModal() {
-  const current = endpoint.value?.flow_interface_aliases || {}
-  const rows = Object.entries(current).map(([idx, val]) => {
-    let name = `if${idx}`
-    let speed = 1000
-    if (typeof val === 'string') {
-      name = val
-    } else if (val && typeof val === 'object') {
-      name = val.name || `if${idx}`
-      speed = val.speed_mbps || 1000
-    }
-    return {
-      index: Number(idx) || idx,
-      name,
-      speed_mbps: speed,
-      preset: [10, 100, 1000, 10000, 40000, 100000].includes(speed) ? speed : 'custom'
-    }
-  })
+  const current = interfaceTelemetry.value || []
+  let rows = current.map((item) => editRow(
+    Number(item.interface_idx) || 1,
+    item.name || `GigabitEthernet0/${item.interface_idx}`,
+    item.speed_configured === false ? null : item.speed_mbps,
+    item.role,
+  ))
   if (rows.length === 0) {
-    rows.push({ index: 1, name: 'GigabitEthernet0/1', speed_mbps: 1000, preset: 1000 })
+    rows = rowsFromAliases(endpoint.value?.flow_interface_aliases)
+  }
+  if (rows.length === 0) {
+    rows.push(editRow(1, 'GigabitEthernet0/1', null, 'lan'))
   }
   editingInterfaces.value = rows
   showInterfaceModal.value = true
@@ -1267,7 +1209,7 @@ function openInterfaceModal() {
 
 function addInterfaceRow() {
   const nextIdx = (editingInterfaces.value.length + 1)
-  editingInterfaces.value.push({ index: nextIdx, name: `GigabitEthernet0/${nextIdx}`, speed_mbps: 1000, preset: 1000 })
+  editingInterfaces.value.push(editRow(nextIdx, `GigabitEthernet0/${nextIdx}`, null, 'lan'))
 }
 
 function removeInterfaceRow(index) {
@@ -1275,25 +1217,14 @@ function removeInterfaceRow(index) {
 }
 
 function onPresetChange(row) {
-  if (row.preset !== 'custom') {
-    row.speed_mbps = Number(row.preset)
-  }
+  applyPreset(row)
 }
 
 async function saveInterfaces() {
   if (!endpoint.value) return
   savingInterfaces.value = true
   try {
-    const payload = {}
-    for (const row of editingInterfaces.value) {
-      const idxStr = String(row.index).trim()
-      if (idxStr) {
-        payload[idxStr] = {
-          name: row.name.trim() || `if${idxStr}`,
-          speed_mbps: Number(row.speed_mbps) || 1000
-        }
-      }
-    }
+    const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(endpoint.value.id, payload)
     endpoint.value.flow_interface_aliases = payload
     showInterfaceModal.value = false
@@ -1307,10 +1238,16 @@ async function saveInterfaces() {
 }
 
 const events = shallowRef([])
+// Charts (timeline, RTT trend, correlated view) read the whole period, independent of which
+// audit-table page is showing. Capped at CHART_EVENT_LIMIT state records, most recent first.
+const CHART_EVENT_LIMIT = 1500
+const chartSourceEvents = shallowRef([])
+const chartEventsTotal = ref(0)
+const chartEventsTruncated = computed(() => chartEventsTotal.value > chartSourceEvents.value.length)
 
 const indexedEvents = computed(() => {
   const nowMs = Date.now()
-  return events.value.map((ev) => ({
+  return chartSourceEvents.value.map((ev) => ({
     raw: ev,
     startMs: Date.parse(ev.start_time) || 0,
     endMs: ev.end_time ? (Date.parse(ev.end_time) || nowMs) : nowMs,
@@ -1324,159 +1261,60 @@ const chartEvents = computed(() => {
 })
 
 const sortedEvents = computed(() => {
-  return [...indexedEvents.value]
-    .sort((a, b) => b.startMs - a.startMs)
-    .map((item) => item.raw)
+  return [...events.value].sort((a, b) => (Date.parse(b.start_time) || 0) - (Date.parse(a.start_time) || 0))
 })
 
-const correlatedChartData = computed(() => {
+// Bandwidth on the same linear time axis as the latency panel above it.
+const correlatedBandwidthData = computed(() => {
+  const series = theme.value.series
   const points = flowSeriesPoints.value
-  const labels = new Array(points.length)
-  const inData = new Array(points.length)
-  const outData = new Array(points.length)
-  const rttData = new Array(points.length)
-
-  // Pre-sorted RTT intervals: O(M log M) once per computation
-  const rttIntervals = indexedEvents.value
-    .filter((item) => item.raw.avg_rtt_ms != null)
-    .sort((a, b) => a.startMs - b.startMs)
-
-  const fallbackRtt = endpoint.value?.avg_rtt_ms != null ? Number(endpoint.value.avg_rtt_ms) : 0
-  const mLen = rttIntervals.length
-  let cursor = 0
-
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i]
-    const pTime = Date.parse(p.timestamp) || 0
-    const d = new Date(pTime)
-    labels[i] = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    inData[i] = p.ingress_bps
-    outData[i] = p.egress_bps
-
-    let closestRtt = null
-    if (mLen > 0) {
-      while (cursor + 1 < mLen && rttIntervals[cursor].endMs < pTime) {
-        cursor++
-      }
-      const cur = rttIntervals[cursor]
-      if (pTime >= cur.startMs && pTime <= cur.endMs) {
-        closestRtt = cur.raw.avg_rtt_ms
-      } else {
-        const distCur = pTime < cur.startMs ? cur.startMs - pTime : pTime - cur.endMs
-        if (cursor > 0) {
-          const prev = rttIntervals[cursor - 1]
-          const distPrev = pTime < prev.startMs ? prev.startMs - pTime : pTime - prev.endMs
-          closestRtt = distPrev <= distCur ? prev.raw.avg_rtt_ms : cur.raw.avg_rtt_ms
-        } else {
-          closestRtt = cur.raw.avg_rtt_ms
-        }
-      }
-    }
-    const resolved = closestRtt ?? fallbackRtt
-    rttData[i] = Number(Number(resolved).toFixed(1))
-  }
-
+  const xy = (key) => points.map((p) => ({ x: Date.parse(p.timestamp), y: p[key] || 0 }))
   const matched = selectedCorrelatedInterfaceIdx.value !== null
-    ? interfaceTelemetry.value?.find(i => i.interface_idx === selectedCorrelatedInterfaceIdx.value)
+    ? interfaceTelemetry.value?.find((i) => i.interface_idx === selectedCorrelatedInterfaceIdx.value)
     : null
-  const ifName = matched?.interface_name || matched?.name || (selectedCorrelatedInterfaceIdx.value !== null ? `Interface #${selectedCorrelatedInterfaceIdx.value}` : '')
-
-  const inLabel = ifName ? `${ifName} Ingress (bps)` : 'Ingress (bps)'
-  const outLabel = ifName ? `${ifName} Egress (bps)` : 'Egress (bps)'
-
+  const prefix = matched ? `${matched.name} ` : ''
   return {
-    labels,
     datasets: [
-      {
-        label: 'ICMP Latency (ms)',
-        data: rttData,
-        borderColor: '#f59e0b',
-        backgroundColor: 'rgba(245, 158, 11, 0.15)',
-        borderWidth: 2,
-        yAxisID: 'y_rtt',
-        tension: 0.2,
-        pointRadius: points.length > 100 ? 0 : 2,
-      },
-      {
-        label: inLabel,
-        data: inData,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.15)',
-        borderWidth: 2,
-        yAxisID: 'y_bandwidth',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 0,
-      },
-      {
-        label: outLabel,
-        data: outData,
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.15)',
-        borderWidth: 2,
-        yAxisID: 'y_bandwidth',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 0,
-      },
+      flowDataset(`${prefix}Ingress (bps)`, xy('ingress_bps'), series.in),
+      flowDataset(`${prefix}Egress (bps)`, xy('egress_bps'), series.out),
     ],
   }
 })
 
-const correlatedChartOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  animation: false,
-  normalized: true,
-  scales: {
-    x: { grid: { display: false }, ticks: { color: '#888', font: { size: 11 } } },
-    y_rtt: {
-      type: 'linear',
-      position: 'left',
-      grid: { color: 'rgba(245, 158, 11, 0.15)' },
-      title: {
-        display: true,
-        text: 'ICMP Latency (ms)',
-        color: '#f59e0b',
-        font: { family: 'JetBrains Mono', size: 11 },
+const correlatedBandwidthOptions = computed(() => {
+  const t = theme.value
+  const start = Date.parse(flowRange.value.start)
+  const end = Date.parse(flowRange.value.end)
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: 'nearest', axis: 'x', intersect: false },
+    scales: {
+      x: {
+        type: 'linear',
+        min: start,
+        max: end,
+        grid: { display: false },
+        ticks: { color: t.text, font: { size: 11 }, maxTicksLimit: 6, callback: (v) => formatAxisTime(v, flowWindow.value) },
       },
-      ticks: {
-        color: '#f59e0b',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => `${val} ms`,
-      },
-    },
-    y_bandwidth: {
-      type: 'linear',
-      position: 'right',
-      grid: { drawOnChartArea: false },
-      title: {
-        display: true,
-        text: 'Bandwidth (bps)',
-        color: '#0ea5e9',
-        font: { family: 'JetBrains Mono', size: 11 },
-      },
-      ticks: {
-        color: '#0ea5e9',
-        font: { family: 'JetBrains Mono', size: 11 },
-        callback: (val) => formatBps(val),
+      y: {
+        beginAtZero: true,
+        grid: { color: t.grid },
+        ticks: { color: t.text, font: { family: t.fontMono, size: 11 }, callback: (val) => formatBps(val) },
       },
     },
-  },
-  plugins: {
-    legend: { position: 'top', labels: { color: '#888', font: { size: 11 } } },
-    tooltip: {
-      callbacks: {
-        label: (context) => {
-          if (context.dataset.yAxisID === 'y_rtt') {
-            return `ICMP Latency: ${context.parsed.y} ms`
-          }
-          return `${context.dataset.label}: ${formatBps(context.parsed.y)}`
+    plugins: {
+      legend: { position: 'top', labels: { color: t.text, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          title: (items) => (items.length ? new Date(items[0].parsed.x).toLocaleString() : ''),
+          label: (ctx) => `${ctx.dataset.label}: ${formatBps(ctx.parsed.y)}`,
         },
       },
     },
-  },
-}
+  }
+})
 
 const toggleTheme = () => {
   isDarkMode.value = !isDarkMode.value
@@ -1652,34 +1490,52 @@ const onDensityChange = () => {
   loadTableEvents()
 }
 
-const loadData = async () => {
+let perspectiveChosen = false
+
+// `refresh` (the 60 s poll) keeps the audit table on its current page.
+const loadData = async ({ refresh = false } = {}) => {
   loading.value = true
   error.value = null
-  tablePage.value = 1
-  
+  if (!refresh) tablePage.value = 1
+
   const { start, end } = getQueryRange()
   periodStartStr.value = start
   periodEndStr.value = end
-  
+
   try {
-    const [endpointRes, uptimeRes, tableEventsRes] = await Promise.all([
+    const [endpointRes, uptimeRes, tableEventsRes, chartEventsRes, periodProbeRes, probe24hRes] = await Promise.all([
       getEndpoint(endpointId),
       getUptimeReport(endpointId, start, end),
-      getEndpointEvents(endpointId, start, end, 1, tableSize.value) // Fetch paginated events starting from page 1
+      getEndpointEvents(endpointId, start, end, tablePage.value, tableSize.value),
+      getEndpointEvents(endpointId, start, end, 1, CHART_EVENT_LIMIT),
+      loadProbe(start, end),
+      loadProbe(null, null),
     ])
-    
+    periodProbe.value = periodProbeRes
+    probe24h.value = probe24hRes
+
     endpoint.value = endpointRes.data.data
     uptimeReport.value = uptimeRes.data.data
     events.value = tableEventsRes.data.data
-    
     totalEvents.value = tableEventsRes.data.meta?.total || 0
     totalPages.value = tableEventsRes.data.meta?.total_pages || 1
+    chartSourceEvents.value = chartEventsRes.data.data || []
+    chartEventsTotal.value = chartEventsRes.data.meta?.total || chartSourceEvents.value.length
 
-    if (endpoint.value.device_role === 'FLOW_EXPORTER') {
-      activePerspective.value = 'flow'
+    // Open flow exporters on the flow tab once; later refreshes keep the tab the user chose.
+    // Other devices export nothing, so their flow tab opens on their own traffic.
+    if (!perspectiveChosen) {
+      perspectiveChosen = true
+      const exportsFlows = endpoint.value.device_role === 'FLOW_EXPORTER' || (endpoint.value.flow_exporter_ips || []).length > 0
+      if (exportsFlows) {
+        activePerspective.value = 'flow'
+      } else {
+        flowMode.value = 'participant'
+      }
     }
     if (activePerspective.value === 'flow') {
       await loadFlowTelemetry()
+      if (refresh) convRefreshKey.value++
     }
   } catch (err) {
     console.error('Failed to query endpoint telemetry:', err)
@@ -1716,12 +1572,9 @@ const formatDate = (isoString) => {
   return new Date(isoString).toLocaleString()
 }
 
-const getUptimeClass = (pct) => {
-  if (pct >= 99.9) return 'perfect'
-  if (pct >= 99.0) return 'good'
-  if (pct >= 95.0) return 'warning'
-  return 'critical'
-}
+const UPTIME_CLASS_BY_TONE = { up: 'perfect', warn: 'warning', down: 'critical', unknown: '' }
+
+const getUptimeClass = (pct) => UPTIME_CLASS_BY_TONE[uptimeTone(pct)]
 
 const getHealthClass = (score) => {
   if (score >= 95) return 'text-success'
@@ -1759,10 +1612,7 @@ onMounted(() => {
   // Establish a 60-second polling interval to fetch fresh telemetry data
   pollInterval = setInterval(() => {
     if (!loading.value) {
-      loadData()
-      if (activePerspective.value === 'flow') {
-        loadFlowTelemetry()
-      }
+      loadData({ refresh: true })
     }
   }, 60000)
 
@@ -1801,12 +1651,81 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.header-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: var(--control-height-sm);
+  padding: 0 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+}
+
+.header-chip strong {
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.header-chip.chip-on strong {
+  color: var(--status-text-up);
+}
+
+.header-chip.chip-off strong {
+  color: var(--status-text-unknown);
+}
+
+.status-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem 1.5rem;
+  margin: 1.25rem 0 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.status-cell dt {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.status-cell dd {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.flow-chart-box.flow-chart-box-compact {
+  height: 220px;
+  margin-top: 0.75rem;
+}
+
+.value-muted {
+  color: var(--status-text-unknown);
+}
+
+.iface-speed-unset {
+  color: var(--status-text-warn);
+  font-weight: 600;
+}
+
 .detail-wrapper {
   min-height: 100vh;
   background-color: var(--canvas-bg);
 }
-
-
 
 .detail-container {
   padding: 2rem;
@@ -1824,53 +1743,6 @@ onBeforeUnmount(() => {
 .device-actions {
   display: flex;
   gap: 0.75rem;
-}
-
-.status-badge {
-  font-size: 0.8rem;
-  font-weight: 700;
-  padding: 0.35rem 0.75rem;
-  border-radius: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background-color: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
-.status-badge.active {
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.status-badge.disabled {
-  color: var(--text-muted);
-  border-color: var(--border-color);
-}
-
-.monitoring-badge {
-  font-size: 0.8rem;
-  font-weight: 700;
-  padding: 0.35rem 0.75rem;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background-color: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
-.monitoring-badge.enabled {
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.monitoring-badge.disabled {
-  border: 1px solid var(--status-down-color);
-  color: var(--status-down-color);
 }
 
 .loading-state {
@@ -2044,12 +1916,6 @@ h2 {
   letter-spacing: 0.05em;
 }
 
-.range-buttons {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
 .toolbar-right {
   display: flex;
   align-items: center;
@@ -2064,36 +1930,6 @@ h2 {
     justify-content: flex-end;
   }
 }
-
-.date-input-group {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.date-input-group label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.date-picker-input {
-  background-color: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 4px;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.85rem;
-  outline: none;
-  font-family: monospace;
-  color: var(--text-primary);
-}
-
-.date-picker-input:focus {
-  border-color: #049f6c;
-}
-
 /* Metrics Cards Grid */
 .metrics-grid {
   display: grid;
@@ -2160,7 +1996,6 @@ h2 {
 }
 
 .value.perfect { color: var(--text-primary); }
-.value.good { color: var(--text-primary); }
 .value.warning { color: var(--status-warn-color); }
 .value.critical { color: var(--status-down-color); }
 
@@ -2275,21 +2110,6 @@ h2 {
 .text-warning { color: var(--status-warn-color); }
 .text-danger { color: var(--status-down-color); }
 
-.table-badge {
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.table-badge.up {
-  color: var(--status-up-color);
-}
-
-.table-badge.down {
-  color: var(--status-down-color);
-}
-
 .table-detail-badge {
   font-size: 0.75rem;
   font-weight: 700;
@@ -2298,46 +2118,16 @@ h2 {
 }
 
 .table-detail-badge.up {
-  color: var(--status-up-color);
+  color: var(--status-text-up);
 }
 
 .table-detail-badge.up-unstable,
 .table-detail-badge.down-unstable {
-  color: var(--status-warn-color);
+  color: var(--status-text-warn);
 }
 
 .table-detail-badge.down {
-  color: var(--status-down-color);
-}
-
-/* PrimeVue Button custom scoping overrides */
-:deep(.p-button) {
-  background-color: var(--bg-surface) !important;
-  border: 1px solid var(--border-color) !important;
-  color: var(--text-secondary) !important;
-  font-family: monospace !important;
-  font-size: 0.85rem !important;
-  font-weight: 700 !important;
-  border-radius: 4px !important;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  transition: all 0.15s ease;
-}
-:deep(.p-button:hover) {
-  background-color: var(--bg-surface-hover) !important;
-  border-color: var(--border-color-strong) !important;
-  color: var(--text-primary) !important;
-}
-/* When button is active (i.e. not outlined) */
-:deep(.p-button:not(.p-button-outlined)) {
-  background-color: var(--text-primary) !important;
-  border-color: var(--text-primary) !important;
-  color: var(--text-inverse) !important;
-}
-:deep(.p-button:not(.p-button-outlined):hover) {
-  background-color: var(--text-secondary) !important;
-  border-color: var(--text-secondary) !important;
-  color: var(--text-inverse) !important;
+  color: var(--status-text-down);
 }
 /* Back button specific */
 .back-btn {
@@ -2351,40 +2141,6 @@ h2 {
   border: 1px solid var(--status-down-color) !important;
   color: var(--status-down-color) !important;
 }
-:deep(.p-button-danger:hover) {
-  background-color: var(--bg-surface-hover) !important;
-  border-color: var(--status-down-color) !important;
-  color: var(--status-down-color) !important;
-}
-/* Text button (header menu navigation) */
-:deep(.p-button-text) {
-  background: transparent !important;
-  border-color: transparent !important;
-  color: var(--text-secondary) !important;
-}
-:deep(.p-button-text:hover) {
-  background-color: var(--bg-surface-selected) !important;
-  color: var(--text-primary) !important;
-}
-:deep(.p-button-text.p-button-danger:hover) {
-  background-color: var(--bg-surface-selected) !important;
-  color: var(--status-down-color) !important;
-}
-
-/* ==========================================================================
-   Light Mode Theme Scoping Overrides (Remaining wrapper variables)
-   ========================================================================== */
-
-
-.version-tag {
-  font-family: monospace;
-  font-size: 0.75rem;
-  color: var(--text-muted, #737373);
-  margin-left: 0.25rem;
-  font-weight: 500;
-  text-transform: none;
-}
-
 
 /* Compact Table Pagination Footer Styles */
 .table-pagination-footer {
@@ -2458,8 +2214,6 @@ h2 {
 .density-dropdown:focus, .density-dropdown:hover {
   border-color: var(--text-secondary);
 }
-
-
 
 .form-row {
   display: grid;
@@ -2637,33 +2391,6 @@ h2 {
   display: flex;
   gap: 0.5rem;
   margin-bottom: 1rem;
-}
-
-.subview-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  padding: 0.4rem 0.85rem;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.subview-btn:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
-}
-
-.subview-btn.active {
-  background: rgba(14, 165, 233, 0.15);
-  border-color: #0ea5e9;
-  color: #0ea5e9;
-  font-weight: 600;
 }
 
 .interface-meter-grid {
@@ -2851,11 +2578,27 @@ h2 {
   color: var(--text-muted);
 }
 
+.iface-wan {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-selected);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
 /* Interface Configuration Modal */
 .modal-subtitle {
   font-size: 0.85rem;
   color: var(--text-secondary);
   margin-bottom: 1rem;
+}
+
+/* Index, name, role, speed and remove fit side by side; the global card is 520px. */
+.modal-card.wide {
+  max-width: 760px;
 }
 
 .interface-config-list {
@@ -2880,10 +2623,41 @@ h2 {
 
 .name-col {
   flex: 1;
+  min-width: 0;
 }
 
 .preset-col {
   width: 170px;
+}
+
+.role-col {
+  width: 130px;
+}
+
+.flow-paths-card {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
+.flow-paths-note {
+  margin: 0 0 12px;
+  font-size: var(--text-sm);
+  color: var(--status-text-warn);
+}
+
+.flow-path-stale td {
+  color: var(--text-muted);
+}
+
+.flow-route-changes {
+  margin-top: 12px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.flow-route-changes ul {
+  margin: 6px 0 0;
+  padding-left: 1.1rem;
 }
 
 .speed-col {
@@ -2956,16 +2730,6 @@ h2 {
   border-color: var(--border-color-strong);
 }
 
-.badge-window {
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-}
-
 /* Section header split */
 .section-header-split {
   display: flex;
@@ -2973,215 +2737,5 @@ h2 {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-}
-
-/* Metric Mode Switcher Pills */
-.metric-mode-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-pill:hover {
-  color: var(--text-primary);
-}
-
-.btn-pill.active {
-  background: var(--bg-surface, #ffffff);
-  color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-}
-
-html.dark .btn-pill.active {
-  background: rgba(255, 255, 255, 0.12);
-  color: #ffffff;
-}
-
-.btn-pill-sm {
-  padding: 2px 8px;
-  font-size: 0.7rem;
-}
-
-/* Service Port Badges */
-.service-port-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-family: var(--font-mono, monospace);
-  font-weight: 600;
-}
-
-.port-web {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.port-dns {
-  background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.port-ssh {
-  background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-
-.port-telemetry {
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.port-generic {
-  background: rgba(107, 114, 128, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-/* Physics & Profiles */
-.physics-profile-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.badge-profile {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  width: fit-content;
-}
-
-.badge-profile-bulk {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.badge-profile-syn {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-profile-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.badge-profile-micro {
-  background: rgba(139, 92, 246, 0.15);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-}
-
-.badge-profile-voip {
-  background: rgba(6, 182, 212, 0.15);
-  color: #06b6d4;
-  border: 1px solid rgba(6, 182, 212, 0.35);
-}
-
-.badge-profile-interactive {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.packet-physics-meta {
-  font-size: 0.6875rem;
-  white-space: nowrap;
-}
-
-/* Forensic L3/L4 Telemetry & Anomaly Badges */
-.metadata-badge-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.badge-tcp-flags {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  background: rgba(100, 116, 139, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.badge-anomaly {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.badge-syn-only {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-tcp-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.badge-dscp {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.badge-dscp-ef {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border-color: rgba(16, 185, 129, 0.4);
-  font-weight: 700;
-}
-
-.badge-dscp-af {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
-  border-color: rgba(59, 130, 246, 0.4);
 }
 </style>

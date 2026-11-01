@@ -1,6 +1,6 @@
 """Zero-dependency SQL Compiler, PostgreSQL DDL Generator & asyncpg ORM Engine.
 
-Ephemres Vertical Integration Architecture (v3.3.2v) - Stage 5C.
+Ephemres Vertical Integration Architecture (v3.3.5) - Stage 5C.
 Eliminates sqlalchemy[asyncio] external dependency from backend/requirements.txt,
 providing a 100% Python Standard Library + asyncpg drop-in engine covering:
 1. Declarative Models (DeclarativeBase, Mapped, mapped_column, Column, relationship, joinedload)

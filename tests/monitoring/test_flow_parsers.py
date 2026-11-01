@@ -60,7 +60,7 @@ class TestNetflowV5Parser(unittest.TestCase):
             rec = RECORD_STRUCT.pack(
                 src_ip_int,
                 dst_ip_int,
-                0,  # nexthop
+                struct.unpack("!I", socket.inet_aton(r.get("next_hop", "0.0.0.0")))[0],
                 r.get("input_if", 1),
                 r.get("output_if", 2),
                 r.get("packets", 10),

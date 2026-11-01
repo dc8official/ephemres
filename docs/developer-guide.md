@@ -1,12 +1,12 @@
-# Ephemres Developer & Contributor Guide — Version 3.3.2.v
+# Ephemres Developer & Contributor Guide — Version 3.3.5
 
-This guide details how to set up a local development environment for the Ephemres Network Monitoring Platform v3.3.2.v and outlines coding standards for the **Vertical Integration Architecture**.
+This guide details how to set up a local development environment for the Ephemres Network Monitoring Platform v3.3.5 and outlines coding standards for the **Vertical Integration Architecture**.
 
 ---
 
 ## 1. Architectural Philosophy
 
-Ephemres v3.3.2.v operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
+Ephemres v3.3.5 operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
 
 > [!IMPORTANT]
 > **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 13 Layer 0 engines in `backend/app/core/`.
@@ -24,7 +24,7 @@ ephemres/
 │   │   │   ├── orm.py          # Native Async ORM compiled directly over asyncpg
 │   │   │   ├── schema.py       # Pure-stdlib SchemaModel validation & serialization
 │   │   │   ├── faststore.py    # In-RAM /dev/shm SQLite WAL cache, pub/sub & streams
-│   │   │   ├── migrator.py     # Native async migration engine (0001-0013)
+│   │   │   ├── migrator.py     # Native async migration engine (0001-0017)
 │   │   │   ├── crypto.py       # Scrypt key derivation & AES-256-GCM encryption
 │   │   │   ├── restore.py      # Cross-version database backup restoration engine
 │   │   │   ├── http_client.py  # Asynchronous socket HTTP client with SSRF defense
@@ -39,7 +39,7 @@ ephemres/
 │   │   ├── services/       # Domain business logic & alert dispatchers
 │   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
-│   ├── migrations/         # Migration versions (0001-0013)
+│   ├── migrations/         # Migration versions (0001-0017)
 │   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon

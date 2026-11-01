@@ -4,6 +4,7 @@
       No RTT data available for this period.
     </div>
     <div v-else class="chart-wrapper">
+      <p class="sr-only">{{ summary }}</p>
       <LineChart :key="isDark" :data="chartData" :options="chartOptions" />
     </div>
   </div>
@@ -12,6 +13,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { Line as LineChart } from 'vue-chartjs'
+import { summarizeSeries } from '../utils/chartSummary.js'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -65,6 +67,15 @@ onBeforeUnmount(() => {
 const validEvents = computed(() => {
   return props.events.filter(ev => ev.avg_rtt_ms != null)
 })
+
+// Text alternative for the canvas chart.
+const summary = computed(() =>
+  summarizeSeries(
+    'Round-trip time per state period',
+    validEvents.value.map((ev) => ({ t: Date.parse(ev.start_time), v: Number(ev.avg_rtt_ms) })),
+    (v) => `${v.toFixed(1)} ms`
+  )
+)
 
 const hasData = computed(() => {
   return validEvents.value.length > 0

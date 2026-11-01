@@ -1,6 +1,6 @@
 # Ephemres Security Model, Threat Architecture & Defense Specification
 
-**Document Version:** 3.3.2.v  
+**Document Version:** 3.3.5  
 **Last Updated:** October 2026  
 **Classification:** Public Security Specification & Threat Model  
 
@@ -22,12 +22,13 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.2.v** | Vertical Integration Release | **Active / Current Standard** | Production standard with Vertical Integration Architecture & 12 zero-dependency engines. |
-| **v3.3.0** | Feature & Ingestion Release | **Supported (Frozen Snapshot)** | Supported frozen production snapshot with Flow Exporter & Interface Telemetry. |
-| **v3.1.35s** | Enterprise LTS Release | **Supported (Frozen Snapshot)** | Supported frozen long-term maintenance track. |
-| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.2.v`. |
-| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.2.v` recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.2.v` immediately. |
+| **v3.3.5** | Feature, Telemetry & Route Augmentation Release | **Active / Current Standard** | Current production standard with Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals, and NetFlow Route Augmentation. |
+| **v3.3.2.v** | Vertical Integration Release | **Supported (Production Ready)** | Supported zero-dependency native core release; upgrading to `v3.3.5` is recommended, though `v3.3.2.v` remains safe and supported in production. |
+| **v3.3.0** | Enterprise LTS Release | **Supported (Long-Term Support / LTS)** | Supported long-term maintenance track with Flow Exporter & Interface Telemetry. |
+| **v3.1.35s** | Legacy Release | **Unsupported / End of Support** | No longer supported; upgrade to `v3.3.0` (LTS) or the newest release (`v3.3.5`). |
+| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.5`. |
+| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.0` (LTS) or `v3.3.5` recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.5` immediately. |
 
 ---
 

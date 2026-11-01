@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from uuid import UUID
 
@@ -11,8 +11,14 @@ from app.core.orm import text
 from app.core.orm import AsyncSession
 
 from monitoring.ping import PingResult, classify_ping_result
+from monitoring.probe_samples import closed_event_stats_sql
 
 logger = logging.getLogger(__name__)
+
+# A restart closes the open events and the first cycle after it opens new ones. When the event
+# reopened in the same state ended at most this long before, or ended when the engine stopped
+# (inside a recorded monitoring gap), the state counts as unbroken.
+STATE_CONTINUITY_GAP = timedelta(minutes=5)
 
 _active_background_tasks: set[asyncio.Task] = set()
 
@@ -468,8 +474,13 @@ class StateMachine:
                             monitoring_cycle_count = monitoring_cycle_count + 1,
                             success_count = success_count + :success_count,
                             failed_count = failed_count + :failed_count,
-                            avg_rtt_ms = :avg_rtt_ms,
-                            health_score = :health_score
+                        """
+                        + closed_event_stats_sql(
+                            ":execution_time",
+                            success="success_count + :success_count",
+                            failed="failed_count + :failed_count",
+                        )
+                        + """
                         WHERE id = CAST(:active_event_id AS uuid) AND end_time IS NULL
                         """
                     ),
@@ -477,8 +488,6 @@ class StateMachine:
                         "execution_time": execution_time,
                         "success_count": result.success_count,
                         "failed_count": result.failed_count,
-                        "avg_rtt_ms": result.avg_rtt_ms,
-                        "health_score": result.health_score,
                         "active_event_id": str(state.active_event_id),
                     },
                 )
@@ -497,6 +506,7 @@ class StateMachine:
                                 avg_rtt_ms,
                                 is_split_event,
                                 start_time,
+                                state_since,
                                 end_time,
                                 duration_seconds,
                                 monitoring_cycle_count
@@ -510,6 +520,8 @@ class StateMachine:
                                 :avg_rtt_ms,
                                 true,
                                 :start_time,
+                                (SELECT COALESCE(state_since, start_time) FROM endpoint_events
+                                 WHERE id = CAST(:active_event_id AS uuid)),
                                 NULL,
                                 0,
                                 1
@@ -525,6 +537,7 @@ class StateMachine:
                             "health_score": result.health_score,
                             "avg_rtt_ms": result.avg_rtt_ms,
                             "start_time": execution_time,
+                            "active_event_id": str(state.active_event_id),
                         },
                     )
                 ).fetchone()
@@ -553,7 +566,10 @@ class StateMachine:
                         "active_event_id": str(state.active_event_id),
                     },
                 )
-                # If for some reason no row was updated (e.g., active_event_id was closed or missing), insert a new open event
+                # If for some reason no row was updated (e.g., active_event_id was closed or missing), insert a new open event.
+                # After an engine restart (the startup closed the event) the state goes on: keep
+                # its start when the closed event had this state and ended moments ago or when
+                # the engine stopped.
                 if update_res.rowcount == 0:
                     row = (
                         await db.execute(
@@ -569,6 +585,7 @@ class StateMachine:
                                     avg_rtt_ms,
                                     is_split_event,
                                     start_time,
+                                    state_since,
                                     end_time,
                                     duration_seconds,
                                     monitoring_cycle_count
@@ -582,6 +599,13 @@ class StateMachine:
                                     :avg_rtt_ms,
                                     false,
                                     :start_time,
+                                    (SELECT COALESCE(state_since, start_time) FROM endpoint_events
+                                     WHERE id = CAST(:active_event_id AS uuid)
+                                       AND detailed_state = :continued_state
+                                       AND (end_time >= :continuous_after OR EXISTS (
+                                           SELECT 1 FROM monitoring_service_events gap
+                                           WHERE gap.start_time <= endpoint_events.end_time
+                                             AND (gap.end_time IS NULL OR gap.end_time >= endpoint_events.end_time)))),
                                     NULL,
                                     0,
                                     1
@@ -597,6 +621,9 @@ class StateMachine:
                                 "health_score": result.health_score,
                                 "avg_rtt_ms": result.avg_rtt_ms,
                                 "start_time": execution_time,
+                                "active_event_id": str(state.active_event_id) if state.active_event_id else None,
+                                "continued_state": next_state.confirmed_detailed_state,
+                                "continuous_after": execution_time - STATE_CONTINUITY_GAP,
                             },
                         )
                     ).fetchone()
@@ -608,7 +635,10 @@ class StateMachine:
                     """
                     UPDATE endpoint_events
                     SET end_time = :execution_time,
-                        duration_seconds = EXTRACT(EPOCH FROM (:execution_time - start_time))::integer
+                        duration_seconds = EXTRACT(EPOCH FROM (:execution_time - start_time))::integer,
+                    """
+                    + closed_event_stats_sql(":execution_time", closed_by_cycle=True)
+                    + """
                     WHERE endpoint_id = CAST(:endpoint_id AS uuid) AND end_time IS NULL
                     """
                 ),

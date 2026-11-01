@@ -131,9 +131,12 @@ def test_endpoint_polymorphic_flow_interface_aliases():
     }
     ep = EndpointDetail(**legacy_data)
     assert ep.flow_interface_aliases["1"].name == "GigabitEthernet0/1"
-    assert ep.flow_interface_aliases["1"].speed_mbps == 1000  # Default 1Gbps
+    # CHANGED IN v3.4 PHASE 4: a legacy name carries no speed, so none is reported (it was a
+    # guessed 1 Gbps); utilization already treated these as unset since Phase 1.
+    assert ep.flow_interface_aliases["1"].speed_mbps is None
+    assert ep.flow_interface_aliases["1"].role == "lan"
     assert ep.flow_interface_aliases["2"].name == "TenGigabit0/2"
-    assert ep.flow_interface_aliases["2"].speed_mbps == 1000
+    assert ep.flow_interface_aliases["2"].speed_mbps is None
 
     # Modern v3.3.0 format: {"1": {"name": "WAN", "speed_mbps": 10000}}
     v33_data = {
@@ -202,7 +205,8 @@ def test_flow_exporter_item_polymorphic():
     )
     assert item.device_role == "FLOW_EXPORTER"
     assert item.interface_aliases["1"]["name"] == "Gig0/1"
-    assert item.interface_aliases["1"]["speed_mbps"] == 1000
+    # CHANGED IN v3.4 PHASE 4: no guessed 1 Gbps for a legacy name.
+    assert item.interface_aliases["1"]["speed_mbps"] is None
     assert item.interface_aliases["2"]["name"] == "10G-Uplink"
     assert item.interface_aliases["2"]["speed_mbps"] == 10000
 
@@ -331,15 +335,21 @@ def test_get_interface_telemetry(client):
     mock_ep_res = MagicMock()
     mock_ep_res.scalar_one_or_none.return_value = mock_ep
 
-    # Mock interface rollups query: (if_idx, sum_in_bytes, sum_out_bytes, sum_in_pkts, sum_out_pkts, sum_flow_count)
+    # Coverage query: first bucket with data in the window (here: the whole hour).
+    import datetime as _dt
+    mock_cov_res = MagicMock()
+    mock_cov_res.scalar.return_value = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=2)
+
+    # Interface rollups query: (if_idx, in, out, in_pkts, out_pkts, flows, peak_in, peak_out,
+    # sorted per-minute in_bytes, sorted per-minute out_bytes)
     mock_rollup_rows = [
-        (1, 75000000, 37500000, 50000, 25000, 1000),  # if1: 75MB in, 37.5MB out
-        (2, 500000000, 250000000, 300000, 150000, 5000),  # if2: 500MB in, 250MB out
+        (1, 75000000, 37500000, 50000, 25000, 1000, 5000000, 2500000, [1250000] * 60, [625000] * 60),
+        (2, 500000000, 250000000, 300000, 150000, 5000, 9000000, 4500000, [8333333] * 60, [4166666] * 60),
     ]
     mock_rollups_res = MagicMock()
     mock_rollups_res.all.return_value = mock_rollup_rows
 
-    mock_session.execute.side_effect = [mock_ep_res, mock_rollups_res]
+    mock_session.execute.side_effect = [mock_ep_res, mock_cov_res, mock_rollups_res]
 
     resp = test_client.get(f"/api/v1/bandwidth/interfaces?exporter_id={exporter_id}&window=1h")
     assert resp.status_code == 200
@@ -354,6 +364,11 @@ def test_get_interface_telemetry(client):
     assert if1["in_bps"] > 0
     assert if1["out_bps"] > 0
     assert 0 <= if1["utilization_percentage"] <= 100
+    # 75 MB over the covered hour -> 166,667 bps; busiest minute 5 MB -> 666,667 bps
+    assert if1["in_bps"] == pytest.approx(75_000_000 * 8 / 3600, rel=0.01)
+    assert if1["in_peak_bps"] == pytest.approx(5_000_000 * 8 / 60, rel=0.001)
+    assert if1["in_p95_bps"] == pytest.approx(1_250_000 * 8 / 60, rel=0.001)
+    assert data["data"]["covered_seconds"] == pytest.approx(3600, abs=2)
 
     if2 = next(i for i in data["data"]["interfaces"] if i["interface_idx"] == 2)
     assert if2["name"] == "Ten0/1"
@@ -425,22 +440,17 @@ def test_update_endpoint_interfaces(client):
 
 
 def test_bandwidth_top_talkers_with_exporter_id(client):
+    from tests.backend.flow_mocks import conversation_row, talker_row, top_talkers_results
+
     test_client, mock_session = client
     exporter_id = uuid4()
 
-    mock_src_row = ("10.0.0.5", exporter_id, 5000000, 500)
-    mock_conv_row = ("10.0.0.5", "10.0.0.20", 6, 443, 5000000, 500)
-
-    m1 = MagicMock()
-    m1.all.return_value = [mock_src_row]
-    m_in = MagicMock()
-    m_in.all.return_value = []
-    m_ep = MagicMock()
-    m_ep.all.return_value = [(exporter_id, "Edge-Router")]
-    m2 = MagicMock()
-    m2.all.return_value = [mock_conv_row]
-
-    mock_session.execute.side_effect = [m1, m_in, m_ep, m2]
+    mock_session.execute.side_effect = top_talkers_results(
+        talkers=[talker_row("10.0.0.5", exporter_id, ingress=0, egress=5000000, flows=500)],
+        hostnames=[(exporter_id, "Edge-Router")],
+        conversations=[conversation_row("10.0.0.5", "10.0.0.20", 6, 443, 5000000, 500)],
+        conversation_hostnames=[],
+    )
 
     resp = test_client.get(f"/api/v1/bandwidth/top-talkers?window=1h&exporter_id={exporter_id}")
     assert resp.status_code == 200
@@ -449,6 +459,9 @@ def test_bandwidth_top_talkers_with_exporter_id(client):
     assert len(data["data"]["top_endpoints"]) == 1
     assert len(data["data"]["top_conversations"]) == 1
     assert data["data"]["top_conversations"][0]["src_ip"] == "10.0.0.5"
+    # The exporter filter reaches both the talker and the conversation SQL
+    sqls = [str(c.args[0]) for c in mock_session.execute.call_args_list]
+    assert sum("exporter_id = CAST(:exporter_id AS uuid)" in q for q in sqls) >= 2
 
 
 # ==============================================================================

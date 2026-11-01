@@ -32,6 +32,11 @@ class PingResult:
     success_count: int
     failed_count: int
     avg_rtt_ms: Optional[float]
+    # Per-cycle spread, None when no reply arrived or the individual RTTs are unknown.
+    min_rtt_ms: Optional[float] = None
+    max_rtt_ms: Optional[float] = None
+    # Mean absolute difference between consecutive replies (RFC 3550 style, unsmoothed).
+    jitter_ms: Optional[float] = None
 
     @property
     def health_score(self) -> float:
@@ -45,7 +50,29 @@ class PingResult:
         return self.success_count + self.failed_count
 
 
+def result_from_rtts(rtts: List[float], count: int) -> PingResult:
+    """Build a cycle result from the RTTs (ms) of the replies that arrived out of `count` probes."""
+    success_count = len(rtts)
+    failed_count = max(0, count - success_count)
+    if success_count == 0:
+        return PingResult(success_count=0, failed_count=failed_count, avg_rtt_ms=None)
+    jitter = None
+    if success_count > 1:
+        jitter = round(sum(abs(b - a) for a, b in zip(rtts, rtts[1:])) / (success_count - 1), 3)
+    return PingResult(
+        success_count=success_count,
+        failed_count=failed_count,
+        avg_rtt_ms=round(sum(rtts) / success_count, 3),
+        min_rtt_ms=round(min(rtts), 3),
+        max_rtt_ms=round(max(rtts), 3),
+        jitter_ms=jitter,
+    )
+
+
 _subprocess_ping_semaphore = asyncio.Semaphore(25)
+
+# The raw-socket fallback is per cycle; log it once instead of once per endpoint per minute.
+_raw_fallback_logged = False
 
 # Monotonically incrementing identifier counter to prevent (ident, seq) collisions
 _ident_counter = os.getpid() & 0xFFFF
@@ -316,6 +343,10 @@ async def _run_raw_socket_ping_cycle(
     """Tier 1: Multiplexed singleton SOCK_RAW ICMP ping cycle."""
     loop = asyncio.get_running_loop()
     mux = _get_raw_multiplexer(loop, is_ipv6=is_ipv6)
+    if mux.sock is None:
+        # Without CAP_NET_RAW the socket could not be opened. Raise so run_ping_cycle falls back
+        # to the unprivileged socket instead of reporting every probe as lost.
+        raise PermissionError("raw ICMP socket unavailable (CAP_NET_RAW missing?)")
     ident = _next_ident()
 
     rtts: List[float] = []
@@ -326,14 +357,7 @@ async def _run_raw_socket_ping_cycle(
         if seq < count and interval > 0:
             await asyncio.sleep(interval)
 
-    success_count = len(rtts)
-    failed_count = max(0, count - success_count)
-    avg_rtt_ms = round(sum(rtts) / success_count, 3) if success_count > 0 else None
-    return PingResult(
-        success_count=success_count,
-        failed_count=failed_count,
-        avg_rtt_ms=avg_rtt_ms,
-    )
+    return result_from_rtts(rtts, count)
 
 
 async def _run_dgram_socket_ping_cycle(
@@ -425,14 +449,7 @@ async def _run_dgram_socket_ping_cycle(
         except Exception:
             pass
 
-    success_count = len(rtts)
-    failed_count = max(0, count - success_count)
-    avg_rtt_ms = round(sum(rtts) / success_count, 3) if success_count > 0 else None
-    return PingResult(
-        success_count=success_count,
-        failed_count=failed_count,
-        avg_rtt_ms=avg_rtt_ms,
-    )
+    return result_from_rtts(rtts, count)
 
 
 async def run_system_ping_fallback(
@@ -493,6 +510,11 @@ async def run_system_ping_fallback(
             transmitted = count
 
         failed_count = max(0, transmitted - received)
+
+        # Individual replies ("... time=12.3 ms") give the same per-cycle stats as the socket tiers.
+        reply_rtts = [float(m) for m in re.findall(r"time[=<]([\d.]+)\s*ms", stdout_str)]
+        if reply_rtts and len(reply_rtts) == received:
+            return result_from_rtts(reply_rtts, transmitted)
 
         avg_rtt = None
         match_rtt = re.search(r"rtt\s+min/avg/max/mdev\s+=\s+[\d\.]+/(?P<avg>[\d\.]+)/", stdout_str)
@@ -568,9 +590,13 @@ async def run_ping_cycle(
                 is_ipv6=is_ipv6,
             )
         except (PermissionError, OSError) as e:
-            logger.info(
-                f"Privileged raw socket ping failed for {ip_address} ({type(e).__name__}). Retrying with unprivileged SOCK_DGRAM socket..."
-            )
+            global _raw_fallback_logged
+            if not _raw_fallback_logged:
+                logger.warning(
+                    f"Privileged raw socket ping failed for {ip_address} ({type(e).__name__}: {e}). "
+                    "Using unprivileged SOCK_DGRAM sockets; this is logged once per process."
+                )
+                _raw_fallback_logged = True
 
     try:
         return await _run_dgram_socket_ping_cycle(

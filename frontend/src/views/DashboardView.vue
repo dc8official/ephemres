@@ -17,25 +17,11 @@
         </div>
       </div>
       <div class="toolbar-right">
-        <!-- Dual View Switcher -->
-        <div class="view-switcher">
-          <button 
-            class="btn-view" 
-            :class="{ active: viewMode === 'grid' }" 
-            @click="viewMode = 'grid'"
-            title="Visual Card Grid"
-          >
-            ▦ Cards
-          </button>
-          <button 
-            class="btn-view" 
-            :class="{ active: viewMode === 'table' }" 
-            @click="viewMode = 'table'"
-            title="Dense Sortable Data Table"
-          >
-            ☰ Table
-          </button>
-        </div>
+        <SegmentedControl
+          v-model="viewMode"
+          aria-label="Endpoint view"
+          :options="[{ value: 'grid', label: 'Cards', title: 'Card grid' }, { value: 'table', label: 'Table', title: 'Sortable table' }]"
+        />
 
         <TelemetryExportPopover :endpoints="filteredEndpoints" />
 
@@ -58,58 +44,88 @@
 
     <!-- Global Network Health KPI Strip -->
     <div class="kpi-strip">
-      <div 
-        class="kpi-card" 
-        :class="{ active: statusFilter === 'ALL' }" 
-        @click="statusFilter = 'ALL'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = 'ALL'"
-      >
-        <span class="kpi-label">Total Monitored</span>
-        <span class="kpi-value tnum">{{ kpiStats.total }}</span>
-      </div>
+      <KpiTile
+        label="Total"
+        :value="kpiStats.total"
+        clickable
+        :active="statusFilter === 'ALL'"
+        @select="statusFilter = 'ALL'"
+      />
+      <KpiTile
+        label="Up"
+        :value="kpiStats.up"
+        :tone="kpiStats.up ? 'up' : 'neutral'"
+        clickable
+        :active="statusFilter === 'UP'"
+        @select="toggleStatusFilter('UP')"
+      />
+      <KpiTile
+        label="Unstable"
+        :value="kpiStats.unstable"
+        :tone="kpiStats.unstable ? 'warn' : 'neutral'"
+        clickable
+        :active="statusFilter === 'UNSTABLE'"
+        @select="toggleStatusFilter('UNSTABLE')"
+      />
+      <KpiTile
+        label="Down"
+        :value="kpiStats.down"
+        :tone="kpiStats.down ? 'down' : 'neutral'"
+        clickable
+        :active="statusFilter === 'DOWN'"
+        @select="toggleStatusFilter('DOWN')"
+      />
+      <KpiTile
+        label="No status"
+        :value="kpiStats.noStatus"
+        tone="unknown"
+        sub="Passive, paused or not probed yet"
+        clickable
+        :active="statusFilter === 'NO_STATUS'"
+        @select="toggleStatusFilter('NO_STATUS')"
+      />
+      <KpiTile
+        label="Mean uptime (24h)"
+        :value="kpiStats.meanUptime"
+        :unit="kpiStats.meanUptime === null ? '' : '%'"
+        :tone="kpiStats.meanUptime === null ? 'unknown' : uptimeTone(kpiStats.meanUptimeRaw)"
+        :sub="kpiStats.uptimeCount ? `${kpiStats.uptimeCount} monitored · target ${DEFAULT_SLA_TARGET}%` : 'No monitored targets'"
+      />
+    </div>
 
-      <div 
-        class="kpi-card kpi-up" 
-        :class="{ active: statusFilter === 'UP' }" 
-        @click="statusFilter = statusFilter === 'UP' ? 'ALL' : 'UP'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'UP' ? 'ALL' : 'UP'"
-      >
-        <span class="kpi-label">🟢 UP</span>
-        <span class="kpi-value tnum text-up">{{ kpiStats.up }}</span>
-      </div>
-
-      <div 
-        class="kpi-card kpi-unstable" 
-        :class="{ active: statusFilter === 'UNSTABLE' }" 
-        @click="statusFilter = statusFilter === 'UNSTABLE' ? 'ALL' : 'UNSTABLE'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'UNSTABLE' ? 'ALL' : 'UNSTABLE'"
-      >
-        <span class="kpi-label">🟡 UNSTABLE</span>
-        <span class="kpi-value tnum text-unstable">{{ kpiStats.unstable }}</span>
-      </div>
-
-      <div 
-        class="kpi-card kpi-down" 
-        :class="{ active: statusFilter === 'DOWN' }" 
-        @click="statusFilter = statusFilter === 'DOWN' ? 'ALL' : 'DOWN'"
-        role="button"
-        tabindex="0"
-        @keydown.enter="statusFilter = statusFilter === 'DOWN' ? 'ALL' : 'DOWN'"
-      >
-        <span class="kpi-label">🔴 DOWN</span>
-        <span class="kpi-value tnum text-down">{{ kpiStats.down }}</span>
-      </div>
-
-      <div class="kpi-card kpi-sla">
-        <span class="kpi-label">📈 Fleet SLA (24h)</span>
-        <span class="kpi-value tnum text-accent">{{ kpiStats.sla }}%</span>
-      </div>
+    <!-- Search, filters and sort (kept in the URL) -->
+    <div class="filter-bar" role="search">
+      <input
+        v-model="searchQuery"
+        type="search"
+        class="form-input filter-search"
+        placeholder="Search hostname, IP or location"
+        aria-label="Search endpoints"
+      />
+      <label class="filter-field">
+        <span>Type</span>
+        <select v-model="typeFilter" class="form-select">
+          <option value="">All types</option>
+          <option v-for="t in deviceTypeOptions" :key="t" :value="t">{{ t }}</option>
+        </select>
+      </label>
+      <label class="filter-field">
+        <span>Location</span>
+        <select v-model="locationFilter" class="form-select">
+          <option value="">All locations</option>
+          <option v-for="l in locationOptions" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
+      <label class="filter-field">
+        <span>Sort by</span>
+        <select :value="sortKey" class="form-select" @change="applySortOption($event.target.value)">
+          <option v-for="o in SORT_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </label>
+      <span class="filter-count text-muted tnum" aria-live="polite">
+        {{ filteredEndpoints.length === endpoints.length ? `${endpoints.length} endpoints` : `${filteredEndpoints.length} of ${endpoints.length} endpoints` }}
+      </span>
+      <button v-if="hasActiveFilters" type="button" class="btn-text clear-filters" @click="clearFilters">Clear filters</button>
     </div>
 
     <!-- Endpoints Content -->
@@ -132,14 +148,15 @@
       </div>
 
       <div v-else-if="filteredEndpoints.length === 0" class="empty-state">
-        <p class="empty-title">No endpoints match filter "{{ statusFilter }}"</p>
-        <button class="btn-secondary" @click="statusFilter = 'ALL'">Clear Filter</button>
+        <p class="empty-title">No endpoints match these filters</p>
+        <p class="empty-sub">{{ activeFilterSummary }}</p>
+        <button class="btn-secondary" @click="clearFilters">Clear filters</button>
       </div>
 
       <!-- View 1: Visual Card Grid -->
       <div v-else-if="viewMode === 'grid'" class="endpoint-grid">
         <EndpointCard
-          v-for="ep in filteredEndpoints"
+          v-for="ep in sortedEndpoints"
           :key="ep.id"
           :endpoint="ep"
           :isAdmin="isAdmin"
@@ -158,13 +175,15 @@
           <table class="dense-table" aria-label="Monitored Endpoints Table">
             <thead>
               <tr>
-                <th style="width: 40px;">
-                  <input 
-                    type="checkbox" 
-                    :checked="isAllSelected" 
-                    @change="toggleSelectAll"
-                    aria-label="Select all endpoints" 
-                  />
+                <th style="width: 44px;">
+                  <label class="select-target">
+                    <input
+                      type="checkbox"
+                      :checked="isAllSelected"
+                      @change="toggleSelectAll"
+                      aria-label="Select all endpoints"
+                    />
+                  </label>
                 </th>
                 <th @click="handleSort('hostname')" class="sortable-th">
                   Hostname {{ sortKey === 'hostname' ? (sortAsc ? '▲' : '▼') : '' }}
@@ -175,20 +194,21 @@
                 <th @click="handleSort('device_type')" class="sortable-th">
                   Device Type {{ sortKey === 'device_type' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('detailed_state')" class="sortable-th">
-                  State {{ sortKey === 'detailed_state' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('severity')" class="sortable-th" title="Down first, then unstable, up, and endpoints without status">
+                  State {{ sortKey === 'severity' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right">
-                  Avg Latency {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right" title="Mean and 95th percentile RTT over the last 24 hours">
+                  Latency 24h · p95 {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('packet_loss_pct')" class="sortable-th text-right">
-                  Loss % {{ sortKey === 'packet_loss_pct' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('loss_pct')" class="sortable-th text-right" title="Share of probes without a reply over the last 24 hours">
+                  Loss 24h {{ sortKey === 'loss_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
+                <th title="Hourly mean RTT over the last 24 hours">RTT trend</th>
                 <th @click="handleSort('uptime_pct')" class="sortable-th text-right">
                   24h Uptime {{ sortKey === 'uptime_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('last_seen')" class="sortable-th">
-                  Last Seen {{ sortKey === 'last_seen' ? (sortAsc ? '▲' : '▼') : '' }}
+                <th @click="handleSort('last_seen')" class="sortable-th" title="When the current state began">
+                  In state since {{ sortKey === 'last_seen' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
                 <th class="text-right">Actions</th>
               </tr>
@@ -202,12 +222,14 @@
                 @click="navigateTo(ep.id)"
               >
                 <td @click.stop>
-                  <input 
-                    type="checkbox" 
-                    :checked="selectedIdSet.has(ep.id)" 
-                    @change="toggleEndpointSelect(ep.id)"
-                    aria-label="Select endpoint" 
-                  />
+                  <label class="select-target">
+                    <input
+                      type="checkbox"
+                      :checked="selectedIdSet.has(ep.id)"
+                      @change="toggleEndpointSelect(ep.id)"
+                      :aria-label="`Select ${ep.hostname}`"
+                    />
+                  </label>
                 </td>
                 <td class="font-bold">{{ ep.hostname }}</td>
                 <td class="font-mono tnum">{{ ep.ip_address }}</td>
@@ -219,22 +241,33 @@
                   />
                 </td>
                 <td class="font-mono tnum text-right">
-                  {{ ep.avg_rtt_ms != null ? ep.avg_rtt_ms.toFixed(1) + ' ms' : (ep.current_state?.avg_rtt_ms != null ? ep.current_state.avg_rtt_ms.toFixed(1) + ' ms' : '—') }}
+                  <template v-if="probeFor(ep)?.rtt_avg_ms != null">
+                    {{ probeFor(ep).rtt_avg_ms.toFixed(1) }} ms
+                    <span class="text-muted p95">· {{ probeFor(ep).rtt_p95_ms != null ? probeFor(ep).rtt_p95_ms.toFixed(1) : '—' }}</span>
+                  </template>
+                  <template v-else>—</template>
                 </td>
-                <td class="font-mono tnum text-right">
-                  {{ getLossPct(ep) }}
+                <td class="font-mono tnum text-right" :style="{ color: probeFor(ep)?.loss_pct > 0 ? 'var(--status-text-down)' : null }">
+                  {{ formatLoss(probeFor(ep)?.loss_pct) }}
                 </td>
-                <td class="font-mono tnum text-right font-bold">
+                <td>
+                  <Sparkline
+                    :values="probeFor(ep)?.rtt_sparkline || []"
+                    :aria-label="`${ep.hostname} hourly RTT over 24 hours`"
+                    unit=" ms"
+                  />
+                </td>
+                <td class="font-mono tnum text-right font-bold" :style="{ color: toneVar(uptimeTone(uptimeValue(ep))) }">
                   {{ getUptimePct(ep) }}
                 </td>
                 <td class="font-mono tnum text-muted">
-                  {{ formatTimeAgo(ep.last_seen) }}
+                  {{ isMonitored(ep) ? formatTimeAgo(ep.last_seen) : 'Not monitored' }}
                 </td>
                 <td class="text-right" @click.stop>
                   <div class="table-actions">
-                    <button class="btn-action inspect" @click="openInspector(ep)" title="Quick Diagnostics">🔍</button>
-                    <button v-if="isAdmin" class="btn-action" @click="openEditDialog(ep)" title="Edit">✎</button>
-                    <button v-if="isAdmin" class="btn-action text-down" @click="confirmDeleteEndpoint(ep.id)" title="Delete">✕</button>
+                    <button class="btn-action inspect" @click="openInspector(ep)" title="Quick Diagnostics" :aria-label="`Quick diagnostics for ${ep.hostname}`">🔍</button>
+                    <button v-if="isAdmin" class="btn-action" @click="openEditDialog(ep)" title="Edit" :aria-label="`Edit ${ep.hostname}`">✎</button>
+                    <button v-if="isAdmin" class="btn-action text-down" @click="confirmDeleteEndpoint(ep.id)" title="Delete" :aria-label="`Delete ${ep.hostname}`">✕</button>
                   </div>
                 </td>
               </tr>
@@ -358,11 +391,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import { 
-  getEndpoints, 
+  getEndpoints,
+  getProbeSummary,
   createEndpoint, 
   updateEndpoint, 
   deleteEndpoint, 
@@ -375,11 +409,29 @@ import StatusBadge from '../components/StatusBadge.vue'
 import EndpointInspectorDrawer from '../components/EndpointInspectorDrawer.vue'
 import TelemetryExportPopover from '../components/TelemetryExportPopover.vue'
 import { useSSE } from '../composables/useSSE.js'
+import KpiTile from '../components/ui/KpiTile.vue'
+import Sparkline from '../components/ui/Sparkline.vue'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import { endpointStateBucket, isMonitored, meanUptime, uptimeValue } from '../utils/endpointState.js'
+import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 
 const endpoints = ref([])
+// 24 h probe statistics per endpoint id (loss, mean/p95 RTT, hourly sparkline).
+const probeSummary = shallowRef(new Map())
+
+function probeFor(ep) {
+  return isMonitored(ep) ? probeSummary.value.get(ep.id) : undefined
+}
+
+function formatLoss(pct) {
+  if (pct === null || pct === undefined) return '—'
+  if (pct === 0) return '0%'
+  return pct < 1 ? `${pct.toFixed(2)}%` : `${pct.toFixed(1)}%`
+}
 const loading = ref(false)
 const error = ref(null)
 const lastRefreshed = ref(null)
@@ -432,12 +484,48 @@ async function handleRunDiagnostics(ep) {
 }
 
 // View Mode: 'grid' | 'table'
-const viewMode = ref('grid')
-const statusFilter = ref('ALL')
+// View, filters and sort are mirrored in the URL so a filtered dashboard can be bookmarked.
+const STATUS_FILTERS = ['ALL', 'UP', 'UNSTABLE', 'DOWN', 'NO_STATUS']
+const viewMode = ref(route.query.view === 'table' ? 'table' : 'grid')
+const statusFilter = ref(STATUS_FILTERS.includes(route.query.status) ? route.query.status : 'ALL')
+const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
+const typeFilter = ref(typeof route.query.type === 'string' ? route.query.type : '')
+const locationFilter = ref(typeof route.query.location === 'string' ? route.query.location : '')
 
 // Sorting for table view
-const sortKey = ref('hostname')
-const sortAsc = ref(true)
+// Each option sorts the worst case first: most severe state, highest latency or loss, lowest
+// uptime, most recent state change.
+const SORT_OPTIONS = [
+  { value: 'severity', label: 'Severity', asc: true },
+  { value: 'hostname', label: 'Name', asc: true },
+  { value: 'avg_rtt_ms', label: 'Latency (24h)', asc: false },
+  { value: 'loss_pct', label: 'Loss (24h)', asc: false },
+  { value: 'uptime_pct', label: 'Uptime (24h)', asc: true },
+  { value: 'last_seen', label: 'Last state change', asc: false },
+]
+const SORT_KEYS = [...SORT_OPTIONS.map((o) => o.value), 'ip_address', 'device_type']
+const sortKey = ref(SORT_KEYS.includes(route.query.sort) ? route.query.sort : 'severity')
+const sortAsc = ref(route.query.dir ? route.query.dir !== 'desc' : (SORT_OPTIONS.find((o) => o.value === sortKey.value)?.asc ?? true))
+
+function applySortOption(value) {
+  const option = SORT_OPTIONS.find((o) => o.value === value)
+  sortKey.value = value
+  sortAsc.value = option ? option.asc : true
+}
+
+watch([viewMode, statusFilter, searchQuery, typeFilter, locationFilter, sortKey, sortAsc], () => {
+  const defaultAsc = SORT_OPTIONS.find((o) => o.value === sortKey.value)?.asc ?? true
+  const query = {
+    view: viewMode.value === 'table' ? 'table' : undefined,
+    status: statusFilter.value === 'ALL' ? undefined : statusFilter.value,
+    q: searchQuery.value.trim() || undefined,
+    type: typeFilter.value || undefined,
+    location: locationFilter.value || undefined,
+    sort: sortKey.value === 'severity' ? undefined : sortKey.value,
+    dir: sortAsc.value === defaultAsc ? undefined : (sortAsc.value ? 'asc' : 'desc'),
+  }
+  router.replace({ query: Object.fromEntries(Object.entries(query).filter(([, v]) => v !== undefined)) })
+})
 
 const selectedIds = ref([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
@@ -462,57 +550,90 @@ const form = ref({
 })
 
 const kpiStats = computed(() => {
-  const total = endpoints.value.length
-  let up = 0
-  let unstable = 0
-  let down = 0
-
-  endpoints.value.forEach(ep => {
-    const op = ep.current_operational_state || ep.endpoint_status || 'UP'
-    const det = ep.current_detailed_state || op
-    if (det === 'UP' || (op === 'UP' && !det.includes('UNSTABLE'))) {
-      up++
-    } else if (det === 'UP-UNSTABLE' || det === 'DOWN-UNSTABLE' || op === 'UNSTABLE') {
-      unstable++
-    } else if (det === 'DOWN' || op === 'DOWN') {
-      down++
-    } else {
-      up++
-    }
+  const counts = { UP: 0, UNSTABLE: 0, DOWN: 0, NO_STATUS: 0 }
+  endpoints.value.forEach((ep) => {
+    counts[endpointStateBucket(ep)]++
   })
-
-  const totalSla = endpoints.value.reduce((sum, ep) => sum + (parseFloat(ep.uptime_percentage_24h) || 100.0), 0)
-  const fleetSla = total > 0 ? (totalSla / total).toFixed(2) : '100.00'
-  return { total, up, unstable, down, sla: fleetSla }
+  // Mean 24h uptime of actively monitored endpoints only; passive or paused ones have no uptime.
+  const mean = meanUptime(endpoints.value)
+  const uptimeCount = endpoints.value.filter((ep) => uptimeValue(ep) !== null).length
+  return {
+    total: endpoints.value.length,
+    up: counts.UP,
+    unstable: counts.UNSTABLE,
+    down: counts.DOWN,
+    noStatus: counts.NO_STATUS,
+    meanUptimeRaw: mean,
+    meanUptime: mean === null ? null : mean.toFixed(2),
+    uptimeCount,
+  }
 })
 
+const STATUS_FILTER_LABELS = { ALL: 'All', UP: 'Up', UNSTABLE: 'Unstable', DOWN: 'Down', NO_STATUS: 'No status' }
+const statusFilterLabel = computed(() => STATUS_FILTER_LABELS[statusFilter.value] || statusFilter.value)
+
+function toggleStatusFilter(bucket) {
+  statusFilter.value = statusFilter.value === bucket ? 'ALL' : bucket
+}
+
+const deviceTypeOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.device_type).filter(Boolean))].sort())
+const locationOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.location).filter(Boolean))].sort())
+
+const hasActiveFilters = computed(() =>
+  statusFilter.value !== 'ALL' || !!searchQuery.value.trim() || !!typeFilter.value || !!locationFilter.value
+)
+
+const activeFilterSummary = computed(() => {
+  const parts = []
+  if (statusFilter.value !== 'ALL') parts.push(`status ${statusFilterLabel.value}`)
+  if (searchQuery.value.trim()) parts.push(`"${searchQuery.value.trim()}"`)
+  if (typeFilter.value) parts.push(`type ${typeFilter.value}`)
+  if (locationFilter.value) parts.push(`location ${locationFilter.value}`)
+  return parts.length ? `Filtered by ${parts.join(', ')}.` : ''
+})
+
+function clearFilters() {
+  statusFilter.value = 'ALL'
+  searchQuery.value = ''
+  typeFilter.value = ''
+  locationFilter.value = ''
+}
+
 const filteredEndpoints = computed(() => {
-  if (statusFilter.value === 'ALL') return endpoints.value
-  return endpoints.value.filter(ep => {
-    const op = ep.current_operational_state || ep.endpoint_status || 'UP'
-    const det = ep.current_detailed_state || op
-    if (statusFilter.value === 'UP') return det === 'UP' || (op === 'UP' && !det.includes('UNSTABLE'))
-    if (statusFilter.value === 'UNSTABLE') return det === 'UP-UNSTABLE' || det === 'DOWN-UNSTABLE' || op === 'UNSTABLE'
-    if (statusFilter.value === 'DOWN') return det === 'DOWN' || op === 'DOWN'
+  const q = searchQuery.value.trim().toLowerCase()
+  return endpoints.value.filter((ep) => {
+    if (statusFilter.value !== 'ALL' && endpointStateBucket(ep) !== statusFilter.value) return false
+    if (typeFilter.value && ep.device_type !== typeFilter.value) return false
+    if (locationFilter.value && ep.location !== locationFilter.value) return false
+    if (q) {
+      const haystack = [ep.hostname, String(ep.ip_address || ''), ep.location, ep.description]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
     return true
   })
 })
+
+// Down first, then unstable, up, and endpoints without status (passive, paused, not probed).
+const SEVERITY_RANK = { DOWN: 0, UNSTABLE: 1, UP: 2, NO_STATUS: 3 }
 
 const sortedEndpoints = computed(() => {
   const key = sortKey.value
   const asc = sortAsc.value ? 1 : -1
   const decorated = filteredEndpoints.value.map((ep) => {
     let sortVal
-    if (key === 'detailed_state') {
-      sortVal = ep.current_detailed_state || ep.current_operational_state || ep.endpoint_status || ''
+    if (key === 'severity') {
+      sortVal = SEVERITY_RANK[endpointStateBucket(ep)]
     } else if (key === 'avg_rtt_ms') {
-      sortVal = ep.avg_rtt_ms ?? (ep.current_state?.avg_rtt_ms ?? 99999)
-    } else if (key === 'packet_loss_pct') {
-      sortVal = ep.failed_count ?? (ep.current_state?.failed_count ?? 0)
+      sortVal = probeFor(ep)?.rtt_avg_ms ?? null
+    } else if (key === 'loss_pct') {
+      sortVal = probeFor(ep)?.loss_pct ?? null
     } else if (key === 'uptime_pct') {
-      sortVal = parseFloat(ep.uptime_percentage_24h) || 100
+      sortVal = uptimeValue(ep)
     } else if (key === 'last_seen') {
-      sortVal = ep.last_seen ? (Date.parse(ep.last_seen) || 0) : 0
+      sortVal = ep.last_seen ? (Date.parse(ep.last_seen) || null) : null
     } else {
       sortVal = ep[key] ?? ''
     }
@@ -520,9 +641,14 @@ const sortedEndpoints = computed(() => {
   })
 
   decorated.sort((a, b) => {
+    // Missing values (no uptime, never seen) sort last in both directions.
+    const aMissing = a.sortVal === null || a.sortVal === undefined
+    const bMissing = b.sortVal === null || b.sortVal === undefined
+    if (aMissing || bMissing) return aMissing === bMissing ? 0 : aMissing ? 1 : -1
     if (a.sortVal < b.sortVal) return -1 * asc
     if (a.sortVal > b.sortVal) return 1 * asc
-    return 0
+    // Ties (e.g. everything UP) fall back to name so the order is stable.
+    return String(a.ep.hostname || '').localeCompare(String(b.ep.hostname || ''))
   })
 
   return decorated.map((d) => d.ep)
@@ -545,8 +671,7 @@ function handleSort(key) {
   if (sortKey.value === key) {
     sortAsc.value = !sortAsc.value
   } else {
-    sortKey.value = key
-    sortAsc.value = true
+    applySortOption(key)
   }
 }
 
@@ -570,22 +695,10 @@ function formatTimeAgo(dateStr) {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-function getLossPct(ep) {
-  const succ = ep.success_count ?? ep.current_state?.success_count ?? 5
-  const fail = ep.failed_count ?? ep.current_state?.failed_count ?? 0
-  const tot = succ + fail
-  if (tot === 0) return '0%'
-  return `${Math.round((fail / tot) * 100)}%`
-}
-
 function getUptimePct(ep) {
-  if (ep.uptime_percentage_24h != null) {
-    const val = parseFloat(ep.uptime_percentage_24h)
-    return !isNaN(val) ? `${val.toFixed(1)}%` : '100.0%'
-  }
-  const hs = ep.current_health_score ?? ep.current_state?.health_score
-  if (hs != null) return `${hs.toFixed(1)}%`
-  return '100.0%'
+  if (!isMonitored(ep)) return '—'
+  const value = uptimeValue(ep)
+  return value === null ? '—' : `${value.toFixed(1)}%`
 }
 
 const toggleEndpointSelect = (id) => {
@@ -632,8 +745,15 @@ const fetchEndpoints = async (isRetry = false) => {
     error.value = null
   }
   try {
-    const response = await getEndpoints()
+    const [response, probeRes] = await Promise.all([
+      getEndpoints(),
+      getProbeSummary(24).catch((err) => {
+        console.warn('[DashboardView] Probe summary unavailable:', err)
+        return null
+      }),
+    ])
     endpoints.value = response.data.data || []
+    probeSummary.value = new Map((probeRes?.data?.data || []).map((row) => [row.endpoint_id, row]))
     lastRefreshed.value = new Date()
     error.value = null
   } catch (err) {
@@ -871,31 +991,44 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-.view-switcher {
+/* ── Filter bar ── */
+.filter-bar {
   display: flex;
-  background: var(--bg-surface-selected);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 2px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.filter-search {
+  flex: 1 1 16rem;
+  min-height: var(--control-height);
+  max-width: 24rem;
+}
+
+.filter-field {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
-}
-
-.btn-view {
-  background: transparent;
-  border: none;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
 }
 
-.btn-view.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+.filter-field .form-select {
+  min-height: var(--control-height);
+}
+
+.filter-count {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  align-self: center;
+}
+
+.clear-filters {
+  align-self: center;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-decoration: underline;
 }
 
 /* ── KPI Strip ── */
@@ -907,52 +1040,39 @@ onUnmounted(() => {
 
 @media (min-width: 768px) {
   .kpi-strip {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
-.kpi-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+@media (min-width: 1100px) {
+  .kpi-strip {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+.text-down { color: var(--status-text-down); }
+
+.p95 {
+  font-size: var(--text-xs);
+}
+
+/* 24 px hit area around native checkboxes */
+.select-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target-min);
+  min-height: var(--target-min);
   cursor: pointer;
-  transition: all 0.15s ease;
-  user-select: none;
 }
 
-.kpi-card:hover {
-  border-color: var(--border-color-strong);
-  background: var(--bg-surface-hover);
+.select-target input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
-
-.kpi-card.active {
-  border-color: var(--text-primary);
-  background: var(--bg-surface-selected);
-  box-shadow: 0 0 0 1px var(--text-primary);
-}
-
-.kpi-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.kpi-value {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.text-up { color: #10B981; }
-.text-unstable { color: #F59E0B; }
-.text-down { color: #EF4444; }
-.text-accent { color: #3B82F6; }
 
 .tnum {
   font-feature-settings: "tnum";
@@ -1121,6 +1241,11 @@ onUnmounted(() => {
 }
 
 .btn-action {
+  min-width: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 1px solid var(--border-color, #374151);
   color: var(--text-secondary, #9ca3af);

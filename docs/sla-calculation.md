@@ -10,10 +10,12 @@ Traditional monitoring tools send a single ICMP Echo Request every 60 seconds. I
 Ephemres eliminates false-positive SLA penalties through **5-Ping Sub-Cycle Burst Sweeping**:
 * **1-Minute Master Cycle**: Every monitored endpoint is evaluated once per 60-second window.
 * **5-Ping Sub-Cycle Sweep**: Within each 60-second window, `ephemres-engine` (`monitoring/engine.py`) dispatches **5 ICMP Echo Requests** spaced **8.0 seconds apart**, each with a **2.0-second reply timeout** (~32s typical, 42s worst case). Count and spacing come from `[monitoring] ping_count` / `ping_interval_seconds`.
-* **Metrics Captured per Cycle** (`PingResult` in `monitoring/ping.py`, stored on `endpoint_events`):
+* **Metrics Captured per Cycle** (`PingResult` in `monitoring/ping.py`, stored on `endpoint_events` and per-cycle in `endpoint_probe_samples`):
   * `success_count`: replies received (`0` to `5`)
   * `failed_count`: probes without a reply
   * `avg_rtt_ms`: arithmetic mean RTT of the received replies (`NULL` when none)
+  * `min_rtt_ms` / `max_rtt_ms`: minimum and maximum RTT across the received replies (`endpoint_probe_samples`)
+  * `jitter_ms`: mean absolute difference between consecutive received reply RTTs (`endpoint_probe_samples`)
   * `health_score`: `success_count / (success_count + failed_count) × 100`
 
 ---
@@ -68,5 +70,8 @@ Where:
 * `T_online`: Cumulative minutes where `operational_state = 'UP'`.
 * `T_monitored_lifetime`: Total elapsed minutes since the endpoint was onboarded.
 * `T_blackout_neutralized`: Server downtime or excluded maintenance periods during which the monitoring engine was offline.
+* **How engine downtime is recorded (v3.3.5)**: every probe cycle stores its time on the endpoint's open period. When the engine starts, it closes each period it left open at that period's last cycle, and records one `monitoring_service_events` row (`SERVICE_RESTART`) from the earliest of those last cycles until the first cycles after the start have run (about two and a half minutes later). That row is `T_blackout_neutralized`. Stops, crashes, reboots and upgrades are all covered, since nothing has to run at shutdown. Periods last probed more than 5 minutes before the others (endpoints paused before the stop) don't extend the gap. An endpoint in the same state before and after the gap keeps its "In state since".
+  * Before v3.3.5 no gap was recorded: the engine closed the open periods when it started again, so the downtime counted as whatever state the endpoint was in, and the minute or so before its first new cycle counted against it. Reports over that older history keep those figures.
+* **Passive / Unmonitored Endpoint Exclusion**: Endpoints with `monitoring_enabled = false` (such as passive `FLOW_EXPORTER` routers or paused devices) are excluded from Fleet SLA averages, report uptime durations, and executive PDF SLA summaries so non-pingable devices never artificially inflate or penalize fleet availability.
 
 This guarantees mathematically sound SLA compliance reports for client reporting, audits, and executive reviews.

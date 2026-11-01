@@ -3,10 +3,10 @@
     <!-- Header Toolbar -->
     <div class="bandwidth-toolbar">
       <div class="toolbar-left">
-        <h1 class="page-title">Network Bandwidth & Flow Telemetry</h1>
+        <h1 class="page-title">Traffic Analytics</h1>
         <div class="toolbar-sub-row">
           <span class="page-sub">
-            v3.3.2.v Flow Engine
+            v3.3.5 Flow Engine
             <span class="separator">·</span>
             NetFlow v5, NetFlow v9 & IPFIX
           </span>
@@ -75,23 +75,16 @@
           </select>
         </div>
 
-        <!-- Window Filter Pills -->
-        <div class="window-pills" role="group" aria-label="Time Window Selector">
-          <button
-            v-for="w in windowOptions"
-            :key="w"
-            class="btn-pill"
-            :class="{ active: selectedWindow === w }"
-            @click="setWindow(w)"
-            :aria-pressed="selectedWindow === w"
-          >
-            {{ w }}
-          </button>
-        </div>
+        <TimeRangePicker
+          :model-value="selectedWindow"
+          :windows="windowOptions"
+          aria-label="Time window"
+          @update:model-value="setWindow"
+        />
 
         <button
           class="btn-secondary"
-          @click="refreshData"
+          @click="refreshAll"
           :disabled="loading"
           aria-label="Refresh telemetry data"
         >
@@ -186,74 +179,124 @@
       </div>
     </div>
 
-    <!-- Top KPI Metric Strip (5 Cards) -->
+    <template v-if="!isUnmatchedScope">
+    <SegmentedControl
+      class="view-switcher"
+      :model-value="activeView"
+      :options="viewOptions"
+      aria-label="Traffic view"
+      @update:model-value="setView"
+    />
+
+    <!-- ── Overview ── -->
+    <template v-if="activeView === 'overview'">
+    <!-- KPI strip: last five complete minutes for the selected scope -->
+    <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
     <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Total Ingress Rate</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum ingress-text">
-            {{ formatBps(overview.total_ingress_bps) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="font-mono tnum">{{ formatPps(overview.total_ingress_pps) }}</span> packet rate (5m avg)
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Total Egress Rate</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum egress-text">
-            {{ formatBps(overview.total_egress_bps) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="font-mono tnum">{{ formatPps(overview.total_egress_pps) }}</span> packet rate (5m avg)
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Packet Physics (Avg Size)</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum text-accent">
-            {{ overview.avg_packet_size || 0 }} <span class="kpi-unit">B/pkt</span>
-          </span>
-        </div>
-        <div class="kpi-subtext">
-          <span class="badge-packet-profile" :class="getPacketProfileClass(overview.avg_packet_size)">
+      <template v-if="hasWan">
+        <KpiTile
+          label="WAN in"
+          :value="formatBps(overview.wan_in_bps)"
+          :marker="theme.series.in"
+          :sub="`${formatPps(overview.wan_in_pps)} · arriving on ${wanLinksLabel}`"
+        />
+        <KpiTile
+          label="WAN out"
+          :value="formatBps(overview.wan_out_bps)"
+          :marker="theme.series.out"
+          :sub="`${formatPps(overview.wan_out_pps)} · leaving on ${wanLinksLabel}`"
+        />
+      </template>
+      <KpiTile
+        label="Ingress"
+        :value="formatBps(overview.total_ingress_bps)"
+        :marker="theme.series.in"
+        :sub="`${formatPps(overview.total_ingress_pps)} · to monitored hosts`"
+      />
+      <KpiTile
+        label="Egress"
+        :value="formatBps(overview.total_egress_bps)"
+        :marker="theme.series.out"
+        :sub="`${formatPps(overview.total_egress_pps)} · from monitored hosts`"
+      />
+      <KpiTile
+        label="Transit"
+        :value="formatBps(overview.total_transit_bps)"
+        :marker="theme.series.transit"
+        :sub="`${formatPps(overview.total_transit_pps)} · no monitored host on either side`"
+      />
+      <KpiTile label="Avg packet size" :value="overview.avg_packet_size || null" unit="B">
+        <template #sub>
+          <span
+            v-if="overview.avg_packet_size"
+            class="badge-packet-profile"
+            :class="getPacketProfileClass(overview.avg_packet_size)"
+          >
             {{ getPacketProfileLabel(overview.avg_packet_size) }}
           </span>
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Active Flow Exporters</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum">
-            {{ overview.active_exporters_count }}
-          </span>
-          <span class="kpi-denom">/ {{ totalEndpointsCount }} nodes</span>
-        </div>
-        <div class="kpi-subtext">Cisco, Juniper, Fortinet, Linux</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Monitored Flows &amp; Anomalies</div>
-        <div class="kpi-value-row">
-          <span class="kpi-value tnum">
-            {{ formatNumber(overview.total_flows_count) }}
-          </span>
-        </div>
-        <div class="kpi-subtext">
+          <span v-else class="text-xs">No packets in this window</span>
+        </template>
+      </KpiTile>
+      <KpiTile
+        label="Flow exporters sending"
+        :value="overview.active_exporters_count"
+        :sub="exporterSummary"
+      />
+      <KpiTile label="Flows" :value="formatNumber(overview.total_flows_count)">
+        <template #sub>
           <span
             v-if="overview.anomaly_flows_count"
             class="badge-anomaly-kpi"
-            title="SYN/RST scan or reset bursts in last 5m"
+            title="SYN-only or RST-without-FIN flows in the last 5 minutes"
           >
-            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} bursts
+            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} SYN/RST anomalies
           </span>
-          <span v-else class="text-success text-xs">✓ Normal flow profile</span>
+          <span v-else class="text-success text-xs">✓ No SYN/RST anomalies</span>
+        </template>
+      </KpiTile>
+    </div>
+    <p v-if="doubleCountNote" class="kpi-scope-note kpi-footnote">{{ doubleCountNote }}</p>
+
+    <!-- WAN links: traffic at the network edge, one row per WAN-role interface -->
+    <div v-if="hasWan" class="table-card wan-links-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">WAN links</div>
+          <span class="section-hint">Share of edge traffic per link · last 5 complete minutes</span>
         </div>
+      </div>
+      <div class="table-responsive">
+        <table class="dense-table" aria-label="WAN links">
+          <thead>
+            <tr>
+              <th>Link</th>
+              <th class="text-right">In</th>
+              <th class="text-right">Out</th>
+              <th style="width: 32%;">Share of WAN traffic</th>
+              <th class="text-right">Utilization</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="link in overview.wan_links" :key="`${link.exporter_id}-${link.interface_idx}`">
+              <td>
+                <span class="font-bold">{{ link.name }}</span>
+                <span class="text-muted text-xs"> · {{ link.exporter_hostname }} #{{ link.interface_idx }}</span>
+              </td>
+              <td class="text-right tnum ingress-text">{{ formatBps(link.in_bps) }}</td>
+              <td class="text-right tnum egress-text">{{ formatBps(link.out_bps) }}</td>
+              <td>
+                <div class="wan-share">
+                  <span class="app-bar-track"><span class="app-bar-fill" :style="{ width: `${Math.min(100, link.share_percentage)}%` }"></span></span>
+                  <span class="app-bar-value tnum">{{ link.share_percentage.toFixed(1) }}%</span>
+                </div>
+              </td>
+              <td class="text-right tnum">
+                <span v-if="link.utilization_percentage == null" class="text-muted text-xs" title="Set the link speed to see utilization">Speed not set</span>
+                <span v-else class="util-text" :class="getUtilClass(link.utilization_percentage)">{{ link.utilization_percentage.toFixed(1) }}%</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -264,47 +307,178 @@
           <div class="section-title">
             {{ chartTitle }}
           </div>
-          <span class="section-hint">{{ selectedWindow }} aggregated series</span>
+          <span class="section-hint">{{ chartHint }}</span>
         </div>
         <div class="chart-header-actions">
-          <!-- Metric Mode Switcher Pills -->
-          <div class="metric-mode-pills" role="group" aria-label="Chart Metric Mode">
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'bps' }"
-              @click="chartMetricMode = 'bps'"
-              title="Throughput in bits per second"
-            >
-              Throughput (bps)
-            </button>
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'pps' }"
-              @click="chartMetricMode = 'pps'"
-              title="Packet rate in packets per second"
-            >
-              Packet Rate (pps)
-            </button>
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: chartMetricMode === 'fps' }"
-              @click="chartMetricMode = 'fps'"
-              title="Flow burst rate in flows per second"
-            >
-              Flow Rate (fps)
-            </button>
-          </div>
-          <span class="badge-window tnum">{{ selectedWindow }} Window</span>
+          <SegmentedControl
+            v-if="showTotalsToggle"
+            :model-value="chartTotals"
+            :options="totalsOptions"
+            aria-label="Chart totals"
+            size="sm"
+            @update:model-value="setChartTotals"
+          />
+          <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
         </div>
       </div>
       <div class="chart-container">
+        <p v-if="seriesPoints.length > 0" class="sr-only">{{ chartSummary }}</p>
         <LineChart
-          v-if="chartData.labels.length > 0"
+          v-if="seriesPoints.length > 0"
           :data="chartData"
           :options="chartOptions"
         />
         <div v-else-if="!loading" class="no-chart-data">
-          No flow records accumulated for the selected {{ selectedWindow }} window.
+          <template v-if="['1h', '6h'].includes(selectedWindow)">No flow records in the last {{ selectedWindow }}.</template>
+          <template v-else>No {{ selectedWindow === '30d' ? 'daily' : 'hourly' }} totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
+        </div>
+        <div v-else class="loading-spinner">Loading telemetry series...</div>
+      </div>
+    </div>
+
+    <div class="secondary-grid">
+      <!-- Top Talkers Leaderboard with Click-to-Filter -->
+      <div class="table-card talkers-panel">
+        <div class="section-header section-header-split">
+          <div>
+            <div class="section-title">Top talkers</div>
+            <span class="section-hint">Top 10 hosts and external addresses by volume · Click one to see its conversations</span>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="dense-table interactive-table" aria-label="Top Talkers Table">
+            <thead>
+              <tr>
+                <th>Host</th>
+                <th class="text-right">Ingress</th>
+                <th class="text-right">Egress</th>
+                <th class="text-right">Total Bytes</th>
+                <th class="text-right">Flows / Avg packet</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="t in topEndpoints"
+                :key="t.ip_address"
+                class="cursor-pointer"
+                tabindex="0"
+                @click="openConversationsFor({ ip: t.ip_address })"
+                @keydown.enter="openConversationsFor({ ip: t.ip_address })"
+              >
+                <td>
+                  <div class="node-cell">
+                    <span class="node-host font-bold">{{ t.hostname || t.ip_address }}</span>
+                    <span class="node-ip tnum text-muted" v-if="t.hostname">{{ t.ip_address }}</span>
+                  </div>
+                </td>
+                <td class="text-right tnum ingress-text">{{ formatBytes(t.ingress_bytes) }}</td>
+                <td class="text-right tnum egress-text">{{ formatBytes(t.egress_bytes) }}</td>
+                <td class="text-right tnum font-bold">{{ formatBytes(t.total_bytes) }}</td>
+                <td class="text-right tnum text-muted">
+                  <div>{{ formatNumber(t.flow_count) }}</div>
+                  <span class="text-xs text-muted block font-mono">{{ t.avg_packet_size || 0 }} B/pkt</span>
+                </td>
+              </tr>
+              <tr v-if="topEndpoints.length === 0">
+                <td colspan="5" class="text-center text-muted">No talker statistics in this window.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="table-card breakdown-panel">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Applications</div>
+            <span class="section-hint">Share of all traffic by service port · Click one to see its conversations</span>
+          </div>
+        </div>
+        <div v-if="applicationStats.length" class="app-bars">
+          <button
+            v-for="app in applicationStats"
+            :key="`${app.protocol_name}-${app.port}`"
+            type="button"
+            class="app-bar-row"
+            :disabled="app.is_other"
+            :title="app.is_other ? 'All other services combined' : `Show conversations on port ${app.port}`"
+            @click="!app.is_other && openConversationsFor({ port: app.port })"
+          >
+            <span class="app-bar-label">{{ app.is_other ? 'Other' : app.service_label }}</span>
+            <span class="app-bar-track"><span class="app-bar-fill" :class="{ other: app.is_other }" :style="{ width: `${Math.min(100, app.percentage)}%` }"></span></span>
+            <span class="app-bar-value tnum">{{ app.percentage.toFixed(1) }}% · {{ formatBytes(app.total_bytes) }}</span>
+          </button>
+        </div>
+        <div v-else class="no-chart-data">No application traffic in this window.</div>
+
+        <div class="section-header zones-header">
+          <div>
+            <div class="section-title">Traffic zones</div>
+            <span class="section-hint">{{ zonesHint }}</span>
+          </div>
+        </div>
+        <template v-if="zonesResolution !== 'unavailable'">
+          <div v-if="trafficZones.length > 0" class="breakdown-list">
+            <div
+              v-for="zone in trafficZones"
+              :key="zone.zone"
+              class="breakdown-item"
+            >
+              <div class="breakdown-row-top">
+                <span class="zone-badge" :class="getZoneBadgeClass(zone.zone)">
+                  <span class="zone-icon">{{ getZoneIcon(zone.zone) }}</span> {{ zone.zone }}
+                </span>
+                <span class="breakdown-pct tnum font-bold">{{ zone.percentage.toFixed(1) }}%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" :class="getZoneFillClass(zone.zone)" :style="{ width: `${Math.min(100, zone.percentage)}%` }"></div>
+              </div>
+              <div class="breakdown-meta tnum text-muted text-xs">
+                <span>{{ formatBytes(zone.total_bytes) }}</span>
+                <span>{{ formatNumber(zone.flow_count) }} flows</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div v-else class="no-chart-data">Zones need address or endpoint detail, which the daily tier does not keep. Pick a window of 7 days or less.</div>
+      </div>
+    </div>
+    </template>
+
+    <!-- ── Interfaces ── -->
+    <template v-else-if="activeView === 'interfaces'">
+      <template v-if="selectedExporterId">
+    <!-- Main Section: Stacked Area Traffic Chart -->
+    <div class="chart-section table-card">
+      <div class="section-header section-header-split">
+        <div>
+          <div class="section-title">
+            {{ chartTitle }}
+          </div>
+          <span class="section-hint">{{ chartHint }}</span>
+        </div>
+        <div class="chart-header-actions">
+          <SegmentedControl
+            v-if="showTotalsToggle"
+            :model-value="chartTotals"
+            :options="totalsOptions"
+            aria-label="Chart totals"
+            size="sm"
+            @update:model-value="setChartTotals"
+          />
+          <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
+        </div>
+      </div>
+      <div class="chart-container">
+        <p v-if="seriesPoints.length > 0" class="sr-only">{{ chartSummary }}</p>
+        <LineChart
+          v-if="seriesPoints.length > 0"
+          :data="chartData"
+          :options="chartOptions"
+        />
+        <div v-else-if="!loading" class="no-chart-data">
+          <template v-if="['1h', '6h'].includes(selectedWindow)">No flow records in the last {{ selectedWindow }}.</template>
+          <template v-else>No {{ selectedWindow === '30d' ? 'daily' : 'hourly' }} totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
         </div>
         <div v-else class="loading-spinner">Loading telemetry series...</div>
       </div>
@@ -344,7 +518,7 @@
               <th class="text-right">Link Speed</th>
               <th class="text-right">Ingress Rate</th>
               <th class="text-right">Egress Rate</th>
-              <th style="width: 200px;">Utilization</th>
+              <th style="width: 300px;" title="Bar: average. Ticks: 95th percentile (|) and busiest minute (▲).">Utilization · avg / p95 / peak</th>
               <th class="text-center" style="width: 90px;">Status</th>
             </tr>
           </thead>
@@ -360,6 +534,7 @@
               <td class="name-cell">
                 <div class="name-cell-inner">
                   <span class="font-bold">{{ item.name }}</span>
+                  <span v-if="item.role === 'wan'" class="badge-wan" title="WAN link: counted in edge totals">WAN</span>
                   <button
                     v-if="isAdmin"
                     type="button"
@@ -371,20 +546,37 @@
                   </button>
                 </div>
               </td>
-              <td class="text-right tnum text-muted">{{ formatSpeed(item.speed_mbps) }}</td>
+              <td class="text-right tnum text-muted">
+                <span v-if="item.speed_configured !== false">{{ formatSpeed(item.speed_mbps) }}</span>
+                <span v-else class="speed-unset" title="Set the link speed to see utilization">Not set</span>
+              </td>
               <td class="text-right tnum ingress-text">{{ formatBps(item.in_bps) }}</td>
               <td class="text-right tnum egress-text">{{ formatBps(item.out_bps) }}</td>
               <td>
-                <div class="util-cell">
+                <span v-if="item.utilization_percentage == null" class="text-muted text-xs">— set link speed</span>
+                <div v-else class="util-cell">
                   <div class="util-bar-bg">
                     <div
                       class="util-bar-fill"
                       :class="getUtilClass(item.utilization_percentage)"
                       :style="{ width: `${Math.min(100, item.utilization_percentage)}%` }"
                     ></div>
+                    <span
+                      v-if="item.p95_utilization_percentage != null"
+                      class="util-marker util-marker-p95"
+                      :style="{ left: `${Math.min(100, item.p95_utilization_percentage)}%` }"
+                      :title="`95th percentile: ${item.p95_utilization_percentage.toFixed(1)}%`"
+                    ></span>
+                    <span
+                      v-if="item.peak_utilization_percentage != null"
+                      class="util-marker util-marker-peak"
+                      :style="{ left: `${Math.min(100, item.peak_utilization_percentage)}%` }"
+                      :title="`Busiest minute: ${item.peak_utilization_percentage.toFixed(1)}%`"
+                    ></span>
                   </div>
-                  <span class="util-text tnum" :class="getUtilClass(item.utilization_percentage)">
-                    {{ item.utilization_percentage.toFixed(1) }}%
+                  <span class="util-text tnum" :class="getUtilClass(item.p95_utilization_percentage ?? item.utilization_percentage)">
+                    {{ item.utilization_percentage.toFixed(1) }}<span class="util-sub">
+                      / {{ (item.p95_utilization_percentage ?? 0).toFixed(1) }} / {{ (item.peak_utilization_percentage ?? 0).toFixed(1) }}%</span>
                   </span>
                 </div>
               </td>
@@ -399,131 +591,58 @@
       </div>
     </div>
 
-    <!-- Secondary Grid: Top Talkers & Telemetry Breakdown Workbench -->
-    <div class="secondary-grid">
-      <!-- Top Talkers Leaderboard with Click-to-Filter -->
-      <div class="table-card talkers-panel">
-        <div class="section-header section-header-split">
-          <div>
-            <div class="section-title">Top Communicating Endpoints</div>
-            <span class="section-hint">Ranked by volume · Click row to filter conversations</span>
-          </div>
-          <div v-if="selectedIpFilter" class="active-filter-badge">
-            <span class="badge-active-filter">Filtered: {{ selectedIpFilter }}</span>
-            <button class="btn-clear-filter" @click="selectedIpFilter = null" title="Clear filter">✕</button>
-          </div>
+        <div v-if="interfaceList.length === 0 && !loading" class="table-card empty-view">
+          No interface data for this exporter in the last {{ selectedWindow }}.
         </div>
-        <div class="table-responsive">
-          <table class="dense-table interactive-table" aria-label="Top Talkers Table">
-            <thead>
-              <tr>
-                <th>Target Node</th>
-                <th class="text-right">Ingress</th>
-                <th class="text-right">Egress</th>
-                <th class="text-right">Total Bytes</th>
-                <th class="text-right">Flows / Physics</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="t in topEndpoints"
-                :key="t.ip_address"
-                :class="{ 'row-selected': selectedIpFilter === t.ip_address, 'cursor-pointer': true }"
-                @click="toggleEndpointFilter(t.ip_address)"
-              >
-                <td>
-                  <div class="node-cell">
-                    <span class="node-host font-bold">{{ t.hostname || t.ip_address }}</span>
-                    <span class="node-ip tnum text-muted" v-if="t.hostname">{{ t.ip_address }}</span>
-                  </div>
-                </td>
-                <td class="text-right tnum ingress-text">{{ formatBytes(t.ingress_bytes) }}</td>
-                <td class="text-right tnum egress-text">{{ formatBytes(t.egress_bytes) }}</td>
-                <td class="text-right tnum font-bold">{{ formatBytes(t.total_bytes) }}</td>
-                <td class="text-right tnum text-muted">
-                  <div>{{ formatNumber(t.flow_count) }}</div>
-                  <span class="text-xs text-muted block font-mono">{{ t.avg_packet_size || 0 }} B/pkt</span>
-                </td>
-              </tr>
-              <tr v-if="topEndpoints.length === 0">
-                <td colspan="5" class="text-center text-muted">No talker statistics in this window.</td>
-              </tr>
-            </tbody>
-          </table>
+      </template>
+      <div v-else class="table-card empty-view">
+        <p class="empty-title">Interfaces belong to one exporter</p>
+        <p class="text-muted">Pick an exporter to see per-interface rates, utilization and peaks.</p>
+        <div class="exporter-picks">
+          <button
+            v-for="exp in flowExporters"
+            :key="exp.id"
+            type="button"
+            class="btn-secondary btn-small"
+            @click="selectedExporterId = exp.id; handleScopeChange()"
+          >
+            {{ exp.hostname }} <span class="text-muted font-mono">{{ exp.primary_ip }}</span>
+          </button>
+          <span v-if="flowExporters.length === 0" class="text-muted">No exporters are configured yet.</span>
         </div>
       </div>
+    </template>
 
-      <!-- Multi-Tab Telemetry Breakdown Card -->
-      <div class="table-card breakdown-panel">
-        <div class="section-header section-header-split">
-          <div class="breakdown-tabs" role="tablist">
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'apps' }"
-              @click="analyticsTab = 'apps'"
-              role="tab"
-            >
-              L4 Apps
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'qos' }"
-              @click="analyticsTab = 'qos'"
-              role="tab"
-            >
-              QoS / DSCP
-              <span v-if="qosClasses.length > 0" class="tab-badge">{{ qosClasses.length }}</span>
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: analyticsTab === 'zones' }"
-              @click="analyticsTab = 'zones'"
-              role="tab"
-            >
-              Traffic Zones
-            </button>
-          </div>
-          <span class="section-hint text-xs">
-            {{ analyticsTab === 'apps' ? 'Layer 4 / Service Port' : (analyticsTab === 'qos' ? 'DiffServ Classes' : 'Perimeter vs Internal') }}
-          </span>
-        </div>
+    <!-- ── Conversations ── -->
+    <ConversationsPanel
+      v-else-if="activeView === 'conversations'"
+      :window="selectedWindow"
+      :exporter-id="selectedExporterId || null"
+      v-model:ip="selectedIpFilter"
+      v-model:port="selectedPortFilter"
+      v-model:dscp="selectedDscpFilter"
+      v-model:dscp-label="selectedDscpLabel"
+      :refresh-key="refreshKey"
+    />
 
-        <!-- Tab 1: L4 Apps -->
-        <div v-if="analyticsTab === 'apps'" class="tab-content">
-          <div class="donut-container">
-            <DoughnutChart
-              v-if="donutData.labels.length > 0"
-              :data="donutData"
-              :options="donutOptions"
-            />
-            <div v-else class="no-chart-data">No application telemetry available.</div>
-          </div>
-          <div v-if="applicationStats.length > 0" class="apps-quick-list">
-            <div
-              v-for="app in applicationStats.slice(0, 6)"
-              :key="app.dst_port"
-              class="app-chip cursor-pointer"
-              :class="{ active: selectedPortFilter === app.dst_port }"
-              @click="togglePortFilter(app.dst_port)"
-              :title="`Filter conversations on port ${app.dst_port}`"
-            >
-              <span class="service-port-badge" :class="getPortBadgeClass(app.dst_port)">
-                {{ formatPortLabel(app.dst_port, app.protocol) }}
-              </span>
-              <span class="app-chip-bytes tnum">{{ formatBytes(app.total_bytes) }}</span>
-            </div>
+    <!-- ── QoS ── -->
+    <template v-else-if="activeView === 'qos'">
+      <div class="table-card breakdown-panel qos-panel">
+        <div class="section-header">
+          <div>
+            <div class="section-title">DiffServ classes</div>
+            <span class="section-hint">Share of traffic by DSCP marking · Click a class to list its conversations</span>
           </div>
         </div>
-
-        <!-- Tab 2: QoS / DSCP Breakdown -->
-        <div v-else-if="analyticsTab === 'qos'" class="tab-content qos-content">
           <div v-if="qosClasses.length > 0" class="breakdown-list">
             <div
               v-for="qos in qosClasses"
               :key="qos.dscp"
               class="breakdown-item cursor-pointer"
               :class="{ 'item-selected': selectedDscpFilter === qos.dscp }"
+              tabindex="0"
               @click="toggleDscpFilter(qos.dscp, qos.dscp_label)"
+              @keydown.enter="toggleDscpFilter(qos.dscp, qos.dscp_label)"
               :title="`Filter conversations by ${qos.dscp_label} (DSCP ${qos.dscp})`"
             >
               <div class="breakdown-row-top">
@@ -544,198 +663,54 @@
               </div>
             </div>
           </div>
-          <div v-else class="no-chart-data">No QoS/DSCP telemetry recorded in this window.</div>
-        </div>
-
-        <!-- Tab 3: Traffic Zones Breakdown -->
-        <div v-else-if="analyticsTab === 'zones'" class="tab-content zones-content">
-          <div v-if="trafficZones.length > 0" class="breakdown-list">
-            <div
-              v-for="zone in trafficZones"
-              :key="zone.zone"
-              class="breakdown-item"
-            >
-              <div class="breakdown-row-top">
-                <span class="zone-badge" :class="getZoneBadgeClass(zone.zone)">
-                  <span class="zone-icon">{{ getZoneIcon(zone.zone) }}</span> {{ zone.zone }}
-                </span>
-                <span class="breakdown-pct tnum font-bold">{{ zone.percentage.toFixed(1) }}%</span>
-              </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill" :class="getZoneFillClass(zone.zone)" :style="{ width: `${Math.min(100, zone.percentage)}%` }"></div>
-              </div>
-              <div class="breakdown-meta tnum text-muted text-xs">
-                <span>{{ formatBytes(zone.total_bytes) }}</span>
-                <span>{{ formatNumber(zone.flow_count) }} flows</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="no-chart-data">No traffic zone classifications recorded in this window.</div>
-        </div>
+        <div v-if="!qosClasses.length" class="no-chart-data">No QoS markings recorded in this window.</div>
       </div>
-    </div>
+      <ConversationsPanel
+        :window="selectedWindow"
+        :exporter-id="selectedExporterId || null"
+        initial-quick="qos"
+        title="QoS-marked conversations"
+        v-model:ip="selectedIpFilter"
+        v-model:port="selectedPortFilter"
+        v-model:dscp="selectedDscpFilter"
+        v-model:dscp-label="selectedDscpLabel"
+        :refresh-key="refreshKey"
+      />
+    </template>
 
-    <!-- Full Width: Top Forensic Conversations Table -->
-    <div class="table-card conversations-panel">
-      <div class="section-header section-header-split">
-        <div>
-          <div class="section-title">Top Forensic Conversations (IP-to-IP Pairs)</div>
-          <span class="section-hint">Forensic tier granularity with packet physics profiling</span>
-        </div>
-        <div class="conversations-top-actions">
-          <!-- Quick Triage Pills -->
-          <div class="triage-pills" role="group" aria-label="Conversation Triage Filters">
-            <button
-              class="btn-pill btn-pill-sm"
-              :class="{ active: conversationQuickFilter === 'all' }"
-              @click="conversationQuickFilter = 'all'"
-            >
-              All ({{ topConversations.length }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-anomalies"
-              :class="{ active: conversationQuickFilter === 'anomalies' }"
-              @click="conversationQuickFilter = 'anomalies'"
-            >
-              Anomalies ({{ anomalyConversationsCount }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-qos"
-              :class="{ active: conversationQuickFilter === 'qos' }"
-              @click="conversationQuickFilter = 'qos'"
-            >
-              QoS Tagged ({{ qosConversationsCount }})
-            </button>
-            <button
-              class="btn-pill btn-pill-sm pill-bulk"
-              :class="{ active: conversationQuickFilter === 'bulk' }"
-              @click="conversationQuickFilter = 'bulk'"
-            >
-              Bulk Transfers ({{ bulkConversationsCount }})
-            </button>
-          </div>
-          <div class="conversation-filter-box">
-            <input 
-              v-model="conversationFilter" 
-              class="conversation-search-input" 
-              placeholder="Search IP, port, profile..." 
-              aria-label="Filter conversations"
-            />
-          </div>
-        </div>
+    <!-- ── Security ── -->
+    <template v-else-if="activeView === 'security'">
+      <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
+      <div class="kpi-grid security-kpis">
+        <KpiTile
+          label="Suspicious conversations"
+          :value="formatNumber(overview.anomaly_conversations_count)"
+          :tone="overview.anomaly_conversations_count ? 'down' : 'neutral'"
+          sub="SYN without ACK, or RST without FIN, over the conversation"
+        />
+        <KpiTile
+          label="Flows in them"
+          :value="formatNumber(overview.anomaly_flows_count)"
+          :tone="overview.anomaly_flows_count ? 'down' : 'neutral'"
+          :sub="`of ${formatNumber(overview.total_flows_count)} flows`"
+        />
       </div>
+      <ConversationsPanel
+        :window="selectedWindow"
+        :exporter-id="selectedExporterId || null"
+        initial-quick="anomalies"
+        initial-sort="flows"
+        title="Suspicious conversations"
+        :hint="`Last ${selectedWindow} · SYN-only conversations suggest scans; RST-only ones refused connections. Sorted by flow count.`"
+        v-model:ip="selectedIpFilter"
+        v-model:port="selectedPortFilter"
+        v-model:dscp="selectedDscpFilter"
+        v-model:dscp-label="selectedDscpLabel"
+        :refresh-key="refreshKey"
+      />
+    </template>
 
-      <!-- Active Cross-Filters Ribbon -->
-      <div
-        v-if="selectedIpFilter || selectedPortFilter || selectedDscpFilter"
-        class="filter-chips-row"
-      >
-        <span class="filter-chips-label">Active Cross-Filters:</span>
-        <span v-if="selectedIpFilter" class="filter-chip">
-          Node: <strong class="font-mono tnum">{{ selectedIpFilter }}</strong>
-          <button class="btn-chip-remove" @click="selectedIpFilter = null">✕</button>
-        </span>
-        <span v-if="selectedPortFilter" class="filter-chip">
-          Port: <strong class="font-mono tnum">{{ selectedPortFilter }}</strong>
-          <button class="btn-chip-remove" @click="selectedPortFilter = null">✕</button>
-        </span>
-        <span v-if="selectedDscpFilter !== null" class="filter-chip">
-          QoS: <strong class="font-mono tnum">{{ selectedDscpLabel || `DSCP ${selectedDscpFilter}` }}</strong>
-          <button class="btn-chip-remove" @click="selectedDscpFilter = null; selectedDscpLabel = ''">✕</button>
-        </span>
-        <button class="btn-clear-all-chips" @click="clearCrossFilters">
-          Clear All Filters
-        </button>
-      </div>
-
-      <div class="table-responsive">
-        <table class="dense-table" aria-label="Top Conversations Table">
-          <thead>
-            <tr>
-              <th>Source IP</th>
-              <th>Destination IP</th>
-              <th>Protocol</th>
-              <th>Service Port</th>
-              <th>Packet Physics &amp; Profile</th>
-              <th>Flags &amp; QoS</th>
-              <th class="text-right">Volume</th>
-              <th class="text-right">Burst Count</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(c, idx) in filteredConversations" :key="idx">
-              <td>
-                <span class="tnum font-mono">{{ c.src_ip }}</span>
-                <span v-if="c.src_hostname" class="text-muted text-xs block">({{ c.src_hostname }})</span>
-              </td>
-              <td>
-                <span class="tnum font-mono">{{ c.dst_ip }}</span>
-                <span v-if="c.dst_hostname" class="text-muted text-xs block">({{ c.dst_hostname }})</span>
-              </td>
-              <td>
-                <span class="status-pill status-unknown">{{ c.protocol }}</span>
-              </td>
-              <td>
-                <span class="service-port-badge" :class="getPortBadgeClass(c.dst_port)">
-                  {{ formatPortLabel(c.dst_port, c.protocol) }}
-                </span>
-              </td>
-              <td>
-                <div class="physics-profile-cell">
-                  <span class="badge-profile" :class="getTrafficProfileBadgeClass(c.traffic_profile)">
-                    {{ c.traffic_profile || 'Interactive' }}
-                  </span>
-                  <div class="packet-physics-meta text-xs text-muted tnum font-mono">
-                    <span>{{ c.avg_packet_size || 0 }} B/pkt</span> · 
-                    <span>{{ c.packets_per_flow || 0 }} pkts/fl</span>
-                  </div>
-                </div>
-              </td>
-              <td>
-                <div class="metadata-badge-group">
-                  <span
-                    v-if="c.protocol === 'TCP' && c.tcp_flags_labels && c.tcp_flags_labels.length > 0"
-                    class="badge-tcp-flags font-mono"
-                    :title="`TCP Flags: ${c.tcp_flags_labels.join(', ')} (0x${(c.tcp_flags || 0).toString(16).padStart(2, '0')})`"
-                  >
-                    {{ c.tcp_flags_labels.join(' ') }}
-                  </span>
-                  <span
-                    v-if="c.anomaly_hint === 'SYN_ONLY'"
-                    class="badge-anomaly badge-syn-only"
-                    title="Anomaly: SYN-only packets observed without ACK (potential port scan)"
-                  >
-                    SYN ONLY
-                  </span>
-                  <span
-                    v-else-if="c.anomaly_hint === 'TCP_RST'"
-                    class="badge-anomaly badge-tcp-rst"
-                    title="Anomaly: Connection reset (RST) observed"
-                  >
-                    RST
-                  </span>
-                  <span
-                    v-if="c.dscp > 0"
-                    class="badge-dscp"
-                    :class="{ 'badge-dscp-ef': c.dscp === 46, 'badge-dscp-af': c.dscp_label && c.dscp_label.includes('AF') }"
-                    :title="`ToS: 0x${(c.tos || 0).toString(16).padStart(2, '0')} · DSCP: ${c.dscp} (${c.dscp_label})`"
-                  >
-                    {{ c.dscp_label }}
-                  </span>
-                </div>
-              </td>
-              <td class="text-right tnum font-bold">{{ formatBytes(c.total_bytes) }}</td>
-              <td class="text-right tnum text-muted">{{ formatNumber(c.flow_count) }}</td>
-            </tr>
-            <tr v-if="filteredConversations.length === 0">
-              <td colspan="8" class="text-center text-muted">
-                {{ topConversations.length === 0 ? 'No conversations recorded in this window.' : 'No conversations matching current filters.' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </template>
 
     <!-- Mapping Modal for Unmatched Exporter -->
     <div v-if="showMappingModal" class="modal-overlay" @click.self="showMappingModal = false">
@@ -848,6 +823,7 @@
         <form @submit.prevent="saveInterfaces" class="modal-form">
           <p class="modal-subtitle">
             Assign human-readable SNMP interface names and provisioned line speeds for accurate utilization calculation.
+            Mark links to the internet or a provider as WAN: fleet totals then count traffic once, at the network edge.
           </p>
 
           <div class="interface-config-list">
@@ -880,9 +856,18 @@
                 />
               </div>
 
+              <div class="form-group role-col">
+                <label v-if="i === 0" :for="`iface-role-${i}`">Role</label>
+                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select" :aria-label="i === 0 ? undefined : 'Role'">
+                  <option value="lan">Internal</option>
+                  <option value="wan">WAN (edge)</option>
+                </select>
+              </div>
+
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
                 <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                  <option value="unset">Not set</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -939,7 +924,7 @@
 <script setup>
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Line as LineChart, Doughnut as DoughnutChart } from 'vue-chartjs'
+import { Line as LineChart } from 'vue-chartjs'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -965,6 +950,14 @@ import {
   getEndpoints,
 } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
+import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
+import { useChartTheme } from '../composables/useChartTheme.js'
+import { summarizeSeries } from '../utils/chartSummary.js'
+import { aliasesPayload, applyPreset, editRow } from '../utils/interfaceConfig.js'
+import KpiTile from '../components/ui/KpiTile.vue'
+import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
+import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
 
 ChartJS.register(
   CategoryScale,
@@ -995,7 +988,7 @@ function handleAutoRefreshChange() {
   if (secs > 0) {
     refreshTimer = setInterval(() => {
       if (!loading.value) {
-        refreshData()
+        refreshAll()
       }
     }, secs * 1000)
   }
@@ -1061,11 +1054,19 @@ const overview = ref({
   total_egress_bps: 0,
   total_ingress_pps: 0,
   total_egress_pps: 0,
+  total_transit_bps: 0,
+  total_transit_pps: 0,
   avg_packet_size: 0,
   active_exporters_count: 0,
   unmatched_exporters_count: 0,
   total_flows_count: 0,
   anomaly_flows_count: 0,
+  wan_interfaces_count: 0,
+  wan_in_bps: 0,
+  wan_out_bps: 0,
+  wan_in_pps: 0,
+  wan_out_pps: 0,
+  wan_links: [],
 })
 
 // Throughput Metric Display Modes:
@@ -1073,123 +1074,134 @@ const overview = ref({
 // - 'pps': Packet rate in packets per second; essential for detecting PPS exhaustion attacks and hardware NIC limits.
 // - 'fps': Flow rate in active flows per second; reflects connection churn and state table stress.
 const chartMetricMode = ref('bps') // 'bps', 'pps', 'fps'
-const analyticsTab = ref('apps') // 'apps', 'qos', 'zones'
 
-const totalEndpointsCount = ref(0)
+const { theme, withAlpha } = useChartTheme()
+
+const metricOptions = [
+  { value: 'bps', label: 'Throughput', title: 'Bits per second' },
+  { value: 'pps', label: 'Packets', title: 'Packets per second' },
+  { value: 'fps', label: 'Flows', title: 'Flow records per second' },
+]
+
 const availableEndpoints = shallowRef([])
 const unmatchedExporters = shallowRef([])
 
 const topEndpoints = shallowRef([])
-const topConversations = shallowRef([])
 const applicationStats = shallowRef([])
 const qosClasses = shallowRef([])
 const trafficZones = shallowRef([])
 
-// Multi-Dimensional Cross-Filtering & Triage State:
-// Allows operators to click an endpoint IP, service port, or DSCP class badge
-// to dynamically filter the active peer conversation table down to the exact offending flows.
-const selectedIpFilter = ref(null)
-const selectedPortFilter = ref(null)
-const selectedDscpFilter = ref(null)
+// Cross-filters shared by the Conversations, QoS and Security views. A talker, application or
+// QoS class sets one; ConversationsPanel shows and clears them. They live in the URL so a
+// filtered view can be shared.
+const selectedIpFilter = ref(route.query.ip || null)
+const selectedPortFilter = ref(route.query.port ? Number(route.query.port) : null)
+const selectedDscpFilter = ref(route.query.dscp ? Number(route.query.dscp) : null)
 const selectedDscpLabel = ref('')
-const conversationQuickFilter = ref('all') // 'all', 'anomalies', 'qos', 'bulk'
 
-// Top conversations live triage search filter (UI-09)
-const conversationFilter = ref('')
+// Bumped after each refresh so the conversation panels reload with the page.
+const refreshKey = ref(0)
 
-const anomalyConversationsCount = computed(() => {
-  return topConversations.value.filter(
-    (c) => c.anomaly_hint === 'SYN_ONLY' || c.anomaly_hint === 'TCP_RST'
-  ).length
-})
+const VIEWS = ['overview', 'interfaces', 'conversations', 'qos', 'security']
+const activeView = computed(() => (VIEWS.includes(route.query.view) ? route.query.view : 'overview'))
 
-const qosConversationsCount = computed(() => {
-  return topConversations.value.filter((c) => Number(c.dscp) > 0).length
-})
+const viewOptions = computed(() => [
+  { value: 'overview', label: 'Overview' },
+  { value: 'interfaces', label: 'Interfaces', title: selectedExporterId.value ? 'Per-interface rates' : 'Pick an exporter first' },
+  { value: 'conversations', label: 'Conversations' },
+  { value: 'qos', label: qosClasses.value.length ? `QoS (${qosClasses.value.length})` : 'QoS' },
+  {
+    value: 'security',
+    label: overview.value.anomaly_conversations_count ? `Security (${overview.value.anomaly_conversations_count})` : 'Security',
+  },
+])
 
-const bulkConversationsCount = computed(() => {
-  return topConversations.value.filter(
-    (c) => c.traffic_profile === 'Bulk Transfer' || (c.avg_packet_size && c.avg_packet_size >= 1100)
-  ).length
-})
+// route.query only updates once a navigation resolves, so back-to-back changes (view + filter)
+// build on the query still in flight instead of overwriting each other.
+let pendingQuery = null
 
-// Unified conversation filtration pipeline combining cross-filters, quick triage pills, and text search:
-const filteredConversations = computed(() => {
-  let list = topConversations.value
-
-  // Cross-Filter by Endpoint Node IP
-  if (selectedIpFilter.value) {
-    const ip = selectedIpFilter.value
-    list = list.filter((c) => c.src_ip === ip || c.dst_ip === ip)
+function replaceQuery(changes) {
+  const query = { ...(pendingQuery || route.query), ...changes }
+  for (const key of Object.keys(query)) {
+    if (query[key] === null || query[key] === undefined || query[key] === '') delete query[key]
   }
-
-  // Cross-Filter by Destination Service Port
-  if (selectedPortFilter.value !== null) {
-    const port = Number(selectedPortFilter.value)
-    list = list.filter((c) => Number(c.dst_port) === port)
-  }
-
-  // Cross-Filter by DSCP
-  if (selectedDscpFilter.value !== null) {
-    const dscp = Number(selectedDscpFilter.value)
-    list = list.filter((c) => Number(c.dscp) === dscp)
-  }
-
-  // Quick Triage Filter
-  if (conversationQuickFilter.value === 'anomalies') {
-    list = list.filter((c) => c.anomaly_hint === 'SYN_ONLY' || c.anomaly_hint === 'TCP_RST')
-  } else if (conversationQuickFilter.value === 'qos') {
-    list = list.filter((c) => Number(c.dscp) > 0)
-  } else if (conversationQuickFilter.value === 'bulk') {
-    list = list.filter(
-      (c) => c.traffic_profile === 'Bulk Transfer' || (c.avg_packet_size && c.avg_packet_size >= 1100)
-    )
-  }
-
-  if (!conversationFilter.value.trim()) return list
-  const q = conversationFilter.value.toLowerCase().trim()
-  return list.filter((c) => {
-    return (
-      (c.src_ip && c.src_ip.toLowerCase().includes(q)) ||
-      (c.dst_ip && c.dst_ip.toLowerCase().includes(q)) ||
-      (c.src_hostname && c.src_hostname.toLowerCase().includes(q)) ||
-      (c.dst_hostname && c.dst_hostname.toLowerCase().includes(q)) ||
-      String(c.dst_port).includes(q) ||
-      (c.protocol && c.protocol.toLowerCase().includes(q)) ||
-      (c.dscp_label && c.dscp_label.toLowerCase().includes(q)) ||
-      (c.anomaly_hint && c.anomaly_hint.toLowerCase().includes(q)) ||
-      (c.traffic_profile && c.traffic_profile.toLowerCase().includes(q)) ||
-      (Array.isArray(c.tcp_flags_labels) && c.tcp_flags_labels.some((f) => f.toLowerCase().includes(q)))
-    )
+  pendingQuery = query
+  router.replace({ query }).finally(() => {
+    if (pendingQuery === query) pendingQuery = null
   })
+}
+
+function setView(view) {
+  replaceQuery({ view: view === 'overview' ? undefined : view })
+}
+
+function openConversationsFor({ ip = null, port = null } = {}) {
+  selectedIpFilter.value = ip
+  selectedPortFilter.value = port
+  selectedDscpFilter.value = null
+  selectedDscpLabel.value = ''
+  setView('conversations')
+}
+
+watch([selectedIpFilter, selectedPortFilter, selectedDscpFilter], ([ip, port, dscp]) => {
+  replaceQuery({ ip, port, dscp })
 })
 
-function formatPortLabel(port, proto) {
-  const p = Number(port)
-  switch (p) {
-    case 443: return '443 / HTTPS'
-    case 80: return '80 / HTTP'
-    case 53: return '53 / DNS'
-    case 22: return '22 / SSH'
-    case 123: return '123 / NTP'
-    case 161: return '161 / SNMP'
-    case 2055: return '2055 / NetFlow'
-    case 4739: return '4739 / IPFIX'
-    default: return `${port}`
+const zonesResolution = ref('ip')
+const zonesHint = computed(() => {
+  if (zonesResolution.value === 'endpoint') {
+    return 'Hourly data keeps no addresses: only monitored endpoints count as internal'
   }
+  return 'Monitored endpoints and private (RFC 1918) addresses count as internal'
+})
+
+const scopeLabel = computed(() => {
+  if (!selectedExporterId.value) return 'all exporters'
+  const exp = flowExporters.value.find((e) => e.id === selectedExporterId.value)
+  return exp ? exp.hostname : 'selected exporter'
+})
+
+// WAN edge: interfaces an admin marked as WAN. Their totals count each packet once; the
+// ingress/egress/transit totals add up what every exporter saw.
+const hasWan = computed(() => (overview.value.wan_interfaces_count || 0) > 0)
+
+const wanLinksLabel = computed(() => {
+  const n = overview.value.wan_interfaces_count || 0
+  return n === 1 ? '1 WAN link' : `${n} WAN links`
+})
+
+const doubleCountNote = computed(() => {
+  if (selectedExporterId.value || (overview.value.active_exporters_count || 0) < 2) return ''
+  const base = 'Ingress, egress and transit add up every exporter, so traffic that crosses two routers counts twice.'
+  if (hasWan.value) return `${base} WAN in and out count it once.`
+  return isAdmin.value ? `${base} Mark your WAN interfaces (Interfaces view, ✎) to see edge totals counted once.` : base
+})
+
+// Chart totals: WAN edge by default once WAN interfaces exist; "all" keeps the per-exporter sum.
+const chartTotals = ref(route.query.totals === 'all' ? 'all' : 'wan')
+const totalsOptions = [
+  { value: 'wan', label: 'WAN edge', title: 'Traffic on WAN-role interfaces, counted once' },
+  { value: 'all', label: 'All flows', title: 'Everything every exporter saw' },
+]
+const wantWanSeries = computed(() => chartTotals.value === 'wan' && selectedInterfaceIdx.value === null)
+const showTotalsToggle = computed(() => selectedInterfaceIdx.value === null && (hasWan.value || seriesMeta.value.wanOnly))
+
+function setChartTotals(value) {
+  chartTotals.value = value === 'all' ? 'all' : 'wan'
+  replaceQuery({ totals: chartTotals.value === 'all' ? 'all' : undefined })
+  fetchTrafficSeriesData()
 }
 
-function getPortBadgeClass(port) {
-  const p = Number(port)
-  if (p === 443 || p === 80) return 'port-web'
-  if (p === 53) return 'port-dns'
-  if (p === 22) return 'port-ssh'
-  if (p === 2055 || p === 4739) return 'port-telemetry'
-  return 'port-generic'
-}
+const exporterSummary = computed(() => {
+  const configured = flowExporters.value.length
+  const unregistered = unmatchedExporters.value.length
+  const parts = [`of ${configured} configured`]
+  if (unregistered) parts.push(`${unregistered} unregistered`)
+  return parts.join(' · ')
+})
 
 function formatSpeed(speedMbps) {
-  if (!speedMbps) return '1 Gbps'
+  if (!speedMbps) return 'Not set'
   if (speedMbps >= 1000000) return `${(speedMbps / 1000000).toFixed(0)} Tbps`
   if (speedMbps >= 1000) return `${(speedMbps / 1000).toFixed(0)} Gbps`
   return `${speedMbps} Mbps`
@@ -1215,10 +1227,8 @@ function handleScopeChange() {
 async function fetchTrafficSeriesData() {
   try {
     const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
-    const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value)
-    if (seriesRes.data?.data?.points) {
-      seriesPoints.value = seriesRes.data.data.points
-    }
+    const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value)
+    applySeries(seriesRes.data?.data)
   } catch (err) {
     console.error('Failed to load traffic series for interface isolation:', err)
   }
@@ -1287,18 +1297,15 @@ const savingInterfaces = ref(false)
 
 function openInterfaceModal(focusIdx = null) {
   const current = interfaceList.value || []
-  let rows = current.map((item) => {
-    const sp = item.speed_mbps || 1000
-    return {
-      index: Number(item.interface_idx) || 1,
-      name: item.name || `GigabitEthernet0/${item.interface_idx}`,
-      speed_mbps: sp,
-      preset: [10, 100, 1000, 10000, 40000, 100000].includes(sp) ? sp : 'custom',
-    }
-  })
+  let rows = current.map((item) => editRow(
+    Number(item.interface_idx) || 1,
+    item.name || `GigabitEthernet0/${item.interface_idx}`,
+    item.speed_configured === false ? null : item.speed_mbps,
+    item.role,
+  ))
 
   if (rows.length === 0) {
-    rows = [{ index: 1, name: 'GigabitEthernet0/1', speed_mbps: 1000, preset: 1000 }]
+    rows = [editRow(1, 'GigabitEthernet0/1', null, 'lan')]
   }
 
   editingInterfaces.value = rows
@@ -1307,12 +1314,7 @@ function openInterfaceModal(focusIdx = null) {
 
 function addInterfaceRow() {
   const nextIdx = editingInterfaces.value.length + 1
-  editingInterfaces.value.push({
-    index: nextIdx,
-    name: `GigabitEthernet0/${nextIdx}`,
-    speed_mbps: 1000,
-    preset: 1000,
-  })
+  editingInterfaces.value.push(editRow(nextIdx, `GigabitEthernet0/${nextIdx}`, null, 'lan'))
 }
 
 function removeInterfaceRow(index) {
@@ -1320,25 +1322,14 @@ function removeInterfaceRow(index) {
 }
 
 function onPresetChange(row) {
-  if (row.preset !== 'custom') {
-    row.speed_mbps = Number(row.preset)
-  }
+  applyPreset(row)
 }
 
 async function saveInterfaces() {
   if (!selectedExporterId.value) return
   savingInterfaces.value = true
   try {
-    const payload = {}
-    for (const row of editingInterfaces.value) {
-      const idxStr = String(row.index).trim()
-      if (idxStr) {
-        payload[idxStr] = {
-          name: row.name.trim() || `if${idxStr}`,
-          speed_mbps: Number(row.speed_mbps) || 1000,
-        }
-      }
-    }
+    const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(selectedExporterId.value, payload)
     showInterfaceModal.value = false
     await refreshData()
@@ -1365,6 +1356,11 @@ const chartTitle = computed(() => {
     return `${ifName} Interface Telemetry (Isolated)`
   }
 
+  if (seriesMeta.value.wanOnly) {
+    if (chartMetricMode.value === 'pps') return 'WAN edge packet rate'
+    if (chartMetricMode.value === 'fps') return 'WAN edge flow rate'
+    return 'WAN edge throughput'
+  }
   if (chartMetricMode.value === 'pps') return 'Packet Rate Telemetry (pps)'
   if (chartMetricMode.value === 'fps') return 'Flow Burst Rate Telemetry (fps)'
   return 'Aggregated Flow Throughput'
@@ -1372,236 +1368,174 @@ const chartTitle = computed(() => {
 
 // Chart Data
 const seriesPoints = shallowRef([])
+const seriesMeta = ref({ bucket_seconds: 60, directional: true, wanOnly: false })
+
+function applySeries(data) {
+  if (!data?.points) return
+  seriesPoints.value = data.points
+  seriesMeta.value = {
+    bucket_seconds: data.bucket_seconds || 60,
+    directional: data.directional !== false,
+    wanOnly: data.wan_only === true,
+  }
+}
+
+const WINDOW_SECONDS = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 }
+const MAX_FILLED_BUCKETS = 3000
+
+// Lay the points on a regular bucket grid covering the whole window, with null where no data
+// arrived, so outages and aggregation lag show as gaps instead of a continuous line.
+const filledPoints = computed(() => {
+  const points = seriesPoints.value
+  const step = (seriesMeta.value.bucket_seconds || 60) * 1000
+  const span = (WINDOW_SECONDS[selectedWindow.value] || 3600) * 1000
+  const now = Date.now()
+  const lastBucket = Math.floor(now / step) * step - step
+  const firstBucket = lastBucket - span + step
+  const byTime = new Map(points.map((p) => [Date.parse(p.timestamp), p]))
+  if ((lastBucket - firstBucket) / step + 1 > MAX_FILLED_BUCKETS) {
+    return points.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  }
+  const grid = []
+  for (let t = firstBucket; t <= lastBucket; t += step) {
+    grid.push({ t, p: byTime.get(t) || null })
+  }
+  // Keep any point that falls off the grid (e.g. a bucket still being filled).
+  for (const [t, p] of byTime) {
+    if (t > lastBucket) grid.push({ t, p })
+  }
+  return grid
+})
+
+const chartHint = computed(() => {
+  const bucket = seriesMeta.value.bucket_seconds || 60
+  const res = bucket >= 86400 ? '1-day' : bucket >= 3600 ? '1-hour' : '1-minute'
+  const direction = seriesMeta.value.directional ? '' : ' · direction not kept at this resolution'
+  const scope = seriesMeta.value.wanOnly ? ' · WAN-role interfaces only' : ''
+  return `Last ${selectedWindow.value} · ${res} averages · gaps mean no data${direction}${scope}`
+})
+
+function formatAxisTime(t) {
+  const d = new Date(t)
+  const span = WINDOW_SECONDS[selectedWindow.value] || 3600
+  if (span <= 86400) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (span <= 604800) return d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+function lineDataset(label, data, color, opts = {}) {
+  return {
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: withAlpha(color, 0.2),
+    borderWidth: 2,
+    fill: opts.fill ?? true,
+    tension: 0.3,
+    spanGaps: false,
+    pointRadius: data.length > 100 ? 0 : 2,
+  }
+}
 
 const chartData = computed(() => {
-  const labels = seriesPoints.value.map((p) => {
-    const d = new Date(p.timestamp)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  })
+  const grid = filledPoints.value
+  const labels = grid.map((g) => formatAxisTime(g.t))
+  const pick = (key) => grid.map((g) => (g.p ? g.p[key] || 0 : null))
+  const series = theme.value.series
 
   const matched = selectedInterfaceIdx.value !== null
     ? interfaceList.value.find(i => i.interface_idx === selectedInterfaceIdx.value)
     : null
-  const ifDisplayName = matched
-    ? (matched.alias?.name || matched.name || `Interface #${selectedInterfaceIdx.value}`)
-    : `Interface #${selectedInterfaceIdx.value}`
-
-  if (chartMetricMode.value === 'pps') {
-    const inData = seriesPoints.value.map((p) => p.ingress_pps || 0)
-    const outData = seriesPoints.value.map((p) => p.egress_pps || 0)
-    const inLabel = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Ingress (pps)`
-      : 'Ingress (pps)'
-    const outLabel = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Egress (pps)`
-      : 'Egress (pps)'
-
-    return {
-      labels,
-      datasets: [
-        {
-          label: inLabel,
-          data: inData,
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16, 185, 129, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-        {
-          label: outLabel,
-          data: outData,
-          borderColor: '#0ea5e9',
-          backgroundColor: 'rgba(14, 165, 233, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-      ],
-    }
-  }
+  const prefix = selectedInterfaceIdx.value !== null
+    ? `${matched?.alias?.name || matched?.name || `Interface #${selectedInterfaceIdx.value}`} `
+    : ''
 
   if (chartMetricMode.value === 'fps') {
-    const flowData = seriesPoints.value.map((p) => p.flows_per_sec || 0)
-    const label = selectedInterfaceIdx.value !== null
-      ? `${ifDisplayName} Flow Rate (fps)`
-      : 'Flow Rate (fps)'
+    return { labels, datasets: [lineDataset(`${prefix}Flows (per second)`, pick('flows_per_sec'), series.flows)] }
+  }
 
-    return {
-      labels,
-      datasets: [
-        {
-          label,
-          data: flowData,
-          borderColor: '#8b5cf6',
-          backgroundColor: 'rgba(139, 92, 246, 0.25)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-        },
-      ],
+  const unit = chartMetricMode.value === 'pps' ? 'pps' : 'bps'
+  const datasets = []
+  if (seriesMeta.value.wanOnly) {
+    datasets.push(lineDataset(`WAN in (${unit})`, pick(`ingress_${unit}`), series.in))
+    datasets.push(lineDataset(`WAN out (${unit})`, pick(`egress_${unit}`), series.out))
+  } else if (seriesMeta.value.directional) {
+    datasets.push(lineDataset(`${prefix}Ingress (${unit})`, pick(`ingress_${unit}`), series.in))
+    datasets.push(lineDataset(`${prefix}Egress (${unit})`, pick(`egress_${unit}`), series.out))
+    const transit = pick(`transit_${unit}`)
+    if (transit.some((v) => v)) {
+      datasets.push(lineDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
     }
+  } else {
+    datasets.push(lineDataset(`Total (${unit})`, pick(`transit_${unit}`), series.transit))
   }
-
-  // Default: 'bps'
-  const inData = seriesPoints.value.map((p) => p.ingress_bps)
-  const outData = seriesPoints.value.map((p) => p.egress_bps)
-
-  const inLabel = selectedInterfaceIdx.value !== null
-    ? `${ifDisplayName} Ingress (bps)`
-    : 'Ingress (bps)'
-  const outLabel = selectedInterfaceIdx.value !== null
-    ? `${ifDisplayName} Egress (bps)`
-    : 'Egress (bps)'
-
-  return {
-    labels,
-    datasets: [
-      {
-        label: inLabel,
-        data: inData,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-      },
-      {
-        label: outLabel,
-        data: outData,
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.25)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-        pointRadius: seriesPoints.value.length > 100 ? 0 : 2,
-      },
-    ],
-  }
+  return { labels, datasets }
 })
 
-// Dynamic theme-adaptive Chart.js options (UI-08)
+// Text alternative for the canvas chart.
+const chartSummary = computed(() => {
+  const unit = chartMetricMode.value
+  const fmt = unit === 'pps' ? formatPps : unit === 'fps' ? (v) => `${v.toFixed(2)} flows/s` : formatBps
+  const pts = seriesPoints.value.map((p) => ({ t: Date.parse(p.timestamp), p }))
+  const keys = unit === 'fps'
+    ? [['flows_per_sec', 'Flows']]
+    : seriesMeta.value.wanOnly
+      ? [[`ingress_${unit}`, 'WAN in'], [`egress_${unit}`, 'WAN out']]
+      : seriesMeta.value.directional
+      ? [[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress'], [`transit_${unit}`, 'Transit']]
+      : [[`transit_${unit}`, 'Total']]
+  return [`${chartTitle.value}, last ${selectedWindow.value}.`]
+    .concat(keys.map(([key, label]) => summarizeSeries(label, pts.map(({ t, p }) => ({ t, v: p[key] ?? null })), fmt)))
+    .join(' ')
+})
+
 const chartOptions = computed(() => {
-  const isDark = typeof document !== 'undefined' && 
-    (document.documentElement.classList.contains('dark') || !document.documentElement.classList.contains('light'))
-  const textColor = isDark ? '#9ca3af' : '#4b5563'
-  const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)'
+  const t = theme.value
+  const formatValue = (val) => {
+    if (val === null || val === undefined) return 'no data'
+    if (chartMetricMode.value === 'pps') return formatPps(val)
+    if (chartMetricMode.value === 'fps') return `${val} fps`
+    return formatBps(val)
+  }
 
   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     normalized: true,
+    interaction: { mode: 'index', intersect: false },
     scales: {
       x: {
         grid: { display: false },
-        ticks: { color: textColor, font: { family: 'Inter', size: 11 } },
+        ticks: { color: t.text, font: { family: t.fontSans, size: 11 }, maxTicksLimit: 12, autoSkip: true },
       },
       y: {
+        beginAtZero: true,
         ticks: {
-          color: textColor,
-          font: { family: 'JetBrains Mono', size: 11 },
-          callback: (val) => {
-            if (chartMetricMode.value === 'pps') return formatPps(val)
-            if (chartMetricMode.value === 'fps') return `${val} fps`
-            return formatBps(val)
-          },
+          color: t.text,
+          font: { family: t.fontMono, size: 11 },
+          callback: (val) => formatValue(val),
         },
-        grid: { color: gridColor },
+        grid: { color: t.grid },
       },
     },
     plugins: {
       legend: {
         position: 'top',
-        labels: { color: textColor, font: { family: 'Inter', size: 12 } },
+        labels: { color: t.text, font: { family: t.fontSans, size: 12 } },
       },
       tooltip: {
         callbacks: {
-          label: (ctx) => {
-            if (chartMetricMode.value === 'pps') return `${ctx.dataset.label}: ${formatPps(ctx.raw)}`
-            if (chartMetricMode.value === 'fps') return `${ctx.dataset.label}: ${ctx.raw} fps`
-            return `${ctx.dataset.label}: ${formatBps(ctx.raw)}`
-          },
+          label: (ctx) => `${ctx.dataset.label}: ${formatValue(ctx.raw)}`,
         },
       },
     },
   }
 })
 
-const donutData = computed(() => {
-  const labels = applicationStats.value.map((a) => a.service_label)
-  const data = applicationStats.value.map((a) => a.total_bytes)
-  const colors = [
-    '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
-    '#EC4899', '#06B6D4', '#14B8A6', '#84CC16', '#6366F1',
-    '#F97316', '#A855F7', '#0EA5E9', '#D946EF', '#EAB308',
-    '#64748B'
-  ]
-
-  return {
-    labels,
-    datasets: [
-      {
-        data,
-        backgroundColor: labels.map((_, i) => colors[i % colors.length]),
-        borderWidth: 1,
-      },
-    ],
-  }
-})
-
-const donutOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: {
-      position: 'right',
-      labels: { color: '#888888', font: { size: 11 } },
-    },
-    tooltip: {
-      callbacks: {
-        label: (ctx) => `${ctx.label}: ${formatBytes(ctx.raw)}`,
-      },
-    },
-  },
-}
-
 function setWindow(w) {
   selectedWindow.value = w
   refreshData()
-}
-
-function formatBps(bps) {
-  if (!bps || bps <= 0) return '0 bps'
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} kbps`
-  return `${Math.round(bps)} bps`
-}
-
-function formatBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(2)} TB`
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(2)} MB`
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
-  return `${bytes} B`
-}
-
-function formatNumber(num) {
-  if (!num) return '0'
-  return new Intl.NumberFormat().format(num)
-}
-
-function formatPps(pps) {
-  if (!pps || pps <= 0) return '0 pps'
-  if (pps >= 1e6) return `${(pps / 1e6).toFixed(2)} Mpps`
-  if (pps >= 1e3) return `${(pps / 1e3).toFixed(1)} kpps`
-  return `${Math.round(pps)} pps`
 }
 
 function getPacketProfileLabel(avgBytes) {
@@ -1616,17 +1550,6 @@ function getPacketProfileClass(avgBytes) {
   if (b >= 1100) return 'profile-bulk'
   if (b <= 150) return 'profile-micro'
   return 'profile-mixed'
-}
-
-function getTrafficProfileBadgeClass(profile) {
-  switch (profile) {
-    case 'Bulk Transfer': return 'badge-profile-bulk'
-    case 'SYN Scan / Probe': return 'badge-profile-syn'
-    case 'Reset / Refused': return 'badge-profile-rst'
-    case 'Micro-Flow / Control': return 'badge-profile-micro'
-    case 'Real-Time / VoIP': return 'badge-profile-voip'
-    default: return 'badge-profile-interactive'
-  }
 }
 
 function getZoneBadgeClass(zone) {
@@ -1653,14 +1576,6 @@ function getZoneIcon(zone) {
   return '🌐'
 }
 
-function toggleEndpointFilter(ip) {
-  selectedIpFilter.value = selectedIpFilter.value === ip ? null : ip
-}
-
-function togglePortFilter(port) {
-  selectedPortFilter.value = selectedPortFilter.value === port ? null : port
-}
-
 function toggleDscpFilter(dscp, label) {
   if (selectedDscpFilter.value === dscp) {
     selectedDscpFilter.value = null
@@ -1669,14 +1584,6 @@ function toggleDscpFilter(dscp, label) {
     selectedDscpFilter.value = dscp
     selectedDscpLabel.value = label || `DSCP ${dscp}`
   }
-}
-
-function clearCrossFilters() {
-  selectedIpFilter.value = null
-  selectedPortFilter.value = null
-  selectedDscpFilter.value = null
-  selectedDscpLabel.value = ''
-  conversationQuickFilter.value = 'all'
 }
 
 function openMappingModal(ip) {
@@ -1709,14 +1616,34 @@ async function submitExporterMapping() {
   }
 }
 
+// Refresh button and auto-refresh: reload the page data and the conversation panels.
+async function refreshAll() {
+  await refreshData()
+  refreshKey.value++
+}
+
 async function refreshData() {
   loading.value = true
   try {
-    const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
+    // An unregistered source has no data of its own yet: load only the inventory for the
+    // enrol / link actions instead of showing fleet-wide numbers under its name.
+    if (isUnmatchedScope.value) {
+      const [expRes, epListRes] = await Promise.all([getFlowExporters(), getEndpoints()])
+      if (expRes.data?.data) {
+        unmatchedExporters.value = expRes.data.data.unmatched || []
+        flowExporters.value = expRes.data.data.exporters || []
+      }
+      if (epListRes.data?.data) {
+        availableEndpoints.value = epListRes.data.data
+      }
+      return
+    }
+
+    const expId = selectedExporterId.value || null
     const [ovRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
-      getBandwidthOverview(),
-      getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value),
-      getTopTalkers(selectedWindow.value, 25, null, expId),
+      getBandwidthOverview(expId),
+      getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value),
+      getTopTalkers(selectedWindow.value, 10, null, expId),
       getApplicationDistribution(selectedWindow.value, expId),
       getFlowExporters(),
       getEndpoints(),
@@ -1726,17 +1653,15 @@ async function refreshData() {
     if (ovRes.data?.data) {
       overview.value = ovRes.data.data
     }
-    if (seriesRes.data?.data?.points) {
-      seriesPoints.value = seriesRes.data.data.points
-    }
+    applySeries(seriesRes.data?.data)
     if (talkersRes.data?.data) {
       topEndpoints.value = talkersRes.data.data.top_endpoints || []
-      topConversations.value = talkersRes.data.data.top_conversations || []
     }
     if (appRes.data?.data) {
       applicationStats.value = appRes.data.data.applications || []
       qosClasses.value = appRes.data.data.qos_classes || []
       trafficZones.value = appRes.data.data.traffic_zones || []
+      zonesResolution.value = appRes.data.data.zones_resolution || 'ip'
     }
     if (expRes.data?.data) {
       unmatchedExporters.value = expRes.data.data.unmatched || []
@@ -1744,7 +1669,6 @@ async function refreshData() {
     }
     if (epListRes.data?.data) {
       availableEndpoints.value = epListRes.data.data
-      totalEndpointsCount.value = epListRes.data.data.length
     }
     if (ifRes?.data?.data?.interfaces) {
       interfaceList.value = ifRes.data.data.interfaces
@@ -1782,6 +1706,98 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.view-switcher {
+  margin: 0.25rem 0 1rem;
+}
+
+.app-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0 1.25rem 1rem;
+}
+
+.app-bar-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, 9rem) 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: var(--target-min);
+  padding: 0.25rem 0.375rem;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.app-bar-row:not(:disabled):hover {
+  background: var(--bg-surface-hover);
+}
+
+.app-bar-row:disabled {
+  cursor: default;
+}
+
+.app-bar-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.app-bar-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-surface-selected);
+  overflow: hidden;
+}
+
+.app-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--series-1);
+}
+
+.app-bar-fill.other {
+  background: var(--series-8);
+}
+
+.app-bar-value {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.zones-header {
+  border-top: 1px solid var(--border-color);
+}
+
+.empty-view {
+  padding: 2rem 1.5rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty-view .empty-title {
+  margin: 0 0 0.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.exporter-picks {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.qos-panel,
+.security-kpis {
+  margin-bottom: 1rem;
+}
+
 .bandwidth-view {
   display: flex;
   flex-direction: column;
@@ -1818,32 +1834,6 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.window-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.btn-pill.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: var(--shadow);
-}
-
 /* Unmatched Discovery Alert */
 .unmatched-banner {
   display: flex;
@@ -1855,19 +1845,10 @@ onUnmounted(() => {
   border: 1px solid rgba(245, 158, 11, 0.4);
   color: #b45309;
 }
-html.dark .unmatched-banner {
-  background: rgba(245, 158, 11, 0.15);
-  border-color: rgba(245, 158, 11, 0.5);
-  color: #fbbf24;
-}
 
 .unmatched-icon {
   font-size: 20px;
   flex-shrink: 0;
-}
-
-.unmatched-content {
-  flex: 1;
 }
 
 .unmatched-title {
@@ -1875,68 +1856,22 @@ html.dark .unmatched-banner {
   font-weight: 700;
 }
 
-.unmatched-desc {
-  font-size: 0.8125rem;
-  margin-top: 2px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+/* KPI Metric Strip */
+.kpi-scope-note {
+  margin: 0 0 0.5rem;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }
 
-.unmatched-ip-chip {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
+.speed-unset {
+  color: var(--status-text-warn);
   font-weight: 600;
 }
 
-/* KPI Metric Strip */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
-}
-
-.kpi-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius, 8px);
-  padding: 16px;
-  box-shadow: var(--shadow);
-}
-
-.kpi-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-}
-
-.kpi-value-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 6px 0 2px 0;
-}
-
-.kpi-value {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.kpi-denom {
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-}
-
-.kpi-subtext {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
 }
 
 .ingress-text {
@@ -1970,15 +1905,6 @@ html.dark .unmatched-banner {
   color: var(--text-muted);
 }
 
-.badge-window {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--bg-surface-selected);
-  color: var(--text-secondary);
-  font-weight: 600;
-}
-
 .chart-container {
   height: 320px;
   position: relative;
@@ -2005,16 +1931,6 @@ html.dark .unmatched-banner {
     grid-template-columns: 1fr;
   }
 }
-
-.donut-panel {
-  padding: 16px;
-}
-
-.donut-container {
-  height: 280px;
-  position: relative;
-}
-
 .node-cell {
   display: flex;
   flex-direction: column;
@@ -2120,107 +2036,6 @@ html.dark .unmatched-banner {
   margin-bottom: 12px;
 }
 
-.conversation-search-input {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  width: 220px;
-  outline: none;
-}
-
-.conversation-search-input:focus {
-  border-color: var(--accent, #3b82f6);
-}
-
-/* Service Port Badges (UI-09) */
-.service-port-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-family: var(--font-mono);
-  font-feature-settings: 'tnum';
-  font-weight: 600;
-}
-
-.port-web {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.port-dns {
-  background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.port-ssh {
-  background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-
-.port-telemetry {
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.3);
-}
-
-.port-generic {
-  background: rgba(107, 114, 128, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-/* Forensic L3/L4 Telemetry & Anomaly Badges */
-.metadata-badge-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.badge-tcp-flags {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  background: rgba(100, 116, 139, 0.12);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.badge-anomaly {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.badge-syn-only {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-tcp-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
 .badge-dscp {
   display: inline-flex;
   align-items: center;
@@ -2305,10 +2120,6 @@ html.dark .unmatched-banner {
   flex-direction: column;
   gap: 16px;
 }
-html.dark .unmatched-scope-card {
-  background: rgba(245, 158, 11, 0.12);
-  border-color: rgba(245, 158, 11, 0.45);
-}
 
 .unmatched-scope-header {
   display: flex;
@@ -2336,9 +2147,6 @@ html.dark .unmatched-scope-card {
   background: rgba(245, 158, 11, 0.2);
   color: #d97706;
   margin-bottom: 6px;
-}
-html.dark .unmatched-scope-badge {
-  color: #fbbf24;
 }
 
 .unmatched-scope-title {
@@ -2407,11 +2215,37 @@ html.dark .unmatched-scope-badge {
 }
 
 .util-bar-bg {
+  position: relative;
   flex: 1;
   height: 6px;
   background: var(--border-color, rgba(255, 255, 255, 0.1));
   border-radius: 3px;
-  overflow: hidden;
+}
+
+.util-marker {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 12px;
+  transform: translateX(-1px);
+  background: var(--text-secondary);
+}
+
+.util-marker-peak {
+  top: -6px;
+  width: 0;
+  height: 0;
+  background: none;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--status-text-down);
+  transform: translateX(-4px);
+}
+
+.util-sub {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
 }
 
 .util-bar-fill {
@@ -2435,8 +2269,9 @@ html.dark .unmatched-scope-badge {
 .util-text {
   font-size: 0.75rem;
   font-weight: 700;
-  width: 45px;
+  min-width: 45px;
   text-align: right;
+  white-space: nowrap;
 }
 
 .util-text.util-healthy {
@@ -2460,6 +2295,37 @@ html.dark .unmatched-scope-badge {
   background: rgba(16, 185, 129, 0.15);
   color: #10b981;
   border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-wan {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: var(--bg-surface-selected);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.wan-links-card {
+  margin-top: 16px;
+}
+
+.wan-links-card td.tnum {
+  white-space: nowrap;
+}
+
+.wan-share {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.kpi-footnote {
+  margin: 0.5rem 0 0;
 }
 
 .badge-idle {
@@ -2502,6 +2368,11 @@ html.dark .unmatched-scope-badge {
   color: var(--accent-primary, #2563eb);
 }
 
+/* Index, name, role, speed and remove fit side by side; the global card is 520px. */
+.modal-card.wide {
+  max-width: 760px;
+}
+
 .interface-config-list {
   display: flex;
   flex-direction: column;
@@ -2523,17 +2394,11 @@ html.dark .unmatched-scope-badge {
 }
 
 .interface-config-row .idx-col { width: 80px; }
-.interface-config-row .name-col { flex: 1; }
+.interface-config-row .name-col { flex: 1; min-width: 0; }
 .interface-config-row .preset-col { width: 170px; }
+.interface-config-row .role-col { width: 130px; }
 .interface-config-row .speed-col { width: 100px; }
 .interface-config-row .remove-col { width: 36px; display: flex; align-items: flex-end; }
-
-/* Flow Analytics Workbench UI Enhancements */
-.kpi-unit {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text-muted);
-}
 
 .text-accent {
   color: var(--accent-primary, #3b82f6);
@@ -2583,129 +2448,9 @@ html.dark .unmatched-scope-badge {
   gap: 12px;
 }
 
-.metric-mode-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.btn-pill-sm {
-  font-size: 0.6875rem;
-  padding: 3px 8px;
-}
-
-.active-filter-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.badge-active-filter {
-  background: rgba(99, 102, 241, 0.15);
-  color: #818cf8;
-  border: 1px solid rgba(99, 102, 241, 0.35);
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-family: var(--font-mono);
-  font-weight: 600;
-}
-
-.btn-clear-filter {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 0.75rem;
-  padding: 0 4px;
-}
-
-.btn-clear-filter:hover {
-  color: var(--text-primary);
-}
-
 /* Multi-Tab Breakdown Panel */
 .breakdown-panel {
   padding: 16px;
-}
-
-.breakdown-tabs {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.tab-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tab-btn:hover {
-  color: var(--text-primary);
-}
-
-.tab-btn.active {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: var(--shadow);
-}
-
-.tab-badge {
-  background: rgba(99, 102, 241, 0.2);
-  color: #818cf8;
-  padding: 1px 5px;
-  border-radius: 8px;
-  font-size: 0.65rem;
-  font-weight: 700;
-}
-
-.apps-quick-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-color);
-}
-
-.app-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-surface-hover);
-  border: 1px solid var(--border-color);
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  transition: all 0.15s ease;
-}
-
-.app-chip:hover {
-  border-color: var(--accent-primary, #3b82f6);
-}
-
-.app-chip.active {
-  background: rgba(59, 130, 246, 0.15);
-  border-color: #3b82f6;
-}
-
-.app-chip-bytes {
-  font-size: 0.6875rem;
-  color: var(--text-muted);
 }
 
 .breakdown-list {
@@ -2820,150 +2565,5 @@ html.dark .unmatched-scope-badge {
   background: rgba(107, 114, 128, 0.12);
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
-}
-
-/* Forensic Conversations Workbench Styling */
-.conversations-top-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.triage-pills {
-  display: flex;
-  background: var(--bg-surface-selected);
-  border-radius: var(--radius-sm, 6px);
-  padding: 2px;
-  gap: 2px;
-}
-
-.triage-pills .pill-anomalies.active {
-  color: #ef4444;
-}
-
-.triage-pills .pill-qos.active {
-  color: #8b5cf6;
-}
-
-.triage-pills .pill-bulk.active {
-  color: #10b981;
-}
-
-.filter-chips-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: var(--bg-surface-hover);
-  border-radius: var(--radius-sm, 6px);
-  border: 1px dashed var(--border-color);
-  flex-wrap: wrap;
-}
-
-.filter-chips-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.filter-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  color: var(--text-primary);
-}
-
-.btn-chip-remove {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 0;
-  line-height: 1;
-}
-
-.btn-chip-remove:hover {
-  color: #ef4444;
-}
-
-.btn-clear-all-chips {
-  border: none;
-  background: transparent;
-  color: var(--accent-primary, #3b82f6);
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-  padding: 2px 6px;
-  margin-left: auto;
-}
-
-.btn-clear-all-chips:hover {
-  text-decoration: underline;
-}
-
-.physics-profile-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.badge-profile {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  width: fit-content;
-}
-
-.badge-profile-bulk {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.badge-profile-syn {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
-}
-
-.badge-profile-rst {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.badge-profile-micro {
-  background: rgba(139, 92, 246, 0.15);
-  color: #8b5cf6;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-}
-
-.badge-profile-voip {
-  background: rgba(6, 182, 212, 0.15);
-  color: #06b6d4;
-  border: 1px solid rgba(6, 182, 212, 0.35);
-}
-
-.badge-profile-interactive {
-  background: rgba(59, 130, 246, 0.12);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-.packet-physics-meta {
-  font-size: 0.6875rem;
-  white-space: nowrap;
 }
 </style>

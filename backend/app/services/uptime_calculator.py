@@ -161,7 +161,11 @@ async def get_service_gap_intervals(
             g_start = max(r_start, start_dt)
             g_end = min(r_end, end_dt)
             if g_end > g_start:
-                intervals.append((g_start, g_end))
+                # Rows are ordered by start: merge overlaps so no second is left out twice.
+                if intervals and g_start <= intervals[-1][1]:
+                    intervals[-1] = (intervals[-1][0], max(intervals[-1][1], g_end))
+                else:
+                    intervals.append((g_start, g_end))
         return intervals
     except Exception:
         return []

@@ -1,7 +1,7 @@
 """Ephemres Network Monitoring Platform — Cross-Version Database Backup Restore Engine.
 
 Restores PostgreSQL and TimescaleDB database dumps created by pg_dump across
-different platform generations (v3.1.35s, v3.3.0, v3.3.1n, v3.3.2v+).
+different platform generations (v3.1.35s, v3.2.0, v3.3.0, v3.3.1n, v3.3.2v+).
 
 Key Capabilities:
 1. TimescaleDB Chunk Remapping:
@@ -97,6 +97,7 @@ DECOMPRESS_FN = "_timescaledb_functions.compressed_data_to_array"
 
 HYPERTABLE_NAMES = {
     "endpoint_events",
+    "endpoint_probe_samples",
     "flow_minute_rollups",
     "flow_hourly_rollups",
     "flow_daily_rollups",
@@ -118,6 +119,8 @@ CONFIG_TABLE_ORDER = [
     "endpoint_baseline_routes",
     "endpoint_diagnostic_traces",
     "endpoint_rca_incidents",
+    "flow_path_observations",
+    "flow_route_changes",
     "user_sessions",
 ]
 
@@ -349,6 +352,30 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "baseline_snapshot": "jsonb",
             "failure_trace_snapshot": "jsonb",
             "is_resolved": "bool",
+            "flow_evidence": "jsonb",
+        },
+        "flow_path_observations": {
+            "exporter_id": "uuid",
+            "endpoint_id": "uuid",
+            "direction": "varchar",
+            "in_if": "int4",
+            "out_if": "int4",
+            "next_hop": "inet",
+            "first_seen": "timestamptz",
+            "last_seen": "timestamptz",
+            "bytes": "int8",
+            "flow_count": "int8",
+        },
+        "flow_route_changes": {
+            "id": "uuid",
+            "detected_at": "timestamptz",
+            "exporter_id": "uuid",
+            "endpoint_id": "uuid",
+            "direction": "varchar",
+            "old_out_if": "int4",
+            "old_next_hop": "inet",
+            "new_out_if": "int4",
+            "new_next_hop": "inet",
         },
         "alert_channels": {
             "id": "uuid",
@@ -416,6 +443,16 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "monitoring_cycle_count": "int4",
             "created_at": "timestamptz",
         },
+        "endpoint_probe_samples": {
+            "endpoint_id": "uuid",
+            "sampled_at": "timestamptz",
+            "sent": "int2",
+            "received": "int2",
+            "rtt_min_ms": "float4",
+            "rtt_avg_ms": "float4",
+            "rtt_max_ms": "float4",
+            "jitter_ms": "float4",
+        },
         "flow_minute_rollups": {
             "bucket": "timestamptz",
             "exporter_id": "uuid",
@@ -428,6 +465,8 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "bytes": "int8",
             "packets": "int8",
             "flow_count": "int4",
+            "tcp_flags": "int2",
+            "tos": "int2",
         },
         "flow_interface_minute_rollups": {
             "bucket": "timestamptz",
@@ -904,6 +943,12 @@ def scan_backup_metadata_and_configs(
                             ):
                                 parent = "endpoint_events"
                             elif (
+                                "sampled_at" in data_cols
+                                and "sent" in data_cols
+                                and "received" in data_cols
+                            ):
+                                parent = "endpoint_probe_samples"
+                            elif (
                                 "interface_idx" in data_cols
                                 or ("in_bytes" in data_cols and "out_bytes" in data_cols)
                                 or "input_snmp" in data_cols
@@ -1316,7 +1361,7 @@ async def reconcile_and_restore_database(
         summary["tables_restored"].append("alert_channels")
 
     # 7. Restore remaining non-hypertable config tables (skipping ephemeral user_sessions)
-    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents"]:
+    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents", "flow_path_observations", "flow_route_changes"]:
         if t in config_data and t in target_schema:
             cols, rows = config_data[t]
             target_cols = target_schema[t]
@@ -1330,6 +1375,8 @@ async def reconcile_and_restore_database(
             batch: List[List[Any]] = []
             for row in rows:
                 if "endpoint_id" in row and row["endpoint_id"] and str(row["endpoint_id"]) not in valid_endpoint_ids:
+                    continue
+                if "exporter_id" in row and row["exporter_id"] and str(row["exporter_id"]) not in valid_endpoint_ids:
                     continue
                 if "channel_id" in row and row["channel_id"] and valid_channel_ids and str(row["channel_id"]) not in valid_channel_ids:
                     continue
@@ -1422,8 +1469,8 @@ async def reconcile_and_restore_database(
 
                             t_cols = target_schema[current_target_table]
                             for row_dict in tuples:
-                                # Filter FK-constrained endpoint_events by valid_endpoint_ids
-                                if current_target_table == "endpoint_events":
+                                # Filter FK-constrained endpoint_events and endpoint_probe_samples by valid_endpoint_ids
+                                if current_target_table in ("endpoint_events", "endpoint_probe_samples"):
                                     ep_id = row_dict.get("endpoint_id")
                                     if ep_id and str(ep_id) not in valid_endpoint_ids:
                                         continue

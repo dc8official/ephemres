@@ -21,12 +21,14 @@ IE_INGRESS_INTERFACE = 10
 IE_DESTINATION_TRANSPORT_PORT = 11
 IE_DESTINATION_IPV4_ADDRESS = 12
 IE_EGRESS_INTERFACE = 14
+IE_IP_NEXT_HOP_IPV4_ADDRESS = 15
 IE_FLOW_END_SYS_UP_TIME = 21
 IE_FLOW_START_SYS_UP_TIME = 22
 IE_POST_OCTET_DELTA_COUNT = 23
 IE_POST_PACKET_DELTA_COUNT = 24
 IE_SOURCE_IPV6_ADDRESS = 27
 IE_DESTINATION_IPV6_ADDRESS = 28
+IE_IP_NEXT_HOP_IPV6_ADDRESS = 62
 IE_OCTET_TOTAL_COUNT = 85
 IE_PACKET_TOTAL_COUNT = 86
 IE_FLOW_START_SECONDS = 150
@@ -241,6 +243,7 @@ class IPFIXParser:
             tos = 0
             input_if = 0
             output_if = 0
+            next_hop: Optional[str] = None
             start_time: Optional[float] = None
             end_time: Optional[float] = None
             first_up_ms: Optional[int] = None
@@ -286,6 +289,10 @@ class IPFIXParser:
                     src_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
                 elif f.ie_id == IE_DESTINATION_IPV6_ADDRESS and len(f_bytes) == 16:
                     dst_ip = socket.inet_ntop(socket.AF_INET6, f_bytes)
+                elif f.ie_id == IE_IP_NEXT_HOP_IPV4_ADDRESS and len(f_bytes) == 4:
+                    next_hop = socket.inet_ntop(socket.AF_INET, f_bytes) if any(f_bytes) else None
+                elif f.ie_id == IE_IP_NEXT_HOP_IPV6_ADDRESS and len(f_bytes) == 16:
+                    next_hop = socket.inet_ntop(socket.AF_INET6, f_bytes) if any(f_bytes) else None
                 elif f.ie_id == IE_SOURCE_TRANSPORT_PORT:
                     src_port = int.from_bytes(f_bytes, "big")
                 elif f.ie_id == IE_DESTINATION_TRANSPORT_PORT:
@@ -363,6 +370,7 @@ class IPFIXParser:
                         "tos": tos,
                         "input_if": input_if,
                         "output_if": output_if,
+                        "next_hop": next_hop,
                         "start_time": start_time,
                         "end_time": end_time,
                     }

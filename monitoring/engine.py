@@ -12,8 +12,9 @@ from app.database import AsyncSessionLocal
 from app.models.endpoint import Endpoint
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task
 from app.services.diagnostics import run_throttled_traceroute, save_diagnostic_trace
-from monitoring.gap_handler import resolve_startup_state
+from monitoring.gap_handler import STARTUP_SETTLE_SECONDS, close_startup_gap, resolve_startup_state
 from monitoring.ping import run_ping_cycle
+from monitoring.probe_samples import record_probe_sample
 from monitoring.registry import endpoint_registry, MonitoredEndpoint
 from monitoring.state_machine import EndpointState, StateMachine
 
@@ -156,6 +157,7 @@ async def monitor_endpoint(
             str(endpoint_id),
         )
         try:
+            sampled_at = datetime.now(timezone.utc)
             result = await run_ping_cycle(
                 ip_address=ip_address,
                 count=1,
@@ -170,6 +172,7 @@ async def monitor_endpoint(
                     endpoint_id, result, db, baseline=baseline
                 )
                 await db.commit()
+            await record_probe_sample(endpoint_id, sampled_at, result)
 
             async with states_lock:
                 endpoint_states[str(endpoint_id)] = new_state
@@ -194,6 +197,7 @@ async def monitor_endpoint(
     while True:
         try:
             # Default 5 pings @ 8.0s: ~32s typical, 42s worst case, inside the 60s slot cycle
+            sampled_at = datetime.now(timezone.utc)
             result = await run_ping_cycle(
                 ip_address=ip_address,
                 count=PING_COUNT,
@@ -253,6 +257,8 @@ async def monitor_endpoint(
                                     )
 
                     await db.commit()
+                # Separate transaction: a failed sample write must not undo the state update.
+                await record_probe_sample(endpoint_id, sampled_at, result)
 
             async with states_lock:
                 endpoint_states[str(endpoint_id)] = new_state
@@ -278,13 +284,30 @@ async def monitor_endpoint(
         await asyncio.sleep(delay)
 
 
+async def _close_startup_gap(gap_id, started_at: datetime) -> None:
+    """End the time the engine was not running once every endpoint has run its first cycle."""
+    await asyncio.sleep(STARTUP_SETTLE_SECONDS)
+    try:
+        async with AsyncSessionLocal() as db:
+            await close_startup_gap(db, gap_id, started_at)
+            await db.commit()
+    except Exception as e:
+        # The next start closes it instead (resolve_startup_state).
+        logger.error("Failed to close the startup monitoring gap: %s: %s", type(e).__name__, e)
+
+
 async def main() -> None:
     logger.info("Ephemres monitoring engine starting.")
+    driver_manager.migrate_sessions = False
     await driver_manager.initialize()
+    started_at = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as db:
-        await resolve_startup_state(db)
+        startup_gap = await resolve_startup_state(db)
         await baseline_cache.refresh_from_db(db)
         await db.commit()
+    startup_gap_task = None
+    if startup_gap is not None:
+        startup_gap_task = asyncio.create_task(_close_startup_gap(startup_gap, started_at), name="close_startup_gap")
 
     try:
         async with AsyncSessionLocal() as db:
@@ -296,6 +319,11 @@ async def main() -> None:
     # Admin UI settings used by the engine (Layer-2 auto-bypass for incident traceroutes).
     runtime_settings_task = await start_runtime_settings_refresh_task(AsyncSessionLocal, interval_seconds=30)
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
+    # FastStore switched in Settings: follow the API onto the new event broker, or the state
+    # changes published here would go where the API no longer listens.
+    from app.services.settings_sync import start_settings_sync_listener
+
+    settings_sync_task = asyncio.create_task(start_settings_sync_listener(AsyncSessionLocal), name="settings_sync_listener")
 
     state_machine = StateMachine(
         confirmation_threshold=settings.monitoring.state_confirmation_cycles
@@ -360,7 +388,10 @@ async def main() -> None:
 
             await asyncio.sleep(30)
     finally:
+        if startup_gap_task is not None:
+            startup_gap_task.cancel()
         runtime_settings_task.cancel()
+        settings_sync_task.cancel()
         watchdog_task.cancel()
         try:
             await watchdog_task

@@ -10,7 +10,13 @@ from app.services.auth_service import hash_password, generate_readable_password
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("seed_admin")
 
-async def seed_admin(password: Optional[str] = None):
+async def seed_admin(password: Optional[str] = None, if_missing: bool = False):
+    """Creates the 'admin' account, or resets it to `password` (DEFAULT_ADMIN_PASSWORD).
+
+    if_missing: only create a missing admin and never touch an existing one. Upgrades use it:
+    the install-time default must not replace an admin password, and a legacy admin hash is
+    replaced by app.reset_legacy_passwords with a random temporary password instead.
+    """
     if not password:
         password = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
 
@@ -38,6 +44,10 @@ async def seed_admin(password: Optional[str] = None):
         existing_admin = existing.fetchone()
 
         force_reset = os.environ.get("FORCE_RESET_ADMIN", "").lower() in ("true", "1")
+
+        if existing_admin is not None and if_missing:
+            print("[seed] Admin user 'admin' already exists — skipping.")
+            return True
 
         if existing_admin is not None:
             pwd_hash = getattr(existing_admin, "password_hash", None)
@@ -102,6 +112,6 @@ async def seed_admin(password: Optional[str] = None):
 
 if __name__ == "__main__":
     target_pass = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-    success = asyncio.run(seed_admin(target_pass))
+    success = asyncio.run(seed_admin(target_pass, if_missing="--if-missing" in sys.argv[1:]))
     if not success:
         sys.exit(1)

@@ -92,9 +92,11 @@
     <!-- Fleet KPI Strip -->
     <div class="kpi-strip">
       <div class="kpi-card">
-        <span class="kpi-label">Mean Fleet SLA</span>
-        <span class="kpi-value tnum text-accent">{{ fleetSla }}%</span>
-        <span class="kpi-sub">Target: 99.90%</span>
+        <span class="kpi-label">Mean uptime</span>
+        <span class="kpi-value tnum" :style="{ color: toneVar(fleetSla === null ? 'unknown' : uptimeTone(fleetSla)) }">
+          {{ fleetSla === null ? '—' : `${fleetSla.toFixed(2)}%` }}
+        </span>
+        <span class="kpi-sub">Monitored targets · target {{ DEFAULT_SLA_TARGET }}%</span>
       </div>
       <div class="kpi-card">
         <span class="kpi-label">Active Targets</span>
@@ -198,17 +200,18 @@
               </td>
               <td>
                 <span class="sla-badge tnum" :class="getSlaClass(row.uptime_percentage)">
-                  {{ row.uptime_percentage != null ? row.uptime_percentage.toFixed(2) + '%' : '100.00%' }}
+                  {{ row.uptime_percentage != null ? row.uptime_percentage.toFixed(2) + '%' : '—' }}
                 </span>
               </td>
+              <!-- Incident and duration figures only apply to ICMP-monitored endpoints. -->
               <td class="tnum" :class="row.incident_count > 0 ? 'text-down' : ''">
-                {{ row.incident_count }}
+                {{ row.monitoring_enabled === false ? '—' : row.incident_count }}
               </td>
               <td class="tnum font-mono">
-                {{ formatDuration(row.uptime_seconds) }}
+                {{ row.monitoring_enabled === false ? '—' : formatDuration(row.uptime_seconds) }}
               </td>
               <td class="tnum font-mono" :class="row.downtime_seconds > 0 ? 'text-down font-bold' : ''">
-                {{ formatDuration(row.downtime_seconds) }}
+                {{ row.monitoring_enabled === false ? '—' : formatDuration(row.downtime_seconds) }}
               </td>
               <td class="text-right">
                 <router-link :to="`/endpoints/${row.id}`" class="btn-inspect">
@@ -533,6 +536,7 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
+import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 import { useToast } from 'primevue/usetoast'
 import { getFleetSummary, exportBatchTelemetry, generatePdfReport } from '../services/api.js'
 import { isOperatorOrAdmin, loadUserFromStorage } from '../services/auth.js'
@@ -600,10 +604,11 @@ async function loadAllReports() {
       operational_state: ep.operational_state || 'UP',
       detailed_state: ep.detailed_state || 'UP',
       monitoring_enabled: ep.monitoring_enabled,
-      uptime_percentage: ep.uptime_percentage != null ? ep.uptime_percentage : 100.0,
-      incident_count: ep.incident_count || 0,
-      uptime_seconds: ep.uptime_seconds || 0,
-      downtime_seconds: ep.downtime_seconds || 0,
+      // null when not measured (monitoring off or no data): never shown or averaged as 100 %, and sorted last.
+      uptime_percentage: ep.monitoring_enabled !== false && ep.uptime_percentage != null ? Number(ep.uptime_percentage) : null,
+      incident_count: ep.monitoring_enabled !== false ? (ep.incident_count || 0) : null,
+      uptime_seconds: ep.monitoring_enabled !== false ? (ep.uptime_seconds || 0) : null,
+      downtime_seconds: ep.monitoring_enabled !== false ? (ep.downtime_seconds || 0) : null,
       total_seconds: ep.total_seconds || 0,
     }))
   } catch (err) {
@@ -615,9 +620,9 @@ async function loadAllReports() {
 }
 
 const fleetSla = computed(() => {
-  if (reportRows.value.length === 0) return '100.00'
-  const sum = reportRows.value.reduce((acc, r) => acc + (r.uptime_percentage || 100.0), 0)
-  return (sum / reportRows.value.length).toFixed(2)
+  const values = reportRows.value.map((r) => r.uptime_percentage).filter((v) => v !== null && v !== undefined)
+  if (values.length === 0) return null
+  return values.reduce((acc, v) => acc + v, 0) / values.length
 })
 
 const activeEndpointsCount = computed(() => {
@@ -648,11 +653,13 @@ const sortedReportRows = computed(() => {
     let valA = a[sortKey.value]
     let valB = b[sortKey.value]
 
+    // Missing values sort last in both directions.
+    const aMissing = valA === null || valA === undefined
+    const bMissing = valB === null || valB === undefined
+    if (aMissing || bMissing) return aMissing === bMissing ? 0 : aMissing ? 1 : -1
     if (typeof valA === 'string') {
       return sortAsc.value ? valA.localeCompare(valB) : valB.localeCompare(valA)
     }
-    valA = valA ?? 0
-    valB = valB ?? 0
     return sortAsc.value ? valA - valB : valB - valA
   })
   return rows
@@ -667,11 +674,10 @@ function toggleSort(key) {
   }
 }
 
+const SLA_CLASS_BY_TONE = { up: 'sla-good', warn: 'sla-warn', down: 'sla-bad', unknown: 'sla-unknown' }
+
 function getSlaClass(val) {
-  if (val == null) return 'sla-good'
-  if (val >= 99.9) return 'sla-good'
-  if (val >= 98.0) return 'sla-warn'
-  return 'sla-bad'
+  return SLA_CLASS_BY_TONE[uptimeTone(val)]
 }
 
 function getStateClass(st) {
@@ -1246,18 +1252,23 @@ onMounted(() => {
 }
 
 .sla-good {
-  color: #4ade80;
-  background: rgba(74, 222, 128, 0.1);
+  color: var(--status-text-up);
+  background: var(--color-up-bg);
 }
 
 .sla-warn {
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.1);
+  color: var(--status-text-warn);
+  background: var(--color-up-unstable-bg);
 }
 
 .sla-bad {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.1);
+  color: var(--status-text-down);
+  background: var(--color-down-bg);
+}
+
+.sla-unknown {
+  color: var(--status-text-unknown);
+  background: var(--color-unknown-bg);
 }
 
 .btn-inspect {

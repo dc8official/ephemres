@@ -169,25 +169,25 @@ const ariaLabel = computed(() => {
 /* Status Color Tokens */
 .badge-up {
   background-color: var(--color-up-bg);
-  color: var(--color-up);
+  color: var(--status-text-up);
   border-color: rgba(22, 163, 74, 0.35);
 }
 
 .badge-unstable {
   background-color: var(--color-up-unstable-bg);
-  color: var(--color-up-unstable);
+  color: var(--status-text-warn);
   border-color: rgba(217, 119, 6, 0.35);
 }
 
 .badge-down {
   background-color: var(--color-down-bg);
-  color: var(--color-down);
+  color: var(--status-text-down);
   border-color: rgba(220, 38, 38, 0.35);
 }
 
 .badge-passive {
   background-color: rgba(99, 102, 241, 0.12);
-  color: #6366f1;
+  color: #4338ca;
   border-color: rgba(99, 102, 241, 0.35);
 }
 
@@ -197,13 +197,13 @@ html.dark .badge-passive {
 
 .badge-paused {
   background-color: var(--color-unknown-bg);
-  color: var(--color-unknown);
+  color: var(--status-text-unknown);
   border-color: var(--border-color);
 }
 
 .badge-unknown {
   background-color: var(--color-unknown-bg);
-  color: var(--color-unknown);
+  color: var(--status-text-unknown);
   border-color: var(--border-color);
 }
 

@@ -45,3 +45,4 @@ migrations/versions/*.pyc
 
 # Agents & Teamwork
 .agents/
+.claude/

@@ -149,7 +149,7 @@ def _sync_http_probe(
 
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Ephemres-SyntheticProbe/3.3.2.v (+https://github.com/dc8official/ephemres)"},
+        headers={"User-Agent": "Ephemres-SyntheticProbe/3.3.5 (+https://github.com/dc8official/ephemres)"},
         method="GET",
     )
 
@@ -236,7 +236,7 @@ async def run_http_probe(
         async with create_ssrf_safe_client(timeout=timeout, allow_private=True) as client:
             resp = await client.get(
                 url,
-                headers={"User-Agent": "Ephemres-SyntheticProbe/3.3.2.v (+https://github.com/dc8official/ephemres)"},
+                headers={"User-Agent": "Ephemres-SyntheticProbe/3.3.5 (+https://github.com/dc8official/ephemres)"},
                 follow_redirects=False,
             )
             latency_ms = (time.perf_counter() - start_time) * 1000.0

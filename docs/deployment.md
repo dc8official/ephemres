@@ -1,6 +1,6 @@
-# Ephemres Deployment & Operations Guide — Version 3.3.2.v
+# Ephemres Deployment & Operations Guide — Version 3.3.5
 
-This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.2.v on a production Linux server under the **Vertical Integration Architecture**.
+This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.5 on a production Linux server under the **Vertical Integration Architecture**.
 
 ---
 
@@ -45,7 +45,7 @@ The initial installation is fully automated via `install.sh`:
 
 ```bash
 sudo -i
-git clone -b v3.3.2v https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.5 https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```
@@ -54,16 +54,16 @@ cd /opt/ephemres/deploy
 1. Adds the NodeSource (Node.js 20), PGDG, and Timescale apt repositories, then installs `postgresql-16`, `timescaledb-2-postgresql-16`, `python3-venv`, `python3-pip`, `nginx`, `certbot`, `traceroute`, `libcap2-bin`, and `nodejs`.
 2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
-4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.2.v defaults.
-5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`).
+4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.5 defaults.
+5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`, revisions `0001`–`0017`).
 6. Sets `cap_net_raw+ep` on the `traceroute` binary. The daemons receive `CAP_NET_RAW` from `AmbientCapabilities` in their systemd units; no capability is placed on the Python interpreter.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
 ---
 
-## 3. Upgrading to Version 3.3.2.v (Zero Historical Data Loss)
+## 3. Upgrading to Version 3.3.5 (Zero Historical Data Loss)
 
-To perform an in-place upgrade to v3.3.2.v:
+To perform an in-place upgrade from `v3.3.0` (LTS) or `v3.3.2.v` to `v3.3.5`:
 
 ```bash
 sudo bash /opt/ephemres/deploy/upgrade.sh
@@ -74,7 +74,7 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
 2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
 3. **Network Capabilities**: Sets `cap_net_raw+ep` on `traceroute`, and removes the host-wide `cap_net_raw` file capability that earlier releases placed on the system Python interpreter (other file capabilities are left untouched). The refreshed unit files grant `CAP_NET_RAW` to the daemons.
-4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.2.v defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections).
+4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.5 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections including `route_change_minutes` and `route_ecmp_share`).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
 6. **Code & Dependency Sync**: Pulls latest codebase, cleans obsolete dependencies from the virtual environment, installs minimal requirements (`uvicorn`, `asyncpg`), and compiles frontend assets.
 7. **Native Async Migrations**: Runs `python3 -m app.core.migrator upgrade head` to apply all database revisions while preserving all historical TimescaleDB hypertable data.
@@ -83,9 +83,9 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 
 ---
 
-## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` $\rightarrow$ `v3.3.2v+`)
+## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` / `v3.3.2v` $\rightarrow$ `v3.3.5`)
 
-Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s`, `v3.3.0`, `v3.3.1n`, or `v3.3.2v+`:
+Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s` (end of support), `v3.3.0` (LTS), `v3.3.1n`, `v3.3.2v`, or `v3.3.5`:
 
 ```bash
 # Interactive restore (prompts for a new admin password; leave blank to keep the one in the backup)
@@ -147,6 +147,8 @@ netflow_port = 2055
 ipfix_port = 4739
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
+route_change_minutes = 3
+route_ecmp_share = 0.2
 ```
 
 > [!NOTE]

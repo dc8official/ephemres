@@ -1,6 +1,9 @@
-# Ephemres v3.3.2.v — Disaster Recovery & Database Restoration Runbook
+# Ephemres v3.3.5 — Disaster Recovery & Database Restoration Runbook
 
-This runbook describes the standard operating procedures for restoring the Ephemres database and platform configuration from timestamped backup archives, supporting both current `v3.3.2v+` installations and legacy releases (`v3.1.35s`, `v3.3.0`, and `v3.3.1n`).
+This runbook describes the standard operating procedures for restoring the Ephemres database and platform configuration from timestamped backup archives across current (`v3.3.5`, `v3.3.2v`), Long-Term Support (`v3.3.0`), and legacy (`v3.1.35s`, `v3.2.0`, `v3.3.1n`) releases.
+
+> [!NOTE]
+> **Version Support Policy**: `v3.3.5` is the active current standard, `v3.3.2v` remains supported (upgrade to `v3.3.5` recommended), and `v3.3.0` is the supported Enterprise LTS track. `v3.1.35s` has reached End of Support; `app.core.restore` continues to read `v3.1.35s` backups so operators can migrate directly to `v3.3.0` or `v3.3.5`.
 
 ---
 
@@ -12,7 +15,7 @@ Restoring a legacy PostgreSQL/TimescaleDB dump into Ephemres using raw `psql -f`
    `pg_dump` dumps hypertable data as `COPY _timescaledb_internal._hyper_<id>_<chunk>_chunk (...) FROM stdin;`. On a freshly provisioned or migrated TimescaleDB instance, these internal chunk table identifiers do not exist, causing PostgreSQL to abort the restoration.
 2. **Schema Drift Across Releases:**
    - **`v3.1.35s` (migration `0007`)**: Lacks `flow_exporter_ips`, `flow_interface_aliases`, and `device_role` on `endpoints`, and does not have the `flow_minute_rollups` or `flow_interface_minute_rollups` tables.
-   - **`v3.3.0` / `v3.3.1n`**: Feature different column orders and omit recently introduced telemetry rollups.
+   - **`v3.2.0` / `v3.3.0` / `v3.3.1n`**: Feature different column orders and omit recently introduced telemetry rollups. `v3.2.0` and `v3.3.0` backups (plain `pg_dump` files in `/var/backups/netmon/`) carry no `.key` file: on the same server the old key is read from `/etc/netmon/netmon.env`; on a new server pass it with `--old-secret-key`, or encrypted alert channels are restored disabled. Their argon2 passwords cannot be carried over, so every user gets a temporary password.
    - Raw `psql` fails when a backup dump includes columns that no longer exist or omits newly enforced `NOT NULL` constraints.
 3. **Password Hashing Algorithm Transition (`$argon2id$` $\rightarrow$ `$scrypt$`):**
    - Pre-`v3.3.2v` backups store `$argon2id$v=19$...` password hashes in `users.password_hash`.
@@ -83,14 +86,14 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
 ### What `app.core.restore` Executes Automatically:
 1. **Daemon Quiescence:** Temporarily halts `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` to prevent concurrent write collisions and stale session cache hits.
 2. **Schema Introspection:** Inspects the live PostgreSQL `information_schema` on the target database.
-3. **Hypertable Re-mapping:** Translates internal `_hyper_*_chunk` COPY blocks directly into the parent hypertable targets (`public.endpoint_events`, `public.flow_minute_rollups`, `public.flow_interface_minute_rollups`).
+3. **Hypertable Re-mapping:** Translates internal `_hyper_*_chunk` COPY blocks directly into the parent hypertable targets (`public.endpoint_events`, `public.endpoint_probe_samples`, `public.flow_minute_rollups`, `public.flow_interface_minute_rollups`).
 4. **Column Intersection:** Dynamically intersects backup dump column lists with target table schemas, safely loading available fields while applying database defaults for missing columns.
 5. **Credential Migration:**
    - `admin` with `--admin-password` given (or typed at the prompt): password set to that value with `must_change_password = TRUE`, whatever hash the backup holds. If the backup has no `admin` row, the existing `admin` account in the target database is updated instead.
    - `admin` without a password: a backed-up `$scrypt$` password is kept unchanged. A legacy (pre-`v3.3.2v`, non-scrypt) admin hash is replaced with a random temporary password, recorded in the report below.
    - Every other account with a legacy (non-`$scrypt$`) hash: assigned a random temporary password with `must_change_password = TRUE`. Accounts that already have `$scrypt$` hashes keep their backed-up passwords.
    - Temporary passwords are written to a root-only (`0600`) report, `/opt/ephemres/legacy_password_resets.txt` (override with `EPHEMRES_RESET_REPORT`). The restore summary prints its path and states which of the admin cases above applied. Distribute the passwords securely, then delete the file.
-6. **Continuous Aggregate Rebuild:** Refreshes `flow_hourly_rollups`, `flow_daily_rollups` and the node baselines over the whole restored history; their policies only look back 3, 7 and 28 days.
+6. **Continuous Aggregate Rebuild:** Refreshes `flow_hourly_rollups`, `flow_daily_rollups`, `endpoint_probe_hourly` and the node baselines over the whole restored history; their policies only look back 3, 7, 3 and 28 days. Aggregates are rebuilt from the restored source rows, so history older than a source's retention (minute flows 90 days, interface minutes 7 days, probe samples 30 days) is not restored into `flow_daily_rollups`, `flow_interface_hourly_rollups` or `endpoint_probe_hourly`.
 7. **In-RAM Storage Flush:** Removes any stale FastStore WAL / IPC shared-memory files (`/dev/shm/ephemres_faststore*`).
 8. **Daemon Resumption:** Restarts API and engine daemons, also when the restore failed, so the platform does not stay down.
 
@@ -98,7 +101,7 @@ sudo systemctl status ephemres-api ephemres-engine ephemres-flowd
 
 ## 4. Workflow B: Clean Database Rebuild & Same-Version Manual Restore
 
-Use this workflow only if performing a clean manual rebuild or restoring a backup generated from the identical `v3.3.2v` release.
+Use this workflow only if performing a clean manual rebuild or restoring a backup generated from the identical `v3.3.5` release.
 
 ### Step 1: Stop Services
 ```bash
@@ -168,6 +171,6 @@ Expected output:
 ```json
 {
   "status": "ok",
-  "version": "3.3.2.v"
+  "version": "3.3.5"
 }
 ```
