@@ -472,8 +472,8 @@ def test_atomic_shim_cutover_and_requirements():
     assert any("asyncpg" in line for line in lines)
 
     # Verify that shims are removed
-    assert (backend_path / "sqlalchemy").exists() is False
-    assert (backend_path / "alembic").exists() is False
+    for removed in ("sqlalchemy", "alembic", "fastapi", "starlette", "pydantic"):
+        assert (backend_path / removed).exists() is False
 
     # Verify native core imports
     import app.core.orm as sa

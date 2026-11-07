@@ -27,20 +27,20 @@ from monitoring.flow.v9_parser import (
     FT_IPV6_SRC_ADDR,
     V9Parser,
 )
-from tests.monitoring.test_flow_parsers import TestIPFIXParser, TestNetflowV5Parser, TestNetflowV9Parser
+from tests.monitoring import test_flow_parsers as packet_builders
 
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
 
 
 def test_v5_next_hop_and_zero_address():
-    build = TestNetflowV5Parser()._create_v5_packet
+    build = packet_builders.TestNetflowV5Parser()._create_v5_packet
     flows = parse_v5_packet(build(records=[{"next_hop": "10.0.0.6"}, {}]), "192.0.2.1")
     assert [f["next_hop"] for f in flows] == ["10.0.0.6", None]
 
 
 def test_v9_ipv4_and_ipv6_next_hop():
-    helper = TestNetflowV9Parser()
+    helper = packet_builders.TestNetflowV9Parser()
     parser = V9Parser()
     parser.parse_packet(
         helper._build_v9_template_packet(1, 256, [(FT_IPV4_SRC_ADDR, 4), (FT_IPV4_DST_ADDR, 4), (FT_IPV4_NEXT_HOP, 4), (FT_IN_BYTES, 4)]),
@@ -66,7 +66,7 @@ def test_v9_ipv4_and_ipv6_next_hop():
 
 
 def test_v9_without_next_hop_field_reports_none():
-    helper = TestNetflowV9Parser()
+    helper = packet_builders.TestNetflowV9Parser()
     parser = V9Parser()
     parser.parse_packet(helper._build_v9_template_packet(1, 256, [(FT_IPV4_SRC_ADDR, 4), (FT_IPV4_DST_ADDR, 4)]), "192.0.2.1")
     rec = struct.pack("!4s4s", socket.inet_aton("10.1.1.1"), socket.inet_aton("10.2.2.2"))
@@ -75,7 +75,7 @@ def test_v9_without_next_hop_field_reports_none():
 
 
 def test_ipfix_next_hop():
-    helper = TestIPFIXParser()
+    helper = packet_builders.TestIPFIXParser()
     parser = IPFIXParser()
     fields = [(IE_SOURCE_IPV4_ADDRESS, 4), (IE_DESTINATION_IPV4_ADDRESS, 4), (IE_IP_NEXT_HOP_IPV4_ADDRESS, 4), (IE_OCTET_DELTA_COUNT, 8)]
     parser.parse_packet(helper._build_ipfix_template_packet(7, 300, fields), "192.0.2.9")

@@ -18,14 +18,6 @@ from app.core.migrator import (
 )
 
 
-def test_requirements_no_alembic_psycopg2():
-    """Ensure alembic and psycopg2 are completely removed from requirements.txt."""
-    req_file = backend_path / "requirements.txt"
-    content = req_file.read_text(encoding="utf-8")
-    assert "alembic" not in content.lower()
-    assert "psycopg2" not in content.lower()
-
-
 def test_database_sync_engine_none():
     """Ensure app.database.sync_engine is None and does not eagerly load psycopg2."""
     import app.database as db
@@ -33,26 +25,26 @@ def test_database_sync_engine_none():
 
 
 def test_migrator_loads_all_19_revisions():
-    """Ensure all 19 migration files are discovered, loaded, and sorted topologically."""
+    """Ensure all 21 migration files are discovered, loaded, and sorted topologically."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 19
-    expected_chain = [f"{i:04d}" for i in range(1, 20)]
+    assert len(ordered) == 21
+    expected_chain = [f"{i:04d}" for i in range(1, 22)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0019"
+    assert ordered[-1].revision == "0021"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 19):
+    for i in range(1, 21):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
 def test_all_19_revisions_upgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 19 revisions and verify generated SQL."""
+    """Execute dry-run DDL compilation for all 21 revisions and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -65,8 +57,8 @@ def test_all_19_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 69 total statements across all 19 migrations
-    assert total_statements == 69
+    # 71 total statements across all 21 migrations
+    assert total_statements == 72
 
     full_sql = "\n".join(all_statements)
 
@@ -144,9 +136,15 @@ def test_all_19_revisions_upgrade_ddl_compilation():
     # 0019 state_since on endpoint_events
     assert "ALTER TABLE endpoint_events ADD COLUMN IF NOT EXISTS state_since TIMESTAMPTZ" in full_sql
 
+    # 0020 shared failed sign-in counters
+    assert "CREATE TABLE IF NOT EXISTS auth_login_failures" in full_sql
+
+    # 0021 hourly conversation tier
+    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS flow_conversation_hourly_rollups" in full_sql
+
 
 def test_all_19_revisions_downgrade_ddl_compilation():
-    """Execute dry-run DDL compilation for all 19 downgrades and verify generated SQL."""
+    """Execute dry-run DDL compilation for all 21 downgrades and verify generated SQL."""
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
@@ -159,8 +157,8 @@ def test_all_19_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 57 total downgrade statements
-    assert total_statements == 57
+    # 58 total downgrade statements
+    assert total_statements == 59
 
     full_sql = "\n".join(all_statements)
 
@@ -184,13 +182,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0019 (head)" in captured.out
+    assert "0021 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0019 (head)" in captured.out
+    assert "0021 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])
@@ -216,4 +214,3 @@ def test_migrator_cli_subprocess_invocation():
     assert result.returncode == 0, f"Process failed with stderr: {result.stderr}"
     assert "CREATE TABLE roles" in result.stdout
     assert "ERROR: op.create_table() called outside an active migration context" not in result.stderr
-

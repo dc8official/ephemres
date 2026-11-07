@@ -209,6 +209,7 @@ async def update_user(
 
     updates = {}
     audit_details = {}
+    role_changed = False
 
     if request.role is not None:
         role_row = await auth_repo.get_role_by_name(request.role)
@@ -216,6 +217,7 @@ async def update_user(
             raise HTTPException(status_code=400, detail="Invalid role specified.")
         updates["role_id"] = role_row.id
         audit_details["role"] = request.role
+        role_changed = str(getattr(user, "role_id", "")) != str(role_row.id)
 
     if request.is_active is not None:
         updates["is_active"] = request.is_active
@@ -241,7 +243,9 @@ async def update_user(
         details=audit_details,
     )
 
-    if request.is_active is False:
+    # Requests already read the role from the database; signing the account out on a role
+    # change also drops its open live-event streams and the browser's cached role.
+    if request.is_active is False or role_changed:
         await invalidate_all_user_sessions_async(str(user_id))
 
     await db.commit()

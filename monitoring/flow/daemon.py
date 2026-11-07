@@ -17,7 +17,7 @@ from app.logging_config import setup_logging
 from app.core.watchdog import start_systemd_watchdog
 from app.services.runtime_settings import get_runtime_settings, start_runtime_settings_refresh_task
 from monitoring.flow.aggregator import FlowAggregator
-from monitoring.flow.collector import FlowCollector
+from monitoring.flow.collector import LEGACY_STREAM_KEY, FlowCollector
 from monitoring.flow.correlator import FlowCorrelator
 from monitoring.flow.path_tracker import PathTracker
 
@@ -26,6 +26,31 @@ logger = setup_logging(
     log_dir=getattr(settings.logging, "log_dir", "/var/log/ephemres"),
     log_level=getattr(settings.logging, "level", "INFO"),
 )
+
+
+STATS_INTERVAL_SECONDS = 60.0
+
+
+async def _log_flow_stats(collector: FlowCollector, aggregator: FlowAggregator) -> None:
+    """Logs once a minute what came in, what was stored and what was lost, so loss is visible."""
+    last = (0, 0, 0, collector.udp_drops())
+    while True:
+        await asyncio.sleep(STATS_INTERVAL_SECONDS)
+        try:
+            now = (collector.flows_received, aggregator.rows_stored, aggregator.flows_dropped_memory, collector.udp_drops())
+        except Exception as e:
+            logger.debug("ephemres-flowd: could not read flow counters: %s", e)
+            continue
+        received, stored, dropped_mem, udp = (n - p for n, p in zip(now, last))
+        last = now
+        if udp or dropped_mem:
+            logger.warning(
+                "ephemres-flowd: last minute %d flows received, %d rollup rows stored; LOST %d datagrams "
+                "(kernel socket buffer full: flowd too slow) and %d flows (flow buffer full: database down?)",
+                received, stored, udp, dropped_mem,
+            )
+        elif received:
+            logger.info("ephemres-flowd: last minute %d flows received, %d rollup rows stored", received, stored)
 
 
 async def run_flow_daemon() -> None:
@@ -52,11 +77,16 @@ async def run_flow_daemon() -> None:
         )
         await client.ping()
         store_client = client
-        redis_client = store_client
+        # Earlier versions buffered every flow in a FastStore stream; flows now go from the
+        # collector to the aggregator in memory. Drop what is left of the stream.
+        try:
+            await store_client.delete(LEGACY_STREAM_KEY)
+        except Exception as e:
+            logger.warning("ephemres-flowd: Could not remove the old flow stream from FastStore: %s", e)
         logger.info("ephemres-flowd: Connected to FastStore at %s:%d/%d", r_host, r_port, r_db)
     except Exception as e:
         logger.error(
-            "ephemres-flowd: FastStore is required for flow ingestion buffer but could not connect: %s",
+            "ephemres-flowd: FastStore is required (exporter discovery, interface lists, events) but could not connect: %s",
             e,
         )
         sys.exit(1)
@@ -71,12 +101,6 @@ async def run_flow_daemon() -> None:
     ipfix_port = rt.flow_ipfix_port
 
     correlator = FlowCorrelator(AsyncSessionLocal, store_client=store_client)
-    collector = FlowCollector(
-        store_client=store_client,
-        bind_host=bind_host,
-        netflow_port=netflow_port,
-        ipfix_port=ipfix_port,
-    )
     # Route changes seen in flows go to the API (targeted traceroute) over the same broker the
     # monitoring engine uses, so initialize it the same way.
     from app.services.driver_manager import driver_manager
@@ -95,10 +119,19 @@ async def run_flow_daemon() -> None:
         # Resolved per event: the broker changes when FastStore is switched in Settings.
         event_publisher=lambda channel, payload: driver_manager.get_event_broker().publish(channel, payload),
     )
+    # Parsed flows go straight to the aggregator: no buffer between them to fill or trim.
+    collector = FlowCollector(
+        sink=aggregator.ingest,
+        bind_host=bind_host,
+        netflow_port=netflow_port,
+        ipfix_port=ipfix_port,
+        exporter_filter=correlator.admit_exporter,
+    )
 
     await correlator.start()
-    await collector.start()
     await aggregator.start()
+    await collector.start()
+    stats_task = asyncio.create_task(_log_flow_stats(collector, aggregator), name="flow_stats")
 
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     # FastStore switched in Settings: follow the API onto the new event broker (route hints).
@@ -125,6 +158,7 @@ async def run_flow_daemon() -> None:
 
     logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
     watchdog_task.cancel()
+    stats_task.cancel()
     runtime_settings_task.cancel()
     settings_sync_task.cancel()
     try:

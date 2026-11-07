@@ -7,8 +7,7 @@ from monitoring.flow.collector import FlowCollector
 
 
 def test_flow_collector_uses_configured_bind_host():
-    mock_redis = MagicMock()
-    collector = FlowCollector(redis_client=mock_redis, bind_host="127.0.0.1")
+    collector = FlowCollector(bind_host="127.0.0.1")
     assert collector.bind_host == "127.0.0.1"
 
     with patch("socket.socket") as mock_socket_cls:
@@ -21,7 +20,7 @@ def test_flow_collector_uses_configured_bind_host():
 
 def test_flow_collector_socket_does_not_set_so_reuseaddr():
     """SO_REUSEADDR would let another local process bind the same UDP port and take the flow stream."""
-    collector = FlowCollector(redis_client=MagicMock(), bind_host="127.0.0.1")
+    collector = FlowCollector(bind_host="127.0.0.1")
     with patch("socket.socket") as mock_socket_cls:
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
@@ -31,7 +30,7 @@ def test_flow_collector_socket_does_not_set_so_reuseaddr():
 
 
 def test_second_listener_cannot_bind_collector_port():
-    collector = FlowCollector(redis_client=MagicMock(), bind_host="127.0.0.1")
+    collector = FlowCollector(bind_host="127.0.0.1")
     sock = collector._create_socket(0)
     try:
         port = sock.getsockname()[1]

@@ -15,9 +15,43 @@ from app.core.http_client import validate_outbound_url
 from app.database import check_database_connection
 
 
+class _DictFastStore:
+    """Just enough of FastStoreClient for FastStoreSessionStore's session methods."""
+
+    def __init__(self):
+        self.data = {}
+
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.data[key] = value
+
+    async def ttl(self, key):
+        return 3600 if key in self.data else -2
+
+    async def delete(self, *keys):
+        for k in keys:
+            self.data.pop(k, None)
+
+
 @pytest.mark.anyio
 async def test_session_eviction_deduplication():
-    """Verify that multiple registrations of the same jti do not evict prior sessions."""
+    """Verify that multiple registrations of the same jti do not evict prior sessions.
+
+    Runs against the real FastStore session store: sessions are only valid in the shared
+    store, never in this worker's memory.
+    """
+    from app.services.driver_manager import driver_manager
+    from app.services.session_store import FastStoreSessionStore
+    from tests.backend.session_store_double import drain_background_session_tasks
+
+    store = FastStoreSessionStore(_DictFastStore())
+    with patch.object(driver_manager, "get_session_store", return_value=store):
+        await _run_session_eviction_deduplication(drain_background_session_tasks)
+
+
+async def _run_session_eviction_deduplication(drain):
     user_id = str(uuid4())
     _active_user_sessions.pop(user_id, None)
 
@@ -36,12 +70,14 @@ async def test_session_eviction_deduplication():
     # Re-registering session 2 must not push out session 1
     register_session(user_id, "token-2", max_sessions=2)
     assert _active_user_sessions[user_id] == ["token-1", "token-2"]
+    await drain()
     assert await is_session_active(user_id, "token-1") is True
     assert await is_session_active(user_id, "token-2") is True
 
     # Session 3 should evict oldest session 1 (FIFO)
     register_session(user_id, "token-3", max_sessions=2)
     assert _active_user_sessions[user_id] == ["token-2", "token-3"]
+    await drain()
     assert await is_session_active(user_id, "token-1") is False
     assert await is_session_active(user_id, "token-2") is True
     assert await is_session_active(user_id, "token-3") is True

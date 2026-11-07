@@ -109,7 +109,7 @@ class TrafficSeriesResponse(BaseModel):
     """Time-series query response encapsulating window metadata and data points.
 
     `bucket_seconds` is the width of each point. `directional` is False when the rollup tier
-    keeps no endpoint attribution (fleet-wide 30d/1y), in which case all bytes are reported as
+    keeps no endpoint attribution (fleet-wide 1y), in which case all bytes are reported as
     transit and ingress/egress are zero.
     """
     window: str
@@ -327,6 +327,7 @@ class ApplicationDistributionResponse(BaseModel):
     # applications query when the hourly/daily tier lacks `tos` (TimescaleDB continuous aggregates).
     qos_source: Optional[str] = None
     qos_window_start: Optional[datetime] = None
+    zones_window_start: Optional[datetime] = None
     traffic_zones: List[TrafficZoneItem] = Field(default_factory=list)
     total_bytes: int = 0
     # How zones were classified: "ip" (addresses + monitored endpoints, minute tier), "endpoint"

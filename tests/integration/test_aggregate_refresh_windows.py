@@ -12,6 +12,7 @@ SOURCE = {
     "endpoint_probe_hourly": "endpoint_probe_samples",
     "flow_hourly_rollups": "flow_minute_rollups",
     "flow_daily_rollups": "flow_minute_rollups",
+    "flow_conversation_hourly_rollups": "flow_minute_rollups",
     "flow_interface_hourly_rollups": "flow_interface_minute_rollups",
     "node_historical_baselines_cagg": "endpoint_events",
 }
@@ -19,6 +20,7 @@ EXPECTED_START = {
     "endpoint_probe_hourly": "29 days",
     "flow_hourly_rollups": "29 days",
     "flow_daily_rollups": "60 days",
+    "flow_conversation_hourly_rollups": "31 days",
     "flow_interface_hourly_rollups": "6 days",
     "node_historical_baselines_cagg": "28 days",
 }

@@ -87,15 +87,15 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **Zero-Allocation Binary Decoders:** High-throughput `struct.unpack_from` byte-slice parsers with dynamic template caching (1,800s TTL) for NetFlow v9 and IPFIX options/flow records. Data FlowSets that arrive before their template are buffered per `(exporter, source/observation domain)` in a bounded ring buffer (100 FlowSets, 10-second TTL) and decoded once the template arrives.
 * **Dual-Role $\mathcal{O}(1)$ In-Memory Correlator:**
   - Maintains pre-indexed hash maps for sub-microsecond matching without SQL queries.
-  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. Unknown exporter IPs are recorded in FastStore (rate-limited to one write per IP every 10 seconds) as a `flow:unmatched:<ip>` key with a 15-minute TTL, a member of `flow:unmatched:set`, and a `flow:unmatched:zset` sorted set pruned to the last 24 hours (capped at 1,000 IPs). These drive the Unmatched Exporter Discovery Banner in the UI.
+  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. The collector asks the correlator before parsing each packet (`admit_exporter`) and drops packets from unknown exporters, so they never reach the flow stream or the database. Unknown exporter IPs are recorded in FastStore (rate-limited to one write per IP every 10 seconds) as a `flow:unmatched:<ip>` key with a 15-minute TTL, a member of `flow:unmatched:set`, and a `flow:unmatched:zset` sorted set pruned to the last 24 hours (capped at 1,000 IPs). These drive the Unmatched Exporter Discovery Banner in the UI.
   - **Traffic Participant Resolution:** Resolves source and destination IPs against monitored inventory endpoints to attribute traffic to internal infrastructure vs. external internet.
 * **Port Normalization & Cardinality Shield:** Normalizes ephemeral client ports (1024–65535) unless recognized as well-known server services (e.g. 8080, 8443, 3306, 5432, 6379, 9200) into a single aggregate representation. This prevents high-entropy ephemeral client ports from exploding TimescaleDB hypertable B-tree index sizes.
-* **FastStore Stream Shock-Absorber (`stream:netflow:raw`):** Ingested flows are buffered into in-RAM FastStore Streams using `XADD` with sliding window trimming (`MAXLEN ~100000`). A circuit breaker checks FastStore's reported memory use against `[flow] buffer_memory_limit_mb` (default 512 MB); above 85% it drops the pending aggregation buffer and logs an error rather than letting the store grow unbounded.
+* **In-Process Hand-Off:** The collector passes each datagram's parsed flows straight to the aggregator (`FlowAggregator.ingest`) in the same process; nothing is buffered in FastStore. (Up to v3.3.5 every flow went through a FastStore stream, whose trimming lost flows above about 1,000 flows/s.) The aggregator writes its 1-minute sums every 10 seconds and keeps them in memory while the database is unreachable, up to `[flow] buffer_memory_limit_mb` (default 512 MB, about 1 KB per conversation and minute); past that it drops new conversations and logs an error. flowd logs flows received, rows stored and anything lost (kernel socket drops, memory cap) every minute.
 * **4-Tier Hierarchical Storage Lifecycle:**
-  1. *Tier 1 (Real-Time Raw Buffer):* FastStore Stream (`stream:netflow:raw`), sliding 2-hour retention for real-time forensic inspection.
+  1. *Tier 1 (In-Memory Accumulator):* flowd's 1-minute sums, flushed every 10 seconds (held longer only while the database is unreachable). A crash loses at most this.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
-  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`peak_in_minute_bytes`, `peak_out_minute_bytes`), retained for 365 days.
-  4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups` (`materialized_only = false`), refreshed daily, retained for 365 days for long-term capacity planning.
+  3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; `flow_conversation_hourly_rollups` with addresses, TCP flags and ToS, retained for 90 days, which serves top talkers, conversations, anomalies and QoS over more than 2 hours; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`peak_in_minute_bytes`, `peak_out_minute_bytes`), retained for 365 days.
+  4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups` (`materialized_only = false`), refreshed daily, retained for 365 days, behind the API's fleet-wide `1y` window.
 
 ---
 
@@ -165,7 +165,6 @@ flowchart TD
         MGR["StorageDriverManager"]
         PS["PostgresSessionStore / PostgresEventBroker"]
         FS["FastStoreSessionStore / FastStoreEventBroker"]
-        F_STREAM["FastStore Stream (/dev/shm: stream:netflow:raw)"]
         MGR --> PS
         MGR --> FS
     end
@@ -181,8 +180,9 @@ flowchart TD
     subgraph Flow_Ingestion["Flow Telemetry Ingestion (ephemres-flowd)"]
         FLOWD["Flow Collector Daemon (UDP 2055 / 4739)"]
         CORR["Dual-Role O(1) Correlator"]
+        AGG["In-Memory 1-Minute Aggregator"]
         FLOWD --> CORR
-        CORR --> F_STREAM
+        CORR --> AGG
     end
 
     subgraph Database_Layer["PostgreSQL & TimescaleDB"]
@@ -199,7 +199,6 @@ flowchart TD
     REPO --> CORE_ORM
     CORE_ORM --> DB
     B --> MGR
-    B --> F_STREAM
 
     ENG --> REG
     ENG -.->|not yet wired| SYN
@@ -209,7 +208,7 @@ flowchart TD
     ENG --> MGR
 
     FLOWD --> REPO
-    F_STREAM --> DB
+    AGG --> DB
 ```
 
 ---
@@ -313,14 +312,12 @@ flowchart TD
             EXP_MAP -.->|Unmapped IP| UNMATCHED
         end
 
-        CIRCUIT["Circuit Breaker (>85% of buffer_memory_limit_mb)"]
-        NORM --> CIRCUIT
+        ACC["In-Memory Accumulator (cap: buffer_memory_limit_mb)"]
+        NORM --> ACC
     end
 
     subgraph Storage_Tiers["4-Tier Hierarchical Storage Lifecycle"]
-        CIRCUIT -->|XADD (MAXLEN ~100k)| TIER1["Tier 1: FastStore In-RAM Stream (/dev/shm, 2h TTL)"]
-        
-        TIER1 -->|Rollup Worker (60s Batch)| TIER2["Tier 2: TimescaleDB flow_minute_rollups (90d Retention)"]
+        ACC -->|Flush every 10s| TIER2["Tier 2: TimescaleDB flow_minute_rollups (90d Retention)"]
         TIER2 -.->|After 1 Day| TIER2_COMP["TimescaleDB Columnar Compression (85%+ Savings)"]
         
         TIER2 -->|Continuous Aggregate| TIER3["Tier 3: flow_hourly_rollups (30d Retention)"]

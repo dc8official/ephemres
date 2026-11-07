@@ -223,6 +223,7 @@ RSYNC_EXCLUDES=(
     --exclude='/.env'
     --exclude='/backend/.env'
     --exclude='/legacy_password_resets.txt'
+    --exclude='/admin_password_reset.txt'
     --exclude='/certs'
 )
 
@@ -327,10 +328,6 @@ else
         DB_PASS=$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 16)
         echo "Database password auto-generated."
 
-        # Set default admin password to 'admin'
-        ADMIN_PASS="admin"
-        echo "Default admin password configured as 'admin'."
-
         SECRET_KEY=$(openssl rand -hex 32)
         echo "Secret key auto-generated."
 
@@ -346,7 +343,6 @@ NETMON_DB_PASSWORD=$DB_PASS
 EPHEMRES_SECRET_KEY=$SECRET_KEY
 NETMON_SECRET_KEY=$SECRET_KEY
 DOMAIN_NAME=$DOMAIN_NAME
-DEFAULT_ADMIN_PASSWORD=$ADMIN_PASS
 EOF
         chmod 0600 "$ENV_FILE"
         chown ephemres:ephemres "$ENV_FILE" 2>/dev/null || true
@@ -357,10 +353,9 @@ EOF
         echo "Environment file created at $ENV_FILE"
     else
         DB_PASS="dryrun_password"
-        ADMIN_PASS="admin"
         SECRET_KEY="dryrun_secret"
         DOMAIN_NAME="monitor.example.com"
-        echo "[DRY RUN] Would auto-generate DB password, set admin password to 'admin', generate secret key, and auto-detect IP address"
+        echo "[DRY RUN] Would auto-generate DB password and secret key, and auto-detect IP address"
     fi
 fi
 
@@ -369,17 +364,21 @@ if [ "$DRY_RUN" = false ]; then
     DB_PASS=$(grep -E '^(EPHEMRES|NETMON)_DB_PASSWORD' "$ENV_FILE" | head -n1 | cut -d'=' -f2-)
     SECRET_KEY=$(grep -E '^(EPHEMRES|NETMON)_SECRET_KEY' "$ENV_FILE" | head -n1 | cut -d'=' -f2-)
     DOMAIN_NAME=$(grep DOMAIN_NAME "$ENV_FILE" | cut -d'=' -f2-)
-    if grep -q DEFAULT_ADMIN_PASSWORD "$ENV_FILE"; then
-        ADMIN_PASS=$(grep DEFAULT_ADMIN_PASSWORD "$ENV_FILE" | cut -d'=' -f2-)
-    else
-        ADMIN_PASS="admin"
-    fi
+    # Earlier installers kept the initial admin password (usually "admin") in the env files.
+    # It is never read again: drop it so it does not sit on disk.
+    for f in "$ENV_FILE" "$INSTALL_DIR/backend/.env"; do
+        [ -f "$f" ] && sed -i '/^DEFAULT_ADMIN_PASSWORD=/d' "$f"
+    done
 else
     DB_PASS="dryrun_password"
     SECRET_KEY="dryrun_secret"
     DOMAIN_NAME="monitor.example.com"
-    ADMIN_PASS="admin"
 fi
+
+# Random initial admin password, shown once at the end of the install and stored nowhere but
+# as a scrypt hash. The account must change it at first sign-in (the API enforces this).
+ADMIN_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+ADMIN_PASS_SET=false
 
 # ============================================================
 print_header "Step 11: Creating configuration file"
@@ -466,17 +465,23 @@ run "Running native database migrations" \
 print_header "Step 14: Creating default admin user"
 
 if [ "$DRY_RUN" = false ]; then
-    run "Seeding default admin user" \
-        sudo -u ephemres \
+    # seed_admin creates 'admin', resets it while it still awaits its first password change
+    # (a re-run before anyone signed in), and otherwise leaves it alone and says so.
+    echo "--> Seeding default admin user"
+    SEED_OUTPUT=$(sudo -u ephemres \
             EPHEMRES_DB_PASSWORD="$DB_PASS" \
             NETMON_DB_PASSWORD="$DB_PASS" \
             EPHEMRES_SECRET_KEY="$SECRET_KEY" \
             NETMON_SECRET_KEY="$SECRET_KEY" \
             DEFAULT_ADMIN_PASSWORD="$ADMIN_PASS" \
             PYTHONPATH="$INSTALL_DIR/backend:$INSTALL_DIR" \
-            "$VENV_DIR/bin/python3" -m app.seed_admin
+            "$VENV_DIR/bin/python3" -m app.seed_admin 2>&1) || { echo "$SEED_OUTPUT"; echo "Error: admin seeding failed."; exit 1; }
+    echo "$SEED_OUTPUT"
+    if ! echo "$SEED_OUTPUT" | grep -q "already exists"; then
+        ADMIN_PASS_SET=true
+    fi
 else
-    echo "[DRY RUN] Would create default admin user (admin / $ADMIN_PASS)"
+    echo "[DRY RUN] Would create the admin user with a random initial password"
 fi
 
 # ============================================================
@@ -590,12 +595,16 @@ else
     echo "  API docs:   https://$DOMAIN_NAME/api/docs"
     echo ""
     echo "--------------------------------------------------------"
-    echo "  DEFAULT ADMIN CREDENTIALS"
-    echo "  Username: admin"
-    echo "  Password: $ADMIN_PASS"
-    echo ""
-    echo "  You will be required to change this password"
-    echo "  on your first login."
+    if [ "$ADMIN_PASS_SET" = true ]; then
+        echo "  INITIAL ADMIN CREDENTIALS (shown only once, not stored)"
+        echo "  Username: admin"
+        echo "  Password: $ADMIN_PASS"
+        echo ""
+        echo "  You must change this password at your first sign-in."
+        echo "  Lost it? sudo bash $INSTALL_DIR/deploy/reset-admin-password.sh"
+    else
+        echo "  The existing 'admin' account kept its password."
+    fi
     echo "--------------------------------------------------------"
     echo "  DATABASE CREDENTIALS"
     echo "  Username: netmon_user"

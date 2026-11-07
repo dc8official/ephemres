@@ -223,6 +223,16 @@ app.include_router(users.router, prefix="/api/v1")
 app.include_router(telemetry_router)
 
 
+@app.exception_handler(asyncio.TimeoutError)
+async def query_timeout_handler(request: Request, exc: Exception) -> JSONResponse:
+    """A query hit the database command timeout: say so instead of a bare 500."""
+    logging.getLogger(__name__).warning("Query timed out on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=504,
+        content={"detail": "This request took too long to answer. Try a shorter time window."},
+    )
+
+
 @app.get("/api/v1/version", tags=["system"])
 async def get_version():
     return APIResponse.success(

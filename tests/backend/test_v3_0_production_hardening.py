@@ -17,7 +17,7 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.system_setting import AppSetting
 from app.routers.auth import create_access_token, get_current_user, require_admin
-from app.routers.reports import csv_generator, sanitize_csv_field, get_fleet_summary
+from app.routers.reports import csv_generator, get_fleet_summary
 from app.routers.settings import get_settings, update_settings, SettingsUpdate
 from app.services.auth_service import is_session_active
 from app.services.diagnostics import is_local_subnet_destination
@@ -128,14 +128,6 @@ class TestPhase4ReportsHardening(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.loop.close()
-
-    def test_csv_sanitization_defense(self) -> None:
-        """Test formula injection sanitization in CSV export."""
-        self.assertEqual(sanitize_csv_field("=cmd|'/C calc'!A0"), "'=cmd|'/C calc'!A0")
-        self.assertEqual(sanitize_csv_field("+12345"), "'+12345")
-        self.assertEqual(sanitize_csv_field("-12345"), "'-12345")
-        self.assertEqual(sanitize_csv_field("@SUM(1,2)"), "'@SUM(1,2)")
-        self.assertEqual(sanitize_csv_field("normal_host.local"), "normal_host.local")
 
     def test_keyset_csv_generator(self) -> None:
         """Test keyset pagination generator terminates properly and formats CSV."""

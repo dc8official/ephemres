@@ -17,7 +17,7 @@ RuntimeDirectoryPreserve=yes
 LogsDirectory=ephemres
 LogsDirectoryMode=0755
 WorkingDirectory=/opt/ephemres
-EnvironmentFile=-/etc/ephemres/ephemres.env
+EnvironmentFile=/etc/ephemres/ephemres.env
 EnvironmentFile=-/opt/ephemres/.env
 EnvironmentFile=-/opt/ephemres/backend/.env
 Environment=PYTHONPATH=/opt/ephemres/backend:/opt/ephemres

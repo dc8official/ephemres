@@ -56,7 +56,9 @@
     </div>
 
     <main class="app-main">
-      <RouterView />
+      <!-- The API refuses every call until a forced password change is done, so the page
+           behind the modal mounts (and loads its data) only afterwards. -->
+      <RouterView v-if="!displayPasswordModal" />
     </main>
 
     <!-- Forced Password Change Modal -->

@@ -8,7 +8,9 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import secrets
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -85,6 +87,21 @@ class ScryptPasswordHasher:
 
 
 _ph = ScryptPasswordHasher()
+
+# Each scrypt run at N=2**17, r=8 needs 128 MiB. Sign-in floods (any username, since unknown
+# ones spend a dummy check) would otherwise run one per thread-pool thread at once and could
+# exhaust memory. Requests beyond this many per worker wait their turn in the thread pool.
+_SCRYPT_SLOTS = threading.BoundedSemaphore(max(2, min(4, os.cpu_count() or 2)))
+
+
+def _hash_bounded(password: str) -> str:
+    with _SCRYPT_SLOTS:
+        return _ph.hash(password)
+
+
+def _verify_bounded(hashed: str, plain: str) -> bool:
+    with _SCRYPT_SLOTS:
+        return _ph.verify(hashed, plain)
 
 
 # ---------------------------------------------------------------------------
@@ -245,18 +262,18 @@ def generate_readable_password() -> str:
 
 def hash_password(password: str) -> str:
     """Synchronous OpenSSL scrypt password hashing."""
-    return _ph.hash(password)
+    return _hash_bounded(password)
 
 
 async def hash_password_async(password: str) -> str:
     """Non-blocking OpenSSL scrypt password hashing delegated to asyncio worker thread."""
-    return await asyncio.to_thread(_ph.hash, password)
+    return await asyncio.to_thread(_hash_bounded, password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Synchronous OpenSSL scrypt password verification."""
     try:
-        return _ph.verify(hashed, plain)
+        return _verify_bounded(hashed, plain)
     except Exception:
         return False
 
@@ -264,6 +281,21 @@ def verify_password(plain: str, hashed: str) -> bool:
 async def verify_password_async(plain: str, hashed: str) -> bool:
     """Non-blocking OpenSSL scrypt password verification delegated to asyncio worker thread."""
     return await asyncio.to_thread(verify_password, plain, hashed)
+
+
+_dummy_password_hash: Optional[str] = None
+
+
+async def burn_password_check_async(plain: str) -> None:
+    """Spends the same scrypt work as a real check, for unknown or disabled usernames.
+
+    Without it those sign-ins answer in a few milliseconds while real accounts take one scrypt
+    verification, which tells an attacker which usernames exist.
+    """
+    global _dummy_password_hash
+    if _dummy_password_hash is None:
+        _dummy_password_hash = await hash_password_async(secrets.token_urlsafe(16))
+    await verify_password_async(plain or "", _dummy_password_hash)
 
 
 def needs_rehash(hashed: str) -> bool:
@@ -404,21 +436,21 @@ def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
 
 async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     """
-    Validates if a given JTI session token is active for the user by delegating
-    to the configured backing session store.
-    Option B (Strict Security Wipe): Invalidate legacy tokens without jti immediately.
+    Validates a session JTI against the configured backing session store, which every API
+    worker shares. The store is the only authority: this worker's in-memory list is never
+    consulted, because a logout, password change or reset handled by another worker only
+    reaches the store. A store error counts as inactive (fail closed).
+    Tokens without a jti are rejected.
     """
     if not jti:
         return False
-    u_id = str(user_id)
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
-        if await store.is_session_active(u_id, jti):
-            return True
+        return bool(await store.is_session_active(str(user_id), jti))
     except Exception:
-        pass
-    return jti in _active_user_sessions.get(u_id, [])
+        logger.exception("Session store check failed; treating the session as inactive")
+        return False
 
 
 async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:

@@ -15,7 +15,7 @@ RuntimeDirectoryPreserve=yes
 AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
 WorkingDirectory=/opt/ephemres
-EnvironmentFile=-/etc/ephemres/ephemres.env
+EnvironmentFile=/etc/ephemres/ephemres.env
 EnvironmentFile=-/opt/ephemres/.env
 EnvironmentFile=-/opt/ephemres/backend/.env
 Environment=PYTHONPATH=/opt/ephemres/backend:/opt/ephemres

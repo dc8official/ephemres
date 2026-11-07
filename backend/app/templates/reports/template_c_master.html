@@ -103,6 +103,12 @@
 {% endif %}
 
 <!-- Section 3: Core Flow Exporter & Interface Capacity Telemetry -->
+{% if coverage_notes %}
+<div style="background: #fffbeb; border: 0.75pt solid #fde68a; border-radius: 4pt; padding: 6pt 8pt; margin-bottom: 8pt; color: #92400e;">
+  {% for note in coverage_notes %}<div>{{ note }}</div>{% endfor %}
+</div>
+{% endif %}
+
 <div class="section-title-row font-display">
   <div class="section-title" style="color: #065f46;">3. Core Flow Exporter & Interface Capacity Telemetry</div>
 </div>

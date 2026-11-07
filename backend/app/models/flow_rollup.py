@@ -181,6 +181,73 @@ class FlowHourlyRollup(Base):
     )
 
 
+class FlowConversationHourlyRollup(Base):
+    """The flow_conversation_hourly_rollups continuous aggregate (migration 0021): one row per
+    hour, exporter and conversation, with addresses and ToS. Kept 90 days. Serves the views that
+    need addresses or ToS over windows too long to scan in the minute table."""
+
+    __tablename__ = "flow_conversation_hourly_rollups"
+
+    bucket: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        primary_key=True,
+        nullable=False,
+    )
+    exporter_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        nullable=False,
+    )
+    src_endpoint_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=True,
+    )
+    dst_endpoint_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=True,
+    )
+    src_ip: Mapped[str] = mapped_column(
+        INET,
+        primary_key=True,
+        nullable=False,
+    )
+    dst_ip: Mapped[str] = mapped_column(
+        INET,
+        primary_key=True,
+        nullable=False,
+    )
+    protocol: Mapped[int] = mapped_column(
+        SmallInteger,
+        primary_key=True,
+        nullable=False,
+    )
+    dst_port: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        nullable=False,
+    )
+    bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+    packets: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+    flow_count: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+    tcp_flags: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+    )
+    tos: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+    )
+
+
 class FlowDailyRollup(Base):
     """Native Declarative ORM Model (app.core.orm.DeclarativeBase) representing
 

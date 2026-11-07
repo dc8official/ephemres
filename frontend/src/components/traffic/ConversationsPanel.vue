@@ -93,7 +93,7 @@
           </tr>
           <tr v-if="!loading && items.length === 0">
             <td colspan="8" class="text-center text-muted empty-row">
-              {{ counts.all === 0 && !activeChips.length ? `No conversations in the last ${window}.` : 'No conversations match these filters.' }}
+              {{ loadError || (counts.all === 0 && !activeChips.length ? `No conversations in the last ${window}.` : 'No conversations match these filters.') }}
             </td>
           </tr>
         </tbody>
@@ -147,6 +147,7 @@ const items = ref([])
 const counts = ref({ all: 0, anomalies: 0, qos: 0, bulk: 0 })
 const total = ref(0)
 const loading = ref(false)
+const loadError = ref('')
 const searchText = ref('')
 const searchError = ref('')
 let requestSeq = 0
@@ -206,8 +207,15 @@ async function load() {
     items.value = data.items || []
     counts.value = data.counts || { all: 0, anomalies: 0, qos: 0, bulk: 0 }
     total.value = data.total || 0
+    loadError.value = ''
   } catch (err) {
-    if (seq === requestSeq) console.error('Failed to load conversations:', err)
+    if (seq === requestSeq) {
+      console.error('Failed to load conversations:', err)
+      // A query that hit the time limit says what to do; don't read as "no conversations".
+      items.value = []
+      total.value = 0
+      loadError.value = err.response?.data?.detail || 'Could not load conversations.'
+    }
   } finally {
     if (seq === requestSeq) loading.value = false
   }

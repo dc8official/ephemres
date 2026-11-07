@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Dict, Generic, List, Literal, Optional, TypeVar
 from uuid import UUID, uuid4
 
@@ -25,11 +24,6 @@ T = TypeVar("T")
 # ---------------------------------------------------------------------------
 # 1. Verification of Requirements: python-multipart removed
 # ---------------------------------------------------------------------------
-def test_python_multipart_removed():
-    """Ensure python-multipart is completely removed from backend/requirements.txt."""
-    req_file = Path(__file__).resolve().parent.parent.parent / "backend" / "requirements.txt"
-    content = req_file.read_text(encoding="utf-8")
-    assert "python-multipart" not in content.lower()
 
 
 # ---------------------------------------------------------------------------

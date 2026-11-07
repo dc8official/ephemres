@@ -10,7 +10,7 @@ from app.core.orm import AsyncSession
 
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
-from app.models.flow_rollup import FlowHourlyRollup, FlowMinuteRollup
+from app.models.flow_rollup import FlowConversationHourlyRollup, FlowHourlyRollup, FlowMinuteRollup
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.repositories.endpoint_repo import EndpointRepository
@@ -389,6 +389,25 @@ async def _interface_totals(
     return res.all()
 
 
+# How long the tables behind the bandwidth report keep their data (migrations 0021 and 0016).
+_CONVERSATION_ROLLUP_RETENTION = timedelta(days=90)
+_INTERFACE_HOURLY_RETENTION = timedelta(days=365)
+
+
+def flow_coverage_notes(start_dt: datetime, now: Optional[datetime] = None) -> List[str]:
+    """What a range reaching past the flow tables' retention leaves out, for the report to say.
+    Custom ranges can span 730 days, and the sections would otherwise look like a quiet period."""
+    now = now or datetime.now(timezone.utc)
+    notes = []
+    for kept, what in (
+        (_CONVERSATION_ROLLUP_RETENTION, "Top conversations, QoS, anomalies and traffic zones"),
+        (_INTERFACE_HOURLY_RETENTION, "Router and interface totals"),
+    ):
+        if start_dt < now - kept:
+            notes.append(f"{what} cover {(now - kept):%Y-%m-%d} onward: this data is kept {kept.days} days.")
+    return notes
+
+
 async def compile_bandwidth_report_data(
     db: AsyncSession,
     exporter_ids: List[UUID],
@@ -477,27 +496,33 @@ async def compile_bandwidth_report_data(
             "formatted_peak_bps": format_bps(stats["peak_bps"]),
         })
 
+    # Conversations, QoS and zones need addresses or ToS. Over a long range they read the hourly
+    # conversation tier (kept 90 days), where an hour straddling the start or end counts whole.
+    long_range = end_dt - start_dt > conversation_queries.HOURLY_TIER_MIN_SPAN
+    conv_model = FlowConversationHourlyRollup if long_range else FlowMinuteRollup
+    conv_start = start_dt.replace(minute=0, second=0, microsecond=0) if long_range else start_dt
+
     # 2. Top Forensic Conversations
     conv_stmt = (
         select(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.dst_port,
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.exporter_id,
-            func.sum(FlowMinuteRollup.bytes).label("total_bytes"),
+            conv_model.src_ip,
+            conv_model.dst_ip,
+            conv_model.dst_port,
+            conv_model.protocol,
+            conv_model.exporter_id,
+            func.sum(conv_model.bytes).label("total_bytes"),
         )
         .where(
-            FlowMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowMinuteRollup.bucket >= start_dt,
-            FlowMinuteRollup.bucket <= end_dt,
+            conv_model.exporter_id.in_(exporter_ids),
+            conv_model.bucket >= conv_start,
+            conv_model.bucket <= end_dt,
         )
         .group_by(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.dst_port,
-            FlowMinuteRollup.protocol,
-            FlowMinuteRollup.exporter_id,
+            conv_model.src_ip,
+            conv_model.dst_ip,
+            conv_model.dst_port,
+            conv_model.protocol,
+            conv_model.exporter_id,
         )
         .order_by(desc("total_bytes"))
         .limit(10)
@@ -527,17 +552,17 @@ async def compile_bandwidth_report_data(
     # across standard QoS traffic classes (Best Effort CS0, Assured Forwarding AF*, Voice EF).
     qos_stmt = (
         select(
-            FlowMinuteRollup.tos,
-            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
-            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
+            conv_model.tos,
+            func.coalesce(func.sum(conv_model.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(conv_model.packets), 0).label("total_packets"),
+            func.coalesce(func.sum(conv_model.flow_count), 0).label("flow_count"),
         )
         .where(
-            FlowMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowMinuteRollup.bucket >= start_dt,
-            FlowMinuteRollup.bucket <= end_dt,
+            conv_model.exporter_id.in_(exporter_ids),
+            conv_model.bucket >= conv_start,
+            conv_model.bucket <= end_dt,
         )
-        .group_by(FlowMinuteRollup.tos)
+        .group_by(conv_model.tos)
     )
     qos_rows = []
     try:
@@ -595,23 +620,23 @@ async def compile_bandwidth_report_data(
     # - External / Transit: Multi-hop traffic between external peers traversing edge routers.
     zone_stmt = (
         select(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.src_endpoint_id,
-            FlowMinuteRollup.dst_endpoint_id,
-            func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("flow_count"),
+            conv_model.src_ip,
+            conv_model.dst_ip,
+            conv_model.src_endpoint_id,
+            conv_model.dst_endpoint_id,
+            func.coalesce(func.sum(conv_model.bytes), 0).label("total_bytes"),
+            func.coalesce(func.sum(conv_model.flow_count), 0).label("flow_count"),
         )
         .where(
-            FlowMinuteRollup.exporter_id.in_(exporter_ids),
-            FlowMinuteRollup.bucket >= start_dt,
-            FlowMinuteRollup.bucket <= end_dt,
+            conv_model.exporter_id.in_(exporter_ids),
+            conv_model.bucket >= conv_start,
+            conv_model.bucket <= end_dt,
         )
         .group_by(
-            FlowMinuteRollup.src_ip,
-            FlowMinuteRollup.dst_ip,
-            FlowMinuteRollup.src_endpoint_id,
-            FlowMinuteRollup.dst_endpoint_id,
+            conv_model.src_ip,
+            conv_model.dst_ip,
+            conv_model.src_endpoint_id,
+            conv_model.dst_endpoint_id,
         )
     )
     zone_sums = {
@@ -681,6 +706,7 @@ async def compile_bandwidth_report_data(
         "qos_classes": qos_rows,
         "anomalies": anomaly_summary,
         "traffic_zones": zone_rows,
+        "coverage_notes": flow_coverage_notes(start_dt),
     }
 
 
@@ -708,4 +734,5 @@ async def compile_master_report_data(
         "qos_classes": bandwidth_data.get("qos_classes", []),
         "anomalies": bandwidth_data.get("anomalies", {}),
         "traffic_zones": bandwidth_data.get("traffic_zones", []),
+        "coverage_notes": bandwidth_data.get("coverage_notes", []),
     }

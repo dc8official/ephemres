@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 from app.core.orm import text
 from app.database import AsyncSessionLocal
-from app.services.auth_service import hash_password, generate_readable_password
+from app.services.auth_service import hash_password, generate_readable_password, verify_password
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("seed_admin")
@@ -110,7 +110,67 @@ async def seed_admin(password: Optional[str] = None, if_missing: bool = False):
         await db.commit()
         return True
 
+DEFAULT_ADMIN_RESET_REPORT = "/opt/ephemres/admin_password_reset.txt"
+
+
+async def rotate_default_admin_password(candidates, report_path: Optional[str] = None) -> bool:
+    """Gives 'admin' a random temporary password if it still signs in with an installer default.
+
+    Earlier installers seeded admin/admin. The API now refuses that account until its
+    password is changed, but anyone who reaches the sign-in page first could still change it
+    and keep the server. Upgrades call this to close that window on servers where nobody ever
+    changed it. The new password goes to a root-only report (never to stdout or logs).
+    Returns True when the password was rotated.
+    """
+    from app.core.restore import write_password_reset_report
+
+    candidates = [c for c in dict.fromkeys(candidates) if c]
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            text("SELECT id, password_hash FROM users WHERE username = 'admin' LIMIT 1")
+        )
+        row = res.fetchone()
+        if row is None:
+            return False
+        current_hash = str(getattr(row, "password_hash", "") or "")
+        if not current_hash.startswith("$scrypt$"):
+            return False  # legacy hashes are handled by app.reset_legacy_passwords
+        if not any(verify_password(c, current_hash) for c in candidates):
+            print("[seed] Admin password is not an installer default — unchanged.")
+            return False
+
+        temp_password = generate_readable_password()
+        await db.execute(
+            text("""
+                UPDATE users
+                SET password_hash = :p,
+                    must_change_password = TRUE,
+                    updated_at = NOW()
+                WHERE username = 'admin'
+            """),
+            {"p": hash_password(temp_password)},
+        )
+        await db.commit()
+
+    path = write_password_reset_report(
+        report_path or os.environ.get("EPHEMRES_ADMIN_RESET_REPORT", DEFAULT_ADMIN_RESET_REPORT),
+        [("admin", temp_password)],
+    )
+    # Its sessions were made with the default password: sign them all out.
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("DELETE FROM user_sessions WHERE user_id = (SELECT id FROM users WHERE username = 'admin')")
+        )
+        await db.commit()
+    print(f"[seed] Admin still had an installer default password; a random one was written to {path}")
+    return True
+
+
 if __name__ == "__main__":
+    if "--rotate-default" in sys.argv[1:]:
+        candidates = ["admin", os.environ.get("DEFAULT_ADMIN_PASSWORD", "")]
+        asyncio.run(rotate_default_admin_password(candidates))
+        sys.exit(0)
     target_pass = os.environ.get("DEFAULT_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
     success = asyncio.run(seed_admin(target_pass, if_missing="--if-missing" in sys.argv[1:]))
     if not success:

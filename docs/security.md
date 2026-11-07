@@ -14,7 +14,7 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 2. **Zero Plaintext Secrets at Rest:** All third-party integration credentials (webhook URLs, SMTP passwords, custom authorization headers) are encrypted at rest using AES-256-GCM.
 3. **Strict Ingress Isolation:** Internal database and cache services bind strictly to loopback interfaces; API gateways enforce reverse-proxy trust validation.
 4. **Least-Privilege Execution:** Daemons execute under an unprivileged system service user with fine-grained Linux capabilities (`CAP_NET_RAW`), completely avoiding `root` execution.
-5. **Bounded Cardinality Defense:** Ingested flow metrics undergo ephemeral port normalization and memory circuit-breaking to prevent resource exhaustion attacks.
+5. **Bounded Cardinality Defense:** Ingested flow metrics undergo ephemeral port normalization, packets from unenrolled exporters are dropped before parsing, and flows held in memory are capped, to prevent resource exhaustion attacks.
 
 ---
 
@@ -64,9 +64,9 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 | :--- | :--- | :--- | :--- |
 | **Nginx Web Server** | `80` / `443` | `0.0.0.0` (Public / LAN) | Public ingress point. Terminates TLS 1.2/1.3, sets `X-Frame-Options`, `X-Content-Type-Options` and `Referrer-Policy`, and proxies internal API traffic. HSTS is added by `ephemres-api` (see §9D); no Content-Security-Policy is set. |
 | **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
-| **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing, memory circuit breaker. |
+| **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing; packets from unenrolled exporters are dropped before parsing; flows held for the database are capped by `flow.buffer_memory_limit_mb`. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
-| **FastStore IPC** | `/dev/shm/ephemres_faststore_*.sqlite3` | UNIX Filesystem | Shared-memory WAL state store & NetFlow stream buffer (`0600 ephemres:ephemres`, no TCP port exposed). |
+| **FastStore IPC** | `/run/ephemres/ephemres_faststore_*.sqlite3` (`/dev/shm` fallback) | UNIX Filesystem | In-memory SQLite store (`0600 ephemres:ephemres`, no TCP port exposed) for sessions, sign-in lockouts and events. Flows never pass through it, so a flow flood cannot block sign-in. |
 | **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
 | **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `AsyncHttpClient` SSRF guard. |
 
@@ -128,10 +128,12 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### B. Distributed Multi-Worker Session Governance
 In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
-* **Driver Architecture:** Session validity is verified asynchronously against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`) rather than volatile single-worker process memory.
+* **Driver Architecture:** Session validity is verified on every request against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`), which all workers share. The store is the only authority: a worker never accepts a session from its own memory, and a store error rejects the request (fail closed).
+* **Authorization From the Database:** The role and the active / must-change flags are read from the account's database row on every request; the token's `role` claim is ignored. Demoting, promoting or disabling an account takes effect on its next request, and a role change also signs the account out.
 * **Concurrent Device Quota:** Accounts are limited to `[security] max_active_sessions_per_user` concurrent sessions (default 2, range 1–10). A further login evicts the oldest session (FIFO).
-* **Instantaneous Session Revocation:** Changing an account password or clicking "Sign Out Everywhere" immediately deletes active session records from the datastore, revoking access across all workers in real time.
-* **Forced Initial Password Reset:** Newly provisioned user accounts (`ADMIN` or `VIEWER`) must change their temporary password upon first login before accessing system telemetry.
+* **Instantaneous Session Revocation:** Changing an account password, an admin reset, disabling or re-roling an account, or clicking "Sign Out Everywhere" deletes its session records from the shared store, so the next request on any worker is rejected.
+* **Forced Initial Password Reset (API-enforced):** Accounts flagged `must_change_password` (new users, admin resets, the installer's admin, upgrade resets) get `403 Password change required` on every API route except `POST /api/v1/auth/change-password`, which always requires the current (temporary) password.
+* **No Default Admin Password:** `deploy/install.sh` generates a random initial admin password, prints it once and stores only its scrypt hash. `deploy/upgrade.sh` replaces an `admin` password still equal to an earlier installer default (`admin`, or the old env file's `DEFAULT_ADMIN_PASSWORD`) with a random temporary one in the root-only `/opt/ephemres/admin_password_reset.txt`, and removes `DEFAULT_ADMIN_PASSWORD` from the env files.
 
 ### C. Password Hashing
 * **Password Hashing**: Passwords are hashed using Python's native OpenSSL-backed **`hashlib.scrypt`** (`$scrypt$n=131072,r=8,p=1$`, 16-byte cryptographic salt, 64-byte derived key) verified in constant time via `hmac.compare_digest`. Hashes created with the earlier `n=16384` cost still verify and are transparently re-hashed at the stronger cost on the user's next successful login. Legacy `$argon2id$` hashes from pre-`v3.3.2v` backups are automatically invalidated and flagged for password reset during cross-version restore.
@@ -152,6 +154,9 @@ When determining the client's real IP address for audit logs and security polici
 
 ### B. IP-Scoped Brute-Force Lockouts
 * **Threshold:** After `lockout_threshold` failed attempts (default 5; **Admin Settings → Security & Discovery**) the `IP:username` pair is locked for 15 minutes. The failure counter resets after 30 minutes without further failures.
+* **Shared, Persistent Counters:** Failures are counted in the session store all workers share (the `auth_login_failures` table in PostgreSQL mode, TTL keys in FastStore mode), with one atomic upsert per failure. Counters survive API restarts and cannot be pushed out by flooding sign-ins with other usernames.
+* **No Username Oracle:** A sign-in for an unknown or disabled username spends the same scrypt verification as a real one, so response time does not reveal which usernames exist. Concurrent scrypt work is capped per worker (128 MiB each).
+* **Edge Rate Limit:** The shipped Nginx site limits `POST /api/v1/auth/login` to 10 requests a minute per client address (burst 5) and answers `429` beyond that. Existing sites are not rewritten by upgrades: copy the `limit_req_zone` line and the `location = /api/v1/auth/login` block from `deploy/nginx.conf.template`.
 * **NAT / VPN Isolation:** Lockout keys are scoped by `f"{client_ip}:{username}"`. If an external attacker attempts to brute force an administrator account, only the attacker's IP is locked out; legitimate administrators on corporate networks remain unaffected.
 
 ---
@@ -244,7 +249,8 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates, `[security] hsts_enabled = true` in `config.toml`, and (optionally) an HSTS `add_header` in the Nginx TLS server block for static assets.
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
 - [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/dev/shm/ephemres_faststore*`) are owned by `ephemres:ephemres` (`0600`).
-- [ ] **Admin Password Changed:** Verify the default administrator password was changed upon initial login.
+- [ ] **Admin Password Changed:** Sign in with the initial password the installer printed (or the one in `/opt/ephemres/admin_password_reset.txt` after an upgrade), set your own, and delete that file.
+- [ ] **Secrets Present:** `/etc/ephemres/ephemres.env` exists and holds `EPHEMRES_SECRET_KEY` (32+ characters). The services refuse to start without it rather than fall back to the public development key.
 - [ ] **Firewall Egress Rules:** Restrict outbound egress from the Ephemres server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).
 
 ---

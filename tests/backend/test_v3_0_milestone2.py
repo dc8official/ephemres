@@ -24,7 +24,7 @@ from app.services.diagnostics import (
     trace_semaphore,
 )
 from app.services.driver_manager import StorageDriverManager, driver_manager
-from app.services.event_broker import PostgresEventBroker, RedisEventBroker
+from app.services.event_broker import PostgresEventBroker
 from app.services.session_store import PostgresSessionStore, RedisSessionStore
 from monitoring.ping import PingResult, classify_ping_result
 from monitoring.registry import EndpointRegistry, MonitoredEndpoint
@@ -282,19 +282,6 @@ class TestMilestone2DualStorageAndEventBroker(unittest.TestCase):
             await store.register_session(user_id, jti, max_sessions=2)
             self.assertTrue(mock_session.add.called)
             self.assertTrue(mock_session.commit.called)
-
-        self.loop.run_until_complete(_run())
-
-    def test_event_broker_publish(self) -> None:
-        mock_redis = AsyncMock()
-        redis_broker = RedisEventBroker(mock_redis)
-
-        async def _run():
-            await redis_broker.publish("state_changes", {"endpoint_id": "123", "state": "UP"})
-            mock_redis.publish.assert_called_once()
-            args = mock_redis.publish.call_args[0]
-            self.assertEqual(args[0], "state_changes")
-            self.assertIn("UP", args[1])
 
         self.loop.run_until_complete(_run())
 

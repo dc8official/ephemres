@@ -130,3 +130,8 @@ async def test_csv_generator_empty_endpoints():
     assert len(chunks) == 1
     assert "Endpoint_ID,Hostname,IP_Address" in chunks[0]
 
+
+def test_telemetry_router_prefix():
+    from app.routers.reports import telemetry_router
+
+    assert telemetry_router.prefix == "/api/v1/telemetry"

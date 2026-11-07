@@ -18,11 +18,18 @@ from app.services.auth_service import hash_password, verify_password, clear_fail
 class TestFullAuthUserFlow(unittest.TestCase):
 
     def setUp(self) -> None:
+        from app.services.driver_manager import driver_manager
+        from tests.backend.session_store_double import InMemorySessionStore
+
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         _failed_attempts.clear()
+        self.store = InMemorySessionStore()
+        self._store_patch = patch.object(driver_manager, "get_session_store", return_value=self.store)
+        self._store_patch.start()
 
     def tearDown(self) -> None:
+        self._store_patch.stop()
         _failed_attempts.clear()
         pending = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
         for t in pending:
@@ -94,7 +101,8 @@ class TestFullAuthUserFlow(unittest.TestCase):
     def test_change_password_initial_forced_reset(self) -> None:
         user_id = uuid4()
         current_user = {"sub": str(user_id), "username": "admin", "role": "ADMIN"}
-        mock_req = ChangePasswordRequest(new_password="NewSecurePassword123!")
+        # A forced change still needs the temporary password (a copied cookie is not enough).
+        mock_req = ChangePasswordRequest(old_password="admin", new_password="NewSecurePassword123!")
         mock_db = AsyncMock()
         mock_db.add = MagicMock()
 

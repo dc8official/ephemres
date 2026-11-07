@@ -83,6 +83,7 @@ fi
 LEGACY_NETMON=0
 LEGACY_FLOWD_ENABLED=0
 ADMIN_TEMP_PASSWORD=0
+ADMIN_DEFAULT_ROTATED=0
 AUDIT_REPAIR_AVAILABLE=0
 if [[ ! -f /etc/ephemres/ephemres.env && -f /etc/netmon/netmon.env ]]; then
     LEGACY_NETMON=1
@@ -436,6 +437,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
             --exclude='/backend/.env' \
             --exclude='/.env' \
             --exclude='/legacy_password_resets.txt' \
+            --exclude='/admin_password_reset.txt' \
             --exclude='/tests' \
             --exclude='/pytest.ini' \
             --exclude='/scratch' \
@@ -561,6 +563,23 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
                 echo -e "${YELLOW}See ${RESET_REPORT} (root-only). Distribute and delete it.${NC}"
                 echo -e "${YELLOW}========================================================================${NC}"
             fi
+
+            # Installers up to v3.3.5 seeded admin/admin. If nobody ever changed it, replace it
+            # with a random temporary password in a root-only file (the env files' old
+            # DEFAULT_ADMIN_PASSWORD, sourced above, is tried as well), then drop that variable.
+            echo -e "${GREEN}[INFO] Checking for an installer-default admin password...${NC}"
+            ADMIN_RESET_REPORT="/opt/ephemres/admin_password_reset.txt"
+            ADMIN_RESET_BEFORE=$(stat -c %Y "${ADMIN_RESET_REPORT}" 2>/dev/null || echo 0)
+            if ! EPHEMRES_ADMIN_RESET_REPORT="${ADMIN_RESET_REPORT}" PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${PYTHON_BIN}" -m app.seed_admin --rotate-default; then
+                echo -e "${RED}[ERROR] Checking the admin password failed.${NC}" >&2
+                exit 1
+            fi
+            if [[ -s "${ADMIN_RESET_REPORT}" && $(stat -c %Y "${ADMIN_RESET_REPORT}") != "${ADMIN_RESET_BEFORE}" ]]; then
+                ADMIN_DEFAULT_ROTATED=1
+            fi
+            for f in /etc/ephemres/ephemres.env "${INSTALL_DIR}/backend/.env" "${INSTALL_DIR}/.env"; do
+                [[ -f "${f}" ]] && sed -i '/^DEFAULT_ADMIN_PASSWORD=/d' "${f}"
+            done
 
             # Periods closed before v3.3.5 kept their last minute's health and latency. The
             # correction is optional and can take long on a big history: only point it out.
@@ -753,6 +772,20 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         fi
     done
 
+    # The units now require /etc/ephemres/ephemres.env: a missing key file must stop the
+    # daemons rather than let them start with the public development key. An install that
+    # only kept the backend/.env copy gets the file put back where the units read it (a netmon
+    # layout gets it from migrate_legacy_services below).
+    if [[ ${LEGACY_NETMON} -ne 1 && ! -f /etc/ephemres/ephemres.env ]]; then
+        if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" ]]; then
+            mkdir -p /etc/ephemres
+            install -m 0600 -o ephemres -g ephemres "${ENV_FILE}" /etc/ephemres/ephemres.env
+            echo -e "${GREEN}[INFO] Copied ${ENV_FILE} to /etc/ephemres/ephemres.env (the services now require it).${NC}"
+        else
+            upgrade_failed "No environment file with EPHEMRES_SECRET_KEY was found; the services require /etc/ephemres/ephemres.env."
+        fi
+    fi
+
     # Ensure runtime and log directories exist before daemon activation
     mkdir -p /run/ephemres /var/log/ephemres
     chown -R ephemres:ephemres /run/ephemres /var/log/ephemres 2>/dev/null || true
@@ -829,6 +862,12 @@ if [[ ${ADMIN_TEMP_PASSWORD} -eq 1 ]]; then
     echo -e "${YELLOW}[NOTICE] Sign in as 'admin' with the random temporary password from the root-only report:${NC}"
     echo -e "${YELLOW}           sudo grep '^admin' /opt/ephemres/legacy_password_resets.txt${NC}"
     echo -e "${YELLOW}         You must choose a new password at that first login.${NC}"
+fi
+if [[ ${ADMIN_DEFAULT_ROTATED} -eq 1 ]]; then
+    echo -e "${YELLOW}[NOTICE] 'admin' still had the installer's default password, so it was replaced. Sign in with${NC}"
+    echo -e "${YELLOW}         the temporary password from the root-only file, then delete the file:${NC}"
+    echo -e "${YELLOW}           sudo cat /opt/ephemres/admin_password_reset.txt${NC}"
+    echo -e "${YELLOW}         You must choose a new password at that first sign-in.${NC}"
 fi
 if [[ ${AUDIT_REPAIR_AVAILABLE} -eq 1 ]]; then
     echo -e "${YELLOW}[OPTIONAL] The audit log has periods recorded before v3.3.5 whose health and latency show${NC}"

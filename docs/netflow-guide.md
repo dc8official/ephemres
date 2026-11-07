@@ -20,7 +20,7 @@ Ephemres v3.3.5 provides real-time, high-volume flow ingestion, per-interface th
 |                    EPHEMRES COLLECTOR DAEMON (ephemres-flowd)                 |
 |  - Async Datagram Listeners (4MB SO_RCVBUF)                                   |
 |  - Zero-alloc binary parsers (v5, v9 template cache, IPFIX RFC 7011/7012)     |
-|  - Fast wire pipeline into FastStore shared-memory stream: stream:netflow:raw |
+|  - Parsed flows handed straight to the aggregator (no FastStore buffer)      |
 +---------------------------------------+---------------------------------------+
                                         |
                                         v
@@ -317,6 +317,8 @@ When network devices export flows from loopback interfaces, secondary management
    - Click **Bind Exporter IP**.
 4. The secondary IP is added to the endpoint's `flow_exporter_ips` array and immediately synchronized to the in-memory correlator via FastStore / PostgreSQL sync (`channel:registry_sync`).
 
+> **Flows from an unmatched exporter are not stored.** flowd drops packets from any sender that is not an endpoint's primary IP or one of its `flow_exporter_ips` before parsing them, so nobody who can reach UDP 2055/4739 can fill the flow buffer or the database. The sender still shows in the banner, with its flow rate (for IPFIX, packets per second, since IPFIX headers carry no record count). Its traffic appears from the moment it is mapped or enrolled. Flows stored before this change under the placeholder exporter (`00000000-…`) stay until retention removes them.
+
 ---
 
 ## 7. Verification & Troubleshooting
@@ -336,16 +338,18 @@ sudo tcpdump -ni any udp port 2055 -c 5
 sudo tcpdump -ni any udp port 4739 -c 5
 ```
 
-### Inspect FastStore Shared-Memory Wire Buffer (`/dev/shm`)
+### Check What flowd Receives, Stores and Loses
+flowd logs a summary every minute. Flows go from the collector to the aggregator in memory, so
+the only places flows can be lost are logged there:
 ```bash
-FASTSTORE_DB=$(ls /dev/shm/ephemres_faststore_*.sqlite3 2>/dev/null | head -n 1)
-
-# Check raw stream queue depth and queued batches
-sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream;"
-
-# Inspect the last 2 raw flow packet entries ingested
-sqlite3 "${FASTSTORE_DB}" "SELECT entry_id, stream, substr(fields_json, 1, 120) FROM stream_entries ORDER BY id_ms DESC, id_seq DESC LIMIT 2;"
+sudo journalctl -u ephemres-flowd --since "-15 min" | grep "last minute"
 ```
+* `last minute N flows received, M rollup rows stored`: normal.
+* `LOST N datagrams (kernel socket buffer full: flowd too slow)`: flowd can't keep up with the
+  exporters. Raise `net.core.rmem_max` (flowd asks for a 4 MB socket buffer) or reduce what the
+  exporters send (sampling).
+* `LOST N flows (flow buffer full: database down?)`: the database has been unreachable long
+  enough to fill `flow.buffer_memory_limit_mb`; check PostgreSQL.
 
 ### Which Data a View Shows
 Each Traffic page view, the endpoint Bandwidth & Flow tab and the PDF bandwidth report read a minute, hourly or daily table depending on the window, and the longer-term tables keep less detail (no addresses, and the daily one no endpoints). See [Database §3](database.md#3-4-tier-hierarchical-storage-lifecycle) for what each table keeps and which one each view reads.

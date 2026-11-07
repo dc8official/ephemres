@@ -134,6 +134,9 @@ class TestSecurityAuditFixes(unittest.TestCase):
 
     def test_concurrent_session_fifo_rotation(self) -> None:
         from app.services.auth_service import register_session, is_session_active, invalidate_session, _active_user_sessions
+        from app.services.driver_manager import driver_manager
+        from tests.backend.session_store_double import InMemorySessionStore, drain_background_session_tasks
+
         async def _run():
             user_id = str(uuid4())
             _active_user_sessions.clear()
@@ -141,22 +144,26 @@ class TestSecurityAuditFixes(unittest.TestCase):
             # Session 1 & Session 2 registered
             register_session(user_id, "jti_session_1", max_sessions=2)
             register_session(user_id, "jti_session_2", max_sessions=2)
+            await drain_background_session_tasks()
 
             self.assertTrue(await is_session_active(user_id, "jti_session_1"))
             self.assertTrue(await is_session_active(user_id, "jti_session_2"))
 
             # Session 3 registered -> FIFO evicts Session 1
             register_session(user_id, "jti_session_3", max_sessions=2)
+            await drain_background_session_tasks()
             self.assertFalse(await is_session_active(user_id, "jti_session_1"))
             self.assertTrue(await is_session_active(user_id, "jti_session_2"))
             self.assertTrue(await is_session_active(user_id, "jti_session_3"))
 
             # Logout session 2
             invalidate_session(user_id, "jti_session_2")
+            await drain_background_session_tasks()
             self.assertFalse(await is_session_active(user_id, "jti_session_2"))
             self.assertTrue(await is_session_active(user_id, "jti_session_3"))
 
-        self.loop.run_until_complete(_run())
+        with patch.object(driver_manager, "get_session_store", return_value=InMemorySessionStore()):
+            self.loop.run_until_complete(_run())
 
     def test_ip_scoped_failed_attempt_lockout(self) -> None:
         _failed_attempts.clear()

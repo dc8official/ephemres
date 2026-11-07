@@ -384,13 +384,13 @@ async def test_flow_aggregator_tcp_flags_or_and_tos_max():
         if "INSERT INTO flow_minute_rollups" in str(c[0][0])
     )
     sql_text = str(call_args[0])
-    chunk_rows = call_args[1]
+    columns = call_args[1]
 
     assert "tcp_flags = (COALESCE(flow_minute_rollups.tcp_flags, 0) | EXCLUDED.tcp_flags)" in sql_text
     assert "tos = GREATEST(COALESCE(flow_minute_rollups.tos, 0), EXCLUDED.tos)" in sql_text
-    assert len(chunk_rows) == 1
-    assert chunk_rows[0]["tcp_flags"] == 0x1A
-    assert chunk_rows[0]["tos"] == 184
+    assert len(columns["tcp_flags"]) == 1
+    assert columns["tcp_flags"][0] == 0x1A
+    assert columns["tos"][0] == 184
 
     # Accumulator should be cleared after successful commit
     assert len(agg._accumulator) == 0

@@ -25,11 +25,18 @@ from monitoring.engine import safe_create_task, _active_background_tasks
 class TestEndToEndSmoke(unittest.TestCase):
 
     def setUp(self) -> None:
+        from app.services.driver_manager import driver_manager
+        from tests.backend.session_store_double import InMemorySessionStore
+
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         _failed_attempts.clear()
+        self.store = InMemorySessionStore()
+        self._store_patch = patch.object(driver_manager, "get_session_store", return_value=self.store)
+        self._store_patch.start()
 
     def tearDown(self) -> None:
+        self._store_patch.stop()
         _failed_attempts.clear()
         self.loop.close()
 
