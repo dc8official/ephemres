@@ -399,8 +399,10 @@ async def create_endpoint(
             enable_scheduled_discovery=request.enable_scheduled_discovery,
             is_l2_segment=request.is_l2_segment,
             manual_parent_id=request.manual_parent_id,
-            flow_exporter_ips=request.flow_exporter_ips,
-            flow_interface_aliases=request.flow_interface_aliases,
+            # An UPDATE writes None as NULL, and both columns are NOT NULL. The add form never
+            # sends them, so re-adding a deleted endpoint failed with a 500.
+            flow_exporter_ips=request.flow_exporter_ips or [],
+            flow_interface_aliases=request.flow_interface_aliases or {},
         )
         await auth_repo.create_audit_log(
             user_id=admin_uuid,

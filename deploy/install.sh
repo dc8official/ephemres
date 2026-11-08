@@ -560,7 +560,7 @@ else
 fi
 
 # ============================================================
-print_header "Step 17: Configuring logrotate"
+print_header "Step 17: Configuring logrotate and socket buffers"
 
 LOGROTATE_DST="/etc/logrotate.d/ephemres"
 if [ ! -f "$LOGROTATE_DST" ]; then
@@ -568,6 +568,22 @@ if [ ! -f "$LOGROTATE_DST" ]; then
         cp "$INSTALL_DIR/deploy/logrotate.conf" "$LOGROTATE_DST"
 else
     echo "Logrotate config already exists."
+fi
+
+# The ICMP and flow sockets ask for 4 MB receive buffers; the stock cap of 208 KB makes the
+# kernel drop ping replies and flow packets under load. Only ever raise the cap.
+SYSCTL_DST="/etc/sysctl.d/90-ephemres.conf"
+SYSCTL_WANT=8388608
+SYSCTL_HAVE=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+if [ "$SYSCTL_HAVE" -lt "$SYSCTL_WANT" ] || [ -f "$SYSCTL_DST" ]; then
+    run "Installing socket buffer limit ($SYSCTL_DST)" \
+        cp "$INSTALL_DIR/deploy/sysctl-ephemres.conf" "$SYSCTL_DST"
+    if [ "$SYSCTL_HAVE" -lt "$SYSCTL_WANT" ]; then
+        run "Raising net.core.rmem_max to $SYSCTL_WANT" \
+            sysctl -q -p "$SYSCTL_DST" || echo "Warning: could not apply $SYSCTL_DST now; it applies at the next boot."
+    fi
+else
+    echo "net.core.rmem_max is already $SYSCTL_HAVE; leaving it."
 fi
 
 # ============================================================

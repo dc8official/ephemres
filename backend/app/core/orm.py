@@ -2280,6 +2280,13 @@ def parse_rowcount(status_tag: Any) -> int:
     return 0
 
 
+# asyncpg prepares and caches every statement. After five runs PostgreSQL may switch a
+# prepared statement to one generic plan that ignores the parameter values. For the
+# endpoint list at 5,000 endpoints that plan takes over 10 s instead of about 100 ms,
+# so every connection's sixth call timed out. Planning each run costs well under 1 ms.
+POOL_SERVER_SETTINGS = {"plan_cache_mode": "force_custom_plan"}
+
+
 class AsyncEngine:
     """Engine managing asyncpg connection pools and connection lifetimes."""
 
@@ -2353,6 +2360,7 @@ class AsyncEngine:
                     max_size=max_size,
                     timeout=5.0,
                     command_timeout=10.0,
+                    server_settings=dict(POOL_SERVER_SETTINGS),
                 )
         return self._pool
 

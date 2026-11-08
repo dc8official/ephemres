@@ -12,6 +12,7 @@ from app.services.runtime_settings import get_runtime_settings
 from monitoring.flow.ipfix_parser import IPFIXParser
 from monitoring.flow.v5_parser import parse_v5_packet
 from monitoring.flow.v9_parser import V9Parser
+from monitoring.sockbuf import set_receive_buffer
 
 logger = logging.getLogger(__name__)
 
@@ -153,11 +154,7 @@ class FlowCollector:
         # No SO_REUSEADDR: UDP has no TIME_WAIT to work around, and on Linux it would let any other
         # local process that also sets it bind the same port and receive the unicast flow datagrams.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # Set 4MB socket receive buffer
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        except Exception as e:
-            logger.warning("Could not set SO_RCVBUF to 4MB: %s", e)
+        set_receive_buffer(sock, f"flow socket UDP {port}")
         sock.setblocking(False)
         sock.bind((self.bind_host, port))
         self._sockets.append(sock)

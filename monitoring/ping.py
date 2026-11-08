@@ -15,6 +15,8 @@ import time
 from typing import Dict, List, Optional, Tuple
 import weakref
 
+from monitoring.sockbuf import set_receive_buffer
+
 logger = logging.getLogger(__name__)
 
 # RFC 792 (ICMPv4) & RFC 4443 (ICMPv6) constants
@@ -210,6 +212,7 @@ class _RawICMPMultiplexer:
                 self.sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
             else:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+            set_receive_buffer(self.sock, "ICMPv6 socket" if is_ipv6 else "ICMP socket")
             self.sock.setblocking(False)
             self.loop.add_reader(self.sock.fileno(), self._on_readable)
         except (PermissionError, OSError):

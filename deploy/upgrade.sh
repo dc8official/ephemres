@@ -802,6 +802,20 @@ EOF
         migrate_legacy_services
     fi
 
+    # The ICMP and flow sockets ask for 4 MB receive buffers; the stock cap of 208 KB makes
+    # the kernel drop ping replies and flow packets under load. Only ever raise the cap.
+    SYSCTL_DST="/etc/sysctl.d/90-ephemres.conf"
+    SYSCTL_WANT=8388608
+    SYSCTL_HAVE=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+    if [[ -f "${INSTALL_DIR}/deploy/sysctl-ephemres.conf" && -d /etc/sysctl.d ]] \
+        && { [[ "${SYSCTL_HAVE}" -lt "${SYSCTL_WANT}" ]] || [[ -f "${SYSCTL_DST}" ]]; }; then
+        cp "${INSTALL_DIR}/deploy/sysctl-ephemres.conf" "${SYSCTL_DST}"
+        if [[ "${SYSCTL_HAVE}" -lt "${SYSCTL_WANT}" ]]; then
+            echo -e "${GREEN}[INFO] Raising net.core.rmem_max from ${SYSCTL_HAVE} to ${SYSCTL_WANT}...${NC}"
+            sysctl -q -p "${SYSCTL_DST}" || echo -e "${YELLOW}[WARN] Could not apply ${SYSCTL_DST} now; it applies at the next boot.${NC}"
+        fi
+    fi
+
     echo -e "${GREEN}[INFO] Reloading systemd daemons and enabling auto-start on boot...${NC}"
     systemctl daemon-reload
     systemctl enable ephemres-api ephemres-engine || true
