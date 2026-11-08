@@ -10,6 +10,12 @@ from app.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
+# How often an idle LISTEN connection is checked. A termination callback covers a closed socket;
+# this covers a connection that silently stopped working (network cut, no FIN).
+LISTENER_CHECK_SECONDS = 5.0
+LISTENER_RECONNECT_SECONDS = 2.0
+_CONNECTION_LOST = object()
+
 
 class EventBroker(ABC):
     """Abstract interface for real-time pub/sub messaging and state broadcasts."""
@@ -66,6 +72,11 @@ class PostgresEventBroker(EventBroker):
         """
         True real-time LISTEN subscription using a dedicated unpooled asyncpg connection
         with automated reconnection loop.
+
+        Waiting on the local queue alone never noticed a dead connection: after a PostgreSQL
+        restart every subscriber kept waiting forever, and live events and alerts silently
+        stopped until the API restarted. NOTIFY is not durable, so an event published while
+        reconnecting is not delivered.
         """
         import asyncio
         from app.config import settings
@@ -79,6 +90,10 @@ class PostgresEventBroker(EventBroker):
                 data = {"raw": payload}
             queue.put_nowait(data)
 
+        def _on_termination(connection):
+            queue.put_nowait(_CONNECTION_LOST)
+
+        failing = False
         while True:
             conn = None
             try:
@@ -91,20 +106,34 @@ class PostgresEventBroker(EventBroker):
                     password=settings.database.password,
                     database=settings.database.name,
                 )
+                conn.add_termination_listener(_on_termination)
                 await conn.add_listener(channel, _on_notification)
                 logger.info("PostgresEventBroker: connected & listening to '%s'", channel)
+                failing = False
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=LISTENER_CHECK_SECONDS)
+                    except asyncio.TimeoutError:
+                        await conn.fetchval("SELECT 1", timeout=LISTENER_CHECK_SECONDS)
+                        continue
+                    if event is _CONNECTION_LOST:
+                        # Left over from the previous connection when this one is open.
+                        if conn.is_closed():
+                            raise ConnectionError("LISTEN connection lost")
+                        continue
                     yield event
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except Exception as exc:
-                logger.warning(
-                    "PostgresEventBroker: listener error on channel '%s': %s. Reconnecting in 2s...",
-                    channel,
-                    exc,
-                )
-                await asyncio.sleep(2.0)
+                # Once per outage: this retries every couple of seconds per channel.
+                if not failing:
+                    logger.warning(
+                        "PostgresEventBroker: listener error on channel '%s': %s. Reconnecting...",
+                        channel,
+                        exc,
+                    )
+                failing = True
+                await asyncio.sleep(LISTENER_RECONNECT_SECONDS)
             finally:
                 if conn and not conn.is_closed():
                     try:

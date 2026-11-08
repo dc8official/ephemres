@@ -105,7 +105,6 @@ async def run_flow_daemon() -> None:
     # monitoring engine uses, so initialize it the same way.
     from app.services.driver_manager import driver_manager
 
-    driver_manager.migrate_sessions = False
     await driver_manager.initialize()
     path_tracker = PathTracker(
         change_minutes=getattr(flow_cfg, "route_change_minutes", 3) if flow_cfg else 3,

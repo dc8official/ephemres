@@ -282,7 +282,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 ### K. FastStore Inspection & Diagnostics (`/run/ephemres`)
 * **Symptoms**:
   - NetFlow telemetry not reaching rollup tables, or real-time event broadcasts stalling when Performance Mode is active.
-* **Files**: FastStore keeps its SQLite file in `/run/ephemres` (`/dev/shm` when that is missing): `ephemres_faststore_u<uid>_db0.sqlite3`, shared by every service: sessions and sign-in lockouts (Performance Mode), events, exporter discovery. Flows themselves no longer pass through FastStore; for flow loss see `journalctl -u ephemres-flowd | grep "last minute"` ([NetFlow guide §7](netflow-guide.md)).
+* **Files**: FastStore keeps its SQLite file in `/run/ephemres` (`/dev/shm` when that is missing): `ephemres_faststore_u<uid>_db0.sqlite3`, shared by every service for events and exporter discovery. Sessions and sign-in lockouts are in PostgreSQL in both modes, so a reboot signs nobody out. Flows themselves no longer pass through FastStore; for flow loss see `journalctl -u ephemres-flowd | grep "last minute"` ([NetFlow guide §7](netflow-guide.md)).
 * **Diagnosis**:
   1. Inspect the files' existence, permissions, and size:
      ```bash
@@ -291,9 +291,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   2. Query FastStore internal tables using the standard `sqlite3` CLI:
      ```bash
      SHARED_DB=$(sudo ls /run/ephemres/ephemres_faststore_*_db0.sqlite3 2>/dev/null | head -n 1)
-
-     # Inspect active cached sessions
-     sudo sqlite3 "${SHARED_DB}" "SELECT count(*) FROM kv_store WHERE k LIKE 'user_sessions:%' AND (expires_at IS NULL OR expires_at > unixepoch());"
+     sudo sqlite3 "${SHARED_DB}" "SELECT k FROM kv_store LIMIT 20;"
      ```
   3. A process that finds a FastStore file corrupt recreates it only when no other process has it open; otherwise it stops with
      `FastStore database ... is corrupt ... but other processes still use it`. A locked file is never recreated: it is waited for.
@@ -303,6 +301,26 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
      sudo rm -f /run/ephemres/ephemres_faststore* /dev/shm/ephemres_faststore*
      sudo systemctl start ephemres-api ephemres-engine ephemres-flowd
      ```
+
+### Database outages
+What each service does while PostgreSQL is unavailable, without anyone restarting it:
+
+* **API:** requests that need the database answer `503` with `Retry-After`, and the UI shows a notice. Nobody is signed out; sessions are valid again as soon as the database returns. `/health/liveness` stays 200 and `/health/readiness` answers 503. Listeners for live events and alerts reconnect by themselves. The alert leader steps down if its database connection dies and takes part in the next election.
+* **Engine:** keeps probing. Each endpoint holds up to 240 cycles (4 hours) in memory and writes them with their real times when the database returns, so history and availability come out as if it had never left. Past that, the oldest are dropped and recorded as a `DATABASE_DISCONNECT` monitoring gap.
+* **Alerts:** a state change still in effect when the database returns alerts then. One that started and ended during the outage is recorded in history without an alert.
+* **flowd:** keeps collecting and holds flows in memory up to `flow.buffer_memory_limit_mb`, then writes the backlog.
+* **Service restarts:** an engine that restarts during an outage loses what it was holding. The stop is recorded as a monitoring gap.
+
+`systemctl stop postgresql` no longer stops the Ephemres services; they wait and retry.
+
+### Stuck API workers
+A worker whose event loop stops running for 30 s exits and uvicorn starts a replacement. The service itself does not restart, and the other worker keeps answering meanwhile. The cause is a bug: something blocking the event loop. To find it, read the stacks the worker printed as it exited:
+
+```bash
+journalctl -u ephemres-api | grep -A25 "Event loop stuck"
+```
+
+Each thread's stack follows. The stuck one is the thread whose frames run through `asyncio/runners.py`: the line above them is where the event loop was blocked. If the stuck worker was sending alerts, the other worker takes over within a few seconds, but a state change in the 30 s it was stuck does not alert. The dashboard and history still show it. If both workers are stuck, both are replaced and requests fail for those 30 s.
 
 ### L. Audit log health and latency from before v3.3.5
 * **What you see**: in an endpoint's audit log (state transition history), some older periods show a health or average latency that doesn't fit the period. For example, an UP period of several hours that ended in an outage shows **0 % health** and no latency, or a DOWN period shows a latency.

@@ -1,7 +1,7 @@
 [Unit]
 Description=Ephemres API Server
 After=network.target postgresql.service
-Requires=postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=notify

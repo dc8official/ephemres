@@ -64,6 +64,19 @@ async def open_monitoring_gap(
     
     return UUID(str(gap_id))
 
+async def record_lost_cycles_gap(db: AsyncSession, start: datetime, end: datetime) -> None:
+    """Probe results dropped because a database outage outlasted the engine's backlog: nothing
+    is known about this period, so availability figures leave it out."""
+    await db.execute(
+        text("""
+            INSERT INTO monitoring_service_events (event_type, start_time, end_time, duration_seconds)
+            VALUES ('DATABASE_DISCONNECT', :start, :end, EXTRACT(EPOCH FROM (CAST(:end AS timestamptz) - CAST(:start AS timestamptz)))::BIGINT)
+        """),
+        {"start": start, "end": end},
+    )
+    logger.warning("Monitoring gap recorded: database outage outlasted the probe backlog (%s to %s)", start, end)
+
+
 async def close_monitoring_gap(
     db: AsyncSession,
     gap_id: UUID,
@@ -125,40 +138,54 @@ async def resolve_startup_state(db: AsyncSession) -> Optional[UUID]:
     Each open period ends at its own last cycle, so the downtime is not credited to whatever
     state the endpoint was in. The gap runs from the earliest of those last cycles until the
     first cycles after this start: close_startup_gap() ends it once they have run. Returns the
-    gap's id, or None when nothing was left open (first start, or nothing monitored).
+    gap's id, or None when there is no gap (first start, or nothing monitored).
     """
     await _lift_decompression_cap(db)
     now = datetime.now(timezone.utc)
 
-    # A gap still open here was left by a start that stopped before closing it: monitoring
-    # resumed at the first period opened after it began.
+    # A gap still open here was left by a start that stopped before closing it. Only a cycle run
+    # after that start shows monitoring resumed: periods from before it can begin after the
+    # gap does, since the gap starts at the earliest endpoint's last cycle. With no such cycle
+    # the engine has not been monitoring since the gap began, so the same gap goes on.
     query_select = text("""
-        SELECT id, start_time, event_type
+        SELECT id, start_time, event_type, created_at
         FROM monitoring_service_events
         WHERE end_time IS NULL
         ORDER BY start_time DESC
         LIMIT 1
     """)
     row = (await db.execute(query_select)).fetchone()
+    continued_gap: Optional[UUID] = None
     if row:
-        logger.warning(
-            "Startup: found unresolved monitoring gap from %s (type=%s). Closing.",
-            row.start_time,
-            row.event_type,
-        )
-        await db.execute(
+        resumed = (await db.execute(
             text("""
-                UPDATE monitoring_service_events
-                SET end_time = COALESCE(
-                        (SELECT MIN(start_time) FROM endpoint_events WHERE start_time > :gap_start),
-                        :now),
-                    duration_seconds = EXTRACT(EPOCH FROM (COALESCE(
-                        (SELECT MIN(start_time) FROM endpoint_events WHERE start_time > :gap_start),
-                        :now) - start_time))::BIGINT
-                WHERE id = CAST(:gap_id AS uuid)
+                SELECT MAX(start_time) FROM endpoint_events
+                WHERE start_time >= :started AND start_time <= :settled
             """),
-            {"gap_start": row.start_time, "now": now, "gap_id": str(row.id)},
-        )
+            {"started": row.created_at, "settled": row.created_at + timedelta(seconds=STARTUP_SETTLE_SECONDS)},
+        )).scalar()
+        if resumed is None:
+            continued_gap = UUID(str(row.id))
+            logger.warning(
+                "Startup: monitoring has not run since the gap of %s (type=%s) began. It stays open.",
+                row.start_time,
+                row.event_type,
+            )
+        else:
+            logger.warning(
+                "Startup: closing the unresolved monitoring gap from %s (type=%s) where monitoring resumed.",
+                row.start_time,
+                row.event_type,
+            )
+            await db.execute(
+                text("""
+                    UPDATE monitoring_service_events
+                    SET end_time = GREATEST(start_time, :resumed),
+                        duration_seconds = EXTRACT(EPOCH FROM (GREATEST(start_time, :resumed) - start_time))::BIGINT
+                    WHERE id = CAST(:gap_id AS uuid)
+                """),
+                {"resumed": resumed, "gap_id": str(row.id)},
+            )
 
     # Bound cleanup to 7-day uncompressed window to enable TimescaleDB hypertable chunk pruning
     window_start = now - timedelta(days=7)
@@ -172,8 +199,8 @@ async def resolve_startup_state(db: AsyncSession) -> Optional[UUID]:
         {"window_start": window_start},
     )).fetchone()
     if cycles is None or cycles.newest is None:
-        logger.info("Startup: no open endpoint events found in active window. Clean state.")
-        return None
+        logger.info("Startup: no open endpoint events found in active window.")
+        return continued_gap
 
     gap_start = (await db.execute(
         text(f"""
@@ -192,6 +219,9 @@ async def resolve_startup_state(db: AsyncSession) -> Optional[UUID]:
           AND start_time >= :window_start
     """)
     update_result = await db.execute(query_update, {"window_start": window_start})
+
+    if continued_gap is not None:
+        return continued_gap
 
     gap_row = (await db.execute(
         text("""

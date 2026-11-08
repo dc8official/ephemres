@@ -133,11 +133,77 @@ def test_start_without_open_periods_records_no_gap(timescale_dsn, run_sql):
 
 def test_gap_left_open_by_an_interrupted_start_ends_where_monitoring_resumed(timescale_dsn, run_sql):
     now, began = _seed(run_sql)
-    gap_id = _with_session(timescale_dsn, resolve_startup_state)
+    _with_session(timescale_dsn, resolve_startup_state)
     _first_cycle(timescale_dsn)  # the engine ran, then stopped before close_startup_gap
 
     _with_session(timescale_dsn, resolve_startup_state)
-    gaps = sorted(run_sql(_gaps), key=lambda g: g["start_time"])
+    first, second = sorted(run_sql(_gaps), key=lambda g: g["start_time"])
     _, reopened = run_sql(_events)[:2]
-    assert gaps[0]["end_time"] == reopened["start_time"]
-    assert gap_id is not None
+    assert first["start_time"] == began + HOUR
+    assert first["end_time"] == reopened["start_time"]
+    # The new gap starts at the short run's last cycle and stays open until the next one settles.
+    assert second["start_time"] == reopened["start_time"] and second["end_time"] is None
+
+
+def test_a_start_that_ran_no_cycle_does_not_end_the_gap(timescale_dsn, run_sql):
+    """A period opened by the old run just after the gap's start used to end it: 5 minutes of real
+    downtime were recorded as 2 s, and since nothing was left open the next start recorded no gap."""
+    now, began = _seed(run_sql)
+    stopped = began + HOUR
+
+    async def period_opened_two_seconds_later(conn):
+        await conn.execute(
+            """
+            INSERT INTO endpoint_events (endpoint_id, operational_state, detailed_state, success_count,
+                failed_count, health_score, avg_rtt_ms, is_split_event, start_time, end_time,
+                duration_seconds, monitoring_cycle_count)
+            VALUES ($1, $2, $3, 4, 0, 100, 10, false, $4, NULL, 10, 1)
+            """,
+            STALE, UP_OP, UP_DETAIL, stopped + datetime.timedelta(seconds=2),
+        )
+
+    run_sql(period_opened_two_seconds_later)
+    gap_id = _with_session(timescale_dsn, resolve_startup_state)  # this start never ran a cycle
+
+    started_at = datetime.datetime.now(datetime.timezone.utc)
+    assert _with_session(timescale_dsn, resolve_startup_state) == gap_id
+    (gap,) = run_sql(_gaps)
+    assert (gap["start_time"], gap["end_time"]) == (stopped, None)
+
+    _first_cycle(timescale_dsn)
+    _with_session(timescale_dsn, lambda session: close_startup_gap(session, gap_id, started_at))
+    (gap,) = run_sql(_gaps)
+    assert gap["start_time"] == stopped
+    assert gap["end_time"] == run_sql(_events)[-1]["start_time"]
+
+
+def test_a_gap_that_failed_to_close_ends_at_the_first_cycles_of_its_run(timescale_dsn, run_sql):
+    """Not at a state change a day later, which would leave that day out of availability."""
+    now, began = _seed(run_sql)
+    _with_session(timescale_dsn, resolve_startup_state)
+    run_started = now - 24 * HOUR + 5 * HOUR
+    first_cycle = run_started + datetime.timedelta(seconds=40)
+
+    async def ran_for_a_day(conn):
+        await conn.execute(
+            "UPDATE monitoring_service_events SET created_at = $1, start_time = $2",
+            run_started, run_started - HOUR,
+        )
+        await conn.executemany(
+            """
+            INSERT INTO endpoint_events (endpoint_id, operational_state, detailed_state, success_count,
+                failed_count, health_score, avg_rtt_ms, is_split_event, start_time, end_time,
+                duration_seconds, monitoring_cycle_count)
+            VALUES ($1, $2, $3, 4, 0, 100, 10, false, $4, $5, $6, 1)
+            """,
+            [
+                (HOST, UP_OP, UP_DETAIL, first_cycle, first_cycle + HOUR, 3600),
+                (HOST, "DOWN", "DOWN", now - datetime.timedelta(seconds=10), None, 5),
+            ],
+        )
+
+    run_sql(ran_for_a_day)
+    _with_session(timescale_dsn, resolve_startup_state)
+    first, second = sorted(run_sql(_gaps), key=lambda g: g["start_time"])
+    assert first["end_time"] == first_cycle
+    assert second["start_time"] == now - datetime.timedelta(seconds=5) and second["end_time"] is None

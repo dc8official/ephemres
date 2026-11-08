@@ -128,7 +128,7 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### B. Distributed Multi-Worker Session Governance
 In production, `ephemres-api` runs with multiple Uvicorn workers (`--workers 2`). Ephemres prevents single-worker auth bypasses via distributed session drivers:
-* **Driver Architecture:** Session validity is verified on every request against `PostgresSessionStore` or `FastStoreSessionStore` (`backend/app/core/faststore.py`), which all workers share. The store is the only authority: a worker never accepts a session from its own memory, and a store error rejects the request (fail closed).
+* **Driver Architecture:** Session validity is verified on every request against `PostgresSessionStore`, which all workers share, in both Standard and Performance Mode. The store is the only authority: a worker never accepts a session from its own memory, and a store error rejects the request (fail closed).
 * **Authorization From the Database:** The role and the active / must-change flags are read from the account's database row on every request; the token's `role` claim is ignored. Demoting, promoting or disabling an account takes effect on its next request, and a role change also signs the account out.
 * **Concurrent Device Quota:** Accounts are limited to `[security] max_active_sessions_per_user` concurrent sessions (default 2, range 1–10). A further login evicts the oldest session (FIFO).
 * **Instantaneous Session Revocation:** Changing an account password, an admin reset, disabling or re-roling an account, or clicking "Sign Out Everywhere" deletes its session records from the shared store, so the next request on any worker is rejected.
@@ -154,7 +154,7 @@ When determining the client's real IP address for audit logs and security polici
 
 ### B. IP-Scoped Brute-Force Lockouts
 * **Threshold:** After `lockout_threshold` failed attempts (default 5; **Admin Settings → Security & Discovery**) the `IP:username` pair is locked for 15 minutes. The failure counter resets after 30 minutes without further failures.
-* **Shared, Persistent Counters:** Failures are counted in the session store all workers share (the `auth_login_failures` table in PostgreSQL mode, TTL keys in FastStore mode), with one atomic upsert per failure. Counters survive API restarts and cannot be pushed out by flooding sign-ins with other usernames.
+* **Shared, Persistent Counters:** Failures are counted in the store all workers share (the `auth_login_failures` table, in both modes), with one atomic upsert per failure. Counters survive API restarts and cannot be pushed out by flooding sign-ins with other usernames.
 * **No Username Oracle:** A sign-in for an unknown or disabled username spends the same scrypt verification as a real one, so response time does not reveal which usernames exist. Concurrent scrypt work is capped per worker (128 MiB each).
 * **Edge Rate Limit:** The shipped Nginx site limits `POST /api/v1/auth/login` to 10 requests a minute per client address (burst 5) and answers `429` beyond that. Existing sites are not rewritten by upgrades: copy the `limit_req_zone` line and the `location = /api/v1/auth/login` block from `deploy/nginx.conf.template`.
 * **NAT / VPN Isolation:** Lockout keys are scoped by `f"{client_ip}:{username}"`. If an external attacker attempts to brute force an administrator account, only the attacker's IP is locked out; legitimate administrators on corporate networks remain unaffected.

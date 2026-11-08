@@ -27,13 +27,11 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
   - `PostgresSessionStore`: Manages authenticated sessions within the `user_sessions` PostgreSQL table.
   - `PostgresEventBroker`: Uses PostgreSQL `LISTEN / NOTIFY` asynchronous channels to publish and broadcast telemetry events.
 * **FastStore In-RAM Driver (`app.core.faststore`):**
-  - `FastStoreSessionStore`: Caches active sessions in high-speed in-RAM `/dev/shm` SQLite WAL storage with atomic TTL expiry and sub-microsecond access times.
   - `FastStoreEventBroker`: Uses native in-memory Pub/Sub channels for high-throughput, low-latency inter-process messaging.
   - **Zero-Daemon Architecture:** Completely replaces external `redis-server` daemon instances, eliminating Unix domain socket timeouts, socket permission drift, and memory bloat.
 * **Multi-Worker Settings & Driver Cluster Synchronization (`SYSTEM_SETTINGS_SYNC`):**
   When running under multiple Uvicorn workers, modifying active storage settings via the Admin UI triggers a PostgreSQL `NOTIFY system_settings_sync` signal. All listening worker processes dynamically reload driver configurations and synchronize active session stores without service downtime or cluster restarts.
-* **Bidirectional Warm Session State Migration:**
-  When switching active drivers between PostgreSQL and FastStore, active sessions are dynamically read and migrated to the destination backend in real time, guaranteeing zero operator session termination or abrupt logouts.
+* **Sessions and sign-in lockouts stay in PostgreSQL in both modes:** every request reads the user from the database anyway, and FastStore's file is cleared on reboot. So switching Performance Mode or rebooting signs nobody out. FastStore carries events only.
 
 ### 4. Real-Time Telemetry & Server-Sent Events (SSE)
 * **Native ASGI 3.0 SSE Stream (`GET /api/v1/events/stream`):** Delivers continuous telemetry directly to web browsers using `text/event-stream` mediated by `EventSourceResponse` in `app.core.asgi`.
@@ -92,7 +90,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **Port Normalization & Cardinality Shield:** Normalizes ephemeral client ports (1024–65535) unless recognized as well-known server services (e.g. 8080, 8443, 3306, 5432, 6379, 9200) into a single aggregate representation. This prevents high-entropy ephemeral client ports from exploding TimescaleDB hypertable B-tree index sizes.
 * **In-Process Hand-Off:** The collector passes each datagram's parsed flows straight to the aggregator (`FlowAggregator.ingest`) in the same process; nothing is buffered in FastStore. (Up to v3.3.5 every flow went through a FastStore stream, whose trimming lost flows above about 1,000 flows/s.) The aggregator writes its 1-minute sums every 10 seconds and keeps them in memory while the database is unreachable, up to `[flow] buffer_memory_limit_mb` (default 512 MB, about 1 KB per conversation and minute); past that it drops new conversations and logs an error. flowd logs flows received, rows stored and anything lost (kernel socket drops, memory cap) every minute.
 * **4-Tier Hierarchical Storage Lifecycle:**
-  1. *Tier 1 (In-Memory Accumulator):* flowd's 1-minute sums, flushed every 10 seconds (held longer only while the database is unreachable). A crash loses at most this.
+  1. *Tier 1 (In-Memory Accumulator):* flowd's 1-minute sums, flushed every 10 seconds (held longer only while the database is unreachable). A flowd crash loses about 15 seconds of flows: the unwritten 10 seconds plus the 5-second restart, while the UDP ports are closed.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
   3. *Tier 3 (Hourly Aggregates):* TimescaleDB continuous aggregate `flow_hourly_rollups` (`materialized_only = false` for real-time tail reads), refreshed every hour, retained for 30 days; `flow_conversation_hourly_rollups` with addresses, TCP flags and ToS, retained for 90 days, which serves top talkers, conversations, anomalies and QoS over more than 2 hours; plus `flow_interface_hourly_rollups` storing hourly interface byte/packet sums and busiest-minute peaks (`peak_in_minute_bytes`, `peak_out_minute_bytes`), retained for 365 days.
   4. *Tier 4 (Daily Aggregates):* TimescaleDB continuous aggregate `flow_daily_rollups` (`materialized_only = false`), refreshed daily, retained for 365 days, behind the API's fleet-wide `1y` window.
@@ -116,7 +114,7 @@ At the bedrock of Ephemres v3.3.5 is **Layer 0 (`backend/app/core/`)** — 12 sp
 | **`app.core.netlink`** | Pure Linux Kernel RTNETLINK Engine | Replaces `psutil`. Pure Linux kernel Netlink binary parser (`AF_NETLINK`, `NETLINK_ROUTE`, `RTM_GETADDR`) and `/proc` stat readers for asynchronous interface and system telemetry. |
 | **`app.core.pdf`** | Direct PostScript/PDF Binary Emitter | Replaces `weasyprint`, `cairo`, `pango`, and `pypdf`. Generates vector-styled executive compliance reports, tables, typography matrices, and Base64 logos without external shared libraries. |
 | **`app.core.template`** | Zero-Dependency Template Compiler | Replaces `jinja2` and `markupsafe`. Supports template inheritance (`{% extends %}`, `{% block %}`), loops, conditionals, and context-aware HTML escaping using pure stdlib regex and AST parsing. |
-| **`app.core.watchdog`** | Linux Systemd Watchdog Supervisor | Pure-stdlib `systemd` watchdog notification client using `sd_notify` protocol over Unix domain datagram sockets (`AF_UNIX`). |
+| **`app.core.watchdog`** | Linux Systemd Watchdog Supervisor | Pure-stdlib `systemd` watchdog notification client using `sd_notify` protocol over Unix domain datagram sockets (`AF_UNIX`). Each API worker also runs a stall guard: a thread that ends the worker if its event loop has not run for 30 s, so uvicorn replaces it. The systemd watchdog can't see this with 2 workers, because the other worker's heartbeat satisfies it. |
 
 Two smaller stdlib helpers live outside `app.core`:
 * **X.509 expiry parsing** (`monitoring/synthetic.py`, `_parse_der_cert_not_after`): a minimal ASN.1 DER reader that extracts the certificate `notAfter` date for `SSL_EXPIRY` probes when the TLS handshake is unverified. It replaces `cryptography.x509` for that one purpose and does not parse `notBefore` or Subject Alternative Names.
@@ -164,7 +162,7 @@ flowchart TD
     subgraph Storage_Drivers["Pluggable Storage Drivers"]
         MGR["StorageDriverManager"]
         PS["PostgresSessionStore / PostgresEventBroker"]
-        FS["FastStoreSessionStore / FastStoreEventBroker"]
+        FS["FastStoreEventBroker"]
         MGR --> PS
         MGR --> FS
     end

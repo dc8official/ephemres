@@ -141,7 +141,7 @@ print_header "Step 4: Installing system packages"
 
 PACKAGES="postgresql-16 postgresql-client-16 \
 timescaledb-2-postgresql-16 timescaledb-tools \
-python3-venv python3-pip traceroute iputils-tracepath iputils-ping libcap2-bin \
+python3-venv python3-pip traceroute iputils-tracepath iputils-ping libcap2-bin rsync git sudo \
 nodejs nginx certbot python3-certbot-nginx"
 
 MISSING=""

@@ -22,7 +22,7 @@ from app.routers.settings import get_settings, update_settings, SettingsUpdate
 from app.services.auth_service import is_session_active
 from app.services.diagnostics import is_local_subnet_destination
 from app.services.event_broker import PostgresEventBroker
-from app.services.session_store import PostgresSessionStore, RedisSessionStore
+from app.services.session_store import PostgresSessionStore
 from monitoring.synthetic import _parse_der_cert_not_after, _sync_ssl_probe
 
 
@@ -407,12 +407,6 @@ class TestOptionBStrictSecurityWipe(unittest.TestCase):
             pg_store = PostgresSessionStore(mock_factory)
             self.assertFalse(await pg_store.is_session_active(user_id, jti=None))
             self.assertFalse(await pg_store.is_session_active(user_id, jti=""))
-
-            # 3. RedisSessionStore
-            mock_redis = AsyncMock()
-            redis_store = RedisSessionStore(mock_redis)
-            self.assertFalse(await redis_store.is_session_active(user_id, jti=None))
-            self.assertFalse(await redis_store.is_session_active(user_id, jti=""))
 
         self.loop.run_until_complete(_run())
 

@@ -157,14 +157,17 @@ def test_session_revoked_in_the_store_is_rejected_even_if_this_worker_remembers_
         auth_service._active_user_sessions.pop(user_id, None)
 
 
-def test_session_store_failure_fails_closed():
+def test_session_store_failure_lets_nothing_through():
+    """Fail closed, without calling a valid session invalid: tests/backend/test_failure_recovery.py
+    checks that the request answers 503."""
     store = AsyncMock()
     store.is_session_active.side_effect = RuntimeError("store down")
     user_id = str(uuid4())
     auth_service._active_user_sessions[user_id] = ["jti-x"]
     try:
         with patch.object(driver_manager, "get_session_store", return_value=store):
-            assert _run(auth_service.is_session_active(user_id, "jti-x")) is False
+            with pytest.raises(RuntimeError):
+                _run(auth_service.is_session_active(user_id, "jti-x"))
     finally:
         auth_service._active_user_sessions.pop(user_id, None)
 

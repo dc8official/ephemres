@@ -25,7 +25,7 @@ from app.services.diagnostics import (
 )
 from app.services.driver_manager import StorageDriverManager, driver_manager
 from app.services.event_broker import PostgresEventBroker
-from app.services.session_store import PostgresSessionStore, RedisSessionStore
+from app.services.session_store import PostgresSessionStore
 from monitoring.ping import PingResult, classify_ping_result
 from monitoring.registry import EndpointRegistry, MonitoredEndpoint
 
@@ -214,54 +214,6 @@ class TestMilestone2DualStorageAndEventBroker(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.loop.close()
-
-    def test_redis_session_store_lifecycle(self) -> None:
-        mock_redis = AsyncMock()
-        fake_storage: dict[str, str] = {}
-
-        async def fake_get(k):
-            return fake_storage.get(k)
-
-        async def fake_set(k, v, ex=None):
-            fake_storage[k] = v
-
-        async def fake_del(k):
-            fake_storage.pop(k, None)
-
-        mock_redis.get.side_effect = fake_get
-        mock_redis.set.side_effect = fake_set
-        mock_redis.delete.side_effect = fake_del
-        mock_redis.ttl.return_value = 7200
-
-        store = RedisSessionStore(mock_redis)
-
-        async def _run():
-            user_id = str(uuid4())
-            jti_1 = "sess_1"
-            jti_2 = "sess_2"
-            jti_3 = "sess_3"
-
-            # Register sessions with max 2 (FIFO rotation)
-            await store.register_session(user_id, jti_1, max_sessions=2)
-            await store.register_session(user_id, jti_2, max_sessions=2)
-            self.assertTrue(await store.is_session_active(user_id, jti_1))
-            self.assertTrue(await store.is_session_active(user_id, jti_2))
-
-            # Adding 3rd session should evict jti_1
-            await store.register_session(user_id, jti_3, max_sessions=2)
-            self.assertFalse(await store.is_session_active(user_id, jti_1))
-            self.assertTrue(await store.is_session_active(user_id, jti_2))
-            self.assertTrue(await store.is_session_active(user_id, jti_3))
-
-            # Invalidate session 2
-            await store.invalidate_session(user_id, jti_2)
-            self.assertFalse(await store.is_session_active(user_id, jti_2))
-
-            # Invalidate all
-            await store.invalidate_all_user_sessions(user_id)
-            self.assertFalse(await store.is_session_active(user_id, jti_3))
-
-        self.loop.run_until_complete(_run())
 
     def test_postgres_session_store_mock_db(self) -> None:
         mock_session = AsyncMock()

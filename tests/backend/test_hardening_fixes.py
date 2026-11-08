@@ -15,38 +15,13 @@ from app.core.http_client import validate_outbound_url
 from app.database import check_database_connection
 
 
-class _DictFastStore:
-    """Just enough of FastStoreClient for FastStoreSessionStore's session methods."""
-
-    def __init__(self):
-        self.data = {}
-
-    async def get(self, key):
-        return self.data.get(key)
-
-    async def set(self, key, value, ex=None):
-        self.data[key] = value
-
-    async def ttl(self, key):
-        return 3600 if key in self.data else -2
-
-    async def delete(self, *keys):
-        for k in keys:
-            self.data.pop(k, None)
-
-
 @pytest.mark.anyio
 async def test_session_eviction_deduplication():
-    """Verify that multiple registrations of the same jti do not evict prior sessions.
-
-    Runs against the real FastStore session store: sessions are only valid in the shared
-    store, never in this worker's memory.
-    """
+    """Verify that multiple registrations of the same jti do not evict prior sessions."""
     from app.services.driver_manager import driver_manager
-    from app.services.session_store import FastStoreSessionStore
-    from tests.backend.session_store_double import drain_background_session_tasks
+    from tests.backend.session_store_double import InMemorySessionStore, drain_background_session_tasks
 
-    store = FastStoreSessionStore(_DictFastStore())
+    store = InMemorySessionStore()
     with patch.object(driver_manager, "get_session_store", return_value=store):
         await _run_session_eviction_deduplication(drain_background_session_tasks)
 

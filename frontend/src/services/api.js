@@ -92,6 +92,11 @@ class ApiClient {
           }
         }
 
+        // The database is away: the session is still good, so say so instead of signing out.
+        if (response.status === 503 && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ephemres:unavailable', { detail: resData?.detail }))
+        }
+
         throw error
       }
 

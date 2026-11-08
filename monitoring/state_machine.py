@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from uuid import UUID
@@ -93,6 +93,11 @@ class EndpointState:
     pending_cycle_count: int = field(default=0)
     hostname: Optional[str] = field(default=None)
     ip_address: Optional[str] = field(default=None)
+    # An endpoint already down at its first probe starts as DOWN, so no transition ever announces
+    # it. This counts the cycles in a row confirming it; None means nothing is owed.
+    first_down_cycles: Optional[int] = field(default=None)
+    # Confirmed and not announced yet.
+    announce_first_down: bool = field(default=False)
 
 
 class StateMachine:
@@ -157,6 +162,8 @@ class StateMachine:
         result: PingResult,
         db: AsyncSession,
         baseline: Optional[Tuple[float, float]] = None,
+        *,
+        at: Optional[datetime] = None,
     ) -> EndpointState:
         """
         Called on the first ping cycle for an endpoint when no existing
@@ -168,7 +175,7 @@ class StateMachine:
         operational_state, detailed_state = classify_ping_result(
             result, baseline_mean=baseline_mean, baseline_stddev=baseline_stddev
         )
-        start_time = datetime.now(timezone.utc)
+        start_time = at or datetime.now(timezone.utc)
         health_score = result.health_score
 
         row = (
@@ -235,7 +242,133 @@ class StateMachine:
             pending_cycle_count=0,
             hostname=ep_hostname,
             ip_address=ep_ip,
+            first_down_cycles=1 if operational_state == "DOWN" else None,
         )
+
+    async def announce_first_down(self, state: EndpointState, result: PingResult, db: AsyncSession) -> None:
+        """Announces a first-probe DOWN once the same number of cycles has confirmed it as any
+        other transition, so one lost ping on a new device sends nothing."""
+        state.announce_first_down = False
+        unknown = replace(state, confirmed_operational_state="UNKNOWN", confirmed_detailed_state="UNKNOWN")
+        await self.announce_transition(unknown, state, result, db)
+
+    async def announce_transition(
+        self,
+        previous: EndpointState,
+        current: EndpointState,
+        result: PingResult,
+        db: AsyncSession,
+    ) -> None:
+        """Tells everything else that an endpoint's confirmed state changed: topology, live
+        events and alerts, and root-cause analysis on an operational change."""
+        # 1. Update in-memory topology DAG status immediately
+        try:
+            from app.services.topology import topology_manager
+
+            safe_create_task(
+                topology_manager.update_node_status(
+                    str(previous.endpoint_id), current.confirmed_detailed_state
+                ),
+                "topology_update_node_status",
+            )
+        except Exception as e:
+            logger.warning("Topology manager update hook error: %s", e)
+
+        # 2. Broadcast SSE and EventBroker events
+        try:
+            from app.routers.events import broadcast_sse_event
+            from app.services.driver_manager import driver_manager
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            node_payload = {
+                "type": "NODE_STATE_CHANGE",
+                "endpoint_id": str(previous.endpoint_id),
+                "new_state": current.confirmed_detailed_state,
+            }
+            safe_create_task(
+                broadcast_sse_event("NODE_STATE_CHANGE", node_payload),
+                "sse_node_state_change",
+            )
+
+            ep_hostname = getattr(previous, "hostname", None)
+            ep_ip = getattr(previous, "ip_address", None)
+            if not ep_hostname or not ep_ip:
+                ep_hostname, ep_ip = await _resolve_endpoint_identity(previous.endpoint_id, db)
+
+            current.hostname = ep_hostname
+            current.ip_address = ep_ip
+
+            transition_payload = {
+                "type": "STATE_TRANSITION",
+                "endpoint_id": str(previous.endpoint_id),
+                "hostname": ep_hostname,
+                "ip_address": ep_ip,
+                "operational_state": current.confirmed_operational_state,
+                "detailed_state": current.confirmed_detailed_state,
+                "avg_rtt_ms": result.avg_rtt_ms,
+                "health_score": result.health_score,
+                "timestamp": now_iso,
+            }
+            safe_create_task(
+                broadcast_sse_event(
+                    "STATE_TRANSITION", transition_payload
+                ),
+                "sse_state_transition",
+            )
+
+            event_broker = driver_manager.get_event_broker()
+            if event_broker:
+                safe_create_task(
+                    event_broker.publish(
+                        "NODE_STATE_CHANGE", node_payload
+                    ),
+                    "broker_node_state_change",
+                )
+                safe_create_task(
+                    event_broker.publish(
+                        "STATE_TRANSITION", transition_payload
+                    ),
+                    "broker_state_transition",
+                )
+        except Exception as e:
+            logger.warning("Event broadcast error: %s", e)
+
+        # V1.5 State Transition Hooks: Differential RCA and Recovery
+        if previous.confirmed_operational_state != current.confirmed_operational_state:
+            from app.services.rca_engine import (
+                handle_endpoint_recovery,
+                run_differential_rca,
+            )
+
+            if current.confirmed_operational_state == "DOWN":
+                # Fetch enable_rca configuration
+                rca_check = await db.execute(
+                    text(
+                        "SELECT enable_rca FROM endpoints WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {"id": str(previous.endpoint_id)},
+                )
+                rca_row = rca_check.fetchone()
+                if rca_row and getattr(rca_row, "enable_rca", True):
+                    safe_create_task(
+                        run_differential_rca(previous.endpoint_id),
+                        "differential_rca",
+                    )
+            elif current.confirmed_operational_state == "UP":
+                ep_check = await db.execute(
+                    text(
+                        "SELECT host(ip_address) AS ip_address FROM endpoints WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {"id": str(previous.endpoint_id)},
+                )
+                ep_row = ep_check.fetchone()
+                if ep_row and ep_row.ip_address:
+                    safe_create_task(
+                        handle_endpoint_recovery(
+                            previous.endpoint_id, str(ep_row.ip_address)
+                        ),
+                        "endpoint_recovery",
+                    )
 
     async def process_cycle(
         self,
@@ -243,13 +376,18 @@ class StateMachine:
         result: PingResult,
         db: AsyncSession,
         baseline: Optional[Tuple[float, float]] = None,
+        *,
+        at: Optional[datetime] = None,
+        announce: bool = True,
     ) -> EndpointState:
         """
         The core method, called on every monitoring cycle for an endpoint
         that already has an EndpointState.
 
         Applies the N-cycle confirmation logic, updates the database, and
-        returns the updated EndpointState.
+        returns the updated EndpointState. `at` is when the cycle ran, for cycles written
+        later than that. With `announce=False` the caller announces a confirmed transition
+        itself, after its transaction commits (monitoring.cycle_store).
         """
         # Step 1: Classify the new result with baseline evaluation.
         baseline_mean = baseline[0] if baseline else None
@@ -310,114 +448,8 @@ class StateMachine:
                     new_detailed_state,
                 )
 
-                # 1. Update in-memory topology DAG status immediately
-                try:
-                    from app.services.topology import topology_manager
-
-                    safe_create_task(
-                        topology_manager.update_node_status(
-                            str(state.endpoint_id), new_detailed_state
-                        ),
-                        "topology_update_node_status",
-                    )
-                except Exception as e:
-                    logger.warning("Topology manager update hook error: %s", e)
-
-                # 2. Broadcast SSE and EventBroker events
-                try:
-                    from app.routers.events import broadcast_sse_event
-                    from app.services.driver_manager import driver_manager
-
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    node_payload = {
-                        "type": "NODE_STATE_CHANGE",
-                        "endpoint_id": str(state.endpoint_id),
-                        "new_state": new_detailed_state,
-                    }
-                    safe_create_task(
-                        broadcast_sse_event("NODE_STATE_CHANGE", node_payload),
-                        "sse_node_state_change",
-                    )
-
-                    ep_hostname = getattr(state, "hostname", None)
-                    ep_ip = getattr(state, "ip_address", None)
-                    if not ep_hostname or not ep_ip:
-                        ep_hostname, ep_ip = await _resolve_endpoint_identity(state.endpoint_id, db)
-
-                    next_state.hostname = ep_hostname
-                    next_state.ip_address = ep_ip
-
-                    transition_payload = {
-                        "type": "STATE_TRANSITION",
-                        "endpoint_id": str(state.endpoint_id),
-                        "hostname": ep_hostname,
-                        "ip_address": ep_ip,
-                        "operational_state": new_operational_state,
-                        "detailed_state": new_detailed_state,
-                        "avg_rtt_ms": result.avg_rtt_ms,
-                        "health_score": result.health_score,
-                        "timestamp": now_iso,
-                    }
-                    safe_create_task(
-                        broadcast_sse_event(
-                            "STATE_TRANSITION", transition_payload
-                        ),
-                        "sse_state_transition",
-                    )
-
-                    event_broker = driver_manager.get_event_broker()
-                    if event_broker:
-                        safe_create_task(
-                            event_broker.publish(
-                                "NODE_STATE_CHANGE", node_payload
-                            ),
-                            "broker_node_state_change",
-                        )
-                        safe_create_task(
-                            event_broker.publish(
-                                "STATE_TRANSITION", transition_payload
-                            ),
-                            "broker_state_transition",
-                        )
-                except Exception as e:
-                    logger.warning("Event broadcast error: %s", e)
-
-                # V1.5 State Transition Hooks: Differential RCA and Recovery
-                if state.confirmed_operational_state != new_operational_state:
-                    from app.services.rca_engine import (
-                        handle_endpoint_recovery,
-                        run_differential_rca,
-                    )
-
-                    if new_operational_state == "DOWN":
-                        # Fetch enable_rca configuration
-                        rca_check = await db.execute(
-                            text(
-                                "SELECT enable_rca FROM endpoints WHERE id = CAST(:id AS uuid)"
-                            ),
-                            {"id": str(state.endpoint_id)},
-                        )
-                        rca_row = rca_check.fetchone()
-                        if rca_row and getattr(rca_row, "enable_rca", True):
-                            safe_create_task(
-                                run_differential_rca(state.endpoint_id),
-                                "differential_rca",
-                            )
-                    elif new_operational_state == "UP":
-                        ep_check = await db.execute(
-                            text(
-                                "SELECT host(ip_address) AS ip_address FROM endpoints WHERE id = CAST(:id AS uuid)"
-                            ),
-                            {"id": str(state.endpoint_id)},
-                        )
-                        ep_row = ep_check.fetchone()
-                        if ep_row and ep_row.ip_address:
-                            safe_create_task(
-                                handle_endpoint_recovery(
-                                    state.endpoint_id, str(ep_row.ip_address)
-                                ),
-                                "endpoint_recovery",
-                            )
+                if announce:
+                    await self.announce_transition(state, next_state, result, db)
 
         # Sub-case B2: No transition was pending, or the pending state has
         # changed to a third state. Reset the pending tracker.
@@ -433,8 +465,19 @@ class StateMachine:
                 ip_address=state.ip_address,
             )
 
+        if next_state.confirmed_detailed_state == state.confirmed_detailed_state:
+            next_state.announce_first_down = state.announce_first_down
+            if state.first_down_cycles is not None:
+                held = state.first_down_cycles + 1 if new_detailed_state == state.confirmed_detailed_state else 0
+                if held >= self.confirmation_threshold:
+                    next_state.announce_first_down = True
+                else:
+                    next_state.first_down_cycles = held
+            if next_state.announce_first_down and announce:
+                await self.announce_first_down(next_state, result, db)
+
         # Step 3: Continuous Event Lifecycle (COR-01)
-        execution_time = datetime.now(timezone.utc)
+        execution_time = at or datetime.now(timezone.utc)
 
         if state.confirmed_detailed_state == next_state.confirmed_detailed_state:
             # Check duration of active event for 24-hour rollover (STAB-01 / DAT-02)

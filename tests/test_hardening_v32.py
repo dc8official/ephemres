@@ -668,43 +668,6 @@ async def test_decoupled_secret_keys_and_rotation():
 
 
 @pytest.mark.anyio
-async def test_redis_session_store_distributed_lockout():
-    """
-    SEC-03: Verifies RedisSessionStore distributed account lockout recording,
-    checking, and clearing.
-    """
-    from app.services.session_store import RedisSessionStore
-
-    mock_redis = AsyncMock()
-    store = RedisSessionStore(mock_redis)
-
-    # 1. Record attempt - under threshold
-    mock_redis.incr.return_value = 1
-    await store.record_failed_attempt("192.168.1.100", "admin", max_attempts=5, lockout_seconds=900)
-    mock_redis.incr.assert_called_with("auth:failed:192.168.1.100:admin")
-    mock_redis.expire.assert_called_with("auth:failed:192.168.1.100:admin", 1800)
-    mock_redis.set.assert_not_called()
-
-    # 2. Record attempt - at threshold (5)
-    mock_redis.incr.return_value = 5
-    await store.record_failed_attempt("192.168.1.100", "admin", max_attempts=5, lockout_seconds=900)
-    mock_redis.set.assert_called_with("auth:locked:192.168.1.100:admin", "1", ex=900)
-
-    # 3. Check lockout
-    mock_redis.exists.return_value = 1
-    assert await store.is_account_locked("192.168.1.100", "admin") is True
-
-    mock_redis.exists.return_value = 0
-    assert await store.is_account_locked("192.168.1.100", "admin") is False
-
-    # 4. Clear lockout
-    await store.clear_failed_attempts("192.168.1.100", "admin")
-    mock_redis.delete.assert_called_with(
-        "auth:failed:192.168.1.100:admin", "auth:locked:192.168.1.100:admin"
-    )
-
-
-@pytest.mark.anyio
 async def test_redis_event_broker_streams():
     """
     STAB-06 / ARCH-01: Verifies RedisEventBroker writes to both Pub/Sub and

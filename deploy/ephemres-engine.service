@@ -1,7 +1,7 @@
 [Unit]
 Description=Ephemres Monitoring Engine
 After=network.target postgresql.service
-Requires=postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=notify
@@ -20,7 +20,7 @@ EnvironmentFile=-/opt/ephemres/.env
 EnvironmentFile=-/opt/ephemres/backend/.env
 Environment=PYTHONPATH=/opt/ephemres/backend:/opt/ephemres
 ExecStart=/opt/ephemres/venv/bin/python -m monitoring.engine
-Restart=on-failure
+Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal

@@ -15,14 +15,8 @@ from app.services.event_broker import (
     RedisEventBroker,
 )
 from app.services.session_store import (
-    FastStoreSessionStore,
     PostgresSessionStore,
-    RedisSessionStore,
     SessionStore,
-    migrate_sessions_faststore_to_pg,
-    migrate_sessions_pg_to_faststore,
-    migrate_sessions_pg_to_redis,
-    migrate_sessions_redis_to_pg,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,12 +38,6 @@ class StorageDriverManager:
         # the subscription moves to the new one. Futures, not an Event, as they belong to the loop
         # that created them.
         self._broker_waiters: List[asyncio.Future] = []
-        # Login sessions live in the API; the engine and flowd switch drivers without copying them.
-        self.migrate_sessions = True
-        # Sessions are copied between stores only when a running process switches drivers. On
-        # the first initialize() there is no previous driver: copying PostgreSQL's sessions over
-        # FastStore's would sign out everyone who logged in while FastStore was on.
-        self._initialized = False
 
     async def initialize(self) -> None:
         """Initializes drivers based on system settings and FastStore connectivity."""
@@ -90,10 +78,11 @@ class StorageDriverManager:
             redis_port = getattr(settings.redis, "port", 6379)
             redis_db = getattr(settings.redis, "db", 0)
 
-        previous_mode = self._driver_mode
         previous_store = self._store_client
-        switching = self._initialized and self.migrate_sessions
-        self._initialized = True
+        # Sessions and sign-in lockouts stay in PostgreSQL in both modes. Every request reads the
+        # user from the database anyway, and FastStore's file is gone after a reboot, which signed
+        # everyone out and cleared the lockouts. FastStore carries events only.
+        self._session_store = PostgresSessionStore(AsyncSessionLocal)
 
         if redis_enabled:
             try:
@@ -107,13 +96,6 @@ class StorageDriverManager:
                 )
                 await client.ping()
 
-                # If switching from PostgreSQL to FastStore, perform warm session migration
-                if previous_mode == "postgres" and switching:
-                    try:
-                        await migrate_sessions_pg_to_faststore(AsyncSessionLocal, client)
-                    except Exception as mig_err:
-                        logger.warning("Warm session migration to FastStore encountered error: %s", mig_err)
-
                 # Clean up previous client if it differed
                 if previous_store is not None and previous_store != client:
                     try:
@@ -122,7 +104,6 @@ class StorageDriverManager:
                         pass
 
                 self._store_client = client
-                self._session_store = FastStoreSessionStore(client)
                 self._set_event_broker(FastStoreEventBroker(client))
                 self._driver_mode = "redis"
                 logger.info(
@@ -138,13 +119,6 @@ class StorageDriverManager:
                     e,
                 )
 
-        # If switching from FastStore to PostgreSQL, perform warm session migration
-        if previous_mode == "redis" and previous_store is not None and switching:
-            try:
-                await migrate_sessions_faststore_to_pg(previous_store, AsyncSessionLocal)
-            except Exception as mig_err:
-                logger.warning("Warm session migration to PostgreSQL encountered error: %s", mig_err)
-
         if self._store_client is not None:
             try:
                 await self._store_client.aclose()
@@ -153,7 +127,6 @@ class StorageDriverManager:
             self._store_client = None
 
         # Fallback to PostgreSQL-Native driver
-        self._session_store = PostgresSessionStore(AsyncSessionLocal)
         self._set_event_broker(PostgresEventBroker(AsyncSessionLocal))
         self._driver_mode = "postgres"
         logger.info("StorageDriverManager: PostgreSQL-Native driver active.")

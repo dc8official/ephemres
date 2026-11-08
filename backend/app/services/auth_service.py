@@ -439,18 +439,16 @@ async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     Validates a session JTI against the configured backing session store, which every API
     worker shares. The store is the only authority: this worker's in-memory list is never
     consulted, because a logout, password change or reset handled by another worker only
-    reaches the store. A store error counts as inactive (fail closed).
+    reaches the store. A store error propagates: nothing is allowed through, and the caller can
+    say "try again" instead of signing the user out of a session that is still valid.
     Tokens without a jti are rejected.
     """
     if not jti:
         return False
-    try:
-        from app.services.driver_manager import driver_manager
-        store = driver_manager.get_session_store()
-        return bool(await store.is_session_active(str(user_id), jti))
-    except Exception:
-        logger.exception("Session store check failed; treating the session as inactive")
-        return False
+    from app.services.driver_manager import driver_manager
+
+    store = driver_manager.get_session_store()
+    return bool(await store.is_session_active(str(user_id), jti))
 
 
 async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
