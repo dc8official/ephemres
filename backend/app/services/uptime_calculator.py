@@ -7,6 +7,18 @@ from app.core.orm import AsyncSession
 from app.services.timezone_utils import get_local_timezone
 
 
+def merge_intervals(intervals: List[Tuple[datetime, datetime]]) -> List[Tuple[datetime, datetime]]:
+    """Sorted, non-overlapping copy of `intervals` (empty ones dropped), so overlapping
+    monitoring gaps are never subtracted twice."""
+    merged: List[List[datetime]] = []
+    for g_start, g_end in sorted((a, b) for a, b in intervals if b > a):
+        if merged and g_start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], g_end)
+        else:
+            merged.append([g_start, g_end])
+    return [(a, b) for a, b in merged]
+
+
 def calculate_device_gap_seconds(
     device_start: datetime,
     device_end: datetime,

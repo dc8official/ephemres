@@ -1,6 +1,7 @@
+"""Queries behind the per-endpoint report routes (uptime, incidents, events)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Sequence
 from uuid import UUID
 
@@ -10,6 +11,13 @@ from app.core.orm import AsyncSession
 from app.models.endpoint_event import EndpointEvent
 from app.schemas.reports import IncidentRecord
 from app.services.uptime_calculator import get_unknown_seconds_for_period
+
+
+def _outage_seconds(start: datetime, end: Optional[datetime], now: datetime) -> int:
+    """An outage's length: from its first DOWN period's start to its last one's end, or to now
+    while it is still going on. Each endpoint_events row is a whole period, not one minute, so
+    the rows can't simply be counted (the PDF report measures outages the same way)."""
+    return max(0, int(((end or now) - start).total_seconds()))
 
 
 class ReportRepository:
@@ -62,6 +70,9 @@ class ReportRepository:
         Retrieve paginated incident logs using database-level window functions and LIMIT/OFFSET.
         Groups contiguous DOWN states into distinct incidents.
         """
+        # Gaps and islands: number each run of same-state periods (LAG marks where the state
+        # changes, a running SUM turns those marks into run numbers), keep the DOWN runs, and
+        # collapse each run into one incident.
         # Step 1: Detect group boundary transitions with LAG()
         lag_state = func.lag(EndpointEvent.operational_state).over(
             order_by=EndpointEvent.start_time.asc()
@@ -117,7 +128,8 @@ class ReportRepository:
                 grouped_cte.c.endpoint_id,
                 func.min(grouped_cte.c.start_time).label("incident_start"),
                 func.max(grouped_cte.c.end_time).label("incident_end"),
-                (func.count() * 60).label("duration_seconds"),
+                # MAX skips NULL, so this says whether the outage is still going on.
+                func.bool_or(grouped_cte.c.end_time.is_(None)).label("still_open"),
                 func.count().label("contributing_event_count"),
                 peak_case.label("peak_detailed_state"),
             )
@@ -140,12 +152,15 @@ class ReportRepository:
             paginated_result = await self.session.execute(paginated_stmt)
             rows = paginated_result.all()
 
+            now = datetime.now(timezone.utc)
             records = [
                 IncidentRecord(
                     endpoint_id=row.endpoint_id,
                     incident_start=row.incident_start,
-                    incident_end=row.incident_end,
-                    duration_seconds=int(row.duration_seconds),
+                    incident_end=None if row.still_open else row.incident_end,
+                    duration_seconds=_outage_seconds(
+                        row.incident_start, None if row.still_open else row.incident_end, now
+                    ),
                     peak_detailed_state=row.peak_detailed_state,
                     contributing_event_count=int(row.contributing_event_count),
                 )
@@ -180,12 +195,13 @@ class ReportRepository:
 
             total = len(incidents)
             paged = incidents[offset : offset + limit]
+            now = datetime.now(timezone.utc)
             recs = [
                 IncidentRecord(
                     endpoint_id=endpoint_id,
                     incident_start=inc["start"],
                     incident_end=inc["end"],
-                    duration_seconds=inc["count"] * 60,
+                    duration_seconds=_outage_seconds(inc["start"], inc["end"], now),
                     peak_detailed_state=inc["peak"],
                     contributing_event_count=inc["count"],
                 )
