@@ -1,7 +1,15 @@
-import logging
+"""A route's Query(...) default reaching a SQL comparison (scale review M2).
+
+That only happens when a route function is called directly (tests); the router always resolves
+parameters first. A Query(None) used to drop the condition from WHERE with a warning, so the
+query quietly returned rows the caller meant to filter out (fail-open). It now raises.
+"""
 import pytest
-from app.core.orm import DeclarativeBase, Column, String, Integer, select
+
 from app.core.asgi import Query
+from app.core.orm import Column, DeclarativeBase, Integer, String, and_, select
+
+OPERATORS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]
 
 
 class DummyModel(DeclarativeBase):
@@ -15,42 +23,31 @@ class DummyColumnLike:
     default = None
 
 
-def test_orm_param_filter_query_param_skipped(caplog):
-    # Model.col == Query(None) should be skipped and emit a warning
-    with caplog.at_level(logging.WARNING):
-        expr = DummyModel.role == Query(None)
-        assert getattr(expr, "_skip_where", False) is True
-        assert "Unresolved query param object used in SQL comparison; filter skipped" in caplog.text
-
-    stmt = select(DummyModel).where(DummyModel.role == Query(None))
-    assert len(stmt._where_clauses) == 0
+@pytest.mark.parametrize("op", OPERATORS)
+def test_unresolved_query_none_raises_instead_of_dropping_the_filter(op):
+    with pytest.raises(TypeError, match="unresolved Query"):
+        getattr(DummyModel.id, op)(Query(None))
 
 
-def test_orm_param_filter_column_like_preserved(caplog):
-    # Model.col == Column(...)-like object with .default=None produces a real predicate
-    caplog.clear()
-    col_like = DummyColumnLike()
-    expr = DummyModel.role == col_like
-    assert getattr(expr, "_skip_where", False) is False
-    assert "Unresolved query param object used in SQL comparison; filter skipped" not in caplog.text
+def test_required_query_parameter_raises_too():
+    with pytest.raises(TypeError, match="unresolved Query"):
+        DummyModel.role == Query(...)  # noqa: B015
 
-    stmt = select(DummyModel).where(expr)
+
+def test_query_with_a_concrete_default_uses_it_like_the_router():
+    stmt = select(DummyModel).where(DummyModel.role == Query("ADMIN"))
     assert len(stmt._where_clauses) == 1
-    assert stmt._where_clauses[0] is expr
-
-    stmt2 = select(DummyModel).where(DummyModel.role == col_like)
-    assert len(stmt2._where_clauses) == 1
+    assert stmt._where_clauses[0].right == "ADMIN"
 
 
-def test_orm_param_filter_other_comparisons(caplog):
-    for op in ["__ne__", "__lt__", "__le__", "__gt__", "__ge__"]:
-        # Query(None)
-        caplog.clear()
-        expr_query = getattr(DummyModel.id, op)(Query(None))
-        assert getattr(expr_query, "_skip_where", False) is True
-        assert "Unresolved query param object used in SQL comparison; filter skipped" in caplog.text
+@pytest.mark.parametrize("op", OPERATORS)
+def test_column_like_object_is_compared_not_dropped(op):
+    expr = getattr(DummyModel.id, op)(DummyColumnLike())
+    stmt = select(DummyModel).where(expr)
+    assert len(stmt._where_clauses) == 1 and stmt._where_clauses[0] is expr
 
-        # Column-like object with default=None
-        col_like = DummyColumnLike()
-        expr_col = getattr(DummyModel.id, op)(col_like)
-        assert getattr(expr_col, "_skip_where", False) is False
+
+def test_empty_and_adds_no_condition():
+    # Optional filters that are all unset: and_() with nothing in it is left out on purpose.
+    stmt = select(DummyModel).where(and_())
+    assert stmt._where_clauses == []
