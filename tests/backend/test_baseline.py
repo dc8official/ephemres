@@ -24,11 +24,10 @@ class TestHybridAdaptiveBaseline(unittest.TestCase):
         self.endpoint_id = uuid4()
         self.now = datetime.now(timezone.utc)
 
-    def test_default_fallback_for_uncached_endpoint(self) -> None:
-        mean, stddev, count = self.cache.get_baseline(self.endpoint_id, self.now)
-        self.assertEqual(mean, DEFAULT_MEAN_MS)
-        self.assertEqual(stddev, DEFAULT_STDDEV_MS)
-        self.assertEqual(count, 0)
+    def test_no_baseline_for_uncached_endpoint(self) -> None:
+        # Without history there is nothing to judge RTT against (it used to be 50 +/- 15 ms,
+        # which marked any healthy endpoint above 95 ms UP-UNSTABLE).
+        self.assertIsNone(self.cache.get_baseline(self.endpoint_id, self.now))
 
     def test_grace_period_fallback_for_new_endpoint(self) -> None:
         # Endpoint onboarded 2 days ago (< 7 days)
@@ -43,10 +42,8 @@ class TestHybridAdaptiveBaseline(unittest.TestCase):
         arr[idx] = (20.0, 5.0, 100)
         self.cache._cache[self.endpoint_id] = arr
 
-        # Should still return default baseline due to 7-day grace period rule
-        mean, stddev, count = self.cache.get_baseline(self.endpoint_id, self.now)
-        self.assertEqual(mean, DEFAULT_MEAN_MS)
-        self.assertEqual(stddev, DEFAULT_STDDEV_MS)
+        # Still no baseline during the 7-day grace period: a few days are too little history
+        self.assertIsNone(self.cache.get_baseline(self.endpoint_id, self.now))
 
     def test_baseline_lookup_after_grace_period(self) -> None:
         # Endpoint onboarded 10 days ago (> 7 days)
@@ -65,6 +62,21 @@ class TestHybridAdaptiveBaseline(unittest.TestCase):
         self.assertEqual(mean, expected_mean)
         self.assertEqual(stddev, expected_stddev)
         self.assertEqual(count, expected_count)
+
+    def test_empty_hour_slot_has_no_baseline(self) -> None:
+        self.cache._onboarded_dates[self.endpoint_id] = self.now - timedelta(days=10)
+        self.cache._cache[self.endpoint_id] = [None] * 168
+        self.assertIsNone(self.cache.get_baseline(self.endpoint_id, self.now))
+
+    def test_slow_endpoint_without_history_is_up(self) -> None:
+        # A distant site answering every ping in 120 ms: UP, not UP-UNSTABLE, until its own
+        # history exists. Loss still counts as before.
+        baseline = self.cache.get_baseline(self.endpoint_id)
+        mean, stddev = (baseline[0], baseline[1]) if baseline else (None, None)
+        all_replies = PingResult(success_count=5, failed_count=0, avg_rtt_ms=120.0)
+        self.assertEqual(classify_ping_result(all_replies, baseline_mean=mean, baseline_stddev=stddev), ("UP", "UP"))
+        two_lost = PingResult(success_count=3, failed_count=2, avg_rtt_ms=120.0)
+        self.assertEqual(classify_ping_result(two_lost, baseline_mean=mean, baseline_stddev=stddev), ("UP", "UP-UNSTABLE"))
 
     def test_1d_array_index_calculation_helper(self) -> None:
         onboarded_time = self.now - timedelta(days=10)

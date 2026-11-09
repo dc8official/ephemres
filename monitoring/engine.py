@@ -1,3 +1,14 @@
+"""The active monitoring engine: pings every monitored endpoint once a minute and records its state.
+
+Each endpoint gets its own asyncio task (monitor_endpoint) that wakes at a fixed second of the
+minute, taken from its UUID, so a large fleet's probes are spread over the minute instead of all
+firing at :00. A cycle sends PING_COUNT echo requests, hands the result to the state machine
+through the cycle store (which keeps cycles in memory while the database is down), and may start
+a traceroute when probes were lost.
+
+main() starts the shared background services, then every 30 s reloads the active endpoints from
+the database, starting tasks for new ones and stopping the tasks of removed or disabled ones.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -33,10 +44,15 @@ logger = setup_logging(
     log_level=getattr(settings.logging, "level", "INFO"),
 )
 
+# Latest confirmed state of each endpoint this process monitors, keyed by str(endpoint UUID).
 endpoint_states: dict[str, EndpointState] = {}
 states_lock = asyncio.Lock()
+# At most 15 endpoints write at once. The pool opens up to 20 connections by default
+# (database.pool_size 10 + max_overflow 10), so this leaves room for the background tasks.
 db_write_semaphore = asyncio.Semaphore(15)
 
+# asyncio only keeps weak references to tasks, so a task nothing else holds can be garbage
+# collected before it finishes. Holding them here keeps them alive until they are done.
 _active_background_tasks: set[asyncio.Task] = set()
 
 
@@ -84,7 +100,10 @@ async def trigger_incident_diagnostic_trace(endpoint_id: UUID, ip_address: str) 
         )
 
 
+# Every endpoint is probed once per cycle. The cycle is fixed: monitoring.interval_seconds in the
+# config is accepted but not read here.
 CYCLE_SECONDS = 60.0
+# How long each echo request waits for its reply before it counts as lost.
 PING_TIMEOUT_SECONDS = 2.0
 # Worst-case sweep must leave this much of the cycle free for the DB write and slot realignment.
 MIN_CYCLE_HEADROOM_SECONDS = 5.0
@@ -118,13 +137,15 @@ def resolve_ping_plan(count: int, interval: float) -> tuple[int, float]:
     return count, float(interval)
 
 
+# Read once at import: a change to ping_count or ping_interval_seconds takes an engine restart.
 PING_COUNT, PING_INTERVAL_SECONDS = resolve_ping_plan(
     settings.monitoring.ping_count, settings.monitoring.ping_interval_seconds
 )
 
 
 def _stagger_offset_for_endpoint(endpoint_id: UUID) -> int:
-    """Computes deterministic second-slot offset (0-59s) based on endpoint UUID."""
+    """The second of the minute (0 to 59) at which this endpoint is probed. Taken from its UUID,
+    so it stays the same across restarts, and random UUIDs spread a fleet evenly over the minute."""
     return int.from_bytes(endpoint_id.bytes[:4], "big") % 60
 
 
@@ -140,8 +161,12 @@ def _cycle_store(state_machine: StateMachine) -> CycleStore:
 
 
 def _maybe_trace_incident(endpoint_id: UUID, ip_address: str, result: Any, new_state: EndpointState) -> None:
-    """PER-02: Check operational toggles and bound diagnostic trace queue (max 10 in flight).
-    One trace per endpoint at a time, and only on a state change or once per cooldown."""
+    """Start a traceroute towards an endpoint whose cycle lost probes, to show where the path breaks.
+
+    Skipped when the endpoint has incident traces turned off, when one is already running for it,
+    or when it was traced in the same confirmed state less than INCIDENT_TRACE_COOLDOWN_SECONDS
+    ago. At most 10 traces are queued across the engine (diagnostics runs 3 of them at a time),
+    so a site-wide outage cannot start a traceroute for every endpoint at once."""
     if result.failed_count <= 0:
         return
     if not endpoint_registry.get_toggles(endpoint_id).get("allow_incident_trace", True):
@@ -168,12 +193,15 @@ async def monitor_endpoint(
     ip_address: str,
     state_machine: StateMachine,
 ) -> None:
+    """Probe one endpoint once a minute, at its own second, until the task is cancelled
+    (the endpoint was removed or disabled)."""
     store = _cycle_store(state_machine)
-    # PER-01: Deterministic second-slot staggering based on endpoint UUID (0-59s)
+    # Wait for this endpoint's second of the minute before anything else.
     slot_second = _stagger_offset_for_endpoint(endpoint_id)
     now_utc = datetime.now().astimezone()
     now_sec = now_utc.second + (now_utc.microsecond / 1_000_000.0)
     initial_delay = (slot_second - now_sec) % 60.0
+    # Already at the slot (within 50 ms): take the next one rather than probing twice in one slot.
     if initial_delay <= 0.05:
         initial_delay += 60.0
     await asyncio.sleep(initial_delay)
@@ -193,10 +221,11 @@ async def monitor_endpoint(
     async with states_lock:
         endpoint_states[str(endpoint_id)] = state
 
-    # Fractional First-Minute Handling:
-    # When a brand-new endpoint is registered and detected mid-minute (state is None),
-    # immediately fire a single baseline validation ping, write it to database,
-    # and sleep until the endpoint's deterministic slot boundary.
+    # A new endpoint (no event in the database yet) gets one ping straight away, so it has a state
+    # on the dashboard within seconds instead of after its first full cycle. A lost ping here
+    # alerts nobody: a first-probe DOWN is only announced once the usual number of cycles has
+    # confirmed it (StateMachine.announce_first_down). If this write fails, the first full cycle
+    # creates the event instead (the cycle store is given state None).
     if state is None:
         logger.info(
             "Endpoint %s is brand-new. Firing baseline validation ping.",
@@ -252,8 +281,10 @@ async def monitor_endpoint(
                 timeout=PING_TIMEOUT_SECONDS,
                 privileged=True,
             )
+            # sampled_at (probes started) stamps the probe sample; the end time stamps the event.
             store.add(backlog, ProbeCycle(sampled_at, datetime.now(timezone.utc), result))
 
+            # None while the database is unavailable: the cycle stays in the backlog for later.
             new_state = await store.write(
                 endpoint_id, endpoint_states.get(str(endpoint_id)), backlog, baseline_cache.get_baseline(endpoint_id)
             )
@@ -266,6 +297,7 @@ async def monitor_endpoint(
             logger.info("Monitoring task for endpoint %s cancelled.", endpoint_id)
             break
         except Exception as e:
+            # This cycle is lost, but the task carries on with the next one.
             logger.error(
                 "Error in monitoring cycle for %s: %s: %s",
                 ip_address,
@@ -273,7 +305,9 @@ async def monitor_endpoint(
                 e,
             )
 
-        # PER-01: Deterministic Slot Loop Alignment (eliminates thundering herds)
+        # Sleep until this endpoint's second in the next minute. Aligning to the clock, rather than
+        # sleeping a fixed 60 s, stops the cycle drifting by however long the probes and the write
+        # took, and keeps the fleet spread over the minute instead of slowly bunching up.
         now_utc = datetime.now().astimezone()
         now_sec = now_utc.second + (now_utc.microsecond / 1_000_000.0)
         delay = (slot_second - now_sec) % 60.0
@@ -303,10 +337,13 @@ async def _close_startup_gap(gap_id, started_at: datetime) -> None:
 
 
 async def main() -> None:
+    """Run the engine until it is stopped: tidy up after the last run, start the shared background
+    tasks, then keep the set of monitoring tasks in step with the endpoints in the database."""
     logger.info("Ephemres monitoring engine starting.")
     await driver_manager.initialize()
     started_at = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as db:
+        # Close the periods the last run left open and record the time it was not running.
         startup_gap = await resolve_startup_state(db)
         await baseline_cache.refresh_from_db(db)
         await db.commit()
@@ -314,12 +351,17 @@ async def main() -> None:
     if startup_gap is not None:
         startup_gap_task = asyncio.create_task(_close_startup_gap(startup_gap, started_at), name="close_startup_gap")
 
+    # Keep endpoint_events' retention in step with the config. Monitoring works without it, so a
+    # failure only logs.
     try:
         async with AsyncSessionLocal() as db:
             await sync_event_retention_policy(db, settings.monitoring.retention_days)
     except Exception as e:
         logger.error("Failed to apply monitoring.retention_days to endpoint_events: %s", e)
 
+    # Each endpoint's usual RTT (mean and spread) for each hour of the week, which
+    # classify_ping_result uses to mark a slow but answering endpoint UP-UNSTABLE. Refreshed
+    # hourly. Without history (first 7 days, or an empty hour) RTT is not judged at all.
     await start_baseline_refresh_task(AsyncSessionLocal, interval_seconds=3600)
     # Admin UI settings used by the engine (Layer-2 auto-bypass for incident traceroutes).
     runtime_settings_task = await start_runtime_settings_refresh_task(AsyncSessionLocal, interval_seconds=30)
@@ -345,7 +387,10 @@ async def main() -> None:
                     result = await db.execute(stmt)
                     active_endpoints = result.scalars().all()
 
-                # PERF-01 / STAB-07: Multi-process engine partitioning
+                # Optional split of the fleet over several engine processes: worker N of M takes the
+                # endpoints whose UUID maps to N. The shipped systemd unit sets neither variable,
+                # so a standard install runs one worker. The NETMON_ names are the spellings from
+                # before the rename (v3.2.0 and v3.3.0 installs).
                 worker_id = int(os.environ.get("EPHEMRES_ENGINE_WORKER_ID") or os.environ.get("NETMON_ENGINE_WORKER_ID", "0"))
                 num_workers = int(os.environ.get("EPHEMRES_ENGINE_NUM_WORKERS") or os.environ.get("NETMON_ENGINE_NUM_WORKERS", "1"))
                 if num_workers > 1:
@@ -391,6 +436,7 @@ async def main() -> None:
                     e,
                 )
 
+            # How soon an endpoint added, removed or disabled in the UI is picked up.
             await asyncio.sleep(30)
     finally:
         if startup_gap_task is not None:
