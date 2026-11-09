@@ -609,7 +609,7 @@ else
     echo "Ephemres v3.3.5 is now running."
     echo ""
     echo "  Dashboard:  https://$DOMAIN_NAME"
-    echo "  API docs:   https://$DOMAIN_NAME/api/docs"
+    echo "  OpenAPI:    https://$DOMAIN_NAME/api/openapi.json"
     echo ""
     echo "--------------------------------------------------------"
     if [ "$ADMIN_PASS_SET" = true ]; then

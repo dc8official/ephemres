@@ -149,8 +149,7 @@ Audit log of all outbound dispatch attempts.
 * `status_code` (`INTEGER`, Nullable) — HTTP status (or SMTP outcome) returned by the destination.
 * `retry_count` (`INTEGER`, Default: 0, Not Null)
 * `response_message` (`TEXT`, Nullable) — Truncated response body or error detail.
-* `latency_ms` (`INTEGER`, Nullable)
-* `timestamp` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed)
+* `delivered_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed) — Dispatch time (UTC). Delivery latency is not stored.
 
 ---
 

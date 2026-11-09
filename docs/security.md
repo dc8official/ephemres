@@ -66,8 +66,8 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 | **Native ASGI Backend (`ephemres-api`)** | `8000` | `127.0.0.1` (Loopback Only) | Internal application server. Blocked from direct external access by firewall. |
 | **Flow Collector (`ephemres-flowd`)** | `2055` / `4739` | UDP Management Ingress | Autonomous flow collector. 4MB kernel receive buffer, zero-allocation binary parsing; packets from unenrolled exporters are dropped before parsing; flows held for the database are capped by `flow.buffer_memory_limit_mb`. |
 | **PostgreSQL / TimescaleDB** | `5432` | `127.0.0.1` (Loopback Only) | Internal database. Protected by strong randomized password; strictly loopback bound. |
-| **FastStore IPC** | `/run/ephemres/ephemres_faststore_*.sqlite3` (`/dev/shm` fallback) | UNIX Filesystem | In-memory SQLite store (`0600 ephemres:ephemres`, no TCP port exposed) for sessions, sign-in lockouts and events. Flows never pass through it, so a flow flood cannot block sign-in. |
-| **ICMP Ping Probes** | ICMP | Outbound | Low-frequency synthetic health probes (default 32s budget). |
+| **FastStore IPC** | `/run/ephemres/ephemres_faststore_*.sqlite3` (`/dev/shm` fallback) | UNIX Filesystem | In-memory SQLite store (`0600 ephemres:ephemres`, no TCP port exposed) for live events between processes (when Performance Mode is on) and flowd's exporter discovery and interface lists. Sessions and sign-in lockouts are kept in PostgreSQL (`user_sessions`, `auth_login_failures`). Flows never pass through it. |
+| **ICMP Ping Probes** | ICMP | Outbound | Low-frequency health probes (default 60s cycle budget). |
 | **Outbound Webhooks / Email** | `443` / `587` | Outbound Egress | Outbound notifications to Teams, Discord, Slack, and SMTP gateways. Protected by `AsyncHttpClient` SSRF guard. |
 
 ---
@@ -80,13 +80,13 @@ Ephemres incorporates **Zero-Trust Socket-Level SSRF Protection** (`SSRFSafeBack
 In standard application architectures, validating a URL before making an HTTP request leaves an exploitable window: an attacker configures a domain with a 0-second TTL that returns a public IP during pre-flight validation, but rebinds to `169.254.169.254` (cloud metadata) or `127.0.0.1` when the HTTP client establishes its TCP connection.
 
 ### B. The Defense: Millisecond-Level Socket Interception & Socket DNS Pinning
-Ephemres implements a native zero-dependency HTTP/1.1 client (`app.core.http_client.AsyncHttpClient`) paired with pre-connect DNS resolution and IP validation (`validate_outbound_url` / `is_ip_safe`) that intercepts all outbound webhook and OIDC requests at the socket layer **before** `asyncio.open_connection()` is invoked:
+Ephemres implements a native zero-dependency HTTP/1.1 client (`app.core.http_client.AsyncHttpClient`) paired with pre-connect DNS resolution and IP validation (`validate_outbound_url` / `is_ip_safe`) that intercepts all outbound webhook and alert dispatch requests at the socket layer **before** `asyncio.open_connection()` is invoked:
 
 1. **Connection-Time Resolution & Pinning:** Performs an asynchronous DNS resolution immediately prior to opening sockets, and pins physical connections directly to the resolved IP.
 2. **Strict IP Enforcement:** Evaluates all returned addresses against the global routable IP specification:
    - **RFC 1918 Private Subnets:** `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` are rejected for generic webhooks. *(Note: Permitted specifically for `EMAIL_SMTP` channels to support internal corporate relays, and synthetic probes targeting internal corporate appliances).*
    - **RFC 6598 Carrier-Grade NAT (CGNAT):** `100.64.0.0/10` is explicitly blocked to protect internal Kubernetes pod networks, AWS VPC CNI overlays, and Tailscale/WireGuard meshes.
-   - **Loopback & Localhost:** `127.0.0.0/8` and `::1/128` are rejected for outbound webhooks.
+   - **Loopback & Localhost:** `127.0.0.0/8` and `::1/128` are rejected for outbound webhooks (permitted for `EMAIL_SMTP` when targeting a local MTA relay).
    - **Cloud Metadata Services:** `169.254.169.254` (AWS/GCP/Azure link-local metadata) and `fd00:ec2::254` (AWS IPv6 metadata) are **strictly and unconditionally rejected across all channels, including SMTP**.
    - **IPv4-Mapped IPv6:** Encodings such as `::ffff:127.0.0.1` or `::ffff:100.64.0.1` are unmapped and strictly evaluated.
    - **Unix Sockets:** Direct Unix domain socket connections (`connect_unix_socket`) are completely disabled.
@@ -123,7 +123,7 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### A. JWT in Secure HttpOnly Cookies
 * **XSS Defense:** Authentication tokens are stored inside browser `HttpOnly`, `SameSite=Lax`, and `Secure` (in HTTPS production) cookies. Malicious client-side JavaScript cannot read session tokens.
-* **Cryptographic JTI Enforcement:** Every issued token carries a cryptographically unique UUID `jti` (JWT ID). Tokens lacking a valid `jti` claim are rejected immediately.
+* **Cryptographic JTI Enforcement:** Every issued token carries a cryptographically unique 32-character hex `jti` (JWT ID, generated via `secrets.token_hex(16)`). Tokens lacking a valid `jti` claim are rejected immediately.
 * **Session Lifetime:** Access tokens expire `session_timeout` minutes after login (default 120). The value comes from **Admin Settings → Security & Discovery**, falling back to `[security] session_timeout_minutes` in `config.toml`.
 
 ### B. Distributed Multi-Worker Session Governance
@@ -193,7 +193,7 @@ Every generated PDF byte stream is hashed prior to transmission:
 
 ### A. Non-Root Daemon Execution
 * `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` run under the dedicated unprivileged system user `ephemres` (UID/GID isolated).
-* The only elevated action available to the service user is a sudoers rule (`/etc/sudoers.d/ephemres`, mode `0440`) allowing `systemctl start|stop|restart ephemres-flowd`, used when an administrator toggles flow ingestion in the Settings UI.
+* The only elevated action available to the service user is a sudoers rule (`/etc/sudoers.d/ephemres`, mode `0440`) allowing `systemctl start|stop|restart|is-active|enable|disable ephemres-flowd`, used when an administrator toggles flow ingestion in the Settings UI.
 
 ### B. Linux Capability Grants (`CAP_NET_RAW`)
 * Raw socket creation for ICMP echo requests (ping) and traceroute normally requires root privileges.
@@ -232,7 +232,6 @@ Ephemres enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), s
 | **View Dashboard & Telemetry** | ❌ (Redirect Login) | ✅ | ✅ |
 | **Inspect Topology Map** | ❌ | ✅ | ✅ |
 | **Export Telemetry CSV** | ❌ | ✅ | ✅ |
-| **Acknowledge Incidents** | ❌ | ❌ | ✅ |
 | **Create / Modify Endpoints** | ❌ | ❌ | ✅ |
 | **Configure Alert Channels** | ❌ | ❌ | ✅ |
 | **Send Diagnostic Test Alerts** | ❌ | ❌ | ✅ |
@@ -248,7 +247,7 @@ When deploying Ephemres in production, ensure the following hardening steps are 
 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates, `[security] hsts_enabled = true` in `config.toml`, and (optionally) an HSTS `add_header` in the Nginx TLS server block for static assets.
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
-- [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/dev/shm/ephemres_faststore*`) are owned by `ephemres:ephemres` (`0600`).
+- [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/run/ephemres/ephemres_faststore*`, `/dev/shm` fallback) are owned by `ephemres:ephemres` (`0600`).
 - [ ] **Admin Password Changed:** Sign in with the initial password the installer printed (or the one in `/opt/ephemres/admin_password_reset.txt` after an upgrade), set your own, and delete that file.
 - [ ] **Secrets Present:** `/etc/ephemres/ephemres.env` exists and holds `EPHEMRES_SECRET_KEY` (32+ characters). The services refuse to start without it rather than fall back to the public development key.
 - [ ] **Firewall Egress Rules:** Restrict outbound egress from the Ephemres server strictly to necessary destinations (Port 443 for webhooks, Port 587 for SMTP).

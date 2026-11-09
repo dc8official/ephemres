@@ -21,12 +21,12 @@ Ephemres eliminates false-positive SLA penalties through **5-Ping Sub-Cycle Burs
 ---
 
 ## 2. Four-State Classification Matrix
-At the conclusion of each 5-ping cycle, `classify_ping_result()` (`monitoring/ping.py`) returns an operational state (`UP` / `DOWN`) and one of four detailed states. Loss sets the state; when all 5 replies arrive, latency is also checked against the endpoint's hour-of-week baseline:
+At the conclusion of each 5-ping cycle, `classify_ping_result()` (`monitoring/ping.py`) returns an operational state (`UP` / `DOWN`) and one of four detailed states. Loss sets the state; when all 5 replies arrive, latency is checked against the endpoint's hour-of-week baseline (endpoints with no baseline history yet, such as during their first 7 days or hours with null baseline data, judge state by loss alone):
 
 | Operational State | Packets Lost (out of 5) | Packet Loss % | SLA Availability Credit | Operational Meaning |
 | :--- | :--- | :--- | :--- | :--- |
-| **`UP`** | `0` | `0%` | **Counted as Available (`1.0`)** | Healthy link: zero packet loss and average RTT within `μ + 3σ` of the baseline (σ floored at 2 ms). |
-| **`UP-UNSTABLE`** | `1 – 2`, or `0` with RTT `> μ + 3σ` | `0% – 40%` | **Counted as Available (`1.0`)** | Link is reachable and passing traffic, but experiencing minor loss or abnormal latency. Triggers early warning visibility without penalizing contractual uptime SLA. |
+| **`UP`** | `0` | `0%` | **Counted as Available (`1.0`)** | Healthy link: zero packet loss and average RTT within `μ + 3σ` of the baseline (or link with no baseline history yet; σ floored at 2 ms). |
+| **`UP-UNSTABLE`** | `1 – 2`, or `0` with RTT `> μ + 3σ` | `0% – 40%` | **Counted as Available (`1.0`)** | Link is reachable and passing traffic, but experiencing minor loss or abnormal latency (when baseline history exists). Triggers early warning visibility without penalizing contractual uptime SLA. |
 | **`DOWN-UNSTABLE`** | `3 – 4` | `60% – 80%` | **Counted as Unavailable (`0.0`)** | Severe packet loss rendering synchronous protocols unusable. Triggers degradation alerting and deducts from SLA availability. |
 | **`DOWN`** | `5` | `100%` | **Counted as Unavailable (`0.0`)** | Complete loss of reachability across the entire sweep. Triggers critical outage alerting. |
 
@@ -74,4 +74,4 @@ Where:
   * Before v3.3.5 no gap was recorded: the engine closed the open periods when it started again, so the downtime counted as whatever state the endpoint was in, and the minute or so before its first new cycle counted against it. Reports over that older history keep those figures.
 * **Passive / Unmonitored Endpoint Exclusion**: Endpoints with `monitoring_enabled = false` (such as passive `FLOW_EXPORTER` routers or paused devices) are excluded from Fleet SLA averages, report uptime durations, and executive PDF SLA summaries so non-pingable devices never artificially inflate or penalize fleet availability.
 
-This guarantees mathematically sound SLA compliance reports for client reporting, audits, and executive reviews.
+This formula applies identically to the Reports page, PDF compliance documents, and the 24-hour uptime on the endpoint list and detail views (`endpoints.py`), ensuring complete mathematical parity across the UI.

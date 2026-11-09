@@ -9,7 +9,7 @@ This guide details how to set up a local development environment for the Ephemre
 Ephemres v3.3.5 operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
 
 > [!IMPORTANT]
-> **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 13 Layer 0 engines in `backend/app/core/`.
+> **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 12 Layer 0 engines in `backend/app/core/`.
 
 ---
 
@@ -23,8 +23,8 @@ ephemres/
 │   │   │   ├── asgi.py         # Native ASGI 3.0 router, dependency injection, SSE
 │   │   │   ├── orm.py          # Native Async ORM compiled directly over asyncpg
 │   │   │   ├── schema.py       # Pure-stdlib SchemaModel validation & serialization
-│   │   │   ├── faststore.py    # In-RAM /dev/shm SQLite WAL cache, pub/sub & streams
-│   │   │   ├── migrator.py     # Native async migration engine (0001-0017)
+│   │   │   ├── faststore.py    # In-RAM /run/ephemres (/dev/shm) SQLite WAL cache, pub/sub & streams
+│   │   │   ├── migrator.py     # Native async migration engine (0001-0021)
 │   │   │   ├── crypto.py       # Scrypt key derivation & AES-256-GCM encryption
 │   │   │   ├── restore.py      # Cross-version database backup restoration engine
 │   │   │   ├── http_client.py  # Asynchronous socket HTTP client with SSRF defense
@@ -39,7 +39,7 @@ ephemres/
 │   │   ├── services/       # Domain business logic & alert dispatchers
 │   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
-│   ├── migrations/         # Migration versions (0001-0017)
+│   ├── migrations/         # Migration versions (0001-0021)
 │   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
@@ -100,7 +100,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    ```
 
 ### 3.3 In-RAM FastStore Cache
-FastStore requires **zero external daemons**. You do not need to install, start, or configure `redis-server`. FastStore automatically creates and manages its in-RAM SQLite WAL database in `/dev/shm/ephemres_faststore_u<UID>_db0.sqlite3` with sub-microsecond access times.
+FastStore requires **zero external daemons**. You do not need to install, start, or configure `redis-server`. FastStore automatically creates and manages its in-RAM SQLite WAL database in `/run/ephemres/ephemres_faststore_u<UID>_db0.sqlite3` (falling back to `/dev/shm`) with sub-microsecond access times.
 
 ### 3.4 Frontend Setup (Vue 3 / Vite)
 1. **Install Dependencies:**
