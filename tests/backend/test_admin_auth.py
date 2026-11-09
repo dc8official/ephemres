@@ -12,10 +12,6 @@ from app.core.asgi import HTTPException
 from app.services.auth_service import (
     hash_password,
     verify_password,
-    clear_failed_attempts,
-    record_failed_attempt,
-    is_account_locked,
-    _failed_attempts,
 )
 from app.seed_admin import seed_admin
 
@@ -25,10 +21,8 @@ class TestAdminAuthSeeding(unittest.TestCase):
     def setUp(self) -> None:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        _failed_attempts.clear()
 
     def tearDown(self) -> None:
-        _failed_attempts.clear()
         self.loop.close()
 
     def test_password_hash_and_verification(self) -> None:
@@ -36,14 +30,6 @@ class TestAdminAuthSeeding(unittest.TestCase):
         self.assertTrue(verify_password("admin", hashed))
         self.assertFalse(verify_password("wrongpassword", hashed))
 
-    def test_account_lockout_and_clear(self) -> None:
-        username = "admin"
-        for _ in range(5):
-            record_failed_attempt(username)
-        self.assertTrue(is_account_locked(username))
-
-        clear_failed_attempts(username)
-        self.assertFalse(is_account_locked(username))
 
     def test_login_schema_parsing(self) -> None:
         from app.routers.auth import LoginRequest

@@ -1,3 +1,12 @@
+"""Monitoring gaps: times when the engine was not monitoring (stopped, restarting, or unable to
+write to the database).
+
+Gaps are rows in monitoring_service_events. Availability (SLA) figures leave them out instead of
+counting them as up or down. At startup resolve_startup_state closes the periods the last run left
+open and records the gap; close_startup_gap ends it once monitoring has resumed.
+record_lost_cycles_gap records the cycles dropped when a database outage outlasted the engine's
+in-memory backlog (monitoring/cycle_store).
+"""
 from __future__ import annotations
 import logging
 from datetime import datetime, timezone, timedelta
@@ -10,59 +19,6 @@ from monitoring.probe_samples import closed_event_stats_sql
 
 logger = logging.getLogger(__name__)
 
-async def open_monitoring_gap(
-    db: AsyncSession,
-    event_type: str,
-    description: Optional[str] = None,
-) -> UUID:
-    gap_start = datetime.now(timezone.utc)
-    window_start = gap_start - timedelta(days=7)
-    
-    query_insert = text("""
-        INSERT INTO monitoring_service_events (
-            event_type,
-            description,
-            start_time
-        ) VALUES (
-            :event_type,
-            :description,
-            :start_time
-        ) RETURNING id
-    """)
-    insert_result = await db.execute(
-        query_insert,
-        {
-            "event_type": event_type,
-            "description": description,
-            "start_time": gap_start,
-        }
-    )
-    row = insert_result.fetchone()
-    gap_id = row.id if row else None
-    
-    query_update = text("""
-        UPDATE endpoint_events
-        SET
-            end_time = :gap_time,
-            duration_seconds = EXTRACT(
-                EPOCH FROM (:gap_time - start_time)
-            )::BIGINT,
-    """ + closed_event_stats_sql(":gap_time") + """
-        WHERE end_time IS NULL
-          AND start_time >= :window_start
-    """)
-    update_result = await db.execute(
-        query_update,
-        {
-            "gap_time": gap_start,
-            "window_start": window_start,
-        }
-    )
-    closed_count = update_result.rowcount
-    
-    logger.info("Monitoring gap opened (type=%s): %s endpoint events closed at %s", event_type, closed_count, gap_start)
-    
-    return UUID(str(gap_id))
 
 async def record_lost_cycles_gap(db: AsyncSession, start: datetime, end: datetime) -> None:
     """Probe results dropped because a database outage outlasted the engine's backlog: nothing
@@ -76,31 +32,6 @@ async def record_lost_cycles_gap(db: AsyncSession, start: datetime, end: datetim
     )
     logger.warning("Monitoring gap recorded: database outage outlasted the probe backlog (%s to %s)", start, end)
 
-
-async def close_monitoring_gap(
-    db: AsyncSession,
-    gap_id: UUID,
-) -> None:
-    end_time = datetime.now(timezone.utc)
-    
-    query = text("""
-        UPDATE monitoring_service_events
-        SET
-            end_time = :end_time,
-            duration_seconds = EXTRACT(
-                EPOCH FROM (:end_time - start_time)
-            )::BIGINT
-        WHERE id = CAST(:gap_id AS uuid)
-    """)
-    await db.execute(
-        query,
-        {
-            "end_time": end_time,
-            "gap_id": str(gap_id),
-        }
-    )
-    
-    logger.info("Monitoring gap %s closed at %s", gap_id, end_time)
 
 # Periods whose last cycle is this much older than the newest one belong to endpoints that
 # were no longer probed (paused, deleted) before the stop; they do not start the gap.
@@ -117,7 +48,10 @@ _LAST_CYCLE = "(endpoint_events.start_time + COALESCE(endpoint_events.duration_s
 
 
 async def _lift_decompression_cap(db: AsyncSession) -> None:
-    # Safely bypass TimescaleDB tuple decompression limit for this startup transaction
+    # TimescaleDB aborts a transaction that decompresses more rows than
+    # timescaledb.max_tuples_decompressed_per_dml_transaction allows. The startup cleanup can touch
+    # compressed chunks, so lift the limit (0 = none) for this transaction only: set_config's
+    # third argument, true, makes the setting local to it. Skipped without TimescaleDB.
     try:
         await db.execute(text("""
             DO $$
@@ -202,6 +136,8 @@ async def resolve_startup_state(db: AsyncSession) -> Optional[UUID]:
         logger.info("Startup: no open endpoint events found in active window.")
         return continued_gap
 
+    # The gap starts at the earliest last cycle among the endpoints still being probed when the
+    # engine stopped.
     gap_start = (await db.execute(
         text(f"""
             SELECT MIN({_LAST_CYCLE}) FROM endpoint_events
@@ -262,19 +198,3 @@ async def close_startup_gap(db: AsyncSession, gap_id: UUID, started_at: datetime
     )
     logger.info("Monitoring gap %s closed: first cycles after startup have run.", gap_id)
 
-async def get_active_gap(
-    db: AsyncSession,
-) -> Optional[tuple[UUID, datetime]]:
-    query = text("""
-        SELECT id, start_time
-        FROM monitoring_service_events
-        WHERE end_time IS NULL
-        ORDER BY start_time DESC
-        LIMIT 1
-    """)
-    result = await db.execute(query)
-    row = result.fetchone()
-    
-    if row:
-        return (UUID(str(row.id)), row.start_time)
-    return None

@@ -11,16 +11,13 @@ from app.services.auth_service import (
     invalidate_session_async,
     invalidate_all_user_sessions_async,
     hash_password,
-    _active_user_sessions,
 )
 
 
 @pytest.fixture(autouse=True)
 def setup_session_store():
     driver_manager._session_store = InMemorySessionStore()
-    _active_user_sessions.clear()
     yield
-    _active_user_sessions.clear()
 
 
 @pytest.mark.anyio
@@ -33,23 +30,19 @@ async def test_session_async_methods_lifecycle():
     # 1. Register session 1
     await register_session_async(user_id, jti_1, max_sessions=2)
     assert await store.is_session_active(user_id, jti_1) is True
-    assert jti_1 in _active_user_sessions.get(user_id, [])
 
     # 2. Register session 2
     await register_session_async(user_id, jti_2, max_sessions=2)
     assert await store.is_session_active(user_id, jti_2) is True
-    assert len(_active_user_sessions.get(user_id, [])) == 2
 
     # 3. Invalidate session 1
     await invalidate_session_async(user_id, jti_1)
     assert await store.is_session_active(user_id, jti_1) is False
     assert await store.is_session_active(user_id, jti_2) is True
-    assert jti_1 not in _active_user_sessions.get(user_id, [])
 
     # 4. Invalidate all sessions
     await invalidate_all_user_sessions_async(user_id)
     assert await store.is_session_active(user_id, jti_2) is False
-    assert user_id not in _active_user_sessions
 
 
 @pytest.mark.anyio
@@ -70,7 +63,6 @@ async def test_invalidate_all_user_sessions_async_with_except_jti():
 
     assert await store.is_session_active(user_id, jti_keep) is True
     assert await store.is_session_active(user_id, jti_drop) is False
-    assert _active_user_sessions.get(user_id) == [jti_keep]
 
 
 def test_login_then_immediate_authenticated_request_200():

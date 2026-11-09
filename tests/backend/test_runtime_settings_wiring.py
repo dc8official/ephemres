@@ -79,18 +79,6 @@ def test_access_token_expiry_follows_session_timeout():
 # --- lockout_threshold ------------------------------------------------------------------------
 
 
-def test_in_memory_lockout_uses_threshold():
-    from app.services import auth_service
-
-    _with(lockout_threshold=2)
-    auth_service._failed_attempts.clear()
-    auth_service.record_failed_attempt("203.0.113.9", "bob")
-    assert not auth_service.is_account_locked("203.0.113.9", "bob")
-    auth_service.record_failed_attempt("203.0.113.9", "bob")
-    assert auth_service.is_account_locked("203.0.113.9", "bob")
-    auth_service._failed_attempts.clear()
-
-
 def test_stored_lockout_uses_threshold():
     from app.services.session_store import PostgresSessionStore
 

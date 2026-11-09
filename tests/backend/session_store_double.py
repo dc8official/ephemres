@@ -67,9 +67,3 @@ class InMemorySessionStore(SessionStore):
         self.state.locked_until.pop(key, None)
 
 
-async def drain_background_session_tasks() -> None:
-    """Waits for the store writes that the synchronous auth_service helpers schedule."""
-    from app.services.auth_service import _background_session_tasks
-
-    while _background_session_tasks:
-        await asyncio.gather(*list(_background_session_tasks), return_exceptions=True)

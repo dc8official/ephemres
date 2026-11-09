@@ -12,7 +12,7 @@ from uuid import uuid4
 from app.core.asgi import HTTPException
 from app.routers.auth import login, change_password, get_current_user, LoginRequest, ChangePasswordRequest
 from app.routers.users import create_user, reset_password, update_user, delete_user, CreateUserRequest, ResetPasswordRequest, UpdateUserRequest
-from app.services.auth_service import hash_password, verify_password, clear_failed_attempts, _failed_attempts
+from app.services.auth_service import hash_password, verify_password
 
 
 class TestFullAuthUserFlow(unittest.TestCase):
@@ -23,14 +23,12 @@ class TestFullAuthUserFlow(unittest.TestCase):
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        _failed_attempts.clear()
         self.store = InMemorySessionStore()
         self._store_patch = patch.object(driver_manager, "get_session_store", return_value=self.store)
         self._store_patch.start()
 
     def tearDown(self) -> None:
         self._store_patch.stop()
-        _failed_attempts.clear()
         pending = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
         for t in pending:
             t.cancel()

@@ -11,13 +11,6 @@ from uuid import uuid4
 
 from app.core.asgi import HTTPException
 from app.routers.auth import get_current_user
-from app.services.auth_service import (
-    _failed_attempts,
-    _prune_expired_attempts,
-    clear_failed_attempts,
-    is_account_locked,
-    record_failed_attempt,
-)
 from app.routers.reports import sanitize_csv_field
 
 
@@ -26,10 +19,8 @@ class TestSecurityAuditFixes(unittest.TestCase):
     def setUp(self) -> None:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        _failed_attempts.clear()
 
     def tearDown(self) -> None:
-        _failed_attempts.clear()
         self.loop.close()
 
     def test_inactive_user_token_rejection(self) -> None:
@@ -60,28 +51,6 @@ class TestSecurityAuditFixes(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 401)
             self.assertIn("inactive", cm.exception.detail)
 
-    def test_rate_limiter_pruning_and_bounded_memory(self) -> None:
-        now = datetime.now(timezone.utc)
-        # Populate 1050 entries (50 expired)
-        for i in range(1050):
-            uname = f"user_{i}"
-            if i < 50:
-                _failed_attempts[uname] = {
-                    "count": 1,
-                    "last_attempt": now - timedelta(minutes=40)
-                }
-            else:
-                _failed_attempts[uname] = {
-                    "count": 1,
-                    "last_attempt": now - timedelta(minutes=1)
-                }
-
-        # Trigger prune
-        _prune_expired_attempts()
-
-        # Expired entries (50) should be removed, total remaining <= 1000
-        self.assertLessEqual(len(_failed_attempts), 1000)
-        self.assertNotIn("user_0", _failed_attempts)
 
     def test_csv_field_formula_injection_escaping(self) -> None:
         self.assertEqual(sanitize_csv_field("=CMD|' /C calc'!A0"), "'=CMD|' /C calc'!A0")
@@ -133,60 +102,33 @@ class TestSecurityAuditFixes(unittest.TestCase):
             self.assertTrue("users.id =" in called_sql or "users.id = :" in called_sql or "WHERE id = CAST(:user_id AS uuid)" in called_sql)
 
     def test_concurrent_session_fifo_rotation(self) -> None:
-        from app.services.auth_service import register_session, is_session_active, invalidate_session, _active_user_sessions
+        from app.services.auth_service import register_session_async, is_session_active, invalidate_session_async
         from app.services.driver_manager import driver_manager
-        from tests.backend.session_store_double import InMemorySessionStore, drain_background_session_tasks
+        from tests.backend.session_store_double import InMemorySessionStore
 
         async def _run():
             user_id = str(uuid4())
-            _active_user_sessions.clear()
 
             # Session 1 & Session 2 registered
-            register_session(user_id, "jti_session_1", max_sessions=2)
-            register_session(user_id, "jti_session_2", max_sessions=2)
-            await drain_background_session_tasks()
+            await register_session_async(user_id, "jti_session_1", max_sessions=2)
+            await register_session_async(user_id, "jti_session_2", max_sessions=2)
 
             self.assertTrue(await is_session_active(user_id, "jti_session_1"))
             self.assertTrue(await is_session_active(user_id, "jti_session_2"))
 
             # Session 3 registered -> FIFO evicts Session 1
-            register_session(user_id, "jti_session_3", max_sessions=2)
-            await drain_background_session_tasks()
+            await register_session_async(user_id, "jti_session_3", max_sessions=2)
             self.assertFalse(await is_session_active(user_id, "jti_session_1"))
             self.assertTrue(await is_session_active(user_id, "jti_session_2"))
             self.assertTrue(await is_session_active(user_id, "jti_session_3"))
 
             # Logout session 2
-            invalidate_session(user_id, "jti_session_2")
-            await drain_background_session_tasks()
+            await invalidate_session_async(user_id, "jti_session_2")
             self.assertFalse(await is_session_active(user_id, "jti_session_2"))
             self.assertTrue(await is_session_active(user_id, "jti_session_3"))
 
         with patch.object(driver_manager, "get_session_store", return_value=InMemorySessionStore()):
             self.loop.run_until_complete(_run())
-
-    def test_ip_scoped_failed_attempt_lockout(self) -> None:
-        _failed_attempts.clear()
-
-        ip_a = "192.168.1.100"
-        ip_b = "10.0.0.5"
-
-        # Record 5 failed attempts from IP A for user 'admin'
-        for _ in range(5):
-            record_failed_attempt(ip_a, "admin")
-
-        # IP A is locked for 'admin'
-        self.assertTrue(is_account_locked(ip_a, "admin"))
-
-        # IP B is NOT locked for 'admin' (legitimate user at different location)
-        self.assertFalse(is_account_locked(ip_b, "admin"))
-
-        # IP A is NOT locked for user 'bob'
-        self.assertFalse(is_account_locked(ip_a, "bob"))
-
-        # Clear IP A lockout upon successful login
-        clear_failed_attempts(ip_a, "admin")
-        self.assertFalse(is_account_locked(ip_a, "admin"))
 
 
 if __name__ == "__main__":

@@ -6,10 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from app.services.auth_service import (
-    register_session,
+    register_session_async,
     is_session_active,
     create_access_token,
-    _active_user_sessions,
 )
 from app.core.http_client import validate_outbound_url
 from app.database import check_database_connection
@@ -19,53 +18,42 @@ from app.database import check_database_connection
 async def test_session_eviction_deduplication():
     """Verify that multiple registrations of the same jti do not evict prior sessions."""
     from app.services.driver_manager import driver_manager
-    from tests.backend.session_store_double import InMemorySessionStore, drain_background_session_tasks
+    from tests.backend.session_store_double import InMemorySessionStore
 
     store = InMemorySessionStore()
     with patch.object(driver_manager, "get_session_store", return_value=store):
-        await _run_session_eviction_deduplication(drain_background_session_tasks)
+        await _run_session_eviction_deduplication()
 
 
-async def _run_session_eviction_deduplication(drain):
+async def _run_session_eviction_deduplication():
     user_id = str(uuid4())
-    _active_user_sessions.pop(user_id, None)
 
-    # Session 1
-    register_session(user_id, "token-1", max_sessions=2)
-    assert _active_user_sessions[user_id] == ["token-1"]
-
-    # Re-registering session 1 must be a no-op (no duplicate, no eviction)
-    register_session(user_id, "token-1", max_sessions=2)
-    assert _active_user_sessions[user_id] == ["token-1"]
-
-    # Session 2
-    register_session(user_id, "token-2", max_sessions=2)
-    assert _active_user_sessions[user_id] == ["token-1", "token-2"]
-
-    # Re-registering session 2 must not push out session 1
-    register_session(user_id, "token-2", max_sessions=2)
-    assert _active_user_sessions[user_id] == ["token-1", "token-2"]
-    await drain()
+    # Re-registering a session must be a no-op (no duplicate, no eviction)
+    await register_session_async(user_id, "token-1", max_sessions=2)
+    await register_session_async(user_id, "token-1", max_sessions=2)
+    await register_session_async(user_id, "token-2", max_sessions=2)
+    await register_session_async(user_id, "token-2", max_sessions=2)
     assert await is_session_active(user_id, "token-1") is True
     assert await is_session_active(user_id, "token-2") is True
 
     # Session 3 should evict oldest session 1 (FIFO)
-    register_session(user_id, "token-3", max_sessions=2)
-    assert _active_user_sessions[user_id] == ["token-2", "token-3"]
-    await drain()
+    await register_session_async(user_id, "token-3", max_sessions=2)
     assert await is_session_active(user_id, "token-1") is False
     assert await is_session_active(user_id, "token-2") is True
     assert await is_session_active(user_id, "token-3") is True
 
 
-def test_create_access_token_is_stateless():
-    """Verify that create_access_token does not modify _active_user_sessions."""
-    user_id = str(uuid4())
-    _active_user_sessions.pop(user_id, None)
+@pytest.mark.anyio
+async def test_create_access_token_is_stateless():
+    """Issuing a token registers no session: only the sign-in route does that."""
+    from app.services.driver_manager import driver_manager
+    from tests.backend.session_store_double import InMemorySessionStore
 
-    token = create_access_token(user_id, "testuser", "ADMIN", jti="stateless-jti")
-    assert isinstance(token, str)
-    assert user_id not in _active_user_sessions
+    user_id = str(uuid4())
+    with patch.object(driver_manager, "get_session_store", return_value=InMemorySessionStore()):
+        token = create_access_token(user_id, "testuser", "ADMIN", jti="stateless-jti")
+        assert isinstance(token, str)
+        assert await is_session_active(user_id, "stateless-jti") is False
 
 
 def test_smtp_private_ip_allowed():

@@ -1,7 +1,19 @@
+"""Sign-in building blocks for the API, written against the standard library only.
+
+- Passwords: scrypt hashes (hashlib.scrypt, from OpenSSL).
+- Session tokens: HS256 JSON Web Tokens (RFC 7519), signed with the server's secret and sent
+  as an HttpOnly cookie. Each token carries a session ID (jti) that must also be in the session
+  store, so a session can be ended before its token expires.
+- The client's real IP behind the nginx reverse proxy, used to key sign-in lockouts.
+
+Sessions and lockouts live only in the shared session store (services/session_store.py): each
+API worker is a separate process, so nothing here keeps its own copy.
+"""
 from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -29,6 +41,8 @@ class ScryptPasswordHasher:
     Format: $scrypt$n=131072,r=8,p=1$<salt_b64>$<hash_b64> (older n=16384 hashes verify and are re-hashed on login)
     """
 
+    # Cost: scrypt needs 128 * N * r bytes, so 128 MiB per check. MAXMEM is OpenSSL's ceiling,
+    # set with room above that. DKLEN is the stored hash length in bytes.
     N = 2**17
     R = 8
     P = 1
@@ -55,12 +69,16 @@ class ScryptPasswordHasher:
     def verify(self, hashed: str, plain: str) -> bool:
         if not hashed or not isinstance(hashed, str) or not isinstance(plain, str):
             return False
+        # Older releases hashed with argon2, a third-party library the zero-dependency rule
+        # removed. Those accounts can't be verified any more and are reset by the script.
         if hashed.startswith("$argon2"):
             logger.warning("Legacy argon2 hash for login attempt; run app.reset_legacy_passwords")
             return False
         parts = hashed.split("$")
         if len(parts) != 5 or parts[1] != "scrypt":
             return False
+        # The cost and length come from the stored hash, not the class constants, so hashes
+        # made with older settings still verify (and needs_rehash() upgrades them at sign-in).
         params_str, salt_b64, hash_b64 = parts[2], parts[3], parts[4]
         try:
             params: Dict[str, int] = {}
@@ -81,6 +99,7 @@ class ScryptPasswordHasher:
                 maxmem=self.MAXMEM,
                 dklen=len(expected_dk),
             )
+            # Constant-time comparison: the time taken must not show how many bytes matched.
             return hmac.compare_digest(derived, expected_dk)
         except Exception:
             return False
@@ -89,9 +108,24 @@ class ScryptPasswordHasher:
 _ph = ScryptPasswordHasher()
 
 # Each scrypt run at N=2**17, r=8 needs 128 MiB. Sign-in floods (any username, since unknown
-# ones spend a dummy check) would otherwise run one per thread-pool thread at once and could
-# exhaust memory. Requests beyond this many per worker wait their turn in the thread pool.
-_SCRYPT_SLOTS = threading.BoundedSemaphore(max(2, min(4, os.cpu_count() or 2)))
+# ones spend a dummy check) would otherwise run one per thread at once and could exhaust
+# memory, so at most SCRYPT_CONCURRENCY run at once per worker.
+SCRYPT_CONCURRENCY = max(2, min(4, os.cpu_count() or 2))
+_SCRYPT_SLOTS = threading.BoundedSemaphore(SCRYPT_CONCURRENCY)
+
+# The async helpers run scrypt on these threads of its own, never in asyncio's default pool.
+# A flood then waits in this pool's queue. In the default pool the waiting requests used to
+# occupy its threads (each blocked on _SCRYPT_SLOTS), and everything else that uses it (every
+# FastStore command, PDF rendering, SMTP) stalled behind them: 3.6 s for FastStore in a 32-way
+# sign-in flood (scale review S3). Started lazily: scripts that never sign in make no threads.
+_scrypt_pool: Optional[ThreadPoolExecutor] = None
+
+
+def _run_scrypt(fn: Any, *args: Any) -> "asyncio.Future[Any]":
+    global _scrypt_pool
+    if _scrypt_pool is None:
+        _scrypt_pool = ThreadPoolExecutor(max_workers=SCRYPT_CONCURRENCY, thread_name_prefix="scrypt")
+    return asyncio.get_running_loop().run_in_executor(_scrypt_pool, fn, *args)
 
 
 def _hash_bounded(password: str) -> str:
@@ -132,6 +166,8 @@ def _b64url_decode(segment: str) -> bytes:
         decoded = base64.urlsafe_b64decode(padded)
     except Exception as exc:
         raise JWTError(f"Invalid base64url encoding: {exc}") from exc
+    # Accept only the canonical spelling of each segment: characters outside the alphabet or
+    # stray low bits would decode to the same bytes, and are refused. Trailing = is tolerated.
     if _b64url_encode(decoded) != segment.rstrip("="):
         raise JWTError("Non-canonical base64url encoding in JWT segment.")
     return decoded
@@ -183,6 +219,10 @@ def jwt_decode(
 
     header_b64, payload_b64, sig_b64 = parts
 
+    # The algorithm is pinned to HS256 whatever the token says, which shuts out "alg": "none"
+    # and algorithm-swap tricks (RFC 8725 2.1 and 3.1). The signature is checked before the
+    # payload is even parsed.
+
     try:
         header_raw = _b64url_decode(header_b64)
         header = json.loads(header_raw.decode("utf-8"))
@@ -232,27 +272,11 @@ def jwt_decode(
     return payload
 
 
-class _JWTNamespace:
-    encode = staticmethod(jwt_encode)
-    decode = staticmethod(jwt_decode)
-
-
-jwt = _JWTNamespace()
-
-
-# Default trusted reverse proxy CIDR networks (strictly loopback)
+# Default trusted reverse proxy CIDR networks (strictly loopback): nginx runs on the same host.
 DEFAULT_TRUSTED_PROXIES = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
 ]
-
-# IP-Scoped Failed Login Tracker:
-# Key format: "<client_ip>:<username>" -> {"count": int, "last_attempt": datetime, "locked_until": datetime}
-_failed_attempts: dict[str, dict] = {}
-
-# In-Memory Concurrent Session Tracker:
-# Key format: "<user_id>" -> [jti_1, jti_2] (ordered list of active session JWT IDs, FIFO rotated)
-_active_user_sessions: dict[str, list[str]] = {}
 
 
 def generate_readable_password() -> str:
@@ -266,8 +290,8 @@ def hash_password(password: str) -> str:
 
 
 async def hash_password_async(password: str) -> str:
-    """Non-blocking OpenSSL scrypt password hashing delegated to asyncio worker thread."""
-    return await asyncio.to_thread(_hash_bounded, password)
+    """Non-blocking OpenSSL scrypt password hashing on scrypt's own threads (_run_scrypt)."""
+    return await _run_scrypt(_hash_bounded, password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -279,8 +303,8 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 async def verify_password_async(plain: str, hashed: str) -> bool:
-    """Non-blocking OpenSSL scrypt password verification delegated to asyncio worker thread."""
-    return await asyncio.to_thread(verify_password, plain, hashed)
+    """Non-blocking OpenSSL scrypt password verification on scrypt's own threads (_run_scrypt)."""
+    return await _run_scrypt(verify_password, plain, hashed)
 
 
 _dummy_password_hash: Optional[str] = None
@@ -363,6 +387,10 @@ def get_trusted_client_ip(
     if not is_ip_in_networks(peer_ip, trusted_nets):
         return peer_ip
 
+    # The peer is a trusted proxy, so X-Forwarded-For can be believed, but only partly: each
+    # proxy appends the address it received from, and the client can put anything it likes
+    # at the start. Walking from the right, skip our own proxies; the first other address is
+    # the client as our outermost proxy saw it.
     if hasattr(request, "headers") and hasattr(request.headers, "get"):
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded and isinstance(forwarded, str):
@@ -381,30 +409,13 @@ def get_trusted_client_ip(
     return peer_ip
 
 
-# ---------------------------------------------------------------------------
-# Concurrent Session Management (Token-based FIFO rotation)
-# ---------------------------------------------------------------------------
-_background_session_tasks: Set[asyncio.Task] = set()
-
-
-def _handle_session_task_done(task: asyncio.Task) -> None:
-    _background_session_tasks.discard(task)
-    if not task.cancelled():
-        exc = task.exception()
-        if exc is not None:
-            logger.exception("Background session task failed: %s", exc)
-
-
 async def register_session_async(user_id: str, jti: str, max_sessions: int = 2) -> None:
-    """Registers a new session JTI for the user, updating in-memory cache and awaiting backing store."""
-    u_id = str(user_id)
-    active_list = _active_user_sessions.get(u_id, [])
-    if jti not in active_list:
-        active_list.append(jti)
-        if len(active_list) > max_sessions:
-            active_list = active_list[-max_sessions:]
-        _active_user_sessions[u_id] = active_list
+    """Records a new session (jti) for the user in the shared session store; past
+    `max_sessions` the store ends the user's oldest one.
 
+    A store failure is only logged. That fails closed: the token is issued, but every request
+    with it gets 401 because its jti is not in the store."""
+    u_id = str(user_id)
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
@@ -413,33 +424,11 @@ async def register_session_async(user_id: str, jti: str, max_sessions: int = 2) 
         logger.exception("Failed to register session for user %s, jti %s in store", u_id, jti)
 
 
-def register_session(user_id: str, jti: str, max_sessions: int = 2) -> None:
-    """Registers a new session JTI for the user (synchronous backward compatibility)."""
-    u_id = str(user_id)
-    active_list = _active_user_sessions.get(u_id, [])
-    if jti not in active_list:
-        active_list.append(jti)
-        if len(active_list) > max_sessions:
-            active_list = active_list[-max_sessions:]
-        _active_user_sessions[u_id] = active_list
-
-    try:
-        from app.services.driver_manager import driver_manager
-        loop = asyncio.get_running_loop()
-        store = driver_manager.get_session_store()
-        task = loop.create_task(store.register_session(u_id, jti, max_sessions=max_sessions))
-        _background_session_tasks.add(task)
-        task.add_done_callback(_handle_session_task_done)
-    except Exception:
-        pass
-
-
 async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     """
     Validates a session JTI against the configured backing session store, which every API
-    worker shares. The store is the only authority: this worker's in-memory list is never
-    consulted, because a logout, password change or reset handled by another worker only
-    reaches the store. A store error propagates: nothing is allowed through, and the caller can
+    worker shares. The store is the only authority, because a logout, password change or
+    reset handled by another worker only reaches the store. A store error propagates: nothing is allowed through, and the caller can
     say "try again" instead of signing the user out of a session that is still valid.
     Tokens without a jti are rejected.
     """
@@ -452,17 +441,10 @@ async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
 
 
 async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
-    """Invalidates a single active session JTI on logout, awaiting backing store."""
+    """Ends one session (sign-out) in the shared session store."""
     if not jti:
         return
     u_id = str(user_id)
-    if u_id in _active_user_sessions:
-        _active_user_sessions[u_id] = [
-            s for s in _active_user_sessions[u_id] if s != jti
-        ]
-        if not _active_user_sessions[u_id]:
-            _active_user_sessions.pop(u_id, None)
-
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
@@ -471,68 +453,16 @@ async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
         logger.exception("Failed to invalidate session for user %s, jti %s in store", u_id, jti)
 
 
-def invalidate_session(user_id: str, jti: Optional[str]) -> None:
-    """Invalidates a single active session JTI on logout (synchronous backward compatibility)."""
-    if not jti:
-        return
-    u_id = str(user_id)
-    if u_id in _active_user_sessions:
-        _active_user_sessions[u_id] = [
-            s for s in _active_user_sessions[u_id] if s != jti
-        ]
-        if not _active_user_sessions[u_id]:
-            _active_user_sessions.pop(u_id, None)
-
-    try:
-        from app.services.driver_manager import driver_manager
-        loop = asyncio.get_running_loop()
-        store = driver_manager.get_session_store()
-        task = loop.create_task(store.invalidate_session(u_id, jti))
-        _background_session_tasks.add(task)
-        task.add_done_callback(_handle_session_task_done)
-    except Exception:
-        pass
-
-
 async def invalidate_all_user_sessions_async(user_id: str, except_jti: Optional[str] = None) -> None:
-    """Invalidates all sessions for a user (optionally preserving a specific JTI), awaiting backing store."""
+    """Ends every session of a user in the shared session store, except `except_jti` when given
+    (the session making a password change stays signed in)."""
     u_id = str(user_id)
-    if except_jti:
-        if u_id in _active_user_sessions:
-            _active_user_sessions[u_id] = [
-                s for s in _active_user_sessions[u_id] if s == except_jti
-            ]
-    else:
-        _active_user_sessions.pop(u_id, None)
-
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
         await store.invalidate_all_user_sessions(u_id, except_jti=except_jti)
     except Exception:
         logger.exception("Failed to invalidate all sessions for user %s in store", u_id)
-
-
-def invalidate_all_user_sessions(user_id: str, except_jti: Optional[str] = None) -> None:
-    """Invalidates all sessions for a user (synchronous backward compatibility)."""
-    u_id = str(user_id)
-    if except_jti:
-        if u_id in _active_user_sessions:
-            _active_user_sessions[u_id] = [
-                s for s in _active_user_sessions[u_id] if s == except_jti
-            ]
-    else:
-        _active_user_sessions.pop(u_id, None)
-
-    try:
-        from app.services.driver_manager import driver_manager
-        loop = asyncio.get_running_loop()
-        store = driver_manager.get_session_store()
-        task = loop.create_task(store.invalidate_all_user_sessions(u_id, except_jti=except_jti))
-        _background_session_tasks.add(task)
-        task.add_done_callback(_handle_session_task_done)
-    except Exception:
-        pass
 
 
 def create_access_token(
@@ -544,6 +474,8 @@ def create_access_token(
     session_id = jti or str(secrets.token_hex(16))
 
     now_utc = datetime.now(timezone.utc)
+    # username and role are for display only: the API reads the role from the database on
+    # every request (routers/auth.get_current_user), so a changed role applies at once.
     payload = {
         "sub": user_id,
         "username": username,
@@ -570,96 +502,11 @@ def decode_access_token(token: str) -> Optional[dict]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# IP-Scoped Account Lockout Memory Manager
-# ---------------------------------------------------------------------------
-MAX_FAILED_ATTEMPTS_ENTRIES = 2000
-
-
+# Lockouts count per (client IP, username), never per username alone: a per-username lockout
+# would let anyone lock the real admin out by failing on purpose. Usernames are lowercased.
 def _get_lockout_key(client_ip: str, username: str) -> str:
     ip = client_ip.strip() if client_ip else "127.0.0.1"
     user = username.strip().lower() if username else ""
     return f"{ip}:{user}"
 
 
-def _prune_expired_attempts() -> None:
-    """Prunes expired account lockout entries and enforces max memory allocation bounds."""
-    now = datetime.now(timezone.utc)
-    expired = [
-        k
-        for k, data in _failed_attempts.items()
-        if (data.get("locked_until") and data["locked_until"] <= now)
-        or (
-            data.get("last_attempt")
-            and now - data["last_attempt"] > timedelta(minutes=30)
-        )
-    ]
-    for k in expired:
-        _failed_attempts.pop(k, None)
-
-    if len(_failed_attempts) > MAX_FAILED_ATTEMPTS_ENTRIES:
-        sorted_keys = sorted(
-            _failed_attempts.keys(),
-            key=lambda k: _failed_attempts[k].get("last_attempt")
-            or datetime.min.replace(tzinfo=timezone.utc),
-        )
-        for k in sorted_keys[: len(_failed_attempts) - MAX_FAILED_ATTEMPTS_ENTRIES]:
-            _failed_attempts.pop(k, None)
-
-
-def is_account_locked(
-    client_ip_or_username: str, username: Optional[str] = None
-) -> bool:
-    """Checks if the (client_ip, username) combination is currently locked out."""
-    _prune_expired_attempts()
-    if username is None:
-        client_ip = "127.0.0.1"
-        user = client_ip_or_username
-    else:
-        client_ip = client_ip_or_username
-        user = username
-    key = _get_lockout_key(client_ip, user)
-    entry = _failed_attempts.get(key)
-    if not entry:
-        return False
-    locked_until = entry.get("locked_until")
-    if locked_until and locked_until > datetime.now(timezone.utc):
-        return True
-    if locked_until:
-        _failed_attempts.pop(key, None)
-    return False
-
-
-def record_failed_attempt(
-    client_ip_or_username: str, username: Optional[str] = None
-) -> None:
-    """Records a failed login attempt for the specific (client_ip, username) pair."""
-    _prune_expired_attempts()
-    if username is None:
-        client_ip = "127.0.0.1"
-        user = client_ip_or_username
-    else:
-        client_ip = client_ip_or_username
-        user = username
-    key = _get_lockout_key(client_ip, user)
-    now = datetime.now(timezone.utc)
-    entry = _failed_attempts.get(key, {"count": 0})
-    entry["count"] = entry.get("count", 0) + 1
-    entry["last_attempt"] = now
-    if entry["count"] >= get_runtime_settings().lockout_threshold:
-        entry["locked_until"] = now + timedelta(minutes=15)
-    _failed_attempts[key] = entry
-
-
-def clear_failed_attempts(
-    client_ip_or_username: str, username: Optional[str] = None
-) -> None:
-    """Clears failed attempts for the specific (client_ip, username) upon successful authentication."""
-    if username is None:
-        client_ip = "127.0.0.1"
-        user = client_ip_or_username
-    else:
-        client_ip = client_ip_or_username
-        user = username
-    key = _get_lockout_key(client_ip, user)
-    _failed_attempts.pop(key, None)
