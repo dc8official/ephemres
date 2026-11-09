@@ -9,13 +9,13 @@
         </span>
       </div>
       <p class="card-desc">
-        Accelerate session lookups and real-time event broadcasting using in-memory FastStore caching, with zero-downtime PostgreSQL fallback.
+        Choose how live events (dashboard updates, alerts) travel between Ephemres processes: through PostgreSQL, or through FastStore, the in-memory store on this server. Sign-in sessions always stay in PostgreSQL.
       </p>
 
       <div class="setting-row">
         <div>
           <label class="setting-label">Memory Acceleration Driver</label>
-          <p class="setting-hint">When enabled, user session tokens and pub/sub events are routed through FastStore.</p>
+          <p class="setting-hint">When enabled, live events go through FastStore. Flow collection works in either mode.</p>
         </div>
         <div class="driver-toggle">
           <button 
@@ -49,7 +49,7 @@
             </span>
           </div>
           <p class="card-desc mt-1">
-            Ingests raw NetFlow v5, NetFlow v9, and IPFIX datagrams into FastStore Stream wire buffers, correlating with monitored endpoints and batching into TimescaleDB rollups.
+            Receives NetFlow v5, NetFlow v9 and IPFIX from your routers, matches them to monitored endpoints and stores per-minute rollups in TimescaleDB.
           </p>
         </div>
         <div class="master-toggle-wrap">
@@ -58,16 +58,6 @@
             <span class="slider round"></span>
           </label>
         </div>
-      </div>
-
-      <!-- Prerequisite Banner when FastStore is disabled -->
-      <div v-if="!settings.performanceMode" class="alert-banner alert-warning mt-3" role="alert">
-        <div class="flex-row-center gap-2">
-          <span>⚠️ FastStore Memory Acceleration is required to buffer raw packet streams. Please activate FastStore first.</span>
-        </div>
-        <button type="button" class="btn-primary btn-small ml-3" @click="activateFastStoreDriver">
-          Activate FastStore Driver
-        </button>
       </div>
 
       <div v-if="settings.flowIngestionEnabled" class="flow-config-fields mt-3">
@@ -118,8 +108,8 @@
 
         <div class="setting-row pt-2">
           <div>
-            <label class="setting-label">Engine Diagnostic Preflight (STAB-05)</label>
-            <p class="setting-hint">Verify FastStore streams, Linux kernel receive buffer (rmem_max >= 2MB), and UDP socket port bindings.</p>
+            <label class="setting-label">Diagnostic Preflight</label>
+            <p class="setting-hint">Checks that FastStore opens, the flow UDP ports are free, and the kernel receive buffer (rmem_max, 2 MB or more recommended).</p>
           </div>
           <button type="button" class="btn-action" @click="openPreflightModal">
             🔍 Run Diagnostic Preflight
@@ -128,16 +118,16 @@
       </div>
     </div>
 
-    <!-- Flow Preflight Modal (STAB-05) -->
+    <!-- Flow Preflight Modal -->
     <div v-if="showPreflightModal" class="modal-overlay" @click.self="showPreflightModal = false">
       <div class="modal-card">
         <div class="modal-header">
-          <h3>⚡ Flow Ingestion Diagnostic Preflight (STAB-05)</h3>
+          <h3>⚡ Flow Ingestion Diagnostic Preflight</h3>
           <button class="btn-close" @click="showPreflightModal = false">✕</button>
         </div>
         <div class="modal-form">
           <div v-if="preflightChecking" class="loading-state p-4 text-center">
-            <p class="mt-2 text-sm">Verifying FastStore streams, kernel rmem_max, and UDP socket bindings...</p>
+            <p class="mt-2 text-sm">Checking FastStore, the flow UDP ports and kernel rmem_max...</p>
           </div>
           <div v-else>
             <div :class="preflightResult?.ready ? 'alert-info success-alert' : 'alert-error'" role="alert">
@@ -147,24 +137,12 @@
 
             <div class="preflight-details mt-3 text-sm">
               <div class="preflight-item">
-                <span>FastStore Engine Connection: </span>
-                <span class="font-bold font-mono" :class="(preflightResult?.faststore_connected ?? preflightResult?.redis_connected) ? 'text-success' : 'text-danger'">
-                  {{ (preflightResult?.faststore_connected ?? preflightResult?.redis_connected) ? 'CONNECTED' : 'UNREACHABLE' }}
+                <span>FastStore: </span>
+                <span class="font-bold font-mono" :class="preflightResult?.faststore_connected ? 'text-success' : 'text-danger'">
+                  {{ preflightResult?.faststore_connected ? 'OPENS' : 'UNAVAILABLE' }}
                 </span>
               </div>
-              <div class="preflight-item mt-1">
-                <span>FastStore Protocol Version: </span>
-                <span class="font-bold font-mono">
-                  {{ preflightResult?.faststore_version || preflightResult?.redis_version || 'N/A' }} (FastStore WAL)
-                </span>
-              </div>
-              <div class="preflight-item mt-1">
-                <span>Wire Buffer Stream Write (XADD): </span>
-                <span class="font-bold font-mono" :class="preflightResult?.stream_write_success ? 'text-success' : 'text-danger'">
-                  {{ preflightResult?.stream_write_success ? 'SUPPORTED' : 'FAILED' }}
-                </span>
-              </div>
-              <!-- STAB-05 Kernel Socket Buffer -->
+              <!-- Kernel socket buffer: reported, but doesn't fail the check -->
               <div class="preflight-item mt-1">
                 <span>Kernel Socket Buffer (rmem_max): </span>
                 <span class="font-bold font-mono tnum" :class="preflightResult?.rmem_max_supported ? 'text-success' : 'text-warning'">
@@ -172,7 +150,7 @@
                   {{ preflightResult?.rmem_max_supported ? '(>= 2MB Recommended)' : '(< 2MB Recommended)' }}
                 </span>
               </div>
-              <!-- STAB-05 UDP Socket Bind -->
+              <!-- UDP ports flowd will listen on -->
               <div class="preflight-item mt-1">
                 <span>UDP Socket Availability: </span>
                 <span class="font-bold font-mono" :class="preflightResult?.udp_ports_available ? 'text-success' : 'text-danger'">
@@ -182,7 +160,7 @@
             </div>
 
             <p v-if="!preflightResult?.ready" class="text-xs text-muted mt-3">
-              Flow telemetry buffering requires active FastStore embedded memory storage in <code>/run/ephemres</code> and unbound UDP ports. If needed, verify permissions (<code>sudo chown -R ephemres:ephemres /run/ephemres</code>) and ensure port conflicts are resolved.
+              The flow collector needs FastStore's file in <code>/run/ephemres</code> to be writable by the ephemres user (<code>sudo chown -R ephemres:ephemres /run/ephemres</code>) and its UDP ports free of other listeners.
             </p>
           </div>
 
@@ -238,40 +216,19 @@ function emitChange() {
   emit('change')
 }
 
+// Performance Mode and flow ingestion are independent. Performance Mode only moves live events
+// onto FastStore; flowd uses FastStore (the local file, for its exporter banner and interface
+// lists) in either mode, and flows go from its collector to its aggregator in memory.
 function setPerformanceMode(val) {
-  if (!val && props.settings.flowIngestionEnabled) {
-    toast.add({
-      severity: 'warn',
-      summary: 'Action Blocked',
-      detail: 'Cannot disable FastStore Memory Acceleration while Flow Ingestion is active. Please disable Flow Ingestion first.',
-      life: 5000,
-    })
-    return
-  }
   props.settings.performanceMode = val
   emitChange()
-}
-
-async function activateFastStoreDriver() {
-  props.settings.performanceMode = true
-  emitChange()
-  showPreflightModal.value = true
-  await runPreflightCheck()
 }
 
 async function toggleFlowIngestion(e) {
   const targetState = e.target.checked
   if (targetState) {
+    // Turning it on goes through the preflight; confirmFlowActivation() sets it once it passes.
     e.target.checked = false
-    if (!props.settings.performanceMode) {
-      toast.add({
-        severity: 'warn',
-        summary: 'Prerequisite Required',
-        detail: 'Network Flow Telemetry requires FastStore Memory Acceleration. Please activate FastStore first.',
-        life: 5000,
-      })
-      return
-    }
     showPreflightModal.value = true
     await runPreflightCheck()
   } else {
@@ -295,13 +252,7 @@ async function runPreflightCheck() {
     }
   } catch (err) {
     preflightResult.value = {
-      redis_connected: false,
-      redis_version: null,
-      redis_version_supported: false,
       faststore_connected: false,
-      faststore_version: null,
-      faststore_version_supported: false,
-      stream_write_success: false,
       rmem_max_supported: false,
       udp_ports_available: false,
       ready: false,

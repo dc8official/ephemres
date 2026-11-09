@@ -353,32 +353,29 @@ Retrieves the active system configuration from the database.
 Updates runtime parameters (requires `Admin` role).
 - **Request Body:** Accepts snake_case or camelCase properties:
   - `alerting_enabled` (bool, optional): Global master toggle to enable or suspend all outbound alert notifications.
-  - `performance_mode` (bool, optional): Switches between In-RAM FastStore (`/dev/shm`) and PostgreSQL-native storage drivers.
+  - `performance_mode` (bool, optional): Routes live events between processes through FastStore instead of PostgreSQL `LISTEN`/`NOTIFY`. Sessions and lockouts stay in PostgreSQL either way, and flow ingestion does not depend on it.
   - `l2_auto_bypass` (bool, optional): Controls Layer-2 direct ICMP diagnostic bypass.
   - `session_timeout` (int, 1–1440 min): Idle session expiration duration.
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
-  - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection.
+  - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection. Turning it on runs the flow preflight below first (with the ports in the same request, if given) and answers `400` if it fails.
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
   - `flow_ipfix_port` (int, 1–65535, optional): IPFIX UDP listening port (default: 4739).
   - `flow_sampling_multiplier` (int, >= 1, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
 
 ### `POST /settings/flow/preflight`
-Performs live pre-flight verification of FastStore (`/dev/shm`) shared-memory stream write capabilities and UDP socket binding prior to enabling passive flow ingestion. The UDP check binds the configured `flow.bind_host` and ports exactly as the collector would; ports held by an active `ephemres-flowd` are not reported as conflicts. Returns backward-compatible status metrics:
+Checks what `ephemres-flowd` needs before flow ingestion is turned on: FastStore opens, and the UDP ports it will listen on (the ones saved in Settings) are free. The UDP check binds `flow.bind_host` and those ports exactly as the collector would; ports held by an active `ephemres-flowd` are not reported as conflicts. `rmem_max` below 2 MB is reported but does not make `ready` false. (The Redis version and stream-write fields were removed: flows no longer go through a FastStore stream.)
 - **Response:** `200 OK`
   ```json
   {
     "status": "success",
     "data": {
-      "redis_connected": true,
-      "redis_version": "7.0.15",
-      "redis_version_supported": true,
-      "stream_write_success": true,
+      "faststore_connected": true,
       "rmem_max": 212992,
       "rmem_max_supported": false,
       "udp_ports_available": true,
       "port_conflicts": [],
       "ready": true,
-      "message": "Flow preflight passed successfully."
+      "message": "Kernel rmem_max is 212992 B, below the recommended 2 MB (2097152 B)."
     },
     "meta": null,
     "error": null

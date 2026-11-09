@@ -256,28 +256,40 @@ def test_bandwidth_map_exporter(client):
     assert mock_session.commit.awaited
 
 
-@patch("app.core.faststore.Redis")
-def test_flow_preflight_success(mock_redis_cls, client):
+def test_flow_preflight_success(client):
+    """The preflight checks what flowd needs: FastStore opens and the ports saved in Settings are
+    free (not config.toml's). There is no Redis version or stream-write check any more."""
+    from types import SimpleNamespace
+
     test_client, _ = client
-
-    mock_redis_instance = AsyncMock()
-    mock_redis_instance.ping = AsyncMock(return_value=True)
-    mock_redis_instance.info = AsyncMock(return_value={"redis_version": "7.0.12"})
-    mock_redis_instance.xadd = AsyncMock(return_value="1700000000000-0")
-    mock_redis_instance.xdel = AsyncMock(return_value=1)
-    mock_redis_instance.aclose = AsyncMock()
-    mock_redis_cls.return_value = mock_redis_instance
-
-    resp = test_client.post("/api/v1/settings/flow/preflight")
+    store = AsyncMock()
+    store.ping = AsyncMock(return_value=True)
+    runtime = SimpleNamespace(flow_netflow_port=9995, flow_ipfix_port=9996)
+    with patch("app.core.faststore.FastStoreClient", return_value=store), \
+         patch("app.routers.settings.get_runtime_settings", return_value=runtime), \
+         patch("app.routers.settings._udp_port_conflicts", AsyncMock(return_value=[])) as ports:
+        resp = test_client.post("/api/v1/settings/flow/preflight")
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    res = data["data"]
-    assert res["redis_connected"] is True
-    assert res["redis_version"] == "7.0.12"
-    assert res["redis_version_supported"] is True
-    assert res["stream_write_success"] is True
+    res = resp.json()["data"]
+    assert res["faststore_connected"] is True and res["udp_ports_available"] is True
     assert res["ready"] is True
+    assert "stream_write_success" not in res and "redis_version" not in res
+    assert ports.await_args.args[1] == (9995, 9996)
+
+
+def test_flow_preflight_reports_a_port_conflict(client):
+    from types import SimpleNamespace
+
+    test_client, _ = client
+    store = AsyncMock()
+    store.ping = AsyncMock(return_value=True)
+    runtime = SimpleNamespace(flow_netflow_port=2055, flow_ipfix_port=4739)
+    with patch("app.core.faststore.FastStoreClient", return_value=store), \
+         patch("app.routers.settings.get_runtime_settings", return_value=runtime), \
+         patch("app.routers.settings._udp_port_conflicts", AsyncMock(return_value=[2055])):
+        res = test_client.post("/api/v1/settings/flow/preflight").json()["data"]
+    assert res["ready"] is False and res["port_conflicts"] == [2055]
+    assert "2055" in res["message"]
 
 
 @patch("app.routers.bandwidth.get_flow_redis")

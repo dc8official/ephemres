@@ -1,3 +1,11 @@
+"""Settings page routes: system settings, organisation branding, and the flow-port preflight.
+
+Saved settings go to the app_settings table and override config.toml at run time
+(services/runtime_settings); other processes are told to reload (services/settings_sync).
+Turning flow ingestion on or off starts or stops ephemres-flowd through systemctl, and turning
+performance mode on or off moves the event broker between FastStore and PostgreSQL. Requests
+may use snake_case or camelCase field names.
+"""
 import asyncio
 import base64
 import binascii
@@ -6,6 +14,7 @@ import socket
 from typing import Any, Optional
 
 from app.core.asgi import APIRouter, Depends, HTTPException
+from app.core.background import spawn
 from app.core.schema import BaseModel, ConfigDict, Field
 from app.core.schema import to_camel
 from app.core.orm import select
@@ -18,7 +27,7 @@ from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse
 from app.schemas.bandwidth import FlowPreflightResponse
 from app.services.driver_manager import driver_manager
-from app.services.runtime_settings import refresh_runtime_settings, resolve as resolve_runtime_settings
+from app.services.runtime_settings import get_runtime_settings, refresh_runtime_settings, resolve as resolve_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +40,9 @@ async def manage_flow_service(enable: bool) -> tuple[bool, str]:
     """
     Attempts to start or stop the ephemres-flowd (or legacy netmon-flowd) systemd service.
     First tries passwordless sudo systemctl, falling back to direct systemctl.
+
+    Starting also enables the unit (so it comes back after a reboot), stopping disables it.
+    A failure is reported, not raised: the setting is saved either way.
     """
     service_name = "ephemres-flowd"
     if not os.path.exists(f"/etc/systemd/system/{service_name}.service"):
@@ -306,40 +318,22 @@ async def update_settings(
 
     current_settings = await _read_settings_dict(db)
 
-    # Calculate effective values
-    if perf_mode_val is not None:
-        effective_perf_mode = bool(perf_mode_val)
-    else:
-        effective_perf_mode = bool(current_settings.get("performance_mode", False))
-
-    if flow_ingestion_val is not None:
-        effective_flow_enabled = bool(flow_ingestion_val)
-    else:
-        effective_flow_enabled = bool(current_settings.get("flow_ingestion_enabled", False))
-
     current_flow_enabled = bool(current_settings.get("flow_ingestion_enabled", False))
 
-    # Rule C (Prevent Orphaned Flow Ingestion)
-    if current_flow_enabled and perf_mode_val is False and flow_ingestion_val is not False:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot disable FastStore while Network Flow Telemetry is enabled. Please disable Flow Ingestion first.",
+    # Turning flow ingestion on runs the same preflight as the Flow tab: FastStore opens (flowd
+    # keeps its exporter banner and interface lists there) and nothing else holds the UDP ports.
+    # It does not depend on Performance Mode, which only moves the API's event broker to
+    # FastStore: flows go from the collector to the aggregator in memory. Requiring it, and a
+    # FastStore stream write, was left over from when flowd buffered flows in a stream.
+    if flow_ingestion_val and not current_flow_enabled:
+        ready, err_msg = await check_flow_prerequisites(
+            payload.flow_netflow_port or payload.flowNetflowPort,
+            payload.flow_ipfix_port or payload.flowIpfixPort,
         )
-
-    # Rule A (Enforce FastStore Memory Acceleration)
-    if effective_flow_enabled and not effective_perf_mode:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot enable Network Flow Telemetry: FastStore Memory Acceleration must be activated first.",
-        )
-
-    # Rule B (Enforce Active FastStore Service Connectivity & Stream Capability)
-    if effective_flow_enabled:
-        ready, err_msg = await check_redis_flow_prerequisites()
         if not ready:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot enable Network Flow Telemetry: FastStore prerequisite check failed ({err_msg}). Please ensure the FastStore engine is accessible.",
+                detail=f"Cannot enable Network Flow Telemetry: preflight check failed ({err_msg})",
             )
 
     reinit_driver = False
@@ -368,7 +362,7 @@ async def update_settings(
         await _upsert_setting(
             db, "flow_ingestion_enabled", "true" if flow_ingestion_val else "false"
         )
-        asyncio.create_task(manage_flow_service(enable=bool(flow_ingestion_val)))
+        spawn(manage_flow_service(enable=bool(flow_ingestion_val)), "manage_flow_service")
 
     flow_nf_val = payload.flow_netflow_port
     if flow_nf_val is None and payload.flowNetflowPort is not None:
@@ -402,7 +396,7 @@ async def update_settings(
         or (flow_ipfix_val is not None and int(flow_ipfix_val) != current_settings.get("flow_ipfix_port"))
     )
     if ports_changed and flow_ingestion_val is None and current_flow_enabled:
-        asyncio.create_task(manage_flow_service(enable=True))
+        spawn(manage_flow_service(enable=True), "manage_flow_service")
 
     if reinit_driver:
         logger.info("performance_mode updated. Re-initializing storage driver manager...")
@@ -497,9 +491,10 @@ async def update_organization_settings(
     return APIResponse.success(data=branding)
 
 
-async def _run_redis_flow_check() -> FlowPreflightResponse:
-
-    # 1. Linux Kernel Socket Receive Buffer (rmem_max) check
+async def _run_flow_check(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None) -> FlowPreflightResponse:
+    """Checks what ephemres-flowd needs to run: FastStore opens (flowd stops at start-up
+    without it), and the UDP ports it will listen on are free. rmem_max below 2 MB is reported
+    but does not fail the check: flowd still runs, it just drops packets sooner under load."""
     rmem_val = None
     rmem_ok = True
     try:
@@ -510,107 +505,50 @@ async def _run_redis_flow_check() -> FlowPreflightResponse:
     except Exception as e:
         logger.debug("Could not inspect /proc/sys/net/core/rmem_max: %s", e)
 
-    # 2. UDP Ports bind availability check
-    netflow_p = getattr(app_cfg.flow, "netflow_port", 2055)
-    ipfix_p = getattr(app_cfg.flow, "ipfix_port", 4739)
+    # The ports flowd will use: the ones saved in Settings (runtime settings), which override
+    # config.toml, or the ones being saved right now. Checking config.toml's tested the wrong
+    # ports once an admin had changed them.
+    rt = get_runtime_settings()
+    ports = (netflow_port or rt.flow_netflow_port, ipfix_port or rt.flow_ipfix_port)
     flow_bind = getattr(app_cfg.flow, "bind_host", "0.0.0.0")
-    port_conflicts = await _udp_port_conflicts(flow_bind, (netflow_p, ipfix_p))
+    port_conflicts = await _udp_port_conflicts(flow_bind, ports)
     udp_ports_ok = len(port_conflicts) == 0
 
-    fs_cfg = getattr(app_cfg, "faststore", getattr(app_cfg, "redis", None))
-    r_host = getattr(fs_cfg, "host", "127.0.0.1") if fs_cfg else "127.0.0.1"
-    r_port = getattr(fs_cfg, "port", 6379) if fs_cfg else 6379
-    r_db = getattr(fs_cfg, "db", 0) if fs_cfg else 0
-
+    faststore_ok = False
+    faststore_error = ""
     try:
-        from app.core.faststore import Redis
+        from app.core.faststore import FastStoreClient
 
-        client = Redis(
-            host=r_host,
-            port=r_port,
-            db=r_db,
-            socket_connect_timeout=2.0,
-            decode_responses=True,
-        )
-        await client.ping()
-        info = await client.info("server")
-        redis_version = info.get("redis_version", "0.0.0")
-
-        major = 0
-        try:
-            major = int(redis_version.split(".")[0])
-        except (ValueError, IndexError):
-            pass
-
-        version_supported = major >= 6
-
-        stream_ok = False
-        test_key = "stream:netflow:preflight_test"
-        try:
-            msg_id = await client.xadd(test_key, {"preflight": "ok"})
-            if msg_id:
-                stream_ok = True
-                await client.xdel(test_key, msg_id)
-        except Exception as str_err:
-            logger.warning("Preflight stream test failed: %s", str_err)
-
+        client = FastStoreClient(decode_responses=True)
+        faststore_ok = bool(await client.ping())
         await client.aclose()
-
-        ready = version_supported and stream_ok and udp_ports_ok
-        diag_parts = []
-        if ready:
-            diag_parts.append(f"FastStore engine ready with Stream wire-buffer support.")
-        elif not version_supported:
-            diag_parts.append(f"FastStore protocol version {redis_version} detected, but 6.0+ compatibility is required.")
-        elif not stream_ok:
-            diag_parts.append("FastStore wire buffer stream capabilities failed.")
-
-        if not rmem_ok and rmem_val is not None:
-            diag_parts.append(f"Kernel rmem_max ({rmem_val} B) is below recommended 2MB (2097152 B).")
-        if not udp_ports_ok:
-            diag_parts.append(f"UDP port conflict on port(s): {port_conflicts}.")
-
-        msg = " ".join(diag_parts) if diag_parts else "Flow preflight passed successfully."
-
-        return FlowPreflightResponse(
-            redis_connected=True,
-            redis_version=redis_version,
-            redis_version_supported=version_supported,
-            faststore_connected=True,
-            faststore_version=redis_version,
-            faststore_version_supported=version_supported,
-            stream_write_success=stream_ok,
-            rmem_max=rmem_val,
-            rmem_max_supported=rmem_ok,
-            udp_ports_available=udp_ports_ok,
-            port_conflicts=port_conflicts,
-            ready=ready,
-            message=msg,
-        )
     except Exception as exc:
-        return FlowPreflightResponse(
-            redis_connected=False,
-            redis_version=None,
-            redis_version_supported=False,
-            faststore_connected=False,
-            faststore_version=None,
-            faststore_version_supported=False,
-            stream_write_success=False,
-            rmem_max=rmem_val,
-            rmem_max_supported=rmem_ok,
-            udp_ports_available=udp_ports_ok,
-            port_conflicts=port_conflicts,
-            ready=False,
-            message=f"FastStore engine check failed: {exc}",
-        )
+        faststore_error = f"{type(exc).__name__}: {exc}"
+
+    ready = faststore_ok and udp_ports_ok
+    problems = []
+    if not faststore_ok:
+        problems.append(f"FastStore could not be opened ({faststore_error or 'no answer'}).")
+    if not udp_ports_ok:
+        problems.append(f"UDP port(s) already in use: {', '.join(str(p) for p in port_conflicts)}.")
+    if not rmem_ok and rmem_val is not None:
+        problems.append(f"Kernel rmem_max is {rmem_val} B, below the recommended 2 MB (2097152 B).")
+    message = " ".join(problems) if problems else "Ready: FastStore opens and the flow ports are free."
+
+    return FlowPreflightResponse(
+        faststore_connected=faststore_ok,
+        rmem_max=rmem_val,
+        rmem_max_supported=rmem_ok,
+        udp_ports_available=udp_ports_ok,
+        port_conflicts=port_conflicts,
+        ready=ready,
+        message=message,
+    )
 
 
-async def check_redis_flow_prerequisites() -> tuple[bool, str]:
-    """
-    Validates Redis 6+ connectivity and stream write capability required for Flow Telemetry.
-    Returns (ready: bool, message: str).
-    """
-    res = await _run_redis_flow_check()
+async def check_flow_prerequisites(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None) -> tuple[bool, str]:
+    """The flow preflight as (ready, message), for PATCH /settings."""
+    res = await _run_flow_check(netflow_port, ipfix_port)
     return res.ready, res.message
 
 
@@ -618,8 +556,6 @@ async def check_redis_flow_prerequisites() -> tuple[bool, str]:
 async def test_flow_preflight(
     current_user: dict = Depends(require_admin),
 ):
-    """
-    Validates Redis 6+ connectivity and stream write capability required for Flow Telemetry.
-    """
-    res = await _run_redis_flow_check()
+    """The Flow tab's Diagnostic Preflight (see _run_flow_check)."""
+    res = await _run_flow_check()
     return APIResponse.success(data=res)
