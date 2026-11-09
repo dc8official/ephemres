@@ -153,6 +153,50 @@
         </form>
       </div>
     </div>
+
+    <!-- Generated password: the server returns it once, so it is shown until dismissed. -->
+    <div
+      class="modal-overlay"
+      v-if="generatedCredential"
+      @keydown="onGeneratedModalKeydown"
+    >
+      <div
+        ref="generatedModalRef"
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="generated-modal-title"
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h3 id="generated-modal-title">Temporary Password for {{ generatedCredential.username }}</h3>
+        </div>
+        <div class="modal-form">
+          <div class="form-group">
+            <label for="generated-password">Temporary Password</label>
+            <input
+              id="generated-password"
+              ref="generatedInputRef"
+              :value="generatedCredential.password"
+              type="text"
+              readonly
+              class="form-input generated-password"
+              @focus="$event.target.select()"
+            />
+          </div>
+          <p class="generated-note">
+            Give this password to {{ generatedCredential.username }} now: it is not shown again.
+            They must choose a new one when they sign in.
+          </p>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" @click="copyGeneratedPassword">
+              {{ generatedCopied ? 'Copied' : 'Copy' }}
+            </button>
+            <button type="button" class="btn-primary" @click="closeGeneratedModal">Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -193,6 +237,43 @@ const addModalRef = ref(null)
 let addOpenerElement = null
 const resetModalRef = ref(null)
 let resetOpenerElement = null
+
+// { username, password } when the server generated a password (the form was left blank). The
+// API returns it only in that one response, so it stays on screen until the admin dismisses it.
+const generatedCredential = ref(null)
+const generatedModalRef = ref(null)
+const generatedInputRef = ref(null)
+const generatedCopied = ref(false)
+
+function showGeneratedPassword(username, response) {
+  const password = response?.data?.data?.generated_password
+  if (!password) return
+  generatedCopied.value = false
+  generatedCredential.value = { username, password }
+  nextTick(() => {
+    generatedInputRef.value?.focus()
+  })
+}
+
+async function copyGeneratedPassword() {
+  try {
+    // Needs HTTPS (or localhost); otherwise the text is selected for a manual copy.
+    await navigator.clipboard.writeText(generatedCredential.value.password)
+    generatedCopied.value = true
+  } catch {
+    generatedInputRef.value?.select()
+  }
+}
+
+function closeGeneratedModal() {
+  generatedCredential.value = null
+}
+
+function onGeneratedModalKeydown(e) {
+  if (e.key === 'Escape') {
+    closeGeneratedModal()
+  }
+}
 
 const userForm = reactive({
   username: '',
@@ -269,8 +350,9 @@ async function saveNewUser() {
       role: userForm.role,
       password: userForm.password || undefined,
     }
-    await createUser(payload)
+    const res = await createUser(payload)
     closeAddModal()
+    showGeneratedPassword(payload.username, res)
     toast.add({
       severity: 'success',
       summary: 'User Created',
@@ -296,8 +378,9 @@ async function executeResetPassword() {
   userSaving.value = true
   try {
     const payload = resetPasswordVal.value ? { password: resetPasswordVal.value } : {}
-    await resetUserPassword(targetUser.value.id, payload)
+    const res = await resetUserPassword(targetUser.value.id, payload)
     closeResetModal()
+    showGeneratedPassword(targetUser.value.username, res)
     toast.add({
       severity: 'success',
       summary: 'Password Reset',
@@ -376,6 +459,17 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.generated-password {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.02em;
+}
+
+.generated-note {
+  margin: 0 0 16px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 .settings-users-pane {
   display: flex;
   flex-direction: column;
