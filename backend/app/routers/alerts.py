@@ -1,3 +1,11 @@
+"""Alert channel management (admin only): create, edit, delete and test channels, and read the
+delivery history.
+
+A channel's settings (webhook URL, SMTP password, custom headers) are stored encrypted
+(core/crypto) and returned masked. The settings page sends masked values back unchanged when
+an admin edits other fields, so a value still showing the mask means "keep the stored one"
+(_merge_channel_config).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +40,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
+# Hides secrets in what the API returns: the webhook URL (it often carries a token), the SMTP
+# password, and any header whose name suggests a credential.
 def _mask_channel_config(channel_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
     masked = dict(config)
     if "webhook_url" in masked and masked["webhook_url"]:
@@ -62,6 +72,8 @@ def _decrypt_config_dict(raw_config: str) -> Dict[str, Any]:
         return {}
 
 
+# Applies an edit on top of the stored settings. A value containing the mask character (•) keeps
+# the stored value; a header set to null is removed.
 def _merge_channel_config(existing_cfg: Dict[str, Any], new_cfg: Dict[str, Any]) -> Dict[str, Any]:
     merged_cfg = dict(existing_cfg)
     for k, v in new_cfg.items():

@@ -64,7 +64,7 @@
           </div>
         </div>
 
-        <!-- Auto-Refresh Interval Selector (UI-07) -->
+        <!-- Auto-Refresh Interval Selector -->
         <div class="auto-refresh-selector">
           <label class="refresh-label">Refresh:</label>
           <select v-model="autoRefreshInterval" @change="handleAutoRefreshChange" class="refresh-select">
@@ -972,7 +972,8 @@ const windowOptions = ['1h', '6h', '24h', '7d', '30d']
 const selectedWindow = ref('1h')
 const loading = ref(false)
 
-// Auto-Refresh state (UI-07)
+// Auto-refresh: reloads every view every N seconds (0 = off), skipping a tick while a load is
+// still running.
 const autoRefreshInterval = ref('0')
 let refreshTimer = null
 
@@ -1953,7 +1954,7 @@ onUnmounted(() => {
   font-size: 0.6875rem;
 }
 
-/* Auto-Refresh (UI-07) */
+/* Auto-Refresh */
 .auto-refresh-selector {
   display: flex;
   align-items: center;
@@ -2018,7 +2019,7 @@ onUnmounted(() => {
   font-size: 0.7rem;
 }
 
-/* Top Conversations Header & Search (UI-09) */
+/* Top Conversations Header & Search */
 .section-header-split {
   display: flex;
   justify-content: space-between;

@@ -1,3 +1,4 @@
+"""UDP listener for flow exports: receives each datagram, parses it and hands its flows on."""
 from __future__ import annotations
 
 import asyncio
@@ -77,8 +78,15 @@ class FlowCollector:
         self._transports: List[asyncio.DatagramTransport] = []
 
     def handle_packet(self, data: bytes, addr: tuple[str, int], listen_port: int) -> None:
+        """Parse one datagram and pass its flows to the sink.
+
+        The format comes from the version field, not the port: a router sending IPFIX to the
+        NetFlow port is still read as IPFIX. A packet that can't be parsed is dropped quietly
+        (debug log at most): one bad packet must not cost the rest of the stream."""
         self.packets_received += 1
         exporter_ip = addr[0]
+        # Senders that can't be a real exporter. 127.0.0.1 stays allowed, so an exporter or a
+        # test generator on the same host still works.
         try:
             ip_obj = ipaddress.ip_address(exporter_ip)
             if ip_obj.is_multicast or (ip_obj.is_loopback and str(ip_obj) != "127.0.0.1") or ip_obj.is_unspecified or ip_obj.is_reserved:
@@ -89,6 +97,7 @@ class FlowCollector:
         if len(data) < 4:
             return
 
+        # Every format starts with a 16-bit version: 5 and 9 for NetFlow, 10 for IPFIX (RFC 7011).
         version = struct.unpack_from("!H", data, 0)[0]
         if self.exporter_filter is not None and version in (5, 9, 10):
             # v5 and v9 headers carry the record count; IPFIX only a length, so count 1 per packet.
@@ -137,11 +146,13 @@ class FlowCollector:
                 inodes.add(str(os.fstat(sock.fileno()).st_ino))
             except OSError:
                 pass
+        # /proc/net/udp has one line per UDP socket on the host. Column 10 is the socket's inode
+        # (how we find ours) and the last column is the kernel's drop count for that socket.
         drops = 0
         for table in ("/proc/net/udp", "/proc/net/udp6"):
             try:
                 with open(table) as fh:
-                    next(fh, None)
+                    next(fh, None)  # header line
                     for line in fh:
                         fields = line.split()
                         if len(fields) >= 13 and fields[9] in inodes:
@@ -153,6 +164,7 @@ class FlowCollector:
     def _create_socket(self, port: int) -> socket.socket:
         # No SO_REUSEADDR: UDP has no TIME_WAIT to work around, and on Linux it would let any other
         # local process that also sets it bind the same port and receive the unicast flow datagrams.
+        # AF_INET only: exporters must send over IPv4 (the flows themselves may be IPv6).
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         set_receive_buffer(sock, f"flow socket UDP {port}")
         sock.setblocking(False)

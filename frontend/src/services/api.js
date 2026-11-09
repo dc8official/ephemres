@@ -85,6 +85,8 @@ class ApiClient {
           headers: headerObj,
         }
 
+        // Not signed in (expired, signed out elsewhere, or ended by a password change): forget
+        // the stored profile and go to the sign-in page.
         if (response.status === 401) {
           clearUserState()
           if (typeof window !== 'undefined' && window.location.pathname !== '/login') {

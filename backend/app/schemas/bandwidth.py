@@ -432,13 +432,10 @@ class MapExporterRequest(BaseModel):
 
 
 class FlowPreflightResponse(BaseModel):
-    redis_connected: bool
-    redis_version: Optional[str] = None
-    redis_version_supported: bool
-    faststore_connected: Optional[bool] = None
-    faststore_version: Optional[str] = None
-    faststore_version_supported: Optional[bool] = None
-    stream_write_success: bool
+    """What ephemres-flowd needs: FastStore opens and its UDP ports are free (ready). A low
+    rmem_max is reported but doesn't fail it. The Redis version and stream-write fields are
+    gone: flowd no longer writes flows to a stream."""
+    faststore_connected: bool
     rmem_max: Optional[int] = None
     rmem_max_supported: bool = True
     udp_ports_available: bool = True

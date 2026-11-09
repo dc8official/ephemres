@@ -1,3 +1,14 @@
+"""Each endpoint's normal round-trip time, for telling a slow endpoint from a healthy one.
+
+For every endpoint and hour of the week (Monday 00:00 to Sunday 23:00, 168 slots) the cache
+holds the mean and standard deviation of RTT from node_historical_baselines. The engine passes
+the current slot's figures to classify_ping_result, which marks an endpoint that answers every
+ping UP-UNSTABLE when its RTT is above mean + 3 x deviation.
+
+Without history there is no baseline (None) and RTT is not judged: during an endpoint's first
+7 days and for any empty slot. Loss still decides UP, UP-UNSTABLE and DOWN as usual. (A fixed
+50 ms +/- 15 ms default used to apply here, which marked healthy distant sites UP-UNSTABLE.)
+"""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +22,8 @@ from app.core.orm import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-# Default static baseline values for fallback & grace period (< 7 days of historical data)
+# DEFAULT_MEAN_MS is no longer used as a fallback (no baseline until real history); kept for
+# imports. DEFAULT_STDDEV_MS still replaces a zero spread in real history.
 DEFAULT_MEAN_MS: float = 50.0
 DEFAULT_STDDEV_MS: float = 15.0
 DEFAULT_K_MULTIPLIER: float = 3.0
@@ -76,7 +88,10 @@ class BaselineCache:
                 if not (0 <= idx < 168):
                     continue
 
-                mean = float(row.historical_mean) if row.historical_mean is not None else DEFAULT_MEAN_MS
+                # An hour with no replies has no mean: leave its slot empty (no baseline).
+                if row.historical_mean is None:
+                    continue
+                mean = float(row.historical_mean)
                 stddev = float(row.historical_stddev) if row.historical_stddev is not None else DEFAULT_STDDEV_MS
                 sample_count = int(getattr(row, "sample_count", 100)) if getattr(row, "sample_count", None) is not None else 100
 
@@ -117,10 +132,10 @@ class BaselineCache:
 
         Index Calculation = (day_of_week * 24) + hour_of_day (0=Monday..6=Sunday).
 
-        Fallback logic:
-        1. Returns default baseline if < 7 days of onboarding records.
-        2. Returns default baseline if array index contains None.
-        3. Returns default stddev if stddev == 0 or total sample count represents < 7 days of collection.
+        No baseline (None) until there is real history, so latency is not judged at all:
+        1. during the endpoint's first 7 days (grace period);
+        2. when the hour-of-week slot has no data.
+        With history, a zero spread falls back to DEFAULT_STDDEV_MS.
         """
         now_utc = datetime.now(timezone.utc)
 
@@ -131,7 +146,7 @@ class BaselineCache:
                 created_at = created_at.replace(tzinfo=timezone.utc)
             age_days = (now_utc - created_at).total_seconds() / 86400.0
             if age_days < GRACE_PERIOD_DAYS:
-                return (DEFAULT_MEAN_MS, DEFAULT_STDDEV_MS, 0)
+                return None
 
         if isinstance(day_of_week, datetime):
             dt = day_of_week
@@ -146,17 +161,17 @@ class BaselineCache:
             hour = dt.hour
 
         if not (0 <= dow <= 6 and 0 <= hour <= 23):
-            return (DEFAULT_MEAN_MS, DEFAULT_STDDEV_MS, 0)
+            return None
 
         index = (dow * 24) + hour
 
         endpoint_arr = self._cache.get(endpoint_id)
         if not endpoint_arr or index >= len(endpoint_arr):
-            return (DEFAULT_MEAN_MS, DEFAULT_STDDEV_MS, 0)
+            return None
 
         entry = endpoint_arr[index]
         if entry is None:
-            return (DEFAULT_MEAN_MS, DEFAULT_STDDEV_MS, 0)
+            return None
 
         mean, stddev, count = entry
         effective_stddev = stddev if (stddev is not None and stddev > 0) else DEFAULT_STDDEV_MS

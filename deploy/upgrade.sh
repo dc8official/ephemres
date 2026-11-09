@@ -668,6 +668,7 @@ nginx_site_body() {
         | grep -vE '^$|^(server_name|ssl_certificate|ssl_certificate_key)[[:space:]]'
 }
 
+# Prints the nginx template with this server's names and certificate paths filled in.
 render_nginx_site() {
     # render_nginx_site TEMPLATE SERVER_NAMES CERTIFICATE KEY
     awk -v names="$2" -v cert="$3" -v key="$4" '
@@ -677,6 +678,11 @@ render_nginx_site() {
         { print }' "$1"
 }
 
+# A v3.2.0/v3.3.0 nginx site still points at /opt/netmon/noop. If it is the old template
+# unchanged (apart from names, certificates and certbot's lines), it is replaced by the current
+# template with the same names and certificates. If an admin edited it, only the path is
+# changed, so their edits survive. Either way nginx -t must pass, or the old site is put back
+# and the upgrade stops.
 migrate_legacy_nginx_site() {
     local site="/etc/nginx/sites-available/netmon"
     local old_template="/opt/netmon/noop/deploy/nginx.conf.template"
@@ -717,6 +723,8 @@ migrate_legacy_nginx_site() {
     echo -e "${YELLOW}       of ${INSTALL_DIR}/deploy/nginx.conf.template. Merge them in by hand when convenient.${NC}"
 }
 
+# Stops and disables the old netmon-* units, moves their nginx site over (see above), and keeps
+# flow collection on when the old server was receiving flows.
 migrate_legacy_services() {
     echo -e "${GREEN}[INFO] Disabling legacy netmon-api, netmon-engine and netmon-flowd units...${NC}"
     systemctl stop netmon-api netmon-engine netmon-flowd 2>/dev/null || true
@@ -725,8 +733,9 @@ migrate_legacy_services() {
     migrate_legacy_nginx_site
 
     # v3.2/v3.3.0 collected flows whenever netmon-flowd was enabled; v3.3.5 starts ephemres-flowd
-    # only when flow ingestion is switched on, which also needs FastStore performance mode. A server
-    # that was receiving flows keeps collecting them: set both, as the Settings page would.
+    # only when flow ingestion is switched on. A server that was receiving flows keeps collecting
+    # them. Performance mode is left as it is: flowd doesn't depend on it (it used to be switched
+    # on here too, because of a Settings check left over from when flows went through FastStore).
     if [[ ${LEGACY_FLOWD_ENABLED} -eq 1 ]]; then
         local recent_flows
         recent_flows=$(PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -tAc \
@@ -735,12 +744,12 @@ migrate_legacy_services() {
             2>>"${UPGRADE_LOG}" || true)
         if [[ "${recent_flows}" == "t" ]]; then
             if PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -v ON_ERROR_STOP=1 -qc \
-                "INSERT INTO app_settings (setting_key, setting_value) VALUES ('performance_mode', 'true'), ('flow_ingestion_enabled', 'true')
+                "INSERT INTO app_settings (setting_key, setting_value) VALUES ('flow_ingestion_enabled', 'true')
                  ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_at = now();" \
                 >/dev/null 2>>"${UPGRADE_LOG}"; then
-                echo -e "${GREEN}[INFO] netmon-flowd was receiving flows: flow ingestion (with FastStore performance mode) stays on under ephemres-flowd.${NC}"
+                echo -e "${GREEN}[INFO] netmon-flowd was receiving flows: flow ingestion stays on under ephemres-flowd.${NC}"
             else
-                echo -e "${YELLOW}[WARN] netmon-flowd was receiving flows, but flow ingestion could not be switched on (see ${UPGRADE_LOG}). Enable FastStore and Flow Ingestion in Settings to resume collection.${NC}"
+                echo -e "${YELLOW}[WARN] netmon-flowd was receiving flows, but flow ingestion could not be switched on (see ${UPGRADE_LOG}). Enable Flow Ingestion in Settings to resume collection.${NC}"
             fi
         else
             echo -e "${YELLOW}[INFO] netmon-flowd was enabled but received no flows in the last 7 days: flow ingestion stays off (enable it in Settings when needed).${NC}"

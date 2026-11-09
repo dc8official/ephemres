@@ -1,3 +1,12 @@
+"""Baseline routes: the traceroute path to each endpoint while it is healthy.
+
+Root-cause analysis compares a failure traceroute with this path. It is recorded when an
+endpoint is added, on demand (Refresh baseline), after a recovery, and every night at midnight
+(the server's local time) for endpoints that are UP and have scheduled discovery on. The API
+worker holding the scheduler lock (services/scheduler_leader) queues the nightly run, which is
+worked through one endpoint at a time, 0.5 s apart. Each path is also given a boundary tier
+(classify_boundary_tier), and the gateway's MAC is checked for an HSRP/VRRP/GLBP failover.
+"""
 from __future__ import annotations
 
 import asyncio

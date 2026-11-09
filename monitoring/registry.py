@@ -1,3 +1,9 @@
+"""In-memory list of the endpoints this engine process monitors, with their settings and tasks.
+
+It lets a cycle read per-endpoint switches (incident traces, RCA) without a database query, and it
+is the one place a monitoring task is started or cancelled. The engine refreshes it from the
+database every 30 s (monitoring.engine.main).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +38,8 @@ class MonitoredEndpoint:
 
 
 def _get_val(obj: Any, key: str, default: Any = None) -> Any:
-    """Extracts an attribute from an ORM model, dataclass, or dictionary safely."""
+    """Extracts an attribute from an ORM model, dataclass, or dictionary safely.
+    A value of None also gives `default`."""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -41,15 +48,6 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
         val = getattr(obj, key, default)
         return default if val is None else val
     return default
-
-
-def _has_val(obj: Any, key: str) -> bool:
-    """Checks if a key/attribute is present in an ORM model, dataclass, or dictionary."""
-    if obj is None:
-        return False
-    if isinstance(obj, dict):
-        return key in obj
-    return hasattr(obj, key)
 
 
 class EndpointRegistry:
@@ -89,6 +87,7 @@ class EndpointRegistry:
         if not ep_id:
             raise ValueError("Endpoint data must contain a valid UUID id.")
 
+        # An inet value can carry a prefix length ("10.0.0.1/24"); ping wants the bare address.
         ip_addr = str(_get_val(ep_data, "ip_address", "")).split("/")[0].strip()
         hostname = str(_get_val(ep_data, "hostname", ip_addr))
         device_type = str(_get_val(ep_data, "device_type", "SERVER"))
@@ -158,69 +157,6 @@ class EndpointRegistry:
 
         return endpoint
 
-    async def update_endpoint(self, ep_data: dict[str, Any] | Any) -> Optional[MonitoredEndpoint]:
-        """Updates target attributes in place without losing active sweep continuity."""
-        ep_id = _get_val(ep_data, "id")
-        if isinstance(ep_id, str):
-            ep_id = UUID(ep_id)
-        if not ep_id:
-            return None
-
-        async with self._lock:
-            existing = self._endpoints.get(ep_id)
-            if not existing:
-                return None
-
-            if _has_val(ep_data, "ip_address"):
-                existing.ip_address = str(
-                    _get_val(ep_data, "ip_address", existing.ip_address)
-                ).split("/")[0].strip()
-            if _has_val(ep_data, "hostname"):
-                existing.hostname = str(
-                    _get_val(ep_data, "hostname", existing.hostname)
-                )
-            if _has_val(ep_data, "endpoint_status"):
-                existing.endpoint_status = str(
-                    _get_val(ep_data, "endpoint_status", existing.endpoint_status)
-                ).upper()
-            if _has_val(ep_data, "monitoring_enabled"):
-                val = _get_val(ep_data, "monitoring_enabled")
-                if val is not None:
-                    existing.monitoring_enabled = bool(val)
-            if _has_val(ep_data, "allow_incident_trace"):
-                val = _get_val(ep_data, "allow_incident_trace")
-                if val is not None:
-                    existing.allow_incident_trace = bool(val)
-            if _has_val(ep_data, "allow_topology_discovery"):
-                val = _get_val(ep_data, "allow_topology_discovery")
-                if val is not None:
-                    existing.allow_topology_discovery = bool(val)
-            if _has_val(ep_data, "enable_rca"):
-                val = _get_val(ep_data, "enable_rca")
-                if val is not None:
-                    existing.enable_rca = bool(val)
-            if _has_val(ep_data, "enable_scheduled_discovery"):
-                val = _get_val(ep_data, "enable_scheduled_discovery")
-                if val is not None:
-                    existing.enable_scheduled_discovery = bool(val)
-            if _has_val(ep_data, "is_l2_segment"):
-                val = _get_val(ep_data, "is_l2_segment")
-                if val is not None:
-                    existing.is_l2_segment = bool(val)
-            if _has_val(ep_data, "manual_parent_id"):
-                val = _get_val(ep_data, "manual_parent_id")
-                if isinstance(val, str):
-                    val = UUID(val)
-                existing.manual_parent_id = val
-
-            # Check if task needs cancellation due to disabling
-            should_run = existing.endpoint_status == "ACTIVE" and existing.monitoring_enabled
-            if not should_run and ep_id in self._running_tasks:
-                logger.info("Registry: Cancelling sweep task for updated disabled target %s", ep_id)
-                self._running_tasks[ep_id].cancel()
-                self._running_tasks.pop(ep_id, None)
-
-            return existing
 
     async def remove_endpoint(self, endpoint_id: UUID) -> None:
         """
@@ -295,6 +231,7 @@ class EndpointRegistry:
         """Returns in-memory operational toggles to prevent in-cycle database queries."""
         ep = self._endpoints.get(endpoint_id)
         if not ep:
+            # Unknown endpoint: the column defaults, everything on.
             return {
                 "allow_incident_trace": True,
                 "enable_rca": True,

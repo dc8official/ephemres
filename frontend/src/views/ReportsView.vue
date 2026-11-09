@@ -567,6 +567,9 @@ function setRange(range) {
   }
 }
 
+// The page's time filter as an ISO UTC range for the API. Custom start/end come from
+// datetime-local inputs, which are in the browser's local time; toISOString() converts them.
+// The CSV and PDF dialogs repeat this logic with their own range selectors.
 function getQueryRange() {
   const now = new Date()
   let start = ''
@@ -619,6 +622,7 @@ async function loadAllReports() {
   }
 }
 
+// Mean of the measured endpoints' uptime %, each endpoint weighted the same (as the API does).
 const fleetSla = computed(() => {
   const values = reportRows.value.map((r) => r.uptime_percentage).filter((v) => v !== null && v !== undefined)
   if (values.length === 0) return null
@@ -780,6 +784,8 @@ function closeExportModal() {
   })
 }
 
+// Keyboard focus stays inside the open dialog: Tab from the last control wraps to the first,
+// Shift+Tab from the first wraps to the last, and Escape closes it (focus returns to the opener).
 function onExportModalKeydown(e) {
   if (e.key === 'Escape') {
     closeExportModal()
@@ -826,6 +832,7 @@ async function triggerExport() {
 
   try {
     const res = await exportBatchTelemetry(targetIds, start, end, selectedColumns.value)
+    // Save the response as a file: link it from an object URL, click it, then free the URL.
     const blob = new Blob([res.data], { type: 'text/csv' })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -903,6 +910,7 @@ function closePdfModal() {
   })
 }
 
+// Same focus handling as the CSV dialog (onExportModalKeydown).
 function onPdfModalKeydown(e) {
   if (e.key === 'Escape') {
     closePdfModal()
@@ -978,6 +986,8 @@ async function triggerPdfExport() {
     console.error('Failed to generate PDF report:', err)
     let errorDetail = 'Failed to generate PDF audit report.'
     if (err.response?.data) {
+      // The request asked for a Blob, so an error's JSON body arrives as a Blob too: read it
+      // as text to get the server's message.
       if (err.response.data instanceof Blob) {
         try {
           const text = await err.response.data.text()

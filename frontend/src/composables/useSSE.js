@@ -1,3 +1,8 @@
+// Live updates from the server (Server-Sent Events on /api/v1/events/stream). One connection is
+// shared by the whole app; pages subscribe to it. When it drops, it retries after 1, 2, 4 ...
+// seconds (at most 15), and once it is back the onReconnect callbacks run so pages can reload
+// what they missed. subscribeBatched hands events over once per animation frame, so a burst of
+// state changes redraws a page once.
 import { ref } from 'vue'
 
 const sseConnected = ref(false)

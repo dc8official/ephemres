@@ -51,6 +51,7 @@ run() {
     fi
 }
 
+# Installing needs root; a dry run doesn't.
 check_root() {
     if [ "$EUID" -ne 0 ] && [ "$DRY_RUN" = false ]; then
         echo "Error: This script must be run as root."

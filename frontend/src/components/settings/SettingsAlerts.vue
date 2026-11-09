@@ -452,19 +452,21 @@ const endpointSearchFilter = ref('')
 const channelModalRef = ref(null)
 let channelOpenerElement = null
 
+// ids are the backend's channel_type values (schemas/alerts.ChannelType); any other value is
+// rejected with a 422.
 const providerOptions = [
-  { id: 'MICROSOFT_TEAMS', name: 'Microsoft Teams', icon: '👥', format: 'Adaptive Card' },
+  { id: 'TEAMS', name: 'Microsoft Teams', icon: '👥', format: 'Adaptive Card' },
   { id: 'DISCORD', name: 'Discord', icon: '🎮', format: 'Rich Embed' },
   { id: 'SLACK', name: 'Slack', icon: '💬', format: 'Block Kit' },
   { id: 'EMAIL_SMTP', name: 'Email (SMTP)', icon: '✉️', format: 'HTML & Text' },
   { id: 'GENERIC_WEBHOOK', name: 'Generic Webhook', icon: '🌐', format: 'JSON REST' },
 ]
 
-const selectedProvider = ref('MICROSOFT_TEAMS')
+const selectedProvider = ref('TEAMS')
 
 const channelForm = reactive({
   name: '',
-  channel_type: 'MICROSOFT_TEAMS',
+  channel_type: 'TEAMS',
   is_enabled: true,
   config: {
     webhook_url: '',
@@ -483,7 +485,7 @@ const channelForm = reactive({
 
 function formatProviderName(providerType) {
   const map = {
-    MICROSOFT_TEAMS: 'Microsoft Teams',
+    TEAMS: 'Microsoft Teams',
     DISCORD: 'Discord',
     SLACK: 'Slack',
     EMAIL_SMTP: 'Email (SMTP)',
@@ -494,7 +496,7 @@ function formatProviderName(providerType) {
 
 function getWebhookPlaceholder(providerType) {
   switch (providerType) {
-    case 'MICROSOFT_TEAMS':
+    case 'TEAMS':
       return 'https://outlook.office.com/webhook/...'
     case 'DISCORD':
       return 'https://discord.com/api/webhooks/...'
@@ -551,9 +553,9 @@ function selectProvider(providerId) {
 function openAddChannelModal() {
   channelOpenerElement = document.activeElement
   editingChannelId.value = null
-  selectedProvider.value = 'MICROSOFT_TEAMS'
+  selectedProvider.value = 'TEAMS'
   channelForm.name = ''
-  channelForm.channel_type = 'MICROSOFT_TEAMS'
+  channelForm.channel_type = 'TEAMS'
   channelForm.is_enabled = true
   channelForm.config = {
     webhook_url: '',
@@ -576,6 +578,8 @@ function openAddChannelModal() {
   })
 }
 
+// The channel's secrets arrive masked (•). Saving without retyping them sends the masks back,
+// which the server reads as "keep the stored value" (routers/alerts._merge_channel_config).
 function openEditChannelModal(ch) {
   channelOpenerElement = document.activeElement
   editingChannelId.value = ch.id

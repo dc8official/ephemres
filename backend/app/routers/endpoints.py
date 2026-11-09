@@ -1,6 +1,12 @@
+"""Endpoint routes: list, detail, probe history, create, update, delete, and route discovery.
+
+Deleting is soft: the row is marked DELETED and keeps its history. Adding an endpoint with the
+IP of a deleted one restores that row (its history comes back) rather than making a new one;
+ip_address is unique, so a second row with the same address can't exist anyway. The engine
+picks up added, changed or removed endpoints within 30 s on its own.
+"""
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import logging
 from datetime import datetime, timedelta, timezone
@@ -8,6 +14,7 @@ from typing import Literal, Optional
 from uuid import UUID
 
 from app.core.asgi import APIRouter, Depends, HTTPException, Query
+from app.core.background import spawn
 from app.core.schema import BaseModel, ConfigDict, field_validator
 from app.core.orm import AsyncSession
 
@@ -21,12 +28,15 @@ from app.services.uptime_calculator import (
     calculate_uptime_denominator_and_percentage,
     get_service_gap_intervals,
     get_unknown_seconds_for_period,
+    merge_intervals,
 )
 
 logger = logging.getLogger(__name__)
 
 
 async def _bg_run_initial_discovery(endpoint_id: UUID, ip_address: str) -> None:
+    """After an endpoint is added or restored: traceroute to it to record its baseline route
+    (what root-cause analysis compares against later), then rebuild the topology map."""
     from app.database import AsyncSessionLocal
     from app.services.baseline_route import refresh_baseline_route
     from app.services.topology import topology_manager
@@ -175,6 +185,7 @@ async def list_endpoints(
     now_utc = datetime.now(timezone.utc)
     since_utc = now_utc - timedelta(hours=24)
 
+    # ACTIVE / DISABLED filter on endpoint_status, MONITORED / UNMONITORED on monitoring_enabled.
     ALLOWED_STATUSES = {"ACTIVE", "DISABLED", "MONITORED", "UNMONITORED"}
     clean_status = None
     if status is not None:
@@ -185,6 +196,7 @@ async def list_endpoints(
                 detail=f"Invalid status filter '{status}'. Must be one of: {', '.join(sorted(ALLOWED_STATUSES))}",
             )
 
+    # Paging is optional: with neither page nor page_size every endpoint comes back at once.
     calc_page = page if isinstance(page, int) else None
     calc_page_size = page_size if isinstance(page_size, int) else None
     if calc_page is not None and calc_page_size is None:
@@ -192,6 +204,8 @@ async def list_endpoints(
     elif calc_page_size is not None and calc_page is None:
         calc_page = 1
 
+    # Time inside monitoring gaps is unknown: left out of both the UP seconds and the window.
+    gap_intervals = await get_service_gap_intervals(db, since_utc, now_utc)
     repo = EndpointRepository(db)
     rows = await repo.list_with_stats(
         status=clean_status,
@@ -199,8 +213,8 @@ async def list_endpoints(
         now_utc=now_utc,
         page=calc_page,
         page_size=calc_page_size,
+        gaps=merge_intervals(gap_intervals),
     )
-    gap_intervals = await get_service_gap_intervals(db, since_utc, now_utc)
 
     data = []
     for row in rows:
@@ -238,6 +252,7 @@ async def list_endpoints(
             "avg_rtt_ms": (
                 float(row["avg_rtt_ms"]) if row.get("avg_rtt_ms") is not None else None
             ),
+            # When the current state began (not the last probe): see EndpointRepository.
             "last_seen": row["last_seen"],
             "uptime_percentage_24h": uptime_percentage,
         })
@@ -304,16 +319,17 @@ async def get_endpoint(
     now_utc = datetime.now(timezone.utc)
     since_utc = now_utc - timedelta(hours=24)
 
+    gap_intervals = await get_service_gap_intervals(db, since_utc, now_utc)
     repo = EndpointRepository(db)
     row = await repo.get_detail_with_stats(
         endpoint_id=endpoint_id,
         since_utc=since_utc,
         now_utc=now_utc,
+        gaps=merge_intervals(gap_intervals),
     )
     if not row:
         raise HTTPException(status_code=404, detail="Endpoint not found.")
 
-    gap_intervals = await get_service_gap_intervals(db, since_utc, now_utc)
     uptime_percentage = calculate_uptime_denominator_and_percentage(
         created_at=row["created_at"],
         start_time=since_utc,
@@ -383,7 +399,7 @@ async def create_endpoint(
             detail="An endpoint with this IP address already exists.",
         )
 
-    # Check for soft-deleted endpoint to restore
+    # Check for soft-deleted endpoint to restore: same row, so its history comes back too.
     existing_deleted = await repo.get_by_ip(request.ip_address, include_deleted=True)
     if existing_deleted and getattr(existing_deleted, "endpoint_status", "") == "DELETED":
         restored = await repo.restore_endpoint(
@@ -416,9 +432,7 @@ async def create_endpoint(
             },
         )
         await db.commit()
-        asyncio.create_task(
-            _bg_run_initial_discovery(existing_deleted.id, request.ip_address)
-        )
+        spawn(_bg_run_initial_discovery(existing_deleted.id, request.ip_address), "initial_discovery")
         return APIResponse.success(
             data={
                 "id": str(existing_deleted.id),
@@ -461,9 +475,7 @@ async def create_endpoint(
     await db.commit()
 
     if new_id:
-        asyncio.create_task(
-            _bg_run_initial_discovery(new_id, request.ip_address)
-        )
+        spawn(_bg_run_initial_discovery(new_id, request.ip_address), "initial_discovery")
 
     return APIResponse.success(
         data={"id": str(new_id), "message": "Endpoint created."},
@@ -486,6 +498,8 @@ async def update_endpoint(
     if not endpoint:
         raise HTTPException(status_code=404, detail="Endpoint not found.")
 
+    # A field left out, or sent as null, is not changed; except manual_parent_id, where an
+    # explicit null removes the parent (model_fields_set tells "sent as null" from "left out").
     updates = {}
     audit_details = {}
 
@@ -529,7 +543,7 @@ async def update_endpoint(
         updates["endpoint_status"] = request.endpoint_status
         audit_details["endpoint_status"] = request.endpoint_status
 
-    if request.manual_parent_id is not None:
+    if "manual_parent_id" in request.model_fields_set:
         if request.manual_parent_id:
             if str(request.manual_parent_id) == str(endpoint_id):
                 raise HTTPException(
@@ -566,6 +580,7 @@ async def update_endpoint(
 
     await db.commit()
 
+    # Only this API worker's map is rebuilt here; each process keeps its own (services/topology).
     try:
         await topology_manager.full_rebuild(db)
     except Exception:

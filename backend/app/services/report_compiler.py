@@ -1,3 +1,7 @@
+"""Gathers and formats the data behind the three PDF reports: availability (template A),
+bandwidth (B) and master (C, both together). The router renders the result through
+core/template.py and core/pdf.py.
+"""
 from __future__ import annotations
 
 import logging
@@ -34,6 +38,7 @@ from app.services.uptime_calculator import (
     calculate_device_gap_seconds,
     calculate_uptime_denominator_and_percentage,
     get_service_gap_intervals,
+    merge_intervals,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,6 +169,11 @@ async def compile_availability_report_data(
 ) -> Dict[str, Any]:
     """
     Compiles objective availability and SLA performance telemetry for Template A.
+
+    Per endpoint: uptime and downtime inside the window (monitoring-gap time counted as
+    neither), uptime %, outages (consecutive DOWN periods merged), packet loss over all probes
+    and probe-weighted RTT. Then the outage ledger, each outage with the RCA snapshot taken
+    for it. Fleet uptime and RTT are plain means over the monitored endpoints.
     """
     now_utc = datetime.now(timezone.utc)
     stmt = (
@@ -356,14 +366,8 @@ INCIDENT_LEDGER_LIMIT = 100
 _RCA_LEAD = timedelta(minutes=5)
 
 
-def _merge_intervals(intervals: List[Tuple[datetime, datetime]]) -> List[Tuple[datetime, datetime]]:
-    merged: List[List[datetime]] = []
-    for g_start, g_end in sorted((a, b) for a, b in intervals if b > a):
-        if merged and g_start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], g_end)
-        else:
-            merged.append([g_start, g_end])
-    return [(a, b) for a, b in merged]
+# Shared with the endpoint list (services/uptime_calculator.merge_intervals).
+_merge_intervals = merge_intervals
 
 
 def _overlap_seconds(start: datetime, end: datetime, intervals: List[Tuple[datetime, datetime]]) -> float:

@@ -27,6 +27,7 @@ const routes = [
     name: 'Settings',
     component: () => import('../views/SettingsView.vue'),
   },
+  // User management is a tab of the Settings page.
   {
     path: '/users',
     name: 'UserManagement',
@@ -49,6 +50,9 @@ const router = createRouter({
   routes,
 })
 
+// Pages need a signed-in user. The session cookie is HttpOnly, so the browser can't check it;
+// this only looks at the profile saved at sign-in (services/auth.js). The API is the real
+// check: a 401 from any call clears the profile and returns to /login (services/api.js).
 router.beforeEach((to, from, next) => {
   const currentUserState = loadUserFromStorage()
   const isAuthenticated = isValidUserObject(currentUserState)

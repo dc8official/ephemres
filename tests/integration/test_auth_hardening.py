@@ -213,3 +213,38 @@ def test_upgrade_keeps_a_password_the_operator_chose(timescale_dsn, admin_accoun
     assert must_change is False
     assert sessions == 1
     assert not report.exists()
+
+
+def test_session_limit_ends_the_oldest_session(timescale_dsn, run_sql):
+    """Past max_sessions the user's oldest session ends; registering a jti again adds nothing.
+
+    This used to be tested only on each worker's in-memory copy, which was removed: the store is
+    the only record of sessions."""
+    import uuid
+
+    user_id = uuid.uuid4()
+
+    async def seed(conn):
+        role_id = await conn.fetchval("SELECT id FROM roles WHERE role_name = 'VIEWER'")
+        await conn.execute(
+            """INSERT INTO users (id, username, password_hash, role_id, is_active, must_change_password)
+               VALUES ($1, 'session-limit', 'x', $2, true, false)""",
+            user_id, role_id,
+        )
+
+    run_sql(seed)
+
+    async def scenario(store, _factory):
+        uid = str(user_id)
+        await store.register_session(uid, "jti-1", max_sessions=2)
+        await asyncio.sleep(0.01)  # created_at decides which session is oldest
+        await store.register_session(uid, "jti-2", max_sessions=2)
+        await asyncio.sleep(0.01)
+        both = [await store.is_session_active(uid, j) for j in ("jti-1", "jti-2")]
+        await store.register_session(uid, "jti-3", max_sessions=2)
+        after = [await store.is_session_active(uid, j) for j in ("jti-1", "jti-2", "jti-3")]
+        return both, after
+
+    both, after = _with_store(timescale_dsn, scenario)
+    assert both == [True, True]
+    assert after == [False, True, True]

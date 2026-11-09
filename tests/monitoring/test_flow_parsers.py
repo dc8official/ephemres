@@ -361,6 +361,35 @@ class TestIPFIXParser(unittest.TestCase):
         self.assertEqual(flows[0]["src_ip"], "1.2.3.4")
         self.assertEqual(flows[0]["bytes"], 500)
 
+    def test_ipfix_microsecond_and_nanosecond_times_are_ntp_format(self):
+        """RFC 7011 6.1.9/6.1.10: seconds since 1900 in the high 32 bits, the fraction of a second
+        in the low 32. They were read as a count of us/ns since 1970: year 546,816, and the
+        aggregator dropped every flow."""
+
+        def ntp(unix_seconds, fraction):
+            return ((unix_seconds + 2208988800) << 32) | int(fraction * 2**32)
+
+        for start_ie, end_ie, template_id in ((154, 155, 262), (156, 157, 263)):
+            fields = [
+                (IE_SOURCE_IPV4_ADDRESS, 4),
+                (IE_DESTINATION_IPV4_ADDRESS, 4),
+                (start_ie, 8),
+                (end_ie, 8),
+            ]
+            self.parser.parse_packet(self._build_ipfix_template_packet(300, template_id, fields), "192.168.10.3")
+            rec_data = struct.pack(
+                "!4s4sQQ",
+                socket.inet_aton("10.0.0.1"),
+                socket.inet_aton("10.0.0.2"),
+                ntp(1699999990, 0.25),
+                ntp(1699999999, 0.5),
+            )
+            data_pkt = self._build_ipfix_data_packet(300, template_id, [rec_data])
+            flows = self.parser.parse_packet(data_pkt, "192.168.10.3")
+            self.assertEqual(len(flows), 1)
+            self.assertAlmostEqual(flows[0]["start_time"], 1699999990.25, places=6)
+            self.assertAlmostEqual(flows[0]["end_time"], 1699999999.5, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

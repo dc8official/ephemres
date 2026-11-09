@@ -1,9 +1,14 @@
+"""NetFlow v5 decoder. v5 has a fixed layout (no templates): a 24-byte header, then `count`
+48-byte records, IPv4 only."""
 from __future__ import annotations
 
 import socket
 import struct
 from typing import Any, List
 
+# Header: version, count, sys_uptime (ms), unix_secs, unix_nsecs, flow_sequence, engine_type,
+# engine_id, sampling. Record: src, dst, next hop, in/out ifIndex, packets, bytes, first/last
+# (sys_uptime in ms), ports, pad, TCP flags, protocol, ToS, src/dst AS, src/dst mask, pad.
 HEADER_STRUCT = struct.Struct("!HHIIIIBBH")
 RECORD_STRUCT = struct.Struct("!IIIHHIIIIHHBBBBHHBBH")
 HEADER_SIZE = HEADER_STRUCT.size  # 24 bytes
@@ -42,6 +47,7 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
     multiplier = sampling_interval if sampling_interval > 0 else 1
 
     expected_len = HEADER_SIZE + (count * RECORD_SIZE)
+    # A truncated datagram keeps the records that arrived whole.
     actual_records = min(count, (len(data) - HEADER_SIZE) // RECORD_SIZE)
 
     flows: List[dict[str, Any]] = []
@@ -78,14 +84,14 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
         # 0.0.0.0: delivered locally or not routed.
         next_hop = socket.inet_ntoa(struct.pack("!I", nexthop_int)) if nexthop_int else None
 
-        # 32-bit sysUpTime rollover compensation
-        # sys_uptime is the current uptime in ms when packet was sent
-        # first_ms / last_ms are uptimes in ms when flow started / ended
+        # Flow times come as router uptime in ms; the header gives the uptime and the wall-clock
+        # time when the packet was sent, so a flow's time is send time minus how long ago it was.
         def calc_flow_time(uptime_ms: int) -> float:
             diff = sys_uptime - uptime_ms
             if diff < 0:
-                diff += 0x100000000  # 2^32 ms rollover
-            # If device rebooted or diff is unreasonably large (> 30 days), fallback to unix_secs
+                # The 32-bit uptime counter wrapped (every 2^32 ms, about 49.7 days) in between.
+                diff += 0x100000000
+            # Over 30 days ago can't be a live flow (a reboot or a bad counter): use the send time.
             if diff > 2592000000:
                 return float(unix_secs)
             return float(unix_secs) - (diff / 1000.0)

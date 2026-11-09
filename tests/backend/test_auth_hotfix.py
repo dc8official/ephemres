@@ -147,14 +147,11 @@ def test_role_change_signs_the_account_out():
 
 # --- H2: the shared store is the only session authority ------------------------------------
 
-def test_session_revoked_in_the_store_is_rejected_even_if_this_worker_remembers_it():
+def test_session_missing_from_the_store_is_rejected():
+    """Revoked on another worker means gone from the shared store; no worker keeps its own copy."""
     user_id = str(uuid4())
-    auth_service._active_user_sessions[user_id] = ["jti-x"]
-    try:
-        with patch.object(driver_manager, "get_session_store", return_value=InMemorySessionStore()):
-            assert _run(auth_service.is_session_active(user_id, "jti-x")) is False
-    finally:
-        auth_service._active_user_sessions.pop(user_id, None)
+    with patch.object(driver_manager, "get_session_store", return_value=InMemorySessionStore()):
+        assert _run(auth_service.is_session_active(user_id, "jti-x")) is False
 
 
 def test_session_store_failure_lets_nothing_through():
@@ -163,13 +160,9 @@ def test_session_store_failure_lets_nothing_through():
     store = AsyncMock()
     store.is_session_active.side_effect = RuntimeError("store down")
     user_id = str(uuid4())
-    auth_service._active_user_sessions[user_id] = ["jti-x"]
-    try:
-        with patch.object(driver_manager, "get_session_store", return_value=store):
-            with pytest.raises(RuntimeError):
-                _run(auth_service.is_session_active(user_id, "jti-x"))
-    finally:
-        auth_service._active_user_sessions.pop(user_id, None)
+    with patch.object(driver_manager, "get_session_store", return_value=store):
+        with pytest.raises(RuntimeError):
+            _run(auth_service.is_session_active(user_id, "jti-x"))
 
 
 # --- H3: lockout in the shared store, no username timing oracle ----------------------------
@@ -199,9 +192,8 @@ def test_unknown_username_spends_a_scrypt_check():
 
 
 def test_lockout_is_read_from_the_shared_store_only():
-    """A lock recorded by another worker applies here, whatever this worker's memory says."""
+    """A lock recorded by another worker applies here."""
     store = InMemorySessionStore(lockout_threshold=3)
-    auth_service._failed_attempts.clear()
     for _ in range(3):
         _run(store.record_failed_attempt("198.51.100.9", "admin"))
     with pytest.raises(HTTPException) as exc:

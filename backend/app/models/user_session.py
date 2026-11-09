@@ -1,8 +1,8 @@
-"""Ephemres Network Monitoring Platform — User Session Data Model.
+"""Ephemres Network Monitoring Platform: User Session Data Model.
 
-This module defines the persistent session model used by the PostgreSQL-native
-session driver (PostgresSessionStore) for managing active JWT JTI tokens,
-sliding inactivity timeouts, and concurrent device quotas.
+One row per signed-in session, used by PostgresSessionStore. A session is valid while its row
+exists and expires_at is in the future. The expiry is fixed at sign-in (activity does not extend
+it), and the per-user session limit deletes the oldest rows.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from app.database import Base
 
 class UserSession(Base):
     """Native Declarative ORM Model (app.core.orm.DeclarativeBase) representing
-
     active authenticated web sessions in the user_sessions table.
     """
 

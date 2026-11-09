@@ -163,6 +163,8 @@ function onDocumentClick(event) {
 }
 const showNav = computed(() => !noNavRoutes.includes(route.path))
 
+// Accounts that must change their password see only this dialog. The API enforces it too: every
+// other call answers 403 until the password is changed.
 const displayPasswordModal = computed(() => {
   return !!currentUser.value && !!mustChangePassword.value && route.path !== '/login'
 })

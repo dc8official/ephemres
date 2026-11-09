@@ -69,7 +69,7 @@ Clicking any endpoint opens its detailed forensic view with a live status bar (S
 
 Administrators can configure platform behavior across five dedicated tabs:
 1. **🔔 Alert Channels:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
-2. **⚡ Performance & Telemetry:** In-RAM FastStore acceleration toggle (`performance_mode` via `/dev/shm`), live FastStore preflight check, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), sampling rate, and live queue metrics.
+2. **⚡ Performance & Telemetry:** FastStore event-routing toggle (`performance_mode`; flows don't depend on it), flow diagnostic preflight, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), sampling rate, and live queue metrics.
 3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session inactivity timeout (minutes), and IP-scoped brute-force lockout threshold.
 4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation.
 5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG or JPEG, up to 1 MB) for branded PDF report generation.

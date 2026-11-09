@@ -1,3 +1,7 @@
+// Who is signed in, as far as the UI is concerned. The session itself is an HttpOnly cookie the
+// browser can't read, so sign-in also stores the username and role in sessionStorage (gone when
+// the tab closes) to decide what to show. It is not a security boundary: the server checks the
+// cookie, the role and any forced password change on every request.
 import { ref } from 'vue'
 import { closeConnection, resetConnection } from '../composables/useSSE.js'
 

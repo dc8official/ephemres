@@ -1,3 +1,10 @@
+"""Sign-in, sign-out and change-password routes, and the dependencies that authenticate every
+other API request (get_current_user, require_admin).
+
+A request is accepted when its token is validly signed and unexpired, its session (jti) is still
+in the session store, and the account still exists and is active. Role and the forced password
+change come from the database row each time, not from the token.
+"""
 from __future__ import annotations
 
 import logging
@@ -22,21 +29,15 @@ from app.services.driver_manager import driver_manager
 from app.services.runtime_settings import get_runtime_settings
 from app.services.auth_service import (
     burn_password_check_async,
-    clear_failed_attempts,
     create_access_token,
     decode_access_token,
     get_trusted_client_ip,
     hash_password,
     hash_password_async,
-    invalidate_all_user_sessions,
     invalidate_all_user_sessions_async,
-    invalidate_session,
     invalidate_session_async,
-    is_account_locked,
     is_session_active,
     needs_rehash,
-    record_failed_attempt,
-    register_session,
     register_session_async,
     verify_password,
     verify_password_async,
@@ -63,7 +64,7 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     client_ip = get_client_ip(http_request)
-    # Lockouts live in the shared session store only (PostgreSQL table or FastStore), so every
+    # Lockouts live in the shared session store only (the auth_login_failures table), so every
     # worker sees the same counters and a restart or junk-username flood cannot reset them.
     store = driver_manager.get_session_store()
     try:
@@ -114,6 +115,8 @@ async def login(
 
     user_id = getattr(user, "id", None)
     username = getattr(user, "username", payload.username)
+    # For the token and the response (what the browser shows); access checks re-read the role
+    # from the database on every request.
     role_name = "VIEWER"
     if hasattr(user, "role_name") and isinstance(user.role_name, str):
         role_name = user.role_name
@@ -136,6 +139,8 @@ async def login(
         )
         await db.commit()
 
+    # Register the session before handing out the token. Past max_active_sessions_per_user the
+    # oldest session of the account is ended (with the default of 2, a third sign-in ends the first).
     session_id = str(secrets.token_hex(16))
     max_sess = getattr(settings.security, "max_active_sessions_per_user", 2)
     await register_session_async(str(user_id), session_id, max_sessions=max_sess)
@@ -154,10 +159,14 @@ async def login(
         message="Login successful.",
     )
 
+    # Behind nginx the request can arrive here as plain http even when the browser used HTTPS, so
+    # an HSTS-enabled install also marks the cookie Secure.
     is_secure = http_request.url.scheme == "https" or getattr(
         settings.security, "hsts_enabled", False
     )
 
+    # HttpOnly: page scripts can't read it. SameSite=Lax: other sites can't make the browser
+    # send it with a POST, the main defence against cross-site request forgery here.
     response.set_cookie(
         key=cookie_name,
         value=token,
@@ -173,6 +182,8 @@ async def login(
 
 @router.post("/logout")
 async def logout(request: Request, response: Response):
+    """End this session in the store and clear the cookie. Always succeeds, even with an
+    expired or invalid token, so the browser can always sign out."""
     token = request.cookies.get(cookie_name)
     if not token:
         auth_header = request.headers.get("Authorization")
@@ -221,6 +232,8 @@ async def get_current_user_allow_password_change(
     Only the change-password route uses this directly; every other route goes through
     get_current_user, which refuses accounts that still have to change their password.
     """
+    # The cookie, the cookie's name in earlier releases, or a Bearer header (scripts and API
+    # clients).
     token = request.cookies.get(cookie_name) or request.cookies.get("lnmp_access_token")
     if not token:
         auth_header = request.headers.get("Authorization")
@@ -248,6 +261,8 @@ async def get_current_user_allow_password_change(
         )
         raise HTTPException(status_code=401, detail="Session expired or invalid.")
 
+    # Signed and unexpired is not enough: the session must not have been ended by sign-out, a
+    # password change or reset, or a newer sign-in (the per-user session limit).
     if not await is_session_active(str(user_id_str), jti):
         logger.warning(
             "Authentication session evicted (quota exceeded or expired)"
@@ -319,6 +334,7 @@ async def get_current_user_sse(request: Request) -> dict:
 async def require_admin(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    """Admin-only routes. The role here is the database's (set by get_current_user)."""
     if current_user.get("role") != "ADMIN":
         raise HTTPException(status_code=403, detail="Admin access required.")
     return current_user
@@ -362,6 +378,8 @@ async def change_password(
     hashed = await hash_password_async(clean_new_pass)
 
     await auth_repo.update_password(user_uuid, hashed, must_change_password=False)
+    # Sign out every other session of this account (another device, or whoever had the old
+    # password); the one making the change stays signed in.
     current_jti = current_user.get("jti")
     await invalidate_all_user_sessions_async(str(user_uuid), except_jti=current_jti)
     await auth_repo.create_audit_log(

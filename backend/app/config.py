@@ -1,3 +1,18 @@
+"""Start-up configuration, read once per process from config.toml and the environment.
+
+The file is the first that exists of: $EPHEMRES_CONFIG_PATH (an error if it names a missing
+file), /etc/ephemres/config.toml, /etc/netmon/config.toml (installs from before the rename),
+deploy/config.template.toml in the repository, ./config.toml. A config under /etc defaults to
+the production environment, where start-up refuses the built-in development secret and keys
+shorter than MIN_SECRET_LENGTH (see the checks at the end of this module).
+
+Any field can be overridden by an environment variable EPHEMRES_<SECTION>__<FIELD> (two
+underscores), for example EPHEMRES_DATABASE__POOL_SIZE=20; the NETMON_ spelling still works.
+EPHEMRES_* variables in a .env file count too, but real environment variables win.
+
+Some of these values can also be changed in the Settings page at run time; those overrides live
+in the app_settings table (services/runtime_settings).
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -553,7 +568,7 @@ def _apply_env_overrides_and_validate(loaded: Settings, env_map: Dict[str, str])
         except Exception:
             pass
 
-    # FIX-09 (SEC-02): Refuse the public development key, or a short one, outside development.
+    # Refuse the public development key, or a short one, outside development.
     # A missing or unreadable env file would otherwise start every daemon with a key printed in
     # this repository, and anyone could sign admin session tokens.
     if loaded.environment.lower() not in ("development", "test"):
@@ -573,7 +588,7 @@ def _apply_env_overrides_and_validate(loaded: Settings, env_map: Dict[str, str])
                     "characters. Generate one with: openssl rand -hex 32"
                 )
 
-    # FIX-10 (SEC-04): Validate that allowed_origins does not contain "*" when allow_credentials=True
+    # Validate that allowed_origins does not contain "*" when allow_credentials=True
     if "*" in loaded.api.allowed_origins:
         raise ValueError(
             "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."

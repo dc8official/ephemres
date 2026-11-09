@@ -1,3 +1,19 @@
+"""FastStore: a Redis-compatible client backed by a SQLite file, used instead of a Redis server.
+
+Every Ephemres process on the host (API workers, engine, flowd) opens the same file, so it is
+how they share caches, event streams and pub/sub messages. It is not a network service:
+host, port and password are accepted for compatibility and ignored, and two machines never
+share one store.
+
+The file lives in /run/ephemres on an install (a systemd RuntimeDirectory: kept across service
+restarts, cleared at reboot), else /dev/shm or /tmp. Writes are not synced to disk
+(synchronous=OFF), so a crash can lose the last moments of data. Treat it as a cache: anything
+held only here is gone after a reboot. PostgreSQL is the record.
+
+Each command is a short SQLite transaction run in a worker thread (asyncio.to_thread), one
+at a time per file. Only part of Redis exists: strings with expiry, sets, sorted sets,
+streams with consumer groups, and pub/sub.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -68,6 +84,8 @@ def _get_faststore_dir() -> str:
     return "/tmp"
 
 
+# One file per user ID and database number, so services running as different users never
+# share (or fight over) a file.
 def _get_db_path(db: int = 0) -> str:
     base_dir = _get_faststore_dir()
     uid = os.getuid() if hasattr(os, "getuid") else 0
@@ -88,6 +106,8 @@ class _SharedSQLiteStore:
         self.db_num = int(db)
         self.db_path = _get_db_path(self.db_num)
 
+        # Refuse a file another user could have planted or can write: a leftover owned by
+        # someone else is removed, and a group- or world-writable database stops startup.
         for ext in ("", "-wal", "-shm", ".lock"):
             p = f"{self.db_path}{ext}"
             if os.path.exists(p):
@@ -215,6 +235,8 @@ class _SharedSQLiteStore:
     def _init_schema(self) -> None:
         with _DB_LOCK:
             cur = self._conn.cursor()
+            # WAL lets readers in other processes go on while one writes. synchronous=OFF skips
+            # fsync: fast, and acceptable for data that can be rebuilt (see the module docstring).
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA wal_autocheckpoint=1000;")
             cur.execute("PRAGMA journal_size_limit=16777216;")
@@ -336,6 +358,14 @@ def _parse_score_bound(val: Union[str, float, int], is_min: bool) -> Tuple[float
 
 
 class PubSub:
+    """Redis-style subscriptions across processes.
+
+    publish() hands a message straight to subscribers in the same process, and also appends it
+    to the pubsub_log table, which subscribers in other processes poll every 50 ms. A
+    subscriber only sees messages published after it was created, and the log keeps the last
+    10,000 messages, so one that falls far behind loses the oldest.
+    """
+
     def __init__(self, client: "FastStoreClient") -> None:
         self._client = client
         self._channels: Set[str] = set()
@@ -436,6 +466,9 @@ class PubSub:
 
 
 class Pipeline:
+    """Queues commands and runs them together at execute(). With transaction=True (the
+    default) they run in one SQLite transaction: all are applied or none."""
+
     def __init__(self, client: "FastStoreClient", transaction: bool = True) -> None:
         self._client = client
         self._transaction = transaction
@@ -602,6 +635,7 @@ class FastStoreClient:
     async def flushdb(self) -> bool:
         return await self._store.execute(self._flushdb_op)
 
+    # Redis-shaped answer for code that reads INFO; only used_memory (the file size) is real.
     async def info(self, section: Optional[str] = None) -> Dict[str, Any]:
         used_mem = 0
         try:

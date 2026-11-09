@@ -4,7 +4,8 @@ Every flow used to be written to a FastStore stream, read back and trimmed. The 
 the whole stream every 100 writes; above about 1,000 flows/s it starved the reader and then
 deleted flows nobody had read, without a log line (65 % stored at 1,000 flows/s, 20 % at
 1,500). Loss can now only happen in two visible places: the kernel socket buffer when flowd is
-too slow, and the memory cap while the database is down. Both are logged every minute.
+too slow, and the memory cap when rollups can't be written fast enough (database down, or more
+new conversations than it can take). Both are logged every minute, with the cause.
 """
 from __future__ import annotations
 
@@ -81,3 +82,98 @@ def test_loss_is_logged_every_minute(monkeypatch):
     fmt, *args = log.warning.call_args[0]
     msg = fmt % tuple(args)
     assert "9000 flows received" in msg and "LOST 40 datagrams" in msg and "5 flows" in msg
+
+
+# --- S4: a full buffer names its real cause ---------------------------------------------------
+# The buffer filled, and the log said "database down?", also when the database was fine and
+# rollup writes simply could not keep up with new conversations (about 15,000 to 20,000 rows/s
+# on one TimescaleDB, mostly the upsert and its indexes).
+
+
+def _fill(agg, n, salt=0):
+    agg.ingest([
+        {"exporter_ip": "192.0.2.1", "src_ip": f"10.{salt}.{i // 250}.{i % 250}", "dst_ip": "10.255.0.1",
+         "dst_port": 443, "protocol": 6, "bytes": 100, "packets": 1, "start_time": 1700000000.0}
+        for i in range(n)
+    ])
+
+
+def _run_stats_once(monkeypatch, collector, agg, set_counters):
+    from monitoring.flow import daemon
+
+    calls = []
+
+    async def fake_sleep(seconds):
+        if calls:
+            raise asyncio.CancelledError
+        calls.append(seconds)
+        set_counters()
+
+    monkeypatch.setattr(daemon.asyncio, "sleep", fake_sleep)
+    log = MagicMock()
+    monkeypatch.setattr(daemon, "logger", log)
+    try:
+        asyncio.run(daemon._log_flow_stats(collector, agg))
+    except asyncio.CancelledError:
+        pass
+    return log
+
+
+def test_full_buffer_while_the_database_refuses_writes_says_so(monkeypatch):
+    agg = _aggregator()
+    agg.max_accumulator_entries = 10
+    agg.last_flush_error = "ConnectionRefusedError: [Errno 111] Connection refused"
+    log = MagicMock()
+    monkeypatch.setattr("monitoring.flow.aggregator.logger", log)
+    _fill(agg, 15)
+    assert agg.flows_dropped_memory == 5
+    msg = log.error.call_args[0][0] % tuple(log.error.call_args[0][1:])
+    assert "database is not accepting rollup writes" in msg and "Connection refused" in msg
+
+
+def test_full_buffer_while_writes_succeed_blames_throughput_not_the_database(monkeypatch):
+    collector = FlowCollector()
+    collector.udp_drops = lambda: 0
+    agg = _aggregator()
+    agg.last_flush_rows, agg.last_flush_seconds = 180_000, 11.2
+
+    def counters():
+        collector.flows_received = 900_000
+        agg.rows_stored = 600_000
+        agg.flows_dropped_memory = 300_000
+
+    log = _run_stats_once(monkeypatch, collector, agg, counters)
+    msg = log.warning.call_args[0][0] % tuple(log.warning.call_args[0][1:])
+    assert "not keeping up with new conversations" in msg and "180000 rows in 11.2 s" in msg
+    assert "database down" not in msg
+
+
+def test_slow_flushes_are_warned_about_before_anything_is_lost(monkeypatch):
+    collector = FlowCollector()
+    collector.udp_drops = lambda: 0
+    agg = _aggregator()
+    agg.last_flush_rows, agg.last_flush_seconds = 150_000, 14.0  # flushes are 10 s apart
+
+    def counters():
+        collector.flows_received = 500_000
+        agg.rows_stored = 450_000
+
+    log = _run_stats_once(monkeypatch, collector, agg, counters)
+    msg = log.warning.call_args[0][0] % tuple(log.warning.call_args[0][1:])
+    assert "falling behind" in msg and "150000 rows in 14.0 s" in msg
+
+
+def test_buffer_full_error_is_logged_once_a_minute_at_most(monkeypatch):
+    agg = _aggregator()
+    agg.max_accumulator_entries = 5
+    log = MagicMock()
+    monkeypatch.setattr("monitoring.flow.aggregator.logger", log)
+    clock = [1000.0]
+    monkeypatch.setattr("monitoring.flow.aggregator.time.monotonic", lambda: clock[0])
+    _fill(agg, 20, salt=1)
+    clock[0] += 30
+    _fill(agg, 20, salt=2)
+    assert log.error.call_count == 1
+    clock[0] += 31
+    _fill(agg, 20, salt=3)
+    assert log.error.call_count == 2

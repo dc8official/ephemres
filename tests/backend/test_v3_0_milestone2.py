@@ -136,12 +136,13 @@ class TestMilestone2DynamicRegistry(unittest.TestCase):
             self.assertEqual(self.registry.endpoints_count, 1)
             self.assertEqual(self.registry.running_tasks_count, 1)
 
-            # Update hostname and toggles
-            updated = await self.registry.update_endpoint({
-                "id": ep_id,
-                "hostname": "switch-1-renamed",
-                "allow_incident_trace": False,
-            })
+            # The engine re-adds endpoints every 30 s: a changed row updates in place, and the
+            # running task is kept (no second task).
+            updated = await self.registry.add_endpoint(
+                {**ep_data, "hostname": "switch-1-renamed", "allow_incident_trace": False},
+                spawn_coro_fn=dummy_coro,
+            )
+            self.assertEqual(self.registry.running_tasks_count, 1)
             self.assertEqual(updated.hostname, "switch-1-renamed")
             self.assertFalse(self.registry.get_toggles(ep_id)["allow_incident_trace"])
 

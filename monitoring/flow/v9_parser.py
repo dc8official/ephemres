@@ -1,3 +1,13 @@
+"""NetFlow v9 decoder (RFC 3954).
+
+v9 is template-based: a router first sends a template (template ID plus a list of field type
+and length), then data records laid out by it. Templates are kept per (exporter, source_id,
+template_id). Data that arrives before its template, as it does after a flowd restart, waits a
+few seconds in an orphan buffer and is decoded when the template comes.
+
+Options templates are skipped, so a v9 router's sampling rate is not read from them: the
+admin's sampling multiplier (applied in the collector) covers it.
+"""
 from __future__ import annotations
 
 import collections
@@ -6,7 +16,9 @@ import struct
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# Packet header: version, count, sys_uptime (ms), unix_secs, sequence, source_id.
 HEADER_STRUCT = struct.Struct("!HHIIII")
+# Each FlowSet: id (0 template, 1 options template, 256+ data with that template), length.
 FLOWSET_HEADER_STRUCT = struct.Struct("!HH")
 
 # Standard Field Types (RFC 3954)
@@ -50,8 +62,9 @@ class V9Template:
 class V9Parser:
     """
     Stateful NetFlow v9 template cache and binary decoder.
-    Tracks templates per (exporter_ip, source_id) with 1800s TTL.
-    Maintains an orphan Data FlowSet ring buffer (100 packets, 10s TTL).
+    Tracks templates per (exporter_ip, source_id). A template not re-sent for 30 minutes
+    (1800 s) is forgotten; routers re-send templates periodically, and each re-send renews it.
+    Data waiting for its template: at most 100 FlowSets per (exporter, source_id), each kept 10 s.
     """
 
     def __init__(self, template_ttl: float = 1800.0, orphan_ttl: float = 10.0):
@@ -136,9 +149,11 @@ class V9Parser:
         out_flows: List[dict[str, Any]],
     ) -> None:
         idx = 0
+        # One FlowSet can hold several templates back to back.
         while idx + 4 <= len(payload):
             template_id, field_count = struct.unpack_from("!HH", payload, idx)
             idx += 4
+            # IDs below 256 are reserved for FlowSet types, so this is padding or garbage.
             if template_id < 256:
                 break
             fields: List[Tuple[int, int]] = []
@@ -205,6 +220,7 @@ class V9Parser:
         flows: List[dict[str, Any]] = []
         offset = 0
 
+        # Records are fixed length in v9. Leftover bytes shorter than a record are padding.
         while offset + tmpl.total_length <= len(payload):
             src_ip: Optional[str] = None
             dst_ip: Optional[str] = None
@@ -248,6 +264,7 @@ class V9Parser:
                     tos = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_IN_BYTES:
                     octets = int.from_bytes(f_bytes, "big")
+                # Some exporters fill only the OUT counters; IN wins when both exist.
                 elif f_type == FT_OUT_BYTES and octets == 0:
                     octets = int.from_bytes(f_bytes, "big")
                 elif f_type == FT_IN_PKTS:
@@ -267,7 +284,9 @@ class V9Parser:
 
             offset += tmpl.total_length
 
+            # A record without both addresses carries nothing we store.
             if src_ip and dst_ip:
+                # Same uptime-to-wall-clock conversion as v5_parser.calc_flow_time.
                 def calc_v9_time(uptime_ms: Optional[int]) -> float:
                     if uptime_ms is None:
                         return float(unix_secs)

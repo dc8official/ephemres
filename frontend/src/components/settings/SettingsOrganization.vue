@@ -147,6 +147,8 @@ function removeLogo() {
   markDirty()
 }
 
+// The logo is stored as a data URL (org:logo_data in app_settings) and printed on the PDF
+// reports, so it is limited to PNG or JPEG and 1 MB.
 function handleFileUpload(event) {
   const file = event.target.files?.[0]
   if (!file) return

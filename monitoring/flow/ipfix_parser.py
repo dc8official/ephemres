@@ -1,3 +1,10 @@
+"""IPFIX decoder (RFC 7011, information elements from RFC 7012 / the IANA registry).
+
+IPFIX is NetFlow v9's standardised successor: the same template idea, with sets instead of
+FlowSets, an observation domain instead of source_id, enterprise-specific fields and fields of
+variable length. Templates and the orphan buffer work as in v9_parser. Options templates are
+skipped here too.
+"""
 from __future__ import annotations
 
 import collections
@@ -43,6 +50,20 @@ IE_FLOW_START_DELTA_MICROSECONDS = 158
 IE_FLOW_END_DELTA_MICROSECONDS = 159
 
 
+# Seconds from the NTP epoch (1900-01-01) to the Unix epoch (1970-01-01).
+NTP_TO_UNIX_SECONDS = 2208988800
+
+
+def ntp_timestamp_to_unix(raw: bytes) -> float:
+    """Decode a dateTimeMicroseconds or dateTimeNanoseconds value (RFC 7011 6.1.9 and 6.1.10).
+
+    Both use the 64-bit NTP timestamp format (RFC 5905 6): whole seconds since 1900 in the high
+    32 bits, the fraction of a second (in units of 2^-32 s) in the low 32. Microseconds and
+    nanoseconds differ only in how many fraction bits the exporter fills in."""
+    seconds, fraction = struct.unpack("!II", raw)
+    return seconds - NTP_TO_UNIX_SECONDS + fraction / 2**32
+
+
 class IPFIXFieldSpec:
     __slots__ = ("ie_id", "length", "enterprise_number")
 
@@ -65,6 +86,8 @@ class IPFIXTemplate:
     def __init__(self, template_id: int, fields: List[IPFIXFieldSpec]):
         self.template_id = template_id
         self.fields = fields
+        # A length of 65535 marks a variable-length field (RFC 7011 7): its real length comes
+        # first in each record. min_length counts it as its 1-byte length prefix.
         self.total_length = sum(f.length for f in fields)
         self.has_variable_length = any(f.length == 65535 for f in fields)
         self.min_length = sum(1 if f.length == 65535 else f.length for f in fields)
@@ -124,6 +147,7 @@ class IPFIXParser:
 
             set_payload = data[offset + SET_HEADER_STRUCT.size : set_end]
 
+            # Set IDs: 2 template, 3 options template, 256 and up data for that template ID.
             if set_id == 2:
                 # Template Set
                 self._parse_template_set(
@@ -167,6 +191,8 @@ class IPFIXParser:
                     break
                 raw_ie_id, field_len = struct.unpack_from("!HH", payload, idx)
                 idx += 4
+                # The top bit marks a vendor (enterprise) field: a 4-byte enterprise number
+                # follows, and the element ID is only meaningful within that vendor.
                 enterprise_bit = bool(raw_ie_id & 0x8000)
                 ie_id = raw_ie_id & 0x7FFF
                 enterprise_number: Optional[int] = None
@@ -180,6 +206,8 @@ class IPFIXParser:
             if len(fields) != field_count:
                 continue
 
+            # A template with no fields is a withdrawal (RFC 7011 8.1). It is stored empty, so
+            # data for that ID waits as orphans until a new template arrives.
             tmpl = IPFIXTemplate(template_id, fields)
             cache_key = (exporter_ip, obs_domain_id, template_id)
             self._templates[cache_key] = tmpl
@@ -252,6 +280,7 @@ class IPFIXParser:
             rec_offset = offset
             record_valid = True
             for f in tmpl.fields:
+                # Variable length: one length byte, or 255 followed by a 2-byte length.
                 if f.length == 65535:
                     if rec_offset >= len(payload):
                         record_valid = False
@@ -323,14 +352,12 @@ class IPFIXParser:
                     start_time = int.from_bytes(f_bytes, "big") / 1000.0
                 elif f.ie_id == IE_FLOW_END_MILLISECONDS:
                     end_time = int.from_bytes(f_bytes, "big") / 1000.0
-                elif f.ie_id == IE_FLOW_START_MICROSECONDS:
-                    start_time = int.from_bytes(f_bytes, "big") / 1_000_000.0
-                elif f.ie_id == IE_FLOW_END_MICROSECONDS:
-                    end_time = int.from_bytes(f_bytes, "big") / 1_000_000.0
-                elif f.ie_id == IE_FLOW_START_NANOSECONDS:
-                    start_time = int.from_bytes(f_bytes, "big") / 1_000_000_000.0
-                elif f.ie_id == IE_FLOW_END_NANOSECONDS:
-                    end_time = int.from_bytes(f_bytes, "big") / 1_000_000_000.0
+                # Not a count of us or ns: NTP format (see ntp_timestamp_to_unix). Any other
+                # length is malformed and leaves the time unset.
+                elif f.ie_id in (IE_FLOW_START_MICROSECONDS, IE_FLOW_START_NANOSECONDS) and len(f_bytes) == 8:
+                    start_time = ntp_timestamp_to_unix(f_bytes)
+                elif f.ie_id in (IE_FLOW_END_MICROSECONDS, IE_FLOW_END_NANOSECONDS) and len(f_bytes) == 8:
+                    end_time = ntp_timestamp_to_unix(f_bytes)
                 elif f.ie_id == IE_FLOW_START_DELTA_MICROSECONDS:
                     start_time = float(export_time) - (int.from_bytes(f_bytes, "big") / 1_000_000.0)
                 elif f.ie_id == IE_FLOW_END_DELTA_MICROSECONDS:
@@ -340,11 +367,16 @@ class IPFIXParser:
                 elif f.ie_id == IE_FLOW_END_SYS_UP_TIME:
                     last_up_ms = int.from_bytes(f_bytes, "big")
 
+            # A truncated record ends the set, and so does a record that read no bytes (it
+            # would loop forever).
             if not record_valid or rec_offset <= offset:
                 break
             offset = rec_offset
 
             if src_ip and dst_ip:
+                # Uptime-based times (IEs 21/22) count from the exporter's boot, which IPFIX sends
+                # in options data that is not read. So keep the flow's duration and assume it
+                # ended when the packet was exported.
                 if start_time is None and first_up_ms is not None and last_up_ms is not None:
                     dur_sec = max(0.0, (last_up_ms - first_up_ms) / 1000.0)
                     start_time = float(export_time) - dur_sec

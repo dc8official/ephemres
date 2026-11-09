@@ -1,3 +1,4 @@
+"""Maps the IP addresses in flows to Ephemres endpoints, and decides which senders are exporters."""
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,12 @@ class FlowCorrelator:
     - Exporters (devices sending NetFlow/IPFIX, matching primary IP or flow_exporter_ips aliases).
     - Traffic Participants (endpoints communicating across the network).
 
-    Tracks unmatched exporters in Redis ('flow:unmatched:<ip>') with a 15-minute TTL.
+    Tracks unmatched exporters in FastStore ('flow:unmatched:<ip>') with a 15-minute TTL.
+
+    The maps are rebuilt from the endpoints table at start, every 60 s, and at once when the
+    API announces a change on channel:registry_sync. Any endpoint's primary IP is accepted as an
+    exporter, plus the extra addresses in its flow_exporter_ips (a router often exports from a
+    loopback or management address that is not the one Ephemres pings).
     """
 
     def __init__(self, db_session_factory: Any, store_client: Any = None, *, redis_client: Any = None):
@@ -104,7 +110,8 @@ class FlowCorrelator:
             if flows_per_sec is not None:
                 await self.store.set(f"flow:unmatched:{ip}:fps", str(flows_per_sec), ex=900)
             await self.store.sadd("flow:unmatched:set", ip)
-            # Track in FastStore ZSET with sliding-window 24h prune (Defect D4 / D12)
+            # Last-seen time per IP in a sorted set, keeping the past 24 h and at most 1,000 IPs,
+            # so a scan from many spoofed sources can't grow it without limit.
             await self.store.zadd("flow:unmatched:zset", {ip: timestamp})
             cutoff = timestamp - 86400.0
             await self.store.zremrangebyscore("flow:unmatched:zset", "-inf", cutoff)

@@ -1,3 +1,8 @@
+"""Report routes: the Reports page's fleet summary, per-endpoint uptime, incidents and events,
+the CSV telemetry export, and the PDF reports.
+
+The PDF numbers come from services/report_compiler.py; the page's numbers are computed here.
+"""
 from __future__ import annotations
 
 import csv
@@ -33,6 +38,8 @@ from app.schemas import (
 )
 from app.core.pdf import render_pdf_async
 from app.services.report_compiler import (
+    _merge_intervals,
+    _overlap_seconds,
     compile_availability_report_data,
     compile_bandwidth_report_data,
     compile_master_report_data,
@@ -60,6 +67,8 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 def parse_datetime_param(val: str, is_end: bool = False) -> datetime:
+    """A query date as an aware UTC datetime. A full timestamp without a zone is taken as UTC;
+    a bare date (YYYY-MM-DD) means the whole UTC day, so as an end date it is 23:59:59."""
     try:
         val_str = str(val).strip()
         if "T" in val_str or " " in val_str:
@@ -89,6 +98,7 @@ def _validate_date_range(
             status_code=400,
             detail="start_date must be before or equal to end_date.",
         )
+    # Two years at most: bounds how much history one request can make the database scan.
     diff_days = (end_date - start_date).total_seconds() / 86400.0
     if diff_days > 730:
         raise HTTPException(
@@ -116,22 +126,49 @@ async def get_fleet_summary(
     res = await db.execute(stmt)
     endpoints = res.scalars().all()
 
+    # Monitoring gaps, merged so overlapping ones are not subtracted twice.
+    gap_intervals = await get_service_gap_intervals(db, start_dt, end_dt)
+    gaps = _merge_intervals(gap_intervals)
+
+    # Per endpoint, in one pass over endpoint_events: seconds UP and DOWN inside the window (each
+    # period clipped to it, an open period running to now, and time inside a monitoring gap left
+    # out, as in the PDF report: a database outage leaves the open period running across its
+    # gap), and incidents, counted as DOWN periods not preceded by another DOWN one, so 24 h
+    # splits of one outage count once. rn = 1 is the latest period, which gives the current state.
     stats_map = {}
     now_utc = datetime.now(timezone.utc)
     cte_query = text("""
-        WITH ranked_events AS (
+        WITH gaps AS (
+            SELECT g.s, g.e
+            FROM unnest(CAST(:gap_starts AS timestamptz[]), CAST(:gap_ends AS timestamptz[])) AS g(s, e)
+        ),
+        clipped AS (
             SELECT
                 endpoint_id,
                 operational_state,
                 detailed_state,
-                duration_seconds,
                 start_time,
-                end_time,
-                GREATEST(0, EXTRACT(EPOCH FROM (LEAST(:end_dt, COALESCE(end_time, NOW())) - GREATEST(:start_dt, start_time))))::BIGINT AS clamped_duration,
-                ROW_NUMBER() OVER (PARTITION BY endpoint_id ORDER BY start_time DESC) AS rn,
-                LAG(operational_state) OVER (PARTITION BY endpoint_id ORDER BY start_time ASC) AS prev_state
+                GREATEST(CAST(:start_dt AS timestamptz), start_time) AS seg_start,
+                LEAST(CAST(:end_dt AS timestamptz), COALESCE(end_time, NOW())) AS seg_end
             FROM endpoint_events
             WHERE (end_time IS NULL OR end_time >= :start_dt) AND start_time <= :end_dt
+        ),
+        ranked_events AS (
+            SELECT
+                endpoint_id,
+                operational_state,
+                detailed_state,
+                CASE WHEN seg_end <= seg_start THEN 0 ELSE GREATEST(0,
+                    EXTRACT(EPOCH FROM (seg_end - seg_start))
+                    - COALESCE((
+                        SELECT SUM(EXTRACT(EPOCH FROM (LEAST(seg_end, g.e) - GREATEST(seg_start, g.s))))
+                        FROM gaps g
+                        WHERE g.s < seg_end AND g.e > seg_start
+                    ), 0)
+                ) END::BIGINT AS clamped_duration,
+                ROW_NUMBER() OVER (PARTITION BY endpoint_id ORDER BY start_time DESC) AS rn,
+                LAG(operational_state) OVER (PARTITION BY endpoint_id ORDER BY start_time ASC) AS prev_state
+            FROM clipped
         )
         SELECT
             endpoint_id,
@@ -147,10 +184,17 @@ async def get_fleet_summary(
     """)
 
     try:
-        raw_res = await db.execute(cte_query, {"start_dt": start_dt, "end_dt": end_dt})
+        raw_res = await db.execute(cte_query, {
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            # Tuples go to asyncpg as PostgreSQL arrays (a list would be sent as JSON).
+            "gap_starts": tuple(g_start for g_start, _ in gaps),
+            "gap_ends": tuple(g_end for _, g_end in gaps),
+        })
         for r in raw_res.mappings():
             stats_map[str(r["endpoint_id"])] = r
     except Exception as e:
+        # The same sums in Python, used only if the query above fails.
         logger.warning("CTE fleet summary query failed, using manual event fallback: %s", e)
         ev_stmt = (
             select(EndpointEvent)
@@ -175,9 +219,11 @@ async def get_fleet_summary(
             for ev in evs:
                 ev_start = ev.start_time
                 ev_end = ev.end_time or now_utc
-                dur = max(0, int((min(end_dt, ev_end) - max(start_dt, ev_start)).total_seconds()))
-                if dur == 0 and getattr(ev, "duration_seconds", 0) > 0:
-                    dur = ev.duration_seconds
+                seg_start, seg_end = max(start_dt, ev_start), min(end_dt, ev_end)
+                dur = 0
+                if seg_end > seg_start:
+                    span = (seg_end - seg_start).total_seconds()
+                    dur = max(0, int(round(span - _overlap_seconds(seg_start, seg_end, gaps))))
                 if ev.operational_state == "UP":
                     up_sec += dur
                 elif ev.operational_state == "DOWN":
@@ -197,7 +243,6 @@ async def get_fleet_summary(
                 "latest_detailed_state": last_ev.detailed_state,
             }
 
-    gap_intervals = await get_service_gap_intervals(db, start_dt, end_dt)
     endpoint_summaries = []
 
     for ep in endpoints:
@@ -227,9 +272,12 @@ async def get_fleet_summary(
         effective_end = min(end_dt, now_utc)
         total_seconds = max(0, int((effective_end - effective_start).total_seconds()))
 
+        # Time inside monitoring gaps (engine stopped, database lost) is unknown: it is taken out
+        # of the uptime denominator.
         unknown_seconds = calculate_device_gap_seconds(
             effective_start, effective_end, gap_intervals
         )
+        # The "* 60" fallbacks assume one-minute rows; only reached when the sums are missing.
         up_sec = int(ep_stats["up_seconds"]) if (ep_stats and "up_seconds" in ep_stats) else up_count * 60
         down_sec = int(ep_stats["down_seconds"]) if (ep_stats and "down_seconds" in ep_stats) else down_count * 60
         uptime_percentage = calculate_uptime_denominator_and_percentage(
@@ -281,6 +329,8 @@ async def get_fleet_summary(
     total_incident_count = sum(e.incident_count for e in endpoint_summaries)
     total_downtime_seconds = sum(e.downtime_seconds for e in endpoint_summaries)
 
+    # Fleet SLA: the plain mean of the monitored endpoints' percentages (each endpoint counts the
+    # same, however long it existed in the window). The page recomputes it the same way.
     monitored_for_sla = [
         e for e in endpoint_summaries
         if getattr(e, "monitoring_enabled", True) is not False
@@ -335,12 +385,14 @@ async def get_uptime_report(
     total_seconds = max(0, int((effective_end - effective_start).total_seconds()))
 
     gap_intervals = await get_service_gap_intervals(db, start_dt, end_dt)
+    gaps = _merge_intervals(gap_intervals)
     unknown_seconds = calculate_device_gap_seconds(
         effective_start, effective_end, gap_intervals
     )
     rep_repo = ReportRepository(db)
     events = await rep_repo.get_uptime_events(endpoint_id, effective_start, end_dt)
 
+    # Time inside a monitoring gap is neither up nor down (as in the PDF report).
     uptime_seconds = 0
     downtime_seconds = 0
     for ev in events:
@@ -348,7 +400,10 @@ async def get_uptime_report(
         ev_end = ev.end_time or now_utc
         clamped_start = max(start_dt, ev_start)
         clamped_end = min(end_dt, ev_end)
-        dur = max(0, int((clamped_end - clamped_start).total_seconds()))
+        if clamped_end <= clamped_start:
+            continue
+        span = (clamped_end - clamped_start).total_seconds()
+        dur = max(0, int(round(span - _overlap_seconds(clamped_start, clamped_end, gaps))))
         if ev.operational_state == "UP":
             uptime_seconds += dur
         else:
@@ -502,6 +557,8 @@ class BatchExportRequest(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# CSV injection guard: a cell starting with = + - @ (or a tab or CR) is run as a formula by
+# Excel and LibreOffice. A leading apostrophe makes them show it as text instead.
 def sanitize_csv_field(val: Any) -> str:
     s = str(val) if val is not None else ""
     if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
@@ -509,6 +566,9 @@ def sanitize_csv_field(val: Any) -> str:
     return s
 
 
+# Turns requested columns into CSV headers, always in the standard order. The page sends the
+# header names themselves; API callers may use looser names ("rtt", "latency", "loss").
+# Matching is by substring and the first match wins. Hostname and IP address are always included.
 def resolve_export_columns(requested_columns: Optional[List[str]]) -> List[str]:
     standard_order = [
         "Endpoint_ID",
@@ -586,6 +646,10 @@ async def csv_generator(
     if not endpoint_ids:
         return
 
+    # Keyset pagination over (start_time, id): each batch resumes after the last row of the one
+    # before, so the database never has to skip earlier rows the way OFFSET does, and every
+    # batch opens and closes its own short session. Rows are flushed to the client every 500.
+    # Events are selected by their start time.
     last_start_time: Optional[datetime] = None
     last_id: Optional[UUID] = None
     limit = 1000
@@ -836,6 +900,8 @@ async def generate_pdf_report(
             detail=f"Report rendering error: {str(exc)}",
         )
 
+    # The SHA-256 goes in the log and a response header, so a PDF shown later as evidence can be
+    # checked against the one that was generated.
     sha256_hash = hashlib.sha256(pdf_bytes).hexdigest()
     logger.info(
         "Successfully compiled %s PDF report for %d targets (SHA256: %s, size: %d bytes)",
@@ -864,7 +930,8 @@ async def batch_export_telemetry(
     request: BatchExportRequest,
     current_user: dict = Depends(get_current_user_sse),
 ):
-    # Any authenticated user may export: telemetry export is read-only.
+    # Any authenticated user may export: telemetry export is read-only. The SSE variant of the
+    # auth check releases its database connection at once, since the stream can run for minutes.
     logger.info(
         "Starting batch telemetry CSV streaming export for %d endpoints (user: %s)",
         len(request.endpoint_ids),

@@ -2,6 +2,17 @@
 
 Implements FastAPI, Starlette, APIRouter, Dependency Injection, Middleware,
 Request/Response, and TestClient using 100% Python Standard Library.
+
+uvicorn runs it as an ASGI app. The names follow FastAPI so existing routes kept working, but
+some behaviour differs:
+- A plain `def` route or dependency runs on the event loop itself. FastAPI moves those to a
+  thread pool; here a blocking call inside one stalls every request on that worker.
+- Only /openapi.json is served, and it lists paths and methods without parameter or body
+  schemas. There is no /docs or /redoc page, whatever docs_url and redoc_url say.
+- HTTP and lifespan only: no WebSockets (live updates use Server-Sent Events).
+- A streaming response is sent while the route's dependencies are still open, so a database
+  session from Depends(get_db) is held for the whole stream. Long streams authenticate with a
+  short session of their own instead (routers/auth.get_current_user_sse).
 """
 
 from __future__ import annotations
@@ -59,6 +70,7 @@ from app.core.schema import (
 
 RequestValidationError = ValidationError
 
+# Requests with a larger body get 413. Settable with EPHEMRES_MAX_BODY_BYTES.
 MAX_BODY_BYTES = int(os.environ.get("EPHEMRES_MAX_BODY_BYTES", 10 * 1024 * 1024))
 
 logger = logging.getLogger(__name__)
@@ -849,6 +861,7 @@ class Route:
         pattern += "$"
         self.regex = re.compile(pattern)
 
+    # A trailing slash is optional, and a {param} matches one path segment (no slashes).
     def matches(self, request_path: str) -> Optional[Dict[str, str]]:
         match = self.regex.match(request_path)
         if match:
@@ -857,7 +870,10 @@ class Route:
 
     @property
     def score(self) -> Tuple[int, int, int]:
-        """Sorting key: Static-before-dynamic (0 dynamic params first, then more static segments)."""
+        """Sorting key: Static-before-dynamic (0 dynamic params first, then more static segments).
+
+        Routes are tried in this order and the first match wins, so /endpoints/probe-summary is
+        found before /endpoints/{endpoint_id} could take "probe-summary" as an ID."""
         return (self.num_dynamic_params, -self.num_static_segments, -len(self.path))
 
 
@@ -929,6 +945,9 @@ class APIRouter:
     def _add_method_decorator(
         self, methods: Sequence[str], path: str, **kwargs: Any
     ) -> Callable[[Any], Any]:
+        # Remember the local names where the route was defined. With `from __future__ import
+        # annotations` every type hint is a string, and a type defined inside a function (a
+        # request model declared next to its route, say) can only be resolved from there.
         caller_locals: Dict[str, Any] = {}
         frame = inspect.currentframe()
         while frame:
@@ -998,7 +1017,12 @@ async def _resolve_dependency(
     path_params: Dict[str, str],
     bg_tasks: Optional[BackgroundTasks] = None,
 ) -> Any:
-    """Resolves and invokes a Depends marker or callable dependency."""
+    """Resolves and invokes a Depends marker or callable dependency.
+
+    dependency_overrides swaps in a replacement (the tests use it for get_db and the auth
+    checks). A dependency that yields is entered on the request's exit stack, so the code after
+    its yield runs when the request ends. With use_cache (the default) each dependency runs once
+    per request, however many parameters ask for it."""
     dep_obj = dep if isinstance(dep, Depends) else Depends(dep)
     dep_fn = dep_obj.dependency
     if dep_fn is None:
@@ -1064,7 +1088,12 @@ async def _resolve_endpoint_kwargs(
     path_params: Dict[str, str],
     bg_tasks: Optional[BackgroundTasks] = None,
 ) -> Dict[str, Any]:
-    """Resolves parameters for a route handler or dependency function."""
+    """Resolves parameters for a route handler or dependency function.
+
+    Each parameter is filled by the first rule that fits, in the numbered order below: Request,
+    Response, BackgroundTasks, Depends, path, header, cookie, body (a schema model, a dict, or
+    Body()), and anything else from the query string or its default. Values are converted to
+    the annotated type. All problems are collected and raised together as one 422."""
     sig = inspect.signature(handler)
     resolved_kwargs: Dict[str, Any] = {}
     validation_errors: List[Dict[str, Any]] = []
@@ -1108,6 +1137,7 @@ async def _resolve_endpoint_kwargs(
             elif annotation == "BackgroundTasks":
                 annotation = BackgroundTasks
             else:
+                # The annotation text comes from our own source code, never from a request.
                 try:
                     annotation = eval(annotation, fn_globals, localns)
                 except Exception:
@@ -1373,7 +1403,12 @@ async def _resolve_endpoint_kwargs(
 # 7. Middleware Architecture
 # ---------------------------------------------------------------------------
 class BaseHTTPMiddleware:
-    """Base HTTP middleware wrapper matching Starlette / FastAPI dispatch contract."""
+    """Base HTTP middleware wrapper matching Starlette / FastAPI dispatch contract.
+
+    call_next() runs the rest of the app in its own task and returns as soon as the response
+    starts, with the body handed on as a stream, so dispatch() can add headers to streaming
+    responses (SSE) without waiting for them to finish.
+    """
 
     def __init__(self, app: Any, **options: Any) -> None:
         self.app = app
@@ -1718,7 +1753,8 @@ class EphemresApp:
         receive: Callable[[], Any],
         send: Callable[[Dict[str, Any]], Any],
     ) -> None:
-        # Build middleware stack if not already constructed
+        # Build middleware stack if not already constructed. Each middleware wraps the ones added
+        # before it, so the last one added sees the request first (as in Starlette).
         if self._compiled_app is None:
             app_handler: Callable = self._dispatch_request
             for middleware_cls, opts in self.middleware_stack:
@@ -1790,6 +1826,8 @@ class EphemresApp:
             params = route.matches(path)
             if params is not None:
                 allowed_methods_for_path.update(route.methods)
+                # HEAD is answered by the GET route. A path that matches with the wrong method
+                # gives 405 instead of 404.
                 if method in route.methods or (method == "HEAD" and "GET" in route.methods):
                     matched_route = route
                     matched_params = params
@@ -1869,6 +1907,7 @@ class EphemresApp:
                 if inspect.iscoroutinefunction(matched_route.endpoint):
                     result = await matched_route.endpoint(**kwargs)
                 else:
+                    # A plain def route runs here on the event loop (no thread pool).
                     result = matched_route.endpoint(**kwargs)
                     if inspect.isawaitable(result):
                         result = await result
@@ -1879,6 +1918,8 @@ class EphemresApp:
                 elif result is None and matched_route.status_code == 204:
                     final_response = Response(status_code=204)
                 else:
+                    # A result that doesn't fit the declared response_model is logged and becomes
+                    # a 500, so a malformed object never reaches the client.
                     if matched_route.response_model is not None:
                         try:
                             result = TypeAdapter(matched_route.response_model).validate_python(result)
@@ -1920,7 +1961,9 @@ class EphemresApp:
                             del final_response.headers["content-length"]
                     await final_response(scope, receive, send)
 
-            # Exit stack closed here (deps cleaned up, get_db committed only on success)
+            # Exit stack closed here (deps cleaned up, get_db committed only on success). An
+            # ordinary response is sent only after that, so the client never sees a success the
+            # commit then failed to save.
             if final_response is not None and not isinstance(final_response, StreamingResponse):
                 await final_response(scope, receive, send)
 
@@ -1971,6 +2014,8 @@ class EphemresApp:
             await val_resp(scope, receive, send)
 
         except Exception as exc:
+            # Once the status line has gone out nothing more can be sent, so a late failure (a
+            # broken stream, say) is only logged.
             if response_started:
                 logger.exception("Exception raised after response already started on %s %s: %s", method, path, exc)
                 return
@@ -2080,7 +2125,12 @@ class TestResponse:
 
 
 class TestClient:
-    """Thread-safe, loop-safe in-process ASGI test client."""
+    """Thread-safe, loop-safe in-process ASGI test client.
+
+    Calls the app directly, without a network or server. Each request runs in a fresh event
+    loop (on a worker thread when the caller is already inside one), which is why the ORM
+    rebuilds its connection pool per loop.
+    """
 
     __test__ = False
 

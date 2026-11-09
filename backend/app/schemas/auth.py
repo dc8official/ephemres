@@ -1,4 +1,4 @@
-"""Ephemres Network Monitoring Platform — Authentication Schemas.
+"""Ephemres Network Monitoring Platform: Authentication Schemas.
 
 This module defines request and response validation models for user login,
 session creation, and forced password change flows.
@@ -33,7 +33,7 @@ class LoginResponse(BaseModel):
 class ChangePasswordRequest(BaseModel):
     """Password mutation request payload."""
 
-    old_password: Optional[str] = Field(None, description="Current password (optional during initial setup reset)")
+    old_password: Optional[str] = Field(None, description="Current password (required, also for a forced change)")
     new_password: str = Field(..., min_length=8, description="New replacement password")
 
     model_config = ConfigDict(from_attributes=True)

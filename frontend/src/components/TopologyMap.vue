@@ -230,6 +230,10 @@
 </template>
 
 <script setup>
+// The topology map: Ephemres at the root, monitored endpoints, the transit routers between them
+// (from each endpoint's baseline traceroute) and subnet hubs, drawn top-down with vis-network.
+// The graph comes from GET /topology (built on the server, services/topology.py); live state
+// changes arrive over SSE and recolour single nodes without reloading the whole map.
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { Network } from 'vis-network'
 // Positions the link and node tooltips (without it they render below the canvas, clipped).
@@ -575,6 +579,9 @@ function getStatusClass(status) {
   }
 }
 
+// Row of each node in the top-down layout: its longest distance from the root, found with a
+// topological walk (Kahn's algorithm), so every link points down the page. A node the walk
+// never places (a loop in manual parents, say) goes on row 1.
 function computeDagLevels(nodesData, edgesData) {
   const nodeIds = new Set(nodesData.map(n => n.id))
   const adj = {}
@@ -848,6 +855,10 @@ function resetView() {
   }
 }
 
+// Live updates: a state change recolours that node only. TOPOLOGY_UPDATED (an endpoint's route
+// was rediscovered, or a discovery run finished) reloads the whole graph. A transit router's
+// INFERRED_DOWN state is worked out on the server, so it changes on the next reload, not with
+// each node event.
 function initSSE() {
   unsubscribeSSE = subscribeBatched((batch) => {
     let needsFetch = false

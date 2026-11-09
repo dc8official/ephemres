@@ -72,6 +72,27 @@ def test_system_ping_fallback_without_reply_lines_keeps_summary_avg(mock_exec):
     assert (result.success_count, result.avg_rtt_ms, result.jitter_ms) == (4, 2.5, None)
 
 
+@patch("asyncio.create_subprocess_exec")
+def test_system_ping_fallback_waits_for_the_whole_cycle(mock_exec):
+    """ping -c 5 -i 8 runs for over 32 s. The deadline used to be timeout * count + 5 (15 s),
+    so the command was killed every time and every endpoint read DOWN."""
+    proc = AsyncMock()
+    proc.communicate.return_value = (LINUX_PING_OUTPUT, b"")
+    mock_exec.return_value = proc
+    deadlines = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(aw, timeout):
+        deadlines.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    with patch("monitoring.ping.asyncio.wait_for", recording_wait_for):
+        asyncio.run(run_system_ping_fallback("10.0.0.1", 5, 8.0, 2.0))
+
+    # Four 8 s gaps between the five probes, then up to 2 s for the last reply.
+    assert deadlines and deadlines[0] >= 4 * 8.0 + 2.0
+
+
 def test_sample_params():
     ts = datetime(2026, 10, 26, 9, 30, tzinfo=timezone.utc)
     ep = UUID("11111111-0000-0000-0000-000000000001")

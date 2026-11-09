@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Async engine – used by all application database operations
 # ---------------------------------------------------------------------------
+# echo, pool_pre_ping and pool_recycle used to be passed here and were silently ignored. asyncpg
+# closes a connection idle for 300 s on its own, and a connection that died with the server
+# fails on its next use (the API answers 503 and the next request gets a fresh one).
 async_engine = create_async_engine(
     settings.db_url,
-    echo=(settings.logging.level == "DEBUG"),
     pool_size=getattr(settings.database, "pool_size", 10),
     max_overflow=getattr(settings.database, "max_overflow", 10),
-    pool_pre_ping=True,
-    pool_recycle=1800,
 )
 
 # ---------------------------------------------------------------------------

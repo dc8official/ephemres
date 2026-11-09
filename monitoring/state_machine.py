@@ -1,3 +1,13 @@
+"""Turns each cycle's ping result into an endpoint state and keeps the endpoint_events log.
+
+Every cycle is classified (UP, UP-UNSTABLE, DOWN-UNSTABLE, DOWN). A different state only counts
+once it has held for `confirmation_threshold` cycles in a row (monitoring.state_confirmation_cycles),
+so one bad minute neither flaps the dashboard nor pages anyone.
+
+endpoint_events holds one row per period in a state. The open row (end_time NULL) is updated
+every cycle, closed when the confirmed state changes, and split every 24 h. A confirmed change is
+announced to the topology view, live events (SSE and the event broker) and root-cause analysis.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +30,8 @@ logger = logging.getLogger(__name__)
 # (inside a recorded monitoring gap), the state counts as unbroken.
 STATE_CONTINUITY_GAP = timedelta(minutes=5)
 
+# Same helper as monitoring.engine.safe_create_task. It lives here too because the engine imports
+# this module, so importing it back would be circular.
 _active_background_tasks: set[asyncio.Task] = set()
 
 
@@ -48,6 +60,9 @@ async def _resolve_endpoint_identity(
     endpoint_id: UUID,
     db: AsyncSession,
 ) -> Tuple[Optional[str], Optional[str]]:
+    """Hostname and IP to label live events with: from the topology cache when it has them, else
+    from the endpoints table. Errors are swallowed, since a missing label must never stop a state
+    change being recorded."""
     ep_hostname = None
     ep_ip = None
     try:
@@ -86,9 +101,12 @@ class EndpointState:
     """Per-endpoint in-memory state tracked by the monitoring engine."""
 
     endpoint_id: UUID
+    # The open endpoint_events row that this cycle's result is added to.
     active_event_id: UUID
+    # What the dashboard shows: UP/DOWN, and the detailed state within it.
     confirmed_operational_state: str
     confirmed_detailed_state: str
+    # A different state seen but not yet confirmed, and how many cycles in a row it has been seen.
     pending_detailed_state: Optional[str] = field(default=None)
     pending_cycle_count: int = field(default=0)
     hostname: Optional[str] = field(default=None)
@@ -333,7 +351,9 @@ class StateMachine:
         except Exception as e:
             logger.warning("Event broadcast error: %s", e)
 
-        # V1.5 State Transition Hooks: Differential RCA and Recovery
+        # 3. Only when it crosses between UP and DOWN (a move to or from UP-UNSTABLE within UP does
+        # not count): root-cause analysis when it goes down, if enabled for the endpoint, and the
+        # recovery hook when it comes back.
         if previous.confirmed_operational_state != current.confirmed_operational_state:
             from app.services.rca_engine import (
                 handle_endpoint_recovery,
@@ -398,7 +418,7 @@ class StateMachine:
 
         # Step 2: Determine what to do based on state comparison.
 
-        # CASE A: No change — endpoint remains in the confirmed state.
+        # CASE A: no change, the endpoint stays in its confirmed state.
         if new_detailed_state == state.confirmed_detailed_state:
             next_state = EndpointState(
                 endpoint_id=state.endpoint_id,
@@ -417,7 +437,7 @@ class StateMachine:
         elif new_detailed_state == state.pending_detailed_state:
             new_pending_count = state.pending_cycle_count + 1
 
-            # Not yet at the confirmation threshold — keep accumulating.
+            # Not confirmed yet: keep counting.
             if new_pending_count < self.confirmation_threshold:
                 next_state = EndpointState(
                     endpoint_id=state.endpoint_id,
@@ -465,6 +485,11 @@ class StateMachine:
                 ip_address=state.ip_address,
             )
 
+        # An endpoint DOWN at its very first probe became DOWN without a transition, so nothing has
+        # announced it. Count the cycles that keep reading the same (any other reading resets the
+        # count to 0) and announce it once the count reaches the threshold, like any other change.
+        # The EndpointState built above starts without these two fields, so they are carried over
+        # here. A confirmed transition drops them: it announces itself.
         if next_state.confirmed_detailed_state == state.confirmed_detailed_state:
             next_state.announce_first_down = state.announce_first_down
             if state.first_down_cycles is not None:
@@ -476,11 +501,13 @@ class StateMachine:
             if next_state.announce_first_down and announce:
                 await self.announce_first_down(next_state, result, db)
 
-        # Step 3: Continuous Event Lifecycle (COR-01)
+        # Step 3: write the cycle to endpoint_events.
         execution_time = at or datetime.now(timezone.utc)
 
         if state.confirmed_detailed_state == next_state.confirmed_detailed_state:
-            # Check duration of active event for 24-hour rollover (STAB-01 / DAT-02)
+            # Split a period once it is 24 h old. endpoint_events chunks are compressed after 7 days
+            # (migration 0005), and the row every cycle updates should never be near one. The new
+            # row keeps state_since, so "in this state since" still shows when the state began.
             rollover = False
             if state.active_event_id:
                 dur_res = await db.execute(
@@ -609,10 +636,11 @@ class StateMachine:
                         "active_event_id": str(state.active_event_id),
                     },
                 )
-                # If for some reason no row was updated (e.g., active_event_id was closed or missing), insert a new open event.
-                # After an engine restart (the startup closed the event) the state goes on: keep
-                # its start when the closed event had this state and ended moments ago or when
-                # the engine stopped.
+                # No open row was updated: it was closed outside this loop, normally by the startup
+                # cleanup after a restart (gap_handler.resolve_startup_state). Open a new one. If
+                # the closed row had this same state and ended within STATE_CONTINUITY_GAP, or
+                # ended inside a recorded monitoring gap, the state never really changed, so the
+                # new row carries its state_since forward.
                 if update_res.rowcount == 0:
                     row = (
                         await db.execute(
@@ -672,7 +700,8 @@ class StateMachine:
                     ).fetchone()
                     next_state.active_event_id = row.id
         else:
-            # State change confirmed: Close previous open event
+            # State change confirmed: close the open period. This closes every open row of the
+            # endpoint, not only active_event_id, so a stray open row cannot outlive the change.
             await db.execute(
                 text(
                     """

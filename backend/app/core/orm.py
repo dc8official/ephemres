@@ -11,6 +11,24 @@ providing a 100% Python Standard Library + asyncpg drop-in engine covering:
 6. Named :param to $1 Text Compiler with type cast / quote preservation and executemany batching
 7. Hybrid Result / Row unpacking (scalars, mappings, attribute access, tuple unpacking)
 8. asyncpg Type Marshaling (JSONB, UUID, INET, ARRAY(INET))
+
+The names follow SQLAlchemy so existing code kept working, but the behaviour is narrower. Where
+it differs, and where it bites:
+- Relationships are not loaded in general. relationship(), joinedload() and selectinload() are
+  accepted and do nothing, except two hard-coded cases resolved after a SELECT: User.role and
+  UserSession.user (AsyncSession._hydrate_select_results). Any other relationship attribute stays
+  None unless the code sets it.
+- A model column is any annotated class attribute, including ones without mapped_column(); its
+  type is guessed from the annotation's text (_infer_type_from_annotation).
+- Models are filled from result columns by name. Selecting two models that share a column name
+  (both have "id") fills both from the same value.
+- A SELECT has one FROM table, the first one found; any other table must come in with join().
+- Every statement runs with a 10 s timeout (asyncpg command_timeout, AsyncEngine._get_pool).
+- create_async_engine() takes only pool_size and max_overflow (one pool of their sum); any other
+  option raises TypeError instead of being ignored.
+- A Python list or dict parameter is sent as JSON text; pass a tuple to get a PostgreSQL array.
+- text() parameters must be typed where PostgreSQL can't infer them (CAST(:x AS timestamptz)),
+  because asyncpg asks the server for each $n's type when it prepares the statement.
 """
 
 from __future__ import annotations
@@ -228,7 +246,10 @@ NULLTYPE = NullType()
 # 3. Parameter Marshaling (asyncpg & Python)
 # ---------------------------------------------------------------------------
 def prepare_bind_param(val: Any, col_type: Optional[SQLType] = None) -> Any:
-    """Prepares a Python value to be passed cleanly to asyncpg."""
+    """Prepares a Python value to be passed cleanly to asyncpg.
+
+    Without a column type (text() parameters), a dict or list becomes a JSON string, while a
+    tuple is left alone and asyncpg sends it as an array. IP address objects become strings."""
     if val is None:
         return None
     if isinstance(val, Enum):
@@ -266,6 +287,7 @@ def hydrate_column_value(val: Any, col_type: Optional[SQLType] = None) -> Any:
             except Exception:
                 return val
         return val
+    # inet values are always handed to the application as strings, never ipaddress objects.
     if isinstance(col_type, INET):
         if isinstance(val, (ipaddress.IPv4Address, ipaddress.IPv6Address, ipaddress.IPv4Interface, ipaddress.IPv6Interface)):
             return str(val)
@@ -301,7 +323,11 @@ CompilationContext = CompileContext
 
 
 def format_sql_literal(val: Any) -> str:
-    """Formats a Python literal value directly into safe SQL syntax."""
+    """Formats a Python literal value directly into safe SQL syntax.
+
+    Used by str(expression), for logs and debugging. Queries that run send values as $n
+    parameters, except numbers, booleans and NULL (compile_operand) and the plain values in
+    case() (format_case_val), which are written into the SQL; strings there have ' doubled."""
     if val is None:
         return "NULL"
     if isinstance(val, bool):
@@ -321,18 +347,22 @@ def format_sql_literal(val: Any) -> str:
     return f"'{str(val)}'"
 
 
-def _unwrap_field_operand(other: Any) -> Tuple[Any, bool]:
-    skip_where = False
+def _unwrap_field_operand(other: Any) -> Any:
+    """Handles a route's Query(...) default reaching a comparison, which happens when a route
+    function is called directly (tests) rather than through the router, which always resolves
+    it. A concrete default is used in its place, as the router would. A None or required
+    default raises: it used to drop the condition from WHERE, so the query quietly returned
+    rows the caller meant to filter out (fail-open; scale review M2)."""
     from app.core.asgi import _ParamInfo
     if isinstance(other, _ParamInfo):
         default_val = getattr(other, "default", None)
-        if default_val is None:
-            logger.warning("Unresolved query param object used in SQL comparison; filter skipped")
-            skip_where = True
-            other = None
-        elif default_val is not ...:
-            other = default_val
-    return other, skip_where
+        if default_val is None or default_val is ...:
+            raise TypeError(
+                "An unresolved Query(...) parameter reached a SQL comparison. Pass a real value "
+                "(or leave the condition out) when calling a route function directly."
+            )
+        other = default_val
+    return other
 
 
 class SQLElement:
@@ -348,53 +378,42 @@ class SQLElement:
         ctx = CompileContext(inline_literals=True, symbolic_binds=True)
         return self.compile(ctx).replace('"', '')
 
-    # Comparisons
+    # Comparisons build SQL instead of comparing: Model.col == 5 is a BinaryExpression, and
+    # == None / != None become IS NULL / IS NOT NULL, as in SQLAlchemy.
     def __eq__(self, other: Any) -> SQLElement:  # type: ignore[override]
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         if other is None:
             expr = IsExpression(self, None, negated=False)
         else:
             expr = BinaryExpression(self, "=", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     def __ne__(self, other: Any) -> SQLElement:  # type: ignore[override]
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         if other is None:
             expr = IsExpression(self, None, negated=True)
         else:
             expr = BinaryExpression(self, "!=", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     def __lt__(self, other: Any) -> SQLElement:
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         expr = BinaryExpression(self, "<", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     def __le__(self, other: Any) -> SQLElement:
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         expr = BinaryExpression(self, "<=", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     def __gt__(self, other: Any) -> SQLElement:
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         expr = BinaryExpression(self, ">", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     def __ge__(self, other: Any) -> SQLElement:
-        other, skip = _unwrap_field_operand(other)
+        other = _unwrap_field_operand(other)
         expr = BinaryExpression(self, ">=", other)
-        if skip:
-            expr._skip_where = True
         return expr
 
     # Arithmetic
@@ -422,7 +441,7 @@ class SQLElement:
     def __rtruediv__(self, other: Any) -> SQLElement:
         return BinaryExpression(other, "/", self, is_arithmetic=True)
 
-    # Logical
+    # Logical: & | ~ mean AND, OR, NOT (Python's and/or/not can't be overloaded).
     def __and__(self, other: Any) -> SQLElement:
         return and_(self, other)
 
@@ -606,6 +625,8 @@ class BooleanClauseList(SQLElement):
     def __init__(self, operator: str, clauses: Sequence[Any]) -> None:
         self.operator = operator
         self.clauses = [c for c in clauses if c is not None and not getattr(c, "_skip_where", False)]
+        # and_() / or_() with nothing in them (all filters optional and unset) add no condition:
+        # Select.where() leaves them out.
         if not self.clauses:
             self._skip_where = True
 
@@ -705,6 +726,8 @@ class CaseExpression(SQLElement):
         return " ".join(parts)
 
 
+# Plain values in case() (NULL, booleans, numbers, strings) are written into the SQL rather
+# than sent as parameters; strings are quoted with ' doubled. Anything else goes as a parameter.
 def format_case_val(val: Any, ctx: CompileContext) -> str:
     if isinstance(val, SQLElement):
         return val.compile(ctx)
@@ -866,6 +889,10 @@ def compile_text_clause(sql: str, params: Optional[Mapping[str, Any]]) -> Tuple[
 
     Deduplicates identical parameter names, preserves single-quoted literals and
     PostgreSQL ::type casts without corruption.
+
+    A :name with no value in params is left as it is, and PostgreSQL then rejects the query.
+    Dollar-quoted bodies ($$ ... $$), /* */ comments and double-quoted identifiers are not
+    recognised, so a :name inside one of those would be replaced too.
     """
     if not params:
         return sql, []
@@ -1299,7 +1326,11 @@ def _find_table_from_entity(e: Any) -> Optional[str]:
 
 
 class Select(SQLElement):
-    """SQL SELECT statement builder supporting joins, CTEs, subqueries & pagination."""
+    """SQL SELECT statement builder supporting joins, CTEs, subqueries & pagination.
+
+    Every builder method returns a new copy (clone()), so a base query can be reused safely.
+    CTEs used anywhere inside are collected and emitted once, in a single WITH at the top.
+    """
 
     def __init__(self, *entities: Any) -> None:
         self._select_entities = list(entities)
@@ -1559,6 +1590,9 @@ class Select(SQLElement):
 
         return " ".join(parts)
 
+    # FROM is one table: select_from() if given, else the first table found in the selected
+    # entities, then in WHERE. A second table must be added with join(), or PostgreSQL reports
+    # a missing FROM-clause entry.
     def _determine_from(self, ctx: CompileContext) -> Optional[str]:
         if self._from_target is not None:
             return self._format_table_target(self._from_target, ctx)
@@ -1905,6 +1939,9 @@ def mapped_column(*args: Any, **kwargs: Any) -> Column:
 
 
 def _infer_type_from_annotation(ann: Any) -> SQLType:
+    # Guesses by looking for words in the annotation's text, in this order, so the first match
+    # wins: a type named PointStr would read as Integer ("int" in "PointStr"). Give the column
+    # an explicit type in mapped_column() when the name could mislead.
     if ann is None:
         return NullType()
     ann_str = str(ann)
@@ -1952,7 +1989,8 @@ class DeclarativeMeta(type):
             elif isinstance(val, RelationshipProperty):
                 relationships[attr_name] = val
 
-        # Handle annotations without explicit assignment
+        # Handle annotations without explicit assignment: every annotated name not starting with
+        # _ becomes a column, so a plain helper attribute with an annotation would be selected too.
         for ann_name, ann_type in annotations.items():
             if ann_name not in columns and ann_name not in relationships and not ann_name.startswith("_"):
                 col = Column(ann_name, _infer_type_from_annotation(ann_type))
@@ -1995,7 +2033,8 @@ class DeclarativeBase(metaclass=DeclarativeMeta):
         self._orm_persisted: bool = False
         self._orm_state: Dict[str, Any] = {}
 
-        # Set declared column values or defaults
+        # Set declared column values or defaults. Only Python-side defaults (default=) apply here;
+        # server_default columns stay None and are left out of the INSERT so the database fills them.
         for col_name, col in self.__table_columns__.items():
             if col_name in kwargs:
                 setattr(self, col_name, kwargs[col_name])
@@ -2016,7 +2055,8 @@ class DeclarativeBase(metaclass=DeclarativeMeta):
 
 
 def _snapshot_model(obj: DeclarativeBase) -> Dict[str, Any]:
-    """Snapshots deep copy of column attributes for dirty tracking."""
+    """Snapshots deep copy of column attributes for dirty tracking. flush() compares each
+    attribute with this copy to decide what an UPDATE must set."""
     snap: Dict[str, Any] = {}
     for col_name in obj.__table_columns__:
         val = getattr(obj, col_name, None)
@@ -2217,6 +2257,7 @@ class AsyncConnection:
                 sql, _ = compile_text_clause(stmt.text_str, params[0])
                 args_list = [[prepare_bind_param(row.get(k), None) for k in param_order] for row in params]
                 await self._conn.executemany(sql, args_list)
+                # executemany reports no counts: rowcount is the number of parameter sets.
                 return Result([], rowcount=len(params))
 
             sql, bound = compile_text_clause(stmt.text_str, params if isinstance(params, dict) else None)
@@ -2290,11 +2331,18 @@ POOL_SERVER_SETTINGS = {"plan_cache_mode": "force_custom_plan"}
 class AsyncEngine:
     """Engine managing asyncpg connection pools and connection lifetimes."""
 
+    # The only options that do something. Others SQLAlchemy accepts (echo, pool_pre_ping,
+    # pool_recycle, ...) used to be accepted and silently ignored; they now raise TypeError, so
+    # nobody relies on a setting that isn't there (scale review M2).
+    SUPPORTED_OPTIONS = frozenset({"pool_size", "max_overflow"})
+
     def __init__(self, url: str, **kwargs: Any) -> None:
+        unsupported = sorted(set(kwargs) - self.SUPPORTED_OPTIONS)
+        if unsupported:
+            raise TypeError(f"create_async_engine() does not support {', '.join(unsupported)}")
         self.url = self._normalize_url(url)
         self.pool_size = kwargs.get("pool_size", 10)
         self.max_overflow = kwargs.get("max_overflow", 10)
-        self.echo = kwargs.get("echo", False)
         self.dialect = types.SimpleNamespace(name="postgresql")
         self._pool: Optional[Any] = None
         self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
@@ -2319,6 +2367,9 @@ class AsyncEngine:
         # asyncpg requires postgresql:// rather than postgresql+asyncpg://
         return url.replace("postgresql+asyncpg://", "postgresql://").replace("postgresql+psycopg2://", "postgresql://")
 
+    # An asyncpg pool belongs to the event loop that created it. Tests and the in-process
+    # TestClient run each request in a fresh loop, so a pool from another or a closed loop is
+    # closed and a new one made.
     async def _get_pool(self) -> Any:
         try:
             loop = asyncio.get_running_loop()
@@ -2352,6 +2403,8 @@ class AsyncEngine:
             if self._pool is None:
                 if asyncpg is None:
                     raise OperationalError("asyncpg is not installed. Please install asyncpg.")
+                # One asyncpg pool of pool_size + max_overflow connections (there is no separate
+                # overflow). Connecting gives up after 5 s, and every statement after 10 s.
                 min_size = 1
                 max_size = max(1, self.pool_size + self.max_overflow)
                 self._pool = await asyncpg.create_pool(
@@ -2441,7 +2494,14 @@ def create_async_engine(url: str, **kwargs: Any) -> AsyncEngine:
 # 11. AsyncSession Runtime
 # ---------------------------------------------------------------------------
 class AsyncSession:
-    """Asynchronous database session with identity mapping, dirty tracking, and flush hydration."""
+    """Asynchronous database session with identity mapping, dirty tracking, and flush hydration.
+
+    The session borrows a pool connection, and opens a transaction on it, at its first query.
+    commit() and rollback() end the transaction and give the connection back; the next query
+    borrows one again. So `await db.rollback()` frees the connection during slow work (the
+    sign-in route does this around scrypt). Leaving the `async with` block rolls back anything
+    not committed.
+    """
 
     def __init__(self, bind: Optional[AsyncEngine] = None, **kwargs: Any) -> None:
         self.bind = bind
@@ -2482,6 +2542,8 @@ class AsyncSession:
         if obj not in self._deleted:
             self._deleted.append(obj)
 
+        # Works both as session.delete(obj) and await session.delete(obj); the DELETE itself
+        # runs at the next flush or commit.
         class _AwaitableDelete:
             def __await__(self) -> Any:
                 async def _noop() -> None: pass
@@ -2506,7 +2568,11 @@ class AsyncSession:
         return self._conn
 
     async def flush(self) -> None:
-        """Executes pending INSERTs, UPDATEs, and DELETEs against the database."""
+        """Executes pending INSERTs, UPDATEs, and DELETEs against the database.
+
+        Always in that order: all inserts, then updates of changed objects (compared with their
+        snapshot), then deletes. Each INSERT and UPDATE uses RETURNING * to refresh the object
+        with what the database stored (defaults, triggers)."""
         conn = await self._get_conn()
 
         # 1. INSERTs for new instances
@@ -2519,6 +2585,8 @@ class AsyncSession:
             vals_to_insert: List[Any] = []
             for col_name, col in model_cls.__table_columns__.items():
                 val = getattr(obj, col_name, None)
+                # A None value is left out, so the column's server default applies (unless the
+                # column has a Python default and no server default: then NULL is inserted).
                 if val is not None or (col.default is not None and col.server_default is None):
                     cols_to_insert.append(col_name)
                     vals_to_insert.append(val)
@@ -2605,6 +2673,7 @@ class AsyncSession:
             self._conn = None
 
     async def rollback(self) -> None:
+        # Also puts every loaded object's attributes back to their last saved values.
         self._new.clear()
         self._deleted.clear()
         for (model_cls, _), obj in list(self._identity_map.items()):
@@ -2680,7 +2749,8 @@ class AsyncSession:
     async def execute(self, stmt: Any, params: Optional[Any] = None) -> Result:
         conn = await self._get_conn()
 
-        # 1. TextClause with batch params (executemany)
+        # 1. TextClause with batch params (executemany). A list of dicts runs the statement once
+        # per dict; rowcount is the number of dicts, not the rows affected.
         if isinstance(stmt, TextClause) and isinstance(params, (list, tuple)):
             if not params:
                 return Result([], rowcount=0)
@@ -2797,6 +2867,9 @@ class AsyncSession:
                     inst._orm_state = _snapshot_model(inst)
                     pk_val = self._extract_pk(inst)
                     if pk_val:
+                        # Identity map: a row already loaded in this session returns the same
+                        # object, refreshed from the database except for attributes changed and
+                        # not yet flushed, which keep their new values.
                         if (model_cls, pk_val) in self._identity_map:
                             inst = self._identity_map[(model_cls, pk_val)]
                             if inst in self.dirty:
@@ -2815,7 +2888,8 @@ class AsyncSession:
                             self._identity_map[(model_cls, pk_val)] = inst
                     slot_values.append(inst)
 
-                    # Check for eager relationships (User.role, UserSession.user)
+                    # The only relationships ever loaded (User.role, UserSession.user), resolved
+                    # in one query each after all rows are read. See the module docstring.
                     if model_cls.__name__ == "User" and getattr(inst, "role", None) is None:
                         users_to_resolve_role.append(inst)
                     elif model_cls.__name__ == "UserSession" and getattr(inst, "user", None) is None:

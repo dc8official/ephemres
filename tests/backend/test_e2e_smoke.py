@@ -15,7 +15,7 @@ from app.routers.auth import login, change_password, get_current_user, LoginRequ
 from app.routers.users import create_user, reset_password, update_user, delete_user, CreateUserRequest, ResetPasswordRequest, UpdateUserRequest
 from app.routers.endpoints import CreateEndpointRequest, list_endpoints
 from app.routers.reports import _validate_date_range, parse_datetime_param
-from app.services.auth_service import hash_password, verify_password, is_account_locked, record_failed_attempt, clear_failed_attempts, _failed_attempts
+from app.services.auth_service import hash_password, verify_password
 from app.services.topology import TopologyGraphManager
 from app.services.diagnostics import sanitize_traceroute_hops
 from app.database import get_db
@@ -30,14 +30,12 @@ class TestEndToEndSmoke(unittest.TestCase):
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        _failed_attempts.clear()
         self.store = InMemorySessionStore()
         self._store_patch = patch.object(driver_manager, "get_session_store", return_value=self.store)
         self._store_patch.start()
 
     def tearDown(self) -> None:
         self._store_patch.stop()
-        _failed_attempts.clear()
         self.loop.close()
 
     # -------------------------------------------------------------

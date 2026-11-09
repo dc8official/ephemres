@@ -1,3 +1,10 @@
+"""User management (admin only): list, create, reset a password, edit, deactivate.
+
+An admin can't reset, edit or deactivate their own account here; their own password changes
+through /auth/change-password. A reset sets a new password (generated when none is given and
+returned once), forces a change at the next sign-in, and signs the user out everywhere.
+"Delete" deactivates: the account and its audit history stay.
+"""
 from __future__ import annotations
 
 import logging
@@ -22,7 +29,6 @@ from app.services.auth_service import (
     generate_readable_password,
     hash_password,
     hash_password_async,
-    invalidate_all_user_sessions,
     invalidate_all_user_sessions_async,
 )
 

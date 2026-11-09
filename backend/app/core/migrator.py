@@ -1,3 +1,19 @@
+"""Database schema migrations: a small replacement for Alembic that reads the same files.
+
+Revisions in backend/migrations/versions form one chain (each names its down_revision), and
+the applied revision is stored in alembic_version, as Alembic did, so databases created
+before the switch upgrade normally.
+
+A revision's upgrade() does not touch the database. Its op.* calls only record SQL, which is
+then run in one transaction per revision together with the version update: a revision is
+applied whole or not at all. Two consequences for whoever writes a migration:
+- upgrade() can't read data to decide what to do; put conditions in the SQL (DO $$ ... $$
+  blocks, IF EXISTS).
+- Statements PostgreSQL refuses inside a transaction (CREATE INDEX CONCURRENTLY, for one)
+  can't be used.
+install.sh and upgrade.sh run it (`python -m app.core.migrator upgrade head`). An advisory
+lock (727274) makes two runs at the same time wait for each other instead of colliding.
+"""
 from __future__ import annotations
 
 import argparse

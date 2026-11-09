@@ -1,3 +1,15 @@
+"""The topology map: which devices sit between Ephemres and each monitored endpoint.
+
+Built from each endpoint's baseline route (the traceroute hops stored by baseline_route),
+plus manual parents set by an admin. Hops that are not monitored endpoints appear as transit
+nodes; a transit router is shown INFERRED_DOWN when every monitored endpoint behind it is down,
+since it can't be probed itself. Flow data is used to check the traceroute links against the
+next hops routers report (refresh_flow_status).
+
+The graph lives in memory, one copy per API process. full_rebuild() reads everything again;
+state changes from the engine arrive through the event broker (services/telemetry_relay) and
+update a node in place. The engine process has a copy too, which its own updates go to.
+"""
 from __future__ import annotations
 
 import asyncio

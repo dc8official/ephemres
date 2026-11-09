@@ -2,6 +2,16 @@
 
 Implements the Pydantic v2 interface using 100% Python Standard Library
 (typing, datetime, uuid, re, inspect, copy, enum, json).
+
+Where it differs from Pydantic:
+- model_config extra= supports "ignore" (the default: unknown keys are dropped) and "forbid"
+  (unknown keys are a validation error); "allow" raises TypeError.
+- A Union tries its types in order and takes the first that converts.
+- A naive datetime stays naive: no time zone is assumed.
+- Types _coerce_value doesn't list (tuple, set, ipaddress types, ...) are passed through
+  unchecked.
+- pattern= is matched with re.search, so it may match part of the string; anchor it with ^
+  and $ to require a full match.
 """
 
 from __future__ import annotations
@@ -244,7 +254,10 @@ def _coerce_value(
     field_name: str,
     model_config: Dict[str, Any],
 ) -> Any:
-    """Recursively validate and coerce input value to the target type."""
+    """Recursively validate and coerce input value to the target type.
+
+    Used for model fields and for route parameters (query, path, header, body). Raises
+    ValueError, which the caller turns into a validation error for that field."""
     if target_type is Any or target_type is inspect._empty:
         return val
 
@@ -283,12 +296,17 @@ def _coerce_value(
             raise ValueError(f"Input should be one of {args}, got '{val}'")
         return val
 
-    # 4. Primitive int
+    # 4. Primitive int. A whole float (5.0) is accepted; 5.7 is rejected, as in Pydantic, rather
+    # than cut down to 5 (scale review M2).
     if target_type is int:
         if isinstance(val, bool):
             raise ValueError("Input should be a valid integer, not boolean")
         if isinstance(val, int):
             return val
+        if isinstance(val, (float, Decimal)):
+            if val != val or val in (float("inf"), float("-inf")) or val != int(val):
+                raise ValueError(f"Input should be a valid integer, got a number with a fractional part ({val})")
+            return int(val)
         try:
             return int(val)
         except Exception:
@@ -316,9 +334,10 @@ def _coerce_value(
             if low in ("false", "0", "no", "off", "f"):
                 return False
             raise ValueError(f"Input should be a valid boolean, got '{val}'")
-        if isinstance(val, (int, float)):
+        # Only 0 and 1 count as numbers for a boolean (as in Pydantic); 2 used to read as True.
+        if isinstance(val, (int, float)) and val in (0, 1):
             return bool(val)
-        return bool(val)
+        raise ValueError(f"Input should be a valid boolean, got '{val}'")
 
     # 7. Primitive str
     if target_type is str:
@@ -781,6 +800,27 @@ class SchemaModel(metaclass=ModelMetaclass):
                 continue
 
             setattr(self, field_name, coerced)
+
+        # extra="forbid": a key that is neither a field nor its alias is an error, as in Pydantic.
+        # Without it (the default, "ignore") unknown keys are dropped. It used to be ignored even
+        # when forbidden (scale review M2).
+        if cfg.get("extra") not in (None, "ignore", "forbid"):
+            # extra="allow" (keep unknown keys) is not implemented: refuse it rather than drop them.
+            raise TypeError(f"{self.__class__.__name__}: model_config extra={cfg.get('extra')!r} is not supported")
+        if cfg.get("extra") == "forbid":
+            known = set(self.model_fields)
+            for f_name, f_info in self.model_fields.items():
+                if f_info.alias:
+                    known.add(f_info.alias)
+                elif alias_gen:
+                    known.add(alias_gen(f_name))
+            for key in input_data:
+                if key not in known:
+                    errors.append({
+                        "loc": (key,),
+                        "msg": "Extra inputs are not permitted",
+                        "type": "extra_forbidden",
+                    })
 
         if errors:
             raise ValidationError(errors, title=self.__class__.__name__)

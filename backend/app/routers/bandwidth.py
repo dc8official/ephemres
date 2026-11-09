@@ -1,3 +1,13 @@
+"""Traffic analytics routes (the Traffic page): overview, traffic series, top talkers,
+conversations, applications and QoS, interfaces, and enrolling or mapping flow exporters.
+
+Everything reads the rollups flowd writes. Which table a window reads, and how long each keeps
+its data, is in _select_rollup_model_and_bucket_seconds and docs/database.md section 3; a
+window longer than the data behind it is refused (_require_window_covered) rather than
+answered with part of it. A conversation seen by several exporters is counted once, at the
+largest report (_counted_once). The services this calls (conversations, flow_metrics,
+wan_edge, flow_paths) hold the shared rules, so the dashboard and the PDF report agree.
+"""
 from __future__ import annotations
 
 import datetime
@@ -77,6 +87,8 @@ router = APIRouter(prefix="/bandwidth", tags=["bandwidth"])
 _flow_redis_pool: Optional[Any] = None
 
 
+# The driver manager's FastStore client when it has one; otherwise a standalone client is made
+# here, unless FastStore is turned off in the config.
 async def _init_flow_store_pool() -> Optional[Any]:
     """
     Returns an async FastStore client for flow telemetry operations.
