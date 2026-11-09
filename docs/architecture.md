@@ -35,7 +35,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 
 ### 4. Real-Time Telemetry & Server-Sent Events (SSE)
 * **Native ASGI 3.0 SSE Stream (`GET /api/v1/events/stream`):** Delivers continuous telemetry directly to web browsers using `text/event-stream` mediated by `EventSourceResponse` in `app.core.asgi`.
-* **Structured Event Envelopes:** Emits strongly typed JSON events on every monitoring transition (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_CHANGE`).
+* **Structured Event Envelopes:** Emits strongly typed JSON events on every monitoring transition (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_HINT`).
 * **Connection Heartbeat:** Emits a 15-second heartbeat comment (`: heartbeat\n\n`) to keep reverse-proxy connections (Nginx, Traefik, HAProxy) alive.
 
 ### 5. Multi-Protocol Synthetic Probes & SSRF Defense
@@ -77,7 +77,7 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
      - **Flapping & Rate Limits:** An endpoint with $\ge 4$ state transitions in a sliding 10-minute window is treated as flapping: deliveries are skipped and logged as `THROTTLED` until the window drops below 4. Independently, each (channel, endpoint, severity) combination sends at most one alert per 5 minutes.
      - **Cryptographic & SSRF Defense:** Derives AES-256-GCM decryption keys via HKDF-SHA256 (`app.core.crypto`) and validates outbound destination IPs against loopback and cloud metadata ranges using `app.core.http_client`.
      - **Polyglot Formatters:** Adapts payload to Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), or SMTP TLS 1.2+ MIME.
-     - **Delivery Audit Logging:** Persists asynchronous results, HTTP response codes, and round-trip latencies into `alert_delivery_logs`.
+     - **Delivery Audit Logging:** Persists each attempt's status (`DELIVERED`, `FAILED`, `THROTTLED`), HTTP status code, retry count, response detail and dispatch time (`delivered_at`) into `alert_delivery_logs`.
 
 ### 9. Network Flow Telemetry Ingestion Pipeline (`ephemres-flowd`)
 * **Autonomous Ingestion Daemon:** `ephemres-flowd` runs as an independent `systemd` daemon completely isolated from `ephemres-engine` and `ephemres-api`. Even under massive multi-gigabit traffic bursts, ICMP polling and REST API responsiveness remain completely unperturbed.
@@ -85,10 +85,10 @@ The platform supports pluggable, dual-driver storage via `StorageDriverManager`:
 * **Zero-Allocation Binary Decoders:** High-throughput `struct.unpack_from` byte-slice parsers with dynamic template caching (1,800s TTL) for NetFlow v9 and IPFIX options/flow records. Data FlowSets that arrive before their template are buffered per `(exporter, source/observation domain)` in a bounded ring buffer (100 FlowSets, 10-second TTL) and decoded once the template arrives.
 * **Dual-Role $\mathcal{O}(1)$ In-Memory Correlator:**
   - Maintains pre-indexed hash maps for sub-microsecond matching without SQL queries.
-  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. The collector asks the correlator before parsing each packet (`admit_exporter`) and drops packets from unknown exporters, so they never reach the flow stream or the database. Unknown exporter IPs are recorded in FastStore (rate-limited to one write per IP every 10 seconds) as a `flow:unmatched:<ip>` key with a 15-minute TTL, a member of `flow:unmatched:set`, and a `flow:unmatched:zset` sorted set pruned to the last 24 hours (capped at 1,000 IPs). These drive the Unmatched Exporter Discovery Banner in the UI.
+  - **Exporter Resolution:** Resolves exporter IP against endpoint primary IPs and `flow_exporter_ips` secondary aliases. The collector asks the correlator before parsing each packet (`admit_exporter`) and drops packets from unknown exporters, so they never reach the aggregator or the database. Unknown exporter IPs are recorded in FastStore (rate-limited to one write per IP every 10 seconds) as a `flow:unmatched:<ip>` key with a 15-minute TTL, a member of `flow:unmatched:set`, and a `flow:unmatched:zset` sorted set pruned to the last 24 hours (capped at 1,000 IPs). These drive the Unmatched Exporter Discovery Banner in the UI.
   - **Traffic Participant Resolution:** Resolves source and destination IPs against monitored inventory endpoints to attribute traffic to internal infrastructure vs. external internet.
 * **Port Normalization & Cardinality Shield:** Normalizes ephemeral client ports (1024–65535) unless recognized as well-known server services (e.g. 8080, 8443, 3306, 5432, 6379, 9200) into a single aggregate representation. This prevents high-entropy ephemeral client ports from exploding TimescaleDB hypertable B-tree index sizes.
-* **In-Process Hand-Off:** The collector passes each datagram's parsed flows straight to the aggregator (`FlowAggregator.ingest`) in the same process; nothing is buffered in FastStore. (Up to v3.3.5 every flow went through a FastStore stream, whose trimming lost flows above about 1,000 flows/s.) The aggregator writes its 1-minute sums every 10 seconds and keeps them in memory while the database is unreachable, up to `[flow] buffer_memory_limit_mb` (default 512 MB, about 1 KB per conversation and minute); past that it drops new conversations and logs an error. flowd logs flows received, rows stored and anything lost (kernel socket drops, memory cap) every minute.
+* **In-Process Hand-Off:** The collector passes each datagram's parsed flows straight to the aggregator (`FlowAggregator.ingest`) in the same process; nothing is buffered in FastStore. (Prior to v3.3.5 every flow went through a FastStore stream, whose trimming lost flows above about 1,000 flows/s.) The aggregator writes its 1-minute sums every 10 seconds and keeps them in memory while the database is unreachable, up to `[flow] buffer_memory_limit_mb` (default 512 MB, about 1 KB per conversation and minute); past that it drops new conversations and logs an error. flowd logs flows received, rows stored and anything lost (kernel socket drops, memory cap) every minute.
 * **4-Tier Hierarchical Storage Lifecycle:**
   1. *Tier 1 (In-Memory Accumulator):* flowd's 1-minute sums, flushed every 10 seconds (held longer only while the database is unreachable). A flowd crash loses about 15 seconds of flows: the unwritten 10 seconds plus the 5-second restart, while the UDP ports are closed.
   2. *Tier 2 (1-Minute Rollups):* TimescaleDB hypertable `flow_minute_rollups`, uncompressed for 24 hours, compressed via TimescaleDB columnar compression after 1 day (85%+ disk space reduction), dropped after 90 days by a TimescaleDB retention policy. Per-interface counters live in `flow_interface_minute_rollups` (uncompressed, 7-day retention).
@@ -106,8 +106,8 @@ At the bedrock of Ephemres v3.3.5 is **Layer 0 (`backend/app/core/`)** — 12 sp
 | **`app.core.asgi`** | Native ASGI 3.0 Web Application | Replaces `fastapi` and `starlette`. Implements `EphemresApp`, regex route matching, dependency resolution (`Depends`), query/path/body extraction, CORS middleware, and `EventSourceResponse` SSE streaming. |
 | **`app.core.orm`** | Native Async Object-Relational Mapper | Replaces `sqlalchemy`. Pure-stdlib async ORM over `asyncpg`: `DeclarativeBase`, `Column`, SQL type compilation, relationship loading, Unit-of-Work `AsyncSession`, and query compilers (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`, `or_`). |
 | **`app.core.schema`** | Pure-Stdlib Type Validation & Serialization | Replaces `pydantic`. Implements `SchemaModel`, `Field`, `validator`, `field_validator`, `model_validator`, `ConfigDict`, and `to_camel` using stdlib `typing`, `inspect`, and `re`. |
-| **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/dev/shm` SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
-| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0018` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
+| **`app.core.faststore`** | In-RAM High-Performance Cache & Message Bus | Replaces `redis-server` and `redis-py`. Pure-stdlib in-RAM `/run/ephemres` (`/dev/shm` fallback) SQLite WAL engine with `RLock` isolation. Implements Key-Value with expiry, Sets, Sorted Sets (ZSET), high-throughput Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and Pub/Sub. |
+| **`app.core.migrator`** | Native Async Database Migration Engine | Replaces `alembic` and `psycopg2-binary`. Direct PostgreSQL DDL compilation executing revisions `0001` through `0021` over `asyncpg`, recording executed versions in the `alembic_version` state table. |
 | **`app.core.crypto`** | Secret Encryption Engine | Replaces `cryptography` for secrets at rest. AES-256-GCM encryption of alert-channel credentials (`ENC:v1:` envelope) with pure-Python HKDF-SHA256 key derivation and legacy-salt fallback decryption. The AES-GCM primitive is called through `ctypes` from the system OpenSSL `libcrypto` (already required by Python's `ssl`/`hashlib`); no Python package is involved. Password hashing is separate: scrypt (`hashlib.scrypt`, `$scrypt$n=131072,r=8,p=1$`, constant-time `hmac.compare_digest`) lives in `app.services.auth_service.ScryptPasswordHasher`, replacing `argon2-cffi`. |
 | **`app.core.restore`** | Cross-Version Database Backup Restore Engine | Schema-reconciling restore engine reconciling TimescaleDB chunk remapping, missing columns, and password hash upgrades across `v3.1.35s`, `v3.3.0`, `v3.3.1n`, and `v3.3.2v+`. |
 | **`app.core.http_client`** | Socket-Level SSRF-Immune HTTP Client | Replaces `httpx`. Asynchronous raw socket HTTP/1.1 client (`asyncio.open_connection`, `ssl`) performing pre-connection DNS validation against RFC 1918, RFC 3927 (cloud metadata `169.254.169.254`), and loopback IPs. |
@@ -150,7 +150,7 @@ flowchart TD
         CORE_ASGI["app.core.asgi (ASGI 3.0 & SSE)"]
         CORE_ORM["app.core.orm (Async ORM & Compilers)"]
         CORE_SCHEMA["app.core.schema (SchemaModel Validation)"]
-        CORE_FASTSTORE["app.core.faststore (/dev/shm SQLite WAL)"]
+        CORE_FASTSTORE["app.core.faststore (/run/ephemres SQLite WAL)"]
         CORE_MIGRATOR["app.core.migrator (Direct asyncpg DDL)"]
         CORE_CRYPTO["app.core.crypto (AES-256-GCM + HKDF)"]
         CORE_HTTP["app.core.http_client (SSRF-Immune Sockets)"]
@@ -215,8 +215,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Engine_Sweep["ephemres-engine (Strict 32s Sweeper Budget)"]
-        PROBE["ICMP / TCP Probes"]
+    subgraph Engine_Sweep["ephemres-engine (Strict 60s Sweeper Budget)"]
+        PROBE["ICMP Probes"]
         TRANS["State Classifier"]
         BROKER_PUB["EventBroker.publish()"]
         PROBE --> TRANS --> BROKER_PUB

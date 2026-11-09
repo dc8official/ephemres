@@ -50,20 +50,21 @@ Connects to the real-time Server-Sent Events (SSE) telemetry stream.
   - `STATE_TRANSITION`: Emitted on endpoint state changes (`UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`).
   - `NODE_STATE_CHANGE`: Emitted for real-time topology canvas node recoloring.
   - `RCA_INCIDENT`: Emitted on root-cause analysis triggers and resolutions.
-  - `ROUTE_CHANGE`: Emitted when NetFlow route augmentation detects a sustained dominant path change for a monitored endpoint.
+  - `ROUTE_HINT`: Emitted when NetFlow route augmentation (`PathTracker` in `ephemres-flowd`) sees a sustained dominant path change for a monitored endpoint; the leader API worker also uses it to queue a targeted traceroute.
   - `: heartbeat\n\n`: Emitted every 15 seconds if idle to prevent proxy timeouts.
 
 ---
 
 ## 2. Authentication (`/auth`)
 
-All routes (except `/login` and `/version`) require a valid session or JWT token:
+All routes (except `/login` and `/version`) require a valid session token, sent either as the `ephemres_access_token` cookie (what the browser does) or as a header:
 `Authorization: Bearer <your_jwt_token>`
 
 ### `POST /auth/login`
-Authenticates a user and returns an access token.
+Authenticates a user and starts a session.
 - **Request Body:** JSON containing `username` and `password`.
-- **Response:** `200 OK` with JSON `{ "access_token": "...", "token_type": "bearer" }`
+- **Response:** `200 OK` with `data` `{ "username": "...", "role": "ADMIN", "must_change_password": false, "message": "Login successful." }`. The token itself is not in the body: it is set as the `ephemres_access_token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS or with HSTS enabled, lifetime = session timeout). A script can take the token from the `Set-Cookie` response header and send it back as that cookie or as a Bearer header.
+- When `must_change_password` is `true`, every route except `POST /auth/change-password` refuses the session until the password is changed.
 
 ### `POST /auth/logout`
 Terminates the active session and invalidates the session token in the active storage driver.
@@ -324,18 +325,14 @@ Retrieves paginated delivery audit logs across all channels.
 Manage global runtime parameters and daemon operation modes.
 
 ### `GET /settings`
-Retrieves the active system configuration from the database.
+Retrieves the active system configuration from the database. The alerting and flow fields are also returned in camelCase; the other fields are snake_case only.
 - **Response:**
   ```json
   {
     "performance_mode": true,
-    "performanceMode": true,
     "l2_auto_bypass": true,
-    "l2AutoBypass": true,
     "session_timeout": 120,
-    "sessionTimeout": 120,
     "lockout_threshold": 5,
-    "lockoutThreshold": 5,
     "alerting_enabled": true,
     "alertingEnabled": true,
     "flow_ingestion_enabled": true,
@@ -477,7 +474,7 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   - `endpoint_id` (UUID, optional): Filter by source or destination endpoint UUID.
   - `interface_idx` (int, optional, with `exporter_id`): One interface only.
   - `wan_only` (bool, default `false`): Fleet or exporter scope only (ignored with `endpoint_id` or `interface_idx`). Returns in/out summed over WAN-role interfaces as `ingress_*`/`egress_*`, from the interface rollups. The response's `wan_only` says whether it applied: with no WAN interface marked it is `false` and the normal series is returned.
-- Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; the fleet-wide 30d tier keeps no endpoint attribution, so it is `false` and all traffic is reported as transit.
+- Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; only the fleet-wide `1y` window (API only, daily tier) keeps no endpoint attribution, so there it is `false` and all traffic is reported as transit. Windows up to 30d keep endpoints (minute or hourly tier).
 - With `exporter_id`, windows up to 6h read 1-minute interface rollups and longer windows the hourly interface rollup. The 24h/7d/30d flow aggregates use real-time aggregation, so the newest minutes are included.
 - **Response:** `200 OK`
   ```json
@@ -544,8 +541,8 @@ Retrieves the highest-volume addresses and the largest conversations within the 
   ```
 
 ### `GET /bandwidth/applications`
-Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). `zones_resolution` says how `traffic_zones` were classified: `ip` (addresses and monitored endpoints, windows up to 6h), `endpoint` (monitored endpoints only, 24h/7d), or `unavailable` (30d+, zones are zero).
-`qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_minute_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
+Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). `traffic_zones` are always classified by address (`zones_resolution` is always `ip`): windows up to 6h read `flow_minute_rollups`, longer windows the hourly conversation tier `flow_conversation_hourly_rollups` (90 days). `zones_window_start` gives the start actually used, so a `1y` window reports zones for the last 90 days only.
+`qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_conversation_hourly_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
 - **Response:** `200 OK`
@@ -570,8 +567,10 @@ Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` ro
         }
       ],
       "qos_classes": [],
-      "qos_source": "flow_minute_rollups",
+      "qos_source": "flow_conversation_hourly_rollups",
       "qos_window_start": "2026-07-23T12:00:00Z",
+      "zones_window_start": "2026-07-23T12:00:00Z",
+      "zones_resolution": "ip",
       "traffic_zones": []
     },
     "meta": null,

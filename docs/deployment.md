@@ -13,8 +13,8 @@ This guide details the procedures for installing, maintaining, and upgrading the
   - **Python 3.11+**: Ubuntu 24.04 (3.12) and Debian 12 (3.11) meet this out of the box; on Ubuntu 22.04 (3.10) install `python3.11` and `python3.11-venv` before running the installer.
   - **Node.js 20 & npm** (installed by `install.sh` from NodeSource; manual builds need Node.js 18+ for Vite 6)
   - **Nginx** (reverse proxy & TLS termination)
-  - **Linux `/dev/shm`** (standard in-RAM POSIX shared memory for FastStore SQLite WAL)
-- **Zero External Daemons:** `redis-server` is **NOT** required. FastStore runs entirely in-process in `/dev/shm`.
+  - **Linux `/run/ephemres` (or `/dev/shm`)** (in-RAM shared memory for FastStore SQLite WAL)
+- **Zero External Daemons:** `redis-server` is **NOT** required. FastStore runs in-memory in `/run/ephemres` (falling back to `/dev/shm`).
 - **Zero Heavy C-Libraries:** `libpango-1.0-0`, `libcairo2`, and `pypdf` are **NOT** required. PDF reports are emitted directly by `app.core.pdf`.
 - **Time Synchronization & Timezone:** Accurate system clock via NTP (`systemd-timesyncd` or `chrony`) and server timezone configured to match the operational region. Critical for TimescaleDB telemetry partitioning, RTT graph rendering, flow rollup boundaries, and SLA calculations.
 - **Network Permissions:** The `ephemres-engine` daemon requires `CAP_NET_RAW` capability to send raw ICMP packets. `ephemres-flowd` binds UDP 2055 and UDP 4739.
@@ -55,7 +55,7 @@ cd /opt/ephemres/deploy
 2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
 4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.5 defaults.
-5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`, revisions `0001`–`0017`).
+5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`, revisions `0001`–`0021`).
 6. Sets `cap_net_raw+ep` on the `traceroute` binary. The daemons receive `CAP_NET_RAW` from `AmbientCapabilities` in their systemd units; no capability is placed on the Python interpreter.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
@@ -134,7 +134,7 @@ max_active_sessions_per_user = 2
 hsts_enabled = true
 
 [redis]
-# FastStore shared-memory configuration (in-RAM /dev/shm)
+# FastStore shared-memory configuration (in-RAM /run/ephemres or /dev/shm)
 host = "127.0.0.1"
 port = 6379
 db = 0
@@ -153,7 +153,7 @@ route_ecmp_share = 0.2
 
 > [!NOTE]
 > **Performance Mode Toggling**:
-> **Performance Mode** (switching between Standard PostgreSQL Mode and high-velocity FastStore `/dev/shm` shared-memory streaming) is managed live from the **Admin Settings UI $\rightarrow$ Performance & Telemetry** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
+> **Performance Mode** (switching between Standard PostgreSQL Mode and FastStore in-memory event routing) is managed live from the **Admin Settings UI $\rightarrow$ Performance & Telemetry** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
 
 ---
 

@@ -23,7 +23,7 @@ Beginning in **Version 3.3.2.v** and expanded in **Version 3.3.5**, Ephemres ope
 │   • asgi.py        Pure-stdlib ASGI 3.0 router, DI, lifespan & middleware      │
 │   • orm.py         Zero-dependency async SQL query compiler & unit-of-work     │
 │   • schema.py      Pure-stdlib validation, type coercion & JSON serialization  │
-│   • faststore.py   In-RAM /dev/shm SQLite WAL engine with Redis async API      │
+│   • faststore.py   In-RAM /run/ephemres (/dev/shm fallback) SQLite WAL engine with Redis async API      │
 │   • migrator.py    Native async TimescaleDB/PostgreSQL DDL migration engine    │
 │   • crypto.py      Pure-stdlib Scrypt key derivation & constant-time validation│
 │   • restore.py     Cross-version database backup restoration engine            │
@@ -47,7 +47,7 @@ Beginning in **Version 3.3.2.v** and expanded in **Version 3.3.5**, Ephemres ope
 | **Python Dependencies** | 15 external packages (~150MB wheels) | **2 packages** (`uvicorn`, `asyncpg`) | Eliminates dependency rot, transitive CVEs, and installation breakages. |
 | **Startup Time** | 2.1–2.4 s until the API answers (code load alone ~2.0 s) | **1.0–1.7 s** until the API answers (code load alone ~0.4 s): about twice as fast | Quicker process restarts and test cycles. |
 | **Worker Memory Footprint** | ~155 MB per worker | **~47 MB per worker** (about 70% less) | Enables deployment on edge nodes and ultra-low-memory containers. |
-| **External Daemons** | PostgreSQL + TimescaleDB + `redis-server` | **PostgreSQL + TimescaleDB** (Redis eliminated) | FastStore runs in `/dev/shm` SQLite WAL mode; zero daemon failure modes. |
+| **External Daemons** | PostgreSQL + TimescaleDB + `redis-server` | **PostgreSQL + TimescaleDB** (Redis eliminated) | FastStore runs in `/run/ephemres` (`/dev/shm` fallback) SQLite WAL mode; zero daemon failure modes. |
 | **System Shared Libraries** | `libpango`, `libharfbuzz`, `cffi`, `python3-dev` | **Zero external C-libraries** | Pure stdlib implementation runs on any vanilla Linux distribution. |
 | **ORM & SQL Overhead** | Heavy SQLAlchemy mapper metamodels | **Direct native asyncpg SQL compilation** | Zero-reflection query generation with sub-millisecond execution. |
 | **Schema Validation** | Pydantic v2 Rust binary extension | **Pure-stdlib `app.core.schema` engine** | Native Python typing with zero binary ABI incompatibilities. |
@@ -59,17 +59,17 @@ Startup time and memory were measured on v3.3.0 against v3.3.5, running the API 
 ## ⚡ Core System Architecture
 
 1. **Network Flow Telemetry Ingestion (`ephemres-flowd`):** Autonomous collector daemon listening on UDP 2055 (NetFlow v5/v9) and UDP 4739 (IPFIX) with 4MB kernel socket buffers (`SO_RCVBUF`), zero-allocation binary decoders (`struct.unpack_from`), dynamic template caching (1,800s TTL), and orphan data set ring buffering.
-2. **FastStore In-RAM Accelerated Storage:** Pure-stdlib SQLite `WAL` mode storage residing in `/dev/shm` with `synchronous=OFF`, delivering a drop-in async Redis client replacement (`FastStoreClient`) supporting Key-Value with expiry, Sets, Sorted Sets (ZSET sliding 24h prune), high-volume Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and inter-process Pub/Sub.
+2. **FastStore In-RAM Accelerated Storage:** Pure-stdlib SQLite `WAL` mode storage residing in `/run/ephemres` (falling back to `/dev/shm`) with `synchronous=OFF`, delivering a drop-in async Redis client replacement (`FastStoreClient`) supporting Key-Value with expiry, Sets, Sorted Sets (ZSET sliding 24h prune), high-volume Streams (`XADD`, `XREADGROUP`, `XACK`, `XTRIM`), and inter-process Pub/Sub.
 3. **Dual-Role $\mathcal{O}(1)$ In-Memory Correlation:** In-memory hash indexing mapping exporter IP addresses (primary endpoint IP + `flow_exporter_ips` secondary aliases) and traffic participants without database roundtrips.
-4. **4-Tier Hierarchical Storage Lifecycle:** FastStore Stream shock-absorber (`stream:netflow:raw`), 1-minute TimescaleDB rollups (`flow_minute_rollups`, 90-day retention with columnar compression; `flow_interface_minute_rollups`, 7-day retention), real-time 1-hour continuous aggregates (`flow_hourly_rollups`, 30-day retention; `flow_interface_hourly_rollups`, 365-day retention with busiest-minute peaks), and 365-day daily totals (`flow_daily_rollups`).
+4. **4-Tier Hierarchical Storage Lifecycle:** flowd in-memory aggregation buffer (`flow.buffer_memory_limit_mb`), 1-minute TimescaleDB rollups (`flow_minute_rollups`, 90-day retention with columnar compression; `flow_interface_minute_rollups`, 7-day retention), real-time 1-hour continuous aggregates (`flow_hourly_rollups`, 30-day retention; `flow_conversation_hourly_rollups`, 90-day retention; `flow_interface_hourly_rollups`, 365-day retention with busiest-minute peaks), and 365-day daily totals (`flow_daily_rollups`).
 5. **Traffic Analytics, WAN Edge Totals & Per-Interface Telemetry:** Multi-view Traffic Analytics cockpit (`Overview`, `Interfaces`, `Conversations`, `QoS`, `Security`), server-side conversation forensics, average/p95/peak link utilization against provisioned speeds, WAN interface role (`role: "wan"`) counting network-edge traffic once at the perimeter, and 1-click exporter enrollment at `/bandwidth`.
 6. **NetFlow Route Discovery & Topology Augmentation:** Decodes IPv4/IPv6 next-hop addresses from NetFlow v5/v9 and IPFIX (`flow_path_observations`), detects sustained route shifts vs. ECMP load-balancing (`flow_route_changes`), triggers targeted re-traceroutes (`ROUTE_HINT`) for `UP` endpoints, verifies topology links (`confirmed`, `differs`, `inferred` silent `* * *` hops), and attaches flow evidence to RCA incidents.
-7. **Enterprise Alerting Subsystem:** Independent background task pool pushing state transitions and RCA incidents across Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), Generic Webhooks, and direct hardened SMTP Email with socket-level SSRF defense, Scrypt encryption at rest, flapping cooldown, and cascade suppression.
+7. **Enterprise Alerting Subsystem:** Independent background task pool pushing state transitions and RCA incidents across Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), Generic Webhooks, and direct hardened SMTP Email with socket-level SSRF defense, AES-256-GCM encryption at rest, flapping cooldown, and cascade suppression.
 8. **Native Async ORM (`app.core.orm`):** Zero-dependency data access layer supporting declarative models, column constraints, relationship navigation, transactional sessions, and query compilation (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`) directly over `asyncpg`.
-9. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all platform revisions (`0001`–`0017`) sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
+9. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all platform revisions (`0001`–`0021`) sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
 10. **5-Ping @ 8.0s Concurrency Sweeper & Per-Cycle Probe History:** Each endpoint sends 5 pings 8.0s apart (2.0s reply timeout) once per 60-second cycle (~32s typical, 42s worst case), staggered deterministically across the minute by UUID. Every cycle records min/avg/max RTT, jitter, and packet loss into `endpoint_probe_samples` (30d retention) and `endpoint_probe_hourly` (365d retention).
 11. **High-Fidelity Route Diagnostics:** Upgraded traceroute engine (`traceroute -n -q 2 -w 3 -m 30 -I`) with multi-probe latency parsing, raw ICMP capability isolation (`CAP_NET_RAW`), and Layer-2 subnet auto-bypass.
-12. **Real-Time Server-Sent Events (SSE):** Asynchronous event broker streaming telemetry envelopes (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_CHANGE`) and 15-second heartbeat keep-alives via `GET /api/v1/events/stream`.
+12. **Real-Time Server-Sent Events (SSE):** Asynchronous event broker streaming telemetry envelopes (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_HINT`) and 15-second heartbeat keep-alives via `GET /api/v1/events/stream`.
 13. **Pure-Stdlib PDF Compliance Engine (`app.core.pdf`):** PostScript/PDF binary emitter compiling executive compliance reports (Availability/SLA, Bandwidth/Capacity, Master Dossier) with corporate branding, Base64 logos, and zero external binary dependencies.
 14. **Interactive Crossing-Free Topology Map:** Vue 3 Vis-Network visualizer implementing **BFS DAG Longest-Path Layering** (`Level(v) = max(Level(u) + 1)`), **Sugiyama (1981)** barycenter crossing reduction, **Gansner (1993)** coordinate alignment, **frozen-physics real-time recoloring**, NetFlow link verification (`confirmed`, `differs`, `inferred`), and **Horizontal (LR) ⇄ Vertical (UD)** layout switching.
 
@@ -84,7 +84,7 @@ For complete architectural references, operational runbooks, and developer guide
 * **[Changelog & Technical Evolution](docs/changelog.md):** Complete evolutionary matrix and milestone chronicle from Version 1.0 to Version 3.3.5.
 * **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 12 native core engines, data pipelines, and concurrency sweeper.
 * **[Developer Guide](docs/developer-guide.md):** Guidelines for contributing with `app.core.orm`, `app.core.schema`, `app.core.asgi`, and `FastStoreClient`.
-* **[Deployment & Operations Guide](docs/deployment.md):** Production deployment runbook, `/dev/shm` shared memory tuning, and zero-Redis service supervision.
+* **[Deployment & Operations Guide](docs/deployment.md):** Production deployment runbook, `/run/ephemres` shared memory directory, and zero-Redis service supervision.
 * **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9 and IPFIX setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), and interface metrics.
 * **[Database & TimescaleDB Deep-Dive](docs/database.md):** Full schema dictionary, hypertable partitioning, 7-day chunk compression, flow rollup hypertables, and continuous aggregate policies.
 * **[Disaster Recovery & Restoration Runbook](deploy/RESTORE.md):** Procedures for restoring TimescaleDB backups and executing native async migrations.
@@ -103,7 +103,7 @@ For complete architectural references, operational runbooks, and developer guide
 * **Web Framework**: Native ASGI (`app.core.asgi` — Zero-Dependency FastAPI/Starlette Replacement)
 * **Validation & Config**: Native Schema Engine (`app.core.schema` & `app.config` — Zero-Dependency Pydantic Replacement)
 * **Database Layer**: PostgreSQL 16 + TimescaleDB (`asyncpg` + `app.core.orm` — Zero-Dependency SQLAlchemy Replacement)
-* **IPC & Streaming**: FastStore (`app.core.faststore` — Shared-Memory `/dev/shm` SQLite WAL Engine replacing Redis)
+* **IPC & Streaming**: FastStore (`app.core.faststore` — Shared-Memory `/run/ephemres` / `/dev/shm` SQLite WAL Engine replacing Redis)
 * **Security & Crypto**: Scrypt password hashing (`hashlib.scrypt`, `app.services.auth_service`), AES-256-GCM secret encryption with HKDF-SHA256 key derivation (`app.core.crypto`, via the system OpenSSL `libcrypto`), HS256 JWT session tokens, and a stdlib DER certificate-expiry parser for SSL probes (`monitoring/synthetic.py`)
 * **Networking & Harvesters**: Raw Socket ICMP (`monitoring/ping.py`), Native Linux RTNETLINK & `/proc/net` Parser (`app.core.netlink`), Native Async HTTP/1.1 + SSRF Guard (`app.core.http_client`)
 * **Reporting Engine**: Native Binary PDF 1.4 Generator with PNG/JPEG XObject embedding (`app.core.pdf`) & Native AST Template Engine (`app.core.template`)
@@ -115,7 +115,7 @@ For complete architectural references, operational runbooks, and developer guide
 
 ### 1. Host Requirements
 * **Operating System:** Ubuntu 22.04 / 24.04 LTS or Debian 12+ (x86_64). The installer uses `apt`; RHEL-family distributions are not supported by `install.sh`.
-* **Kernel & Memory:** Linux Kernel 4.x+ with write access to `/dev/shm` (standard POSIX shared memory).
+* **Kernel & Memory:** Linux Kernel 4.x+ with write access to `/run/ephemres` (systemd RuntimeDirectory) or `/dev/shm`.
 * **Database:** PostgreSQL with TimescaleDB 2. The installer provisions PostgreSQL 16 and TimescaleDB from the official PGDG and Timescale repositories; manual installs need PostgreSQL 14+.
 * **Python:** Python 3.11+. Ubuntu 24.04 (3.12) and Debian 12 (3.11) meet this out of the box; on Ubuntu 22.04 (3.10) install `python3.11` and `python3.11-venv` before running the installer.
 * **System Packages:** `traceroute`, Nginx, Node.js 20 (installed by `install.sh`). **No `redis-server`, `libpango`, or C-compilers required.**
@@ -152,11 +152,11 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 
 The upgrade utility automatically:
 1. **Pre-Upgrade Backup:** Dumps a timestamped PostgreSQL SQL backup to `/var/backups/ephemres/`.
-2. **Removes Obsolete Daemons:** Safely stops and disables `redis-server` (if previously installed for legacy Ephemres versions).
+2. **Migrates Legacy Installs:** On a server still running the pre-rename `netmon-*` services, carries over `/etc/netmon` configuration, disables the `netmon-*` units and repoints the nginx site; flow ingestion stays on if `netmon-flowd` was receiving flows. (It does not touch `redis-server`; remove that package yourself if an old release installed it.)
 3. **Synchronizes Dependencies:** Installs the minimal 2-package requirements (`uvicorn`, `asyncpg`) in <3 seconds.
 4. **Compiles Frontend:** Builds production Vue 3 assets via Vite.
-5. **Executes Native Migrations:** Runs `migrator.py` applying forward schema migrations (`0001`–`0017`) while preserving all historical telemetry and continuous aggregates.
-6. **Restarts Services:** Reloads `ephemres-api`, `ephemres-engine`, and `ephemres-flowd` under systemd.
+5. **Executes Native Migrations:** Runs `migrator.py` applying forward schema migrations (`0001`–`0021`) while preserving all historical telemetry and continuous aggregates.
+6. **Restarts Services:** Reloads `ephemres-api` and `ephemres-engine` under systemd, plus `ephemres-flowd` when flow ingestion is enabled.
 7. **Health Verification:** Confirms `/api/v1/version` and `/api/v1/health` report services are healthy.
 
 ---

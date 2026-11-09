@@ -6,21 +6,21 @@ This guide provides systematic diagnostic steps, platform logging architecture s
 
 ## 1. Platform Logging Architecture & Log Triage Guide
 
-Ephemres incorporates a dual-logging architecture: all standard console output is captured by `systemd-journald`, while automated auto-rotating file handlers mirror structured logs directly to `/var/log/ephemres/` (or `./logs/` in non-root test environments) with strict storage quotas.
+Ephemres incorporates a dual-logging architecture: all standard console output is captured by `systemd-journald`, while automated auto-rotating file handlers mirror structured logs directly to `/var/log/ephemres/` with strict storage quotas (logging to console only if `/var/log/ephemres` is not writable).
 
 ### A. The 6 Core Log Streams
 
 | Log Stream | Destination / Location | Description & Contents | Default Retention / Rotation |
 | :--- | :--- | :--- | :--- |
 | **API Server Daemon** | `journalctl -u ephemres-api`<br>`/var/log/ephemres/ephemres-api.log` | Native ASGI REST request logs, authentication events, session validation, route handling, settings updates, and background workers. | 10 MB per file, 5 rotated backups (max 60 MB total). |
-| **Monitoring Engine** | `journalctl -u ephemres-engine`<br>`/var/log/ephemres/ephemres-engine.log` | 32-second ICMP sweep cycles, synthetic HTTP/TCP/SSL probes, route traceroutes, RCA analysis, gap detection, and state transitions. | 10 MB per file, 5 rotated backups (max 60 MB total). |
-| **Flow Collector Daemon** *(v3.2.0+)* | `journalctl -u ephemres-flowd`<br>`/var/log/ephemres/ephemres-flowd.log` | Passive NetFlow v5/v9 and IPFIX UDP packet decoding, template caching, and FastStore shared-memory stream buffering (`/dev/shm`). | 10 MB per file, 5 rotated backups (max 60 MB total). |
-| **Platform Error Aggregator** | `/var/log/ephemres/error.log` | Unified platform-wide sink capturing all `ERROR` and `CRITICAL` log records across all Ephemres Python components. | 10 MB per file, 3 rotated backups (max 30 MB total). |
+| **Monitoring Engine** | `journalctl -u ephemres-engine`<br>`/var/log/ephemres/ephemres-engine.log` | 60-second ICMP sweep cycles (5 pings @ 8.0s), route traceroutes, RCA analysis, gap detection, and state transitions. | 10 MB per file, 5 rotated backups (max 60 MB total). |
+| **Flow Collector Daemon** *(v3.2.0+)* | `journalctl -u ephemres-flowd`<br>`/var/log/ephemres/ephemres-flowd.log` | Passive NetFlow v5/v9 and IPFIX UDP packet decoding, template caching, and in-memory aggregation to TimescaleDB. | 10 MB per file, 5 rotated backups (max 60 MB total). |
+| **Platform Error Aggregator** | `/var/log/ephemres/error.log` | Unified platform-wide sink capturing all `ERROR` and `CRITICAL` log records across all Ephemres Python components. | 10 MB per file, 3 rotated backups (max 40 MB total). |
 | **Reverse Proxy (Nginx)** | `/var/log/nginx/access.log`<br>`/var/log/nginx/error.log` | Inbound client HTTP requests, TLS termination, SSE long-polling connection lifecycle, and upstream proxy dispatch. | Managed by system `logrotate` (daily / weekly compression). |
-| **Database & Cache Services** | `journalctl -u postgresql`<br>`/dev/shm/ephemres_faststore_*.sqlite3` | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and FastStore In-RAM IPC WAL engine state. | Managed by PostgreSQL engine and FastStore RAM lifecycle. |
+| **Database & Cache Services** | `journalctl -u postgresql`<br>`/run/ephemres/ephemres_faststore_*.sqlite3` (`/dev/shm` fallback) | PostgreSQL query execution, TimescaleDB hypertable compression jobs, connection pool metrics, and FastStore In-RAM IPC WAL engine state. | Managed by PostgreSQL engine and FastStore RAM lifecycle. |
 
 > [!NOTE]
-> **Total Log Footprint Ceiling**: Application file logging in `/var/log/ephemres/` is bounded to a maximum ceiling of **$\sim$150 MB** across all services combined, preventing disk exhaustion on lean edge or VPS instances.
+> **Total Log Footprint Ceiling**: Application file logging in `/var/log/ephemres/` is bounded to a maximum ceiling of **$\sim$220 MB** across all services combined (3 service logs $\times$ 60 MB + 40 MB error log), preventing disk exhaustion on lean edge or VPS instances.
 
 ---
 
@@ -81,7 +81,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Check the unit's `AmbientCapabilities` (Section 2.A). |
 | **Services fail to start: `Insecure configuration`** or systemd `Failed to load environment files` | `journalctl -u ephemres-api` | `the JWT signing key is the default development secret`, `shorter than 32 characters`, `ephemres.env: No such file` | `/etc/ephemres/ephemres.env` is missing, unreadable by `ephemres`, or lacks `EPHEMRES_SECRET_KEY`. Restore it from the backup's `.key` file (keep the same key, or saved alert channel secrets cannot be decrypted), `chmod 600`, `chown ephemres:ephemres`. |
 | **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait 15 minutes for the lockout to expire, or reset `admin` with `reset-admin-password.sh` (Sections 2.B and 2.C). |
-| **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore `/dev/shm` IPC state. |
+| **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore in-memory IPC state (`/run/ephemres`). |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
 
 ---
@@ -244,7 +244,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   - The issue persists until the API daemon is restarted.
 * **Cause**:
   - In production, `ephemres-api` operates under Uvicorn with multiple worker processes (`--workers 2`).
-  - Worker processes have isolated memory spaces. In legacy releases prior to v3.1.3s, updating `performance_mode` via `PATCH /api/v1/settings` re-initialized the storage driver only in the worker process that handled the HTTP request.
+  - Worker processes have isolated memory spaces. In legacy releases prior to v3.3.5, updating `performance_mode` via `PATCH /api/v1/settings` re-initialized the storage driver only in the worker process that handled the HTTP request.
   - The other worker remained connected to PostgreSQL, creating an in-memory split-brain state where Worker 1 validated sessions against FastStore while Worker 2 validated sessions against PostgreSQL.
   - Navigating to Admin Settings triggers concurrent HTTP requests. Any request routed to the desynchronized worker returned `HTTP 401 Unauthorized`, causing the frontend router interceptor to clear credentials and redirect to `/login`.
 * **Fix**:
@@ -254,7 +254,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
      sudo systemctl restart ephemres-api
      ```
   2. **Permanent Resolution**:
-     Ephemres incorporates cluster-wide PostgreSQL `LISTEN`/`NOTIFY` synchronization (`SYSTEM_SETTINGS_SYNC`) and bidirectional warm session migration, eliminating worker split-brain states automatically without service restarts.
+     Ephemres stores all sessions and sign-in lockouts in PostgreSQL (`user_sessions`, `auth_login_failures`) across all workers, and broadcasts `performance_mode` updates via PostgreSQL `LISTEN`/`NOTIFY` (`SYSTEM_SETTINGS_SYNC`), eliminating worker split-brain states automatically without service restarts.
 
 ### J. PostgreSQL Connection Pool Exhaustion (`TooManyConnectionsError`)
 * **Symptoms**:
@@ -378,5 +378,5 @@ systemctl show ephemres-engine ephemres-api -p AmbientCapabilities
 getcap "$(readlink -f "$(command -v traceroute)")"
 
 # 4. FastStore IPC shared memory check
-ls -l /dev/shm/ephemres_faststore*
+ls -l /run/ephemres/ephemres_faststore* /dev/shm/ephemres_faststore*
 ```

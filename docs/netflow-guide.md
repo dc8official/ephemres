@@ -296,7 +296,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
    - Click **Run Diagnostic Preflight** to check that FastStore opens and the flow UDP ports are free (it also reports `rmem_max`). Performance Mode is not needed for flows.
    - Toggle **Enable Flow Telemetry Ingestion** to **Active**.
    - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match your network topology.
-   - Click **Save Global Settings**.
+   - Click **Save Changes**.
 4. Start or restart the `ephemres-flowd` service on the host:
    ```bash
    sudo systemctl enable --now ephemres-flowd
@@ -348,8 +348,17 @@ sudo journalctl -u ephemres-flowd --since "-15 min" | grep "last minute"
 * `LOST N datagrams (kernel socket buffer full: flowd too slow)`: flowd can't keep up with the
   exporters. Raise `net.core.rmem_max` (flowd asks for a 4 MB socket buffer) or reduce what the
   exporters send (sampling).
-* `LOST N flows (flow buffer full: database down?)`: the database has been unreachable long
-  enough to fill `flow.buffer_memory_limit_mb`; check PostgreSQL.
+* `LOST N flows (flow buffer full: <reason>)`: flows held for the database filled
+  `flow.buffer_memory_limit_mb`, and new conversations are being dropped. The reason says which:
+  * `the database is not accepting rollup writes (<error>)`: PostgreSQL is down or refusing
+    writes; check PostgreSQL.
+  * `rollup writes are not keeping up with new conversations (the last flush wrote N rows in X s)`:
+    the database is up but too slow for the number of new conversations (a single TimescaleDB
+    manages roughly 15,000 to 20,000 rollup rows/s). Reduce what the exporters send (sampling,
+    fewer exporters) or give the database more resources.
+* `rollup writes are falling behind (the last flush wrote N rows in X s, flushes are 10 s apart)`:
+  nothing is lost yet, but a flush takes longer than the gap between flushes, so the buffer is
+  growing and will fill if this goes on. Same remedies as above.
 
 ### Which Data a View Shows
 Each Traffic page view, the endpoint Bandwidth & Flow tab and the PDF bandwidth report read a minute, hourly or daily table depending on the window, and the longer-term tables keep less detail (no addresses, and the daily one no endpoints). See [Database §3](database.md#3-4-tier-hierarchical-storage-lifecycle) for what each table keeps and which one each view reads.

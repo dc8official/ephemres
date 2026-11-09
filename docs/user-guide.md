@@ -69,7 +69,7 @@ Clicking any endpoint opens its detailed forensic view with a live status bar (S
 
 Administrators can configure platform behavior across five dedicated tabs:
 1. **🔔 Alert Channels:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
-2. **⚡ Performance & Telemetry:** FastStore event-routing toggle (`performance_mode`; flows don't depend on it), flow diagnostic preflight, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), sampling rate, and live queue metrics.
+2. **⚡ Performance & Telemetry:** FastStore event-routing toggle (`performance_mode`; flows don't depend on it), flow diagnostic preflight, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), and sampling rate.
 3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, sliding session inactivity timeout (minutes), and IP-scoped brute-force lockout threshold.
 4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation.
 5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG or JPEG, up to 1 MB) for branded PDF report generation.
@@ -168,10 +168,10 @@ Switch between five dedicated views (persisted in `?view=` in the URL):
 ### 2. Time Window Selection
 Select your analysis horizon using the time range switcher:
 * `1h` (High-resolution 1-minute intervals)
-* `6h` (5-minute rolling averages)
-* `24h` (Hourly trend analysis)
-* `7d` (Daily capacity curves)
-* `30d` (Monthly utilization summaries)
+* `6h` (1-minute intervals)
+* `24h` (Hourly trend intervals)
+* `7d` (Hourly trend intervals)
+* `30d` (Hourly trend intervals)
 
 ### 3. Stacked Traffic Series Chart
 An interactive Chart.js area chart visualizes total Ingress vs. Egress throughput over time:
