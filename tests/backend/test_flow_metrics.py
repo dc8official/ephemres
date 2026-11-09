@@ -203,11 +203,11 @@ def test_traffic_zone_order():
     )
 
 
-@pytest.mark.parametrize("flags", range(256))
-def test_tcp_anomaly_matches_every_legacy_flag_check(flags):
-    hint = fm.tcp_anomaly(flags)
-    assert hint == _legacy_conversation_hint(flags)
-    assert (hint is not None) == _legacy_overview_is_anomaly(flags)
+def test_tcp_anomaly_matches_every_legacy_flag_check():
+    for flags in range(256):
+        hint = fm.tcp_anomaly(flags)
+        assert hint == _legacy_conversation_hint(flags), f"flags={flags}"
+        assert (hint is not None) == _legacy_overview_is_anomaly(flags), f"flags={flags}"
 
 
 def test_tcp_anomaly_handles_missing_flags():

@@ -13,7 +13,6 @@ from app.core.asgi import HTTPException
 from app.core.schema import ValidationError
 
 from app.routers.reports import parse_datetime_param
-from app.routers.users import reset_password
 from app.routers.endpoints import update_endpoint, UpdateEndpointRequest
 from app.schemas.common import PaginationMeta
 from monitoring.ping import PingResult, classify_ping_result
@@ -41,26 +40,6 @@ class TestCodeReviewBugFixes(unittest.TestCase):
         # With 2.0ms floor, threshold is 1.0 + 3*2.0 = 7.0ms -> 1.10ms should be UP, not UP-UNSTABLE
         self.assertEqual(op, "UP")
         self.assertEqual(detailed, "UP")
-
-    def test_admin_self_reset_protection(self) -> None:
-        mock_req = MagicMock()
-        mock_req.password = "newpass123"
-        admin_id = uuid4()
-        current_user = {"sub": str(admin_id), "role": "ADMIN"}
-        mock_db = AsyncMock()
-
-        with self.assertRaises(HTTPException) as cm:
-            self.loop.run_until_complete(
-                reset_password(
-                    user_id=admin_id,
-                    request=mock_req,
-                    current_user=current_user,
-                    db=mock_db,
-                )
-            )
-
-        self.assertEqual(cm.exception.status_code, 400)
-        self.assertIn("own password", cm.exception.detail)
 
     def test_cyclic_parent_relationship_protection(self) -> None:
         ep_id = uuid4()

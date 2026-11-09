@@ -41,29 +41,6 @@ class FakeFastStoreClient:
 
 
 @pytest.mark.anyio
-async def test_process_start_in_faststore_mode_keeps_faststore_sessions():
-    manager = StorageDriverManager()
-    with patch("app.services.driver_manager.AsyncSessionLocal", _settings_session("true")), \
-         patch("app.core.faststore.FastStoreClient", FakeFastStoreClient), \
-         patch("app.services.driver_manager.migrate_sessions_pg_to_faststore", AsyncMock()) as to_faststore:
-        await manager.initialize()
-    assert manager.driver_mode == "redis"
-    to_faststore.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_switching_faststore_on_at_runtime_still_copies_sessions():
-    manager = StorageDriverManager()
-    with patch("app.services.driver_manager.AsyncSessionLocal", _settings_session("false")):
-        await manager.initialize()
-    with patch("app.services.driver_manager.AsyncSessionLocal", _settings_session("true")), \
-         patch("app.core.faststore.FastStoreClient", FakeFastStoreClient), \
-         patch("app.services.driver_manager.migrate_sessions_pg_to_faststore", AsyncMock()) as to_faststore:
-        await manager.initialize()
-    to_faststore.assert_awaited_once()
-
-
-@pytest.mark.anyio
 async def test_registered_exporter_addresses_leave_the_unmatched_lists():
     db = AsyncMock()
     rows = MagicMock()

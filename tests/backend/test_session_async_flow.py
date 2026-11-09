@@ -3,10 +3,9 @@ from uuid import uuid4
 from unittest.mock import AsyncMock, MagicMock
 
 from app.core.asgi import EphemresApp, TestClient, Depends, Request, Response
-from app.core.faststore import FastStoreClient
 from app.routers.auth import login, get_current_user, LoginRequest, cookie_name
 from app.services.driver_manager import driver_manager
-from app.services.session_store import FastStoreSessionStore
+from tests.backend.session_store_double import InMemorySessionStore
 from app.services.auth_service import (
     register_session_async,
     invalidate_session_async,
@@ -17,10 +16,8 @@ from app.services.auth_service import (
 
 
 @pytest.fixture(autouse=True)
-def setup_faststore_session_store():
-    # Configure driver_manager to use FastStoreSessionStore
-    faststore_client = FastStoreClient()
-    driver_manager._session_store = FastStoreSessionStore(faststore_client)
+def setup_session_store():
+    driver_manager._session_store = InMemorySessionStore()
     _active_user_sessions.clear()
     yield
     _active_user_sessions.clear()

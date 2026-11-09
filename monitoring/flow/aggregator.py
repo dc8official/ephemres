@@ -18,9 +18,16 @@ except ModuleNotFoundError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-STREAM_KEY = "stream:netflow:raw"
-GROUP_NAME = "flow_agg_group"
-CONSUMER_NAME = "aggregator_worker_1"
+# Memory budget per accumulator entry (about 370 bytes measured, plus the flush snapshot's copy),
+# used to turn flow.buffer_memory_limit_mb into an entry cap.
+ACCUMULATOR_BYTES_PER_ENTRY = 1024
+
+ROLLUP_COLUMNS = (
+    "bucket", "exporter_id", "src_endpoint_id", "dst_endpoint_id", "src_ip", "dst_ip",
+    "protocol", "dst_port", "bytes", "packets", "flow_count", "tcp_flags", "tos",
+)
+ROLLUP_ROWS_PER_STATEMENT = 5000
+
 SENTINEL_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 # flow_path_observations rows not seen for this long, and flow_route_changes older than this,
@@ -54,7 +61,11 @@ def normalize_service_port(src_port: int, dst_port: int, protocol: int = 0) -> i
 
 class FlowAggregator:
     """
-    Redis Stream consumer and TimescaleDB 1-minute hypertable micro-batch aggregator.
+    Sums flows into 1-minute rollups in memory and writes them to TimescaleDB every few seconds.
+
+    The collector hands parsed flows straight to ingest() in the same process. They used to go
+    through a FastStore stream, which wrote, read back and trimmed every flow in SQLite; above
+    about 1,000 flows/s the trim starved the reader and deleted flows it had not read yet.
     """
 
     def __init__(
@@ -69,13 +80,20 @@ class FlowAggregator:
         path_tracker: Optional[PathTracker] = None,
         event_publisher: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
     ):
+        # FastStore: active interface sets for the API (flows themselves never go there).
         self.store = store_client if store_client is not None else redis_client
-        # Circuit-breaker ceiling for the FastStore buffer (config.toml flow.buffer_memory_limit_mb).
+        # flow.buffer_memory_limit_mb bounds the flows held here while the database is
+        # unreachable: past it, new conversations are dropped (and counted) until a flush works.
         if memory_limit_mb is None:
             from app.config import settings
 
             memory_limit_mb = getattr(getattr(settings, "flow", None), "buffer_memory_limit_mb", 512)
         self.memory_limit_bytes = int(memory_limit_mb) * 1024 * 1024
+        self.max_accumulator_entries = max(1000, self.memory_limit_bytes // ACCUMULATOR_BYTES_PER_ENTRY)
+        # Counters since start, logged by flowd every minute.
+        self.flows_ingested = 0
+        self.flows_dropped_memory = 0
+        self.rows_stored = 0
         self.correlator = correlator
         self.db_factory = db_session_factory
         self.flush_interval = flush_interval_seconds
@@ -98,13 +116,11 @@ class FlowAggregator:
         self.event_publisher = event_publisher
 
         self._active_interfaces_set: Set[Tuple[UUID, int]] = set()
-        self._pending_msg_ids: List[str] = []
         self._flush_lock = asyncio.Lock()
+        self._memory_cap_logged = False
 
         self._running = False
-        self._consume_task: Optional[asyncio.Task] = None
         self._flush_task: Optional[asyncio.Task] = None
-        self._trim_task: Optional[asyncio.Task] = None
         self._prune_task: Optional[asyncio.Task] = None
 
     @property
@@ -115,33 +131,44 @@ class FlowAggregator:
     def redis(self, val: Any) -> None:
         self.store = val
 
-    async def _setup_consumer_group(self) -> None:
-        if not self.store:
-            return
-        try:
-            await self.store.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
-            logger.info("Created consumer group '%s' on '%s'.", GROUP_NAME, STREAM_KEY)
-        except Exception as e:
-            if "BUSYGROUP" not in str(e):
-                logger.warning("Error creating consumer group: %s", e)
-
-    async def _check_circuit_breaker(self) -> bool:
-        """Returns True if FastStore usage is within 85% of flow.buffer_memory_limit_mb, False if tripped."""
-        if not self.store:
-            return True
-        try:
-            info = await self.store.info("memory")
-            used = int(info.get("used_memory", 0))
-            maxmem = self.memory_limit_bytes
-            if maxmem > 0 and (used / maxmem) > 0.85:
-                logger.error(
-                    "Circuit Breaker TRIPPED: FastStore memory utilization at %.1f%% (>85%%). Dropping buffer.",
-                    (used / maxmem) * 100.0,
+    def ingest(self, flows: List[Dict[str, Any]]) -> None:
+        """Adds one packet's parsed flows (the collector calls this for every datagram)."""
+        for f in flows:
+            src_ip = f.get("src_ip")
+            dst_ip = f.get("dst_ip")
+            if not src_ip or not dst_ip:
+                continue
+            try:
+                start = float(f.get("start_time") or time.time())
+                end = float(f.get("end_time") or start)
+                next_hop = f.get("next_hop") or None
+                if next_hop is not None:
+                    try:
+                        ipaddress.ip_address(next_hop)
+                    except ValueError:
+                        next_hop = None
+                # IPFIX interface indexes are 32-bit; anything outside the column's range is unknown.
+                in_if = int(f.get("input_if") or 0)
+                out_if = int(f.get("output_if") or 0)
+                self.accumulate_flow(
+                    exporter_ip=f.get("exporter_ip", ""),
+                    src_ip=src_ip,
+                    dst_ip=dst_ip,
+                    src_port=int(f.get("src_port") or 0),
+                    dst_port=int(f.get("dst_port") or 0),
+                    protocol=int(f.get("protocol") or 0),
+                    flow_bytes=int(f.get("bytes") or 0),
+                    flow_packets=int(f.get("packets") or 0),
+                    start_time_unix=start,
+                    in_if=in_if if 0 < in_if <= 2147483647 else 0,
+                    out_if=out_if if 0 < out_if <= 2147483647 else 0,
+                    tcp_flags=int(f.get("tcp_flags") or 0),
+                    tos=int(f.get("tos") or 0),
+                    next_hop=next_hop,
+                    end_time_unix=end,
                 )
-                return False
-        except Exception:
-            pass
-        return True
+            except (TypeError, ValueError) as err:
+                logger.debug("Skipping malformed flow record from %s: %s", f.get("exporter_ip"), err)
 
     def accumulate_interface_flow(
         self,
@@ -222,6 +249,7 @@ class FlowAggregator:
 
         tcp_flags = int(tcp_flags) & 0xFF
         tos = int(tos) & 0xFF
+        self.flows_ingested += 1
 
         exporter_id, src_ep_id, dst_ep_id = self.correlator.correlate(
             exporter_ip, src_ip, dst_ip
@@ -245,6 +273,18 @@ class FlowAggregator:
         )
 
         if key not in self._accumulator:
+            if len(self._accumulator) >= self.max_accumulator_entries:
+                # Only reachable while flushes fail (database down): keep what is held, drop new
+                # conversations, and say so once until a flush succeeds.
+                self.flows_dropped_memory += 1
+                if not self._memory_cap_logged:
+                    self._memory_cap_logged = True
+                    logger.error(
+                        "Flow buffer full (%d conversations, flow.buffer_memory_limit_mb=%d): "
+                        "dropping new flows until the database accepts the backlog.",
+                        len(self._accumulator), self.memory_limit_bytes // (1024 * 1024),
+                    )
+                return
             self._accumulator[key] = [flow_bytes, flow_packets, 1, tcp_flags, tos]
         else:
             entry = self._accumulator[key]
@@ -278,14 +318,13 @@ class FlowAggregator:
 
     async def _flush_rollups(self) -> None:
         async with self._flush_lock:
-            if not self._accumulator and not self._interface_accumulator and not self._pending_msg_ids:
+            if not self._accumulator and not self._interface_accumulator:
                 return
 
-            # Snapshot current accumulator entries and pending stream IDs
+            # Snapshot current accumulator entries
             snapshot = {k: list(v) for k, v in self._accumulator.items()}
             if_snapshot = {k: list(v) for k, v in self._interface_accumulator.items()}
             active_if_snapshot = set(self._active_interfaces_set)
-            pending_ack = list(self._pending_msg_ids)
 
             rows: List[Dict[str, Any]] = []
             if_rows: List[Dict[str, Any]] = []
@@ -363,16 +402,25 @@ class FlowAggregator:
 
                 if_rows = list(grouped_if.values())
 
+            # One statement per chunk, each parameter an array of the chunk's column: an
+            # executemany ran the upsert once per row and capped flowd at about 1,900 new
+            # conversations a second.
             insert_sql = text("""
                 INSERT INTO flow_minute_rollups (
                     bucket, exporter_id, src_endpoint_id, dst_endpoint_id,
                     src_ip, dst_ip, protocol, dst_port,
                     bytes, packets, flow_count, tcp_flags, tos
-                ) VALUES (
-                    :bucket, :exporter_id, :src_endpoint_id, :dst_endpoint_id,
-                    CAST(:src_ip AS inet), CAST(:dst_ip AS inet), :protocol, :dst_port,
-                    :bytes, :packets, :flow_count, :tcp_flags, :tos
                 )
+                SELECT u.bk, u.ex, u.sep, u.dep, CAST(u.sip AS inet), CAST(u.dip AS inet),
+                       u.pr, u.dpt, u.byt, u.pkt, u.fcn, u.tfl, u.tsv
+                FROM unnest(
+                    CAST(:bucket AS timestamptz[]), CAST(:exporter_id AS uuid[]),
+                    CAST(:src_endpoint_id AS uuid[]), CAST(:dst_endpoint_id AS uuid[]),
+                    CAST(:src_ip AS text[]), CAST(:dst_ip AS text[]),
+                    CAST(:protocol AS smallint[]), CAST(:dst_port AS integer[]),
+                    CAST(:bytes AS bigint[]), CAST(:packets AS bigint[]), CAST(:flow_count AS integer[]),
+                    CAST(:tcp_flags AS smallint[]), CAST(:tos AS smallint[])
+                ) AS u(bk, ex, sep, dep, sip, dip, pr, dpt, byt, pkt, fcn, tfl, tsv)
                 ON CONFLICT (bucket, exporter_id, src_ip, dst_ip, protocol, dst_port)
                 DO UPDATE SET
                     bytes = flow_minute_rollups.bytes + EXCLUDED.bytes,
@@ -405,10 +453,14 @@ class FlowAggregator:
                 try:
                     async with self.db_factory() as session:
                         if rows:
-                            batch_size = 1000
+                            batch_size = ROLLUP_ROWS_PER_STATEMENT
                             for i in range(0, len(rows), batch_size):
                                 chunk = rows[i : i + batch_size]
-                                await session.execute(insert_sql, chunk)
+                                # Tuples, not lists: the ORM sends a list parameter as JSON, a
+                                # tuple goes to asyncpg as a PostgreSQL array.
+                                await session.execute(
+                                    insert_sql, {name: tuple(r[name] for r in chunk) for name in ROLLUP_COLUMNS}
+                                )
                         if if_rows:
                             batch_size = 1000
                             for i in range(0, len(if_rows), batch_size):
@@ -421,8 +473,10 @@ class FlowAggregator:
                         logger.info("Successfully persisted %d interface rollup records to TimescaleDB.", len(if_rows))
                 except Exception as e:
                     logger.error("Failed to commit flow rollup micro-batch to DB: %s", e)
-                    # Keep accumulator intact and do not ack messages on failure
+                    # Keep the accumulator intact; the next flush retries.
                     return
+                self.rows_stored += len(rows)
+                self._memory_cap_logged = False
 
                 # Only deduct committed quantities from accumulator on successful DB commit
                 if rows:
@@ -457,106 +511,6 @@ class FlowAggregator:
                     except Exception as store_err:
                         logger.warning("Failed to record active interfaces in FastStore: %s", store_err)
 
-            # Acknowledge stream messages in FastStore only after successful DB persistence
-            if pending_ack and self.store:
-                try:
-                    batch_ack = 500
-                    for i in range(0, len(pending_ack), batch_ack):
-                        ack_chunk = pending_ack[i : i + batch_ack]
-                        await self.store.xack(STREAM_KEY, GROUP_NAME, *ack_chunk)
-                    self._pending_msg_ids = self._pending_msg_ids[len(pending_ack):]
-                except Exception as ack_err:
-                    logger.warning("Failed to xack stream messages in FastStore: %s", ack_err)
-
-    async def _consume_stream(self) -> None:
-        await self._setup_consumer_group()
-
-        while self._running:
-            if not self.store:
-                await asyncio.sleep(1.0)
-                continue
-
-            # Circuit breaker check
-            if not await self._check_circuit_breaker():
-                await asyncio.sleep(5.0)
-                continue
-
-            try:
-                # Read up to 2000 messages with 1s timeout
-                entries = await self.store.xreadgroup(
-                    GROUP_NAME,
-                    CONSUMER_NAME,
-                    {STREAM_KEY: ">"},
-                    count=2000,
-                    block=1000,
-                )
-
-                if not entries:
-                    continue
-
-                for _, message_list in entries:
-                    for msg_id, fields in message_list:
-                        raw_id = msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id)
-                        self._pending_msg_ids.append(raw_id)
-                        try:
-                            exp_ip = fields.get("exp", "")
-                            src_ip = fields.get("src", "")
-                            dst_ip = fields.get("dst", "")
-                            if not src_ip or not dst_ip:
-                                continue
-                            try:
-                                ipaddress.ip_address(src_ip.strip())
-                                ipaddress.ip_address(dst_ip.strip())
-                            except ValueError:
-                                continue
-                            sport = int(fields.get("sport", 0))
-                            dport = int(fields.get("dport", 0))
-                            proto = int(fields.get("proto", 0))
-                            f_bytes = int(fields.get("b", 0))
-                            f_pkts = int(fields.get("p", 0))
-                            tcp_flags = int(fields.get("flags", 0) or 0)
-                            tos = int(fields.get("tos", 0) or 0)
-                            ts_start = float(fields.get("ts_start", time.time()))
-                            ts_end = float(fields.get("ts_end") or ts_start)
-                            next_hop = (fields.get("nh") or "").strip() or None
-                            if next_hop is not None:
-                                try:
-                                    ipaddress.ip_address(next_hop)
-                                except ValueError:
-                                    next_hop = None
-
-                            # Extract interface indexes with IPFIX 32-bit bound checks
-                            raw_in_if = int(fields.get("in_if", 0))
-                            raw_out_if = int(fields.get("out_if", 0))
-                            valid_in_if = raw_in_if if (0 < raw_in_if <= 2147483647) else 0
-                            valid_out_if = raw_out_if if (0 < raw_out_if <= 2147483647) else 0
-
-                            self.accumulate_flow(
-                                exporter_ip=exp_ip,
-                                src_ip=src_ip,
-                                dst_ip=dst_ip,
-                                src_port=sport,
-                                dst_port=dport,
-                                protocol=proto,
-                                flow_bytes=f_bytes,
-                                flow_packets=f_pkts,
-                                start_time_unix=ts_start,
-                                in_if=valid_in_if,
-                                out_if=valid_out_if,
-                                tcp_flags=tcp_flags,
-                                tos=tos,
-                                next_hop=next_hop,
-                                end_time_unix=ts_end,
-                            )
-                        except Exception as parse_err:
-                            logger.debug("Corrupted stream message %s: %s", msg_id, parse_err)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("Error consuming from Redis Stream: %s", exc)
-                await asyncio.sleep(1.0)
-
     async def _flush_loop(self) -> None:
         while self._running:
             try:
@@ -566,21 +520,6 @@ class FlowAggregator:
                 break
             except Exception as e:
                 logger.error("Aggregator flush loop error: %s", e)
-
-    async def _stream_trim_loop(self) -> None:
-        """Prunes FastStore Stream entries older than 2 hours every 5 minutes."""
-        while self._running:
-            try:
-                await asyncio.sleep(300.0)
-                if self.store:
-                    # 2 hours ago in ms
-                    cutoff_ms = int((time.time() - 7200.0) * 1000)
-                    await self.store.xtrim(STREAM_KEY, minid=str(cutoff_ms), approximate=True)
-                    logger.debug("Trimmed stream '%s' older than 2 hours (minid=%d).", STREAM_KEY, cutoff_ms)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning("Stream trim error: %s", e)
 
     async def _flush_paths(self) -> None:
         """Writes path observations and route changes, then publishes the changes.
@@ -700,24 +639,16 @@ class FlowAggregator:
 
     async def start(self) -> None:
         self._running = True
-        self._consume_task = asyncio.create_task(self._consume_stream())
         self._flush_task = asyncio.create_task(self._flush_loop())
-        self._trim_task = asyncio.create_task(self._stream_trim_loop())
         self._prune_task = asyncio.create_task(self._prune_loop())
         logger.info("FlowAggregator started.")
 
     async def stop(self) -> None:
         self._running = False
         tasks = []
-        if self._consume_task:
-            self._consume_task.cancel()
-            tasks.append(self._consume_task)
         if self._flush_task:
             self._flush_task.cancel()
             tasks.append(self._flush_task)
-        if self._trim_task:
-            self._trim_task.cancel()
-            tasks.append(self._trim_task)
         if self._prune_task:
             self._prune_task.cancel()
             tasks.append(self._prune_task)

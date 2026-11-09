@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import fcntl
 import threading
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -38,7 +39,21 @@ class ResponseError(FastStoreError):
 
 
 _DB_LOCK = threading.RLock()
+# How long a process waits for other processes' locks while opening the database.
+_OPEN_RETRY_SECONDS = 30.0
+# Expired keys are hidden from reads at once; writes delete them in a sweep at most this often.
+_EXPIRY_SWEEP_SECONDS = 5.0
 _PUBSUB_WAITERS: Dict[str, weakref.WeakSet[asyncio.Queue]] = {}
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
+def _is_corruption(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "not a database" in msg or "malformed" in msg or "corrupt" in msg
 
 
 def _get_faststore_dir() -> str:
@@ -73,7 +88,7 @@ class _SharedSQLiteStore:
         self.db_num = int(db)
         self.db_path = _get_db_path(self.db_num)
 
-        for ext in ("", "-wal", "-shm"):
+        for ext in ("", "-wal", "-shm", ".lock"):
             p = f"{self.db_path}{ext}"
             if os.path.exists(p):
                 st = os.stat(p)
@@ -89,16 +104,70 @@ class _SharedSQLiteStore:
                         f"FastStore database file '{p}' has insecure permissions ({oct(st.st_mode)}): group or other write allowed."
                     )
 
+        # Every process that uses this file holds a shared flock on a sidecar for as long as it
+        # runs. Only a process that gets the exclusive lock (nobody else has the file open) may
+        # delete and recreate it: deleting a file other processes still use leaves them on the
+        # old inode, or on the old database with the new WAL ("no such table"), until restart.
+        self._lock_fd = self._open_lock_file()
+        fcntl.flock(self._lock_fd, fcntl.LOCK_SH)
         try:
-            self._open_connection()
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            self._open_with_retry()
+        except sqlite3.DatabaseError as exc:
+            if not _is_corruption(exc):
+                raise
+            self._recover_corrupt_database(exc)
+        self._lock = threading.RLock()
+        self._last_sweep = 0.0
+
+    def _open_lock_file(self) -> int:
+        old_umask = os.umask(0o077)
+        try:
+            return os.open(f"{self.db_path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        finally:
+            os.umask(old_umask)
+
+    def _open_with_retry(self) -> None:
+        """Opens the database, waiting out other processes' locks (several services and API
+        workers open the same file at boot). A locked database is busy, never stale."""
+        deadline = time.monotonic() + _OPEN_RETRY_SECONDS
+        delay = 0.05
+        while True:
+            try:
+                self._open_connection()
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_lock_error(exc) or time.monotonic() >= deadline:
+                    raise
+                if getattr(self, "_conn", None) is not None:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+
+    def _recover_corrupt_database(self, exc: BaseException) -> None:
+        fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_SH)
+            raise FastStoreError(
+                f"FastStore database '{self.db_path}' is corrupt ({exc}) but other processes still "
+                "use it; stop all Ephemres services so it can be recreated."
+            ) from exc
+        try:
             logger.warning(
-                "FastStore database at '%s' encountered initialization error (%s). Purging stale database and companion WAL/SHM files and retrying...",
+                "FastStore database at '%s' is corrupt (%s) and no other process uses it. "
+                "Recreating it with its WAL/SHM files.",
                 self.db_path,
                 exc,
             )
             self._purge_companion_files()
-            self._open_connection()
+            self._open_with_retry()
+        finally:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_SH)
 
     def _purge_companion_files(self) -> None:
         if hasattr(self, "_conn") and self._conn:
@@ -209,7 +278,8 @@ class _SharedSQLiteStore:
             cur.close()
 
     def execute_sync(self, fn, *args, **kwargs):
-        with _DB_LOCK:
+        # One lock per database file: flowd's stream file must not block its other store.
+        with self._lock:
             return fn(self._conn, *args, **kwargs)
 
     async def execute(self, fn, *args, **kwargs):
@@ -552,31 +622,43 @@ class FastStoreClient:
     # -----------------------------------------------------------------------
     # KV Store & Expiration
     # -----------------------------------------------------------------------
-    def _evict_expired_sync(self, conn: sqlite3.Connection) -> None:
+    def _evict_expired_sync(self, conn: sqlite3.Connection, *keys: str) -> None:
+        """Deletes expired data. Only write operations call this, so reads never need the write
+        lock (another process writing would otherwise make every read wait, then fail): the
+        written keys are cleaned up every time, the whole store at most every few seconds.
+        Reads hide expired keys themselves (_key_expired)."""
         now = time.time()
-        conn.execute("DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
-        rows = conn.execute("SELECT k FROM key_expiry WHERE expires_at <= ?", (now,)).fetchall()
-        if rows:
-            for r in rows:
-                k_exp = r[0]
-                conn.execute("DELETE FROM kv_store WHERE k = ?", (k_exp,))
-                conn.execute("DELETE FROM set_store WHERE k = ?", (k_exp,))
-                conn.execute("DELETE FROM zset_store WHERE k = ?", (k_exp,))
-                conn.execute("DELETE FROM stream_entries WHERE stream = ?", (k_exp,))
-                conn.execute("DELETE FROM stream_groups WHERE stream = ?", (k_exp,))
-                conn.execute("DELETE FROM stream_pel WHERE stream = ?", (k_exp,))
-                conn.execute("DELETE FROM key_expiry WHERE k = ?", (k_exp,))
+        store = self._store
+        if now - store._last_sweep >= _EXPIRY_SWEEP_SECONDS:
+            store._last_sweep = now
+            conn.execute("DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
+            expired = [r[0] for r in conn.execute("SELECT k FROM key_expiry WHERE expires_at <= ?", (now,)).fetchall()]
+        else:
+            expired = [k for k in keys if self._key_expired(conn, k, now)]
+            for k in keys:
+                conn.execute("DELETE FROM kv_store WHERE k = ? AND expires_at IS NOT NULL AND expires_at <= ?", (k, now))
+        for k_exp in expired:
+            conn.execute("DELETE FROM kv_store WHERE k = ?", (k_exp,))
+            conn.execute("DELETE FROM set_store WHERE k = ?", (k_exp,))
+            conn.execute("DELETE FROM zset_store WHERE k = ?", (k_exp,))
+            conn.execute("DELETE FROM stream_entries WHERE stream = ?", (k_exp,))
+            conn.execute("DELETE FROM stream_groups WHERE stream = ?", (k_exp,))
+            conn.execute("DELETE FROM stream_pel WHERE stream = ?", (k_exp,))
+            conn.execute("DELETE FROM key_expiry WHERE k = ?", (k_exp,))
+
+    @staticmethod
+    def _key_expired(conn: sqlite3.Connection, k_str: str, now: float) -> bool:
+        row = conn.execute("SELECT expires_at FROM key_expiry WHERE k = ?", (k_str,)).fetchone()
+        return row is not None and row[0] <= now
 
     def _get_op(self, conn: sqlite3.Connection, name: Union[str, bytes]) -> Any:
         k_str = _to_str(name)
         now = time.time()
-        self._evict_expired_sync(conn)
         row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
         if row is None:
             return None
         val, expires_at = row
         if expires_at is not None and expires_at <= now:
-            conn.execute("DELETE FROM kv_store WHERE k = ?", (k_str,))
             return None
         return _decode_val(val, self.decode_responses)
 
@@ -602,7 +684,7 @@ class FastStoreClient:
         elif px is not None:
             expires_at = now + (float(px) / 1000.0)
 
-        self._evict_expired_sync(conn)
+        self._evict_expired_sync(conn, k_str)
         existing = conn.execute("SELECT expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
         exists = existing is not None and (existing[0] is None or existing[0] > now)
         if nx and exists:
@@ -674,10 +756,11 @@ class FastStoreClient:
         if not names:
             return 0
         now = time.time()
-        self._evict_expired_sync(conn)
         count = 0
         for name in names:
             k_str = _to_str(name)
+            if self._key_expired(conn, k_str, now):
+                continue
             if conn.execute(
                 "SELECT 1 FROM kv_store WHERE k = ? AND (expires_at IS NULL OR expires_at > ?)",
                 (k_str, now),
@@ -699,7 +782,7 @@ class FastStoreClient:
     def _incr_op(self, conn: sqlite3.Connection, name: Union[str, bytes], amount: int = 1) -> int:
         k_str = _to_str(name)
         now = time.time()
-        self._evict_expired_sync(conn)
+        self._evict_expired_sync(conn, k_str)
         row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
         if row is None or (row[1] is not None and row[1] <= now):
             new_val = int(amount)
@@ -724,7 +807,7 @@ class FastStoreClient:
         k_str = _to_str(name)
         now = time.time()
         new_exp = now + float(time_sec)
-        self._evict_expired_sync(conn)
+        self._evict_expired_sync(conn, k_str)
         found = False
         row = conn.execute("SELECT v, expires_at FROM kv_store WHERE k = ?", (k_str,)).fetchone()
         if row is not None and (row[1] is None or row[1] > now):
@@ -751,7 +834,6 @@ class FastStoreClient:
     def _ttl_op(self, conn: sqlite3.Connection, name: Union[str, bytes]) -> int:
         k_str = _to_str(name)
         now = time.time()
-        self._evict_expired_sync(conn)
         exp_row = conn.execute("SELECT expires_at FROM key_expiry WHERE k = ?", (k_str,)).fetchone()
         if exp_row is not None:
             expires_at = exp_row[0]
@@ -772,7 +854,6 @@ class FastStoreClient:
         if expires_at is None:
             return -1
         if expires_at <= now:
-            conn.execute("DELETE FROM kv_store WHERE k = ?", (k_str,))
             return -2
         return max(0, int(expires_at - now))
 
@@ -781,9 +862,9 @@ class FastStoreClient:
 
     def _keys_op(self, conn: sqlite3.Connection, pattern: Union[str, bytes] = "*") -> List[Any]:
         pat = _to_str(pattern)
-        self._evict_expired_sync(conn)
+        now = time.time()
         all_keys: Set[str] = set()
-        for r in conn.execute("SELECT k FROM kv_store").fetchall():
+        for r in conn.execute("SELECT k FROM kv_store WHERE expires_at IS NULL OR expires_at > ?", (now,)).fetchall():
             all_keys.add(r[0])
         for r in conn.execute("SELECT DISTINCT k FROM set_store").fetchall():
             all_keys.add(r[0])
@@ -791,6 +872,7 @@ class FastStoreClient:
             all_keys.add(r[0])
         for r in conn.execute("SELECT DISTINCT stream FROM stream_entries").fetchall():
             all_keys.add(r[0])
+        all_keys -= {r[0] for r in conn.execute("SELECT k FROM key_expiry WHERE expires_at <= ?", (now,)).fetchall()}
 
         matched = [k for k in sorted(all_keys) if fnmatch.fnmatch(k, pat)]
         return [k if self.decode_responses else k.encode("utf-8") for k in matched]
@@ -812,7 +894,7 @@ class FastStoreClient:
         if not values:
             return 0
         k_str = _to_str(name)
-        self._evict_expired_sync(conn)
+        self._evict_expired_sync(conn, k_str)
         added = 0
         for v in values:
             m_bytes = _encode_val(v)
@@ -837,7 +919,7 @@ class FastStoreClient:
         if not values:
             return 0
         k_str = _to_str(name)
-        self._evict_expired_sync(conn)
+        self._evict_expired_sync(conn, k_str)
         removed = 0
         for v in values:
             m_bytes = _encode_val(v)
@@ -857,7 +939,8 @@ class FastStoreClient:
 
     def _smembers_op(self, conn: sqlite3.Connection, name: Union[str, bytes]) -> Set[Any]:
         k_str = _to_str(name)
-        self._evict_expired_sync(conn)
+        if self._key_expired(conn, k_str, time.time()):
+            return set()
         rows = conn.execute("SELECT member FROM set_store WHERE k = ?", (k_str,)).fetchall()
         return {
             row[0].decode("utf-8", errors="replace") if self.decode_responses else row[0]
@@ -869,7 +952,8 @@ class FastStoreClient:
 
     def _scard_op(self, conn: sqlite3.Connection, name: Union[str, bytes]) -> int:
         k_str = _to_str(name)
-        self._evict_expired_sync(conn)
+        if self._key_expired(conn, k_str, time.time()):
+            return 0
         row = conn.execute("SELECT COUNT(*) FROM set_store WHERE k = ?", (k_str,)).fetchone()
         return int(row[0]) if row else 0
 
@@ -879,7 +963,8 @@ class FastStoreClient:
     def _sismember_op(self, conn: sqlite3.Connection, name: Union[str, bytes], value: Any) -> bool:
         k_str = _to_str(name)
         m_bytes = _encode_val(value)
-        self._evict_expired_sync(conn)
+        if self._key_expired(conn, k_str, time.time()):
+            return False
         row = conn.execute(
             "SELECT 1 FROM set_store WHERE k = ? AND member = ?",
             (k_str, m_bytes),

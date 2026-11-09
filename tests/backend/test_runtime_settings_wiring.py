@@ -91,23 +91,18 @@ def test_in_memory_lockout_uses_threshold():
     auth_service._failed_attempts.clear()
 
 
-def test_faststore_lockout_uses_threshold():
-    from app.services.session_store import FastStoreSessionStore
+def test_stored_lockout_uses_threshold():
+    from app.services.session_store import PostgresSessionStore
 
-    store = MagicMock()
-    store.incr = AsyncMock(return_value=3)
-    store.expire = AsyncMock()
-    store.set = AsyncMock()
-    session_store = FastStoreSessionStore.__new__(FastStoreSessionStore)
-    session_store.store = store
+    db = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__.return_value = db
+    factory.return_value.__aexit__.return_value = None
+    store = PostgresSessionStore(factory)
 
     _with(lockout_threshold=4)
-    asyncio.run(session_store.record_failed_attempt("203.0.113.9", "bob"))
-    store.set.assert_not_called()
-
-    _with(lockout_threshold=3)
-    asyncio.run(session_store.record_failed_attempt("203.0.113.9", "bob"))
-    store.set.assert_called_once()
+    asyncio.run(store.record_failed_attempt("203.0.113.9", "bob"))
+    assert db.execute.await_args_list[0].args[1]["max"] == 4
 
 
 # --- l2_auto_bypass ---------------------------------------------------------------------------
@@ -150,10 +145,11 @@ def _v5_packet(sampling: int, d_octets: int = 1500, d_pkts: int = 10) -> bytes:
 def _collect(packet: bytes) -> dict:
     from monitoring.flow.collector import FlowCollector
 
-    collector = FlowCollector(store_client=None)
+    received = []
+    collector = FlowCollector(sink=received.extend)
     collector.handle_packet(packet, ("192.0.2.10", 2055), 2055)
-    assert len(collector._queue) == 1
-    return collector._queue[0]
+    assert len(received) == 1
+    return received[0]
 
 
 def test_sampling_multiplier_scales_unsampled_flows():
@@ -255,11 +251,22 @@ def test_retention_sync_replaces_differing_policy():
 # --- flow.buffer_memory_limit_mb --------------------------------------------------------------
 
 
-def test_circuit_breaker_uses_configured_memory_limit():
-    from monitoring.flow.aggregator import FlowAggregator
+def test_flow_buffer_limit_caps_conversations_held_while_the_database_is_down():
+    """flow.buffer_memory_limit_mb bounds the flows flowd holds in memory waiting for the
+    database: past it, new conversations are dropped and counted instead of growing forever."""
+    from monitoring.flow.aggregator import ACCUMULATOR_BYTES_PER_ENTRY, FlowAggregator
 
-    store = MagicMock()
-    store.info = AsyncMock(return_value={"used_memory": 450 * 1024 * 1024, "maxmemory": 256 * 1024 * 1024})
+    correlator = MagicMock()
+    correlator.correlate.return_value = (None, None, None)
+    agg = FlowAggregator(store_client=None, correlator=correlator, memory_limit_mb=64)
+    assert agg.max_accumulator_entries == 64 * 1024 * 1024 // ACCUMULATOR_BYTES_PER_ENTRY
+    agg.max_accumulator_entries = 3
 
-    assert asyncio.run(FlowAggregator(store_client=store, memory_limit_mb=512)._check_circuit_breaker()) is False
-    assert asyncio.run(FlowAggregator(store_client=store, memory_limit_mb=1024)._check_circuit_breaker()) is True
+    for i in range(5):
+        agg.accumulate_flow("192.0.2.1", f"10.0.0.{i + 1}", "10.0.1.1", 40000, 443, 6, 100, 1, 1700000000.0)
+    # Conversations already held keep counting.
+    agg.accumulate_flow("192.0.2.1", "10.0.0.1", "10.0.1.1", 40000, 443, 6, 100, 1, 1700000000.0)
+
+    assert len(agg._accumulator) == 3
+    assert agg.flows_dropped_memory == 2
+    assert agg.flows_ingested == 6

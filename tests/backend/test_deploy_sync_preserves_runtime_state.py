@@ -20,7 +20,7 @@ def test_sync_excludes_are_anchored_and_cover_runtime_state(script: str):
     excludes = _excludes(script)
     # Unanchored names also match inside the venv (e.g. site-packages/*/tests) and split deletions
     assert excludes and all(e.startswith("/") for e in excludes), excludes
-    for path in ("/venv", "/.env", "/backend/.env", "/legacy_password_resets.txt"):
+    for path in ("/venv", "/.env", "/backend/.env", "/legacy_password_resets.txt", "/admin_password_reset.txt"):
         assert path in excludes
 
 
@@ -40,6 +40,7 @@ def test_sync_keeps_venv_and_removes_stale_code(tmp_path: Path, script: str):
     (dst / "venv" / "bin").mkdir(parents=True)
     (dst / "venv" / "bin" / "pip").write_text("#!/bin/sh\n")
     (dst / "legacy_password_resets.txt").write_text("admin\ttemp\n")
+    (dst / "admin_password_reset.txt").write_text("admin\ttemp\n")
     (dst / "backend" / "app").mkdir(parents=True)
     (dst / "backend" / "app" / "stale.py").write_text("old")
 
@@ -49,6 +50,7 @@ def test_sync_keeps_venv_and_removes_stale_code(tmp_path: Path, script: str):
     assert (dst / "venv" / "bin" / "pip").is_file()
     assert (vendored / "pip" / "_vendor" / "certifi" / "cacert.pem").is_file()
     assert (dst / "legacy_password_resets.txt").is_file()
+    assert (dst / "admin_password_reset.txt").is_file()
     assert (dst / "backend" / "app" / "main.py").read_text() == "new"
     assert not (dst / "backend" / "app" / "stale.py").exists()
     assert not (dst / "tests").exists()

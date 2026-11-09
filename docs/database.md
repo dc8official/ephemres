@@ -160,9 +160,9 @@ To deliver real-time sub-second forensic drill-down while keeping long-term disk
 
 | Tier | Storage Engine | Retention | Granularity | Compression / Aggregation | Use Case |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1** | FastStore Shared-Memory Stream (`stream:netflow:raw` in `/dev/shm`) | 2 Hours | Flow Record | Sliding in-memory buffer (`MAXLEN ~100000`) | Real-time forensic packet/flow inspection, live anomaly triage. |
+| **Tier 1** | flowd's in-memory accumulator | 10 Seconds (longer only while the database is unreachable, up to `flow.buffer_memory_limit_mb`) | 1 Minute | Summed per exporter, conversation and minute before each write | Absorbs bursts between database writes; not queryable. |
 | **Tier 2** | TimescaleDB Hypertable (`flow_minute_rollups` / `flow_interface_minute_rollups`) | 90 Days / 7 Days | 1 Minute | `flow_minute_rollups`: native columnar compression after 1 day (85%+ disk savings). `flow_interface_minute_rollups`: uncompressed | Short-term forensic queries, detailed talker attribution, interface throughput. |
-| **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`, `flow_interface_hourly_rollups`, `endpoint_probe_hourly`) | 30 Days / 365 Days | 1 Hour | Materialized Views with `materialized_only = false` and auto-refresh policies | Weekly / monthly capacity trends, 30-day interface p95/peak utilization, and long-term probe RTT/loss trends. |
+| **Tier 3** | TimescaleDB Continuous Aggregate (`flow_hourly_rollups`, `flow_conversation_hourly_rollups`, `flow_interface_hourly_rollups`, `endpoint_probe_hourly`) | 30 Days / 90 Days / 365 Days | 1 Hour | Materialized Views with `materialized_only = false` and auto-refresh policies | Weekly / monthly capacity trends, 30-day interface p95/peak utilization, and long-term probe RTT/loss trends. |
 | **Tier 4** | TimescaleDB Continuous Aggregate (`flow_daily_rollups`) | 365 Days | 1 Day | Materialized View (`materialized_only = false`) with auto-refresh policy (`start_offset: 60d`, `end_offset: 1d`) | Annual capacity planning, ISP billing auditing, executive reporting. |
 
 ### A. What each flow table keeps
@@ -173,11 +173,12 @@ Each tier above the minute table drops detail to stay small, which limits what i
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | `flow_minute_rollups` | 90 days | Yes | Yes | Yes | Yes | n/a |
 | `flow_hourly_rollups` | 30 days | No | Yes | Yes | No | No |
+| `flow_conversation_hourly_rollups` | 90 days | Yes | Yes | Yes | Yes | No |
 | `flow_daily_rollups` | 365 days | No | No | Yes | No | No |
 | `flow_interface_minute_rollups` | 7 days | Per interface: in/out bytes, packets, flows | | | | n/a |
 | `flow_interface_hourly_rollups` | 365 days | Per interface: in/out bytes, packets, flows | | | | Yes |
 
-So the daily tier cannot split traffic into ingress/egress or traffic zones (it knows no endpoints), and no tier above the minute table can name addresses.
+So the daily tier cannot split traffic into ingress/egress (it knows no endpoints) and is only used for the API's fleet-wide `1y`; only `flow_conversation_hourly_rollups` can name addresses above the minute table. `flow_hourly_rollups` is kept shorter than the minute table it is built from: its windows end at 30 days, and nothing longer reads it.
 
 ### B. Which table each view reads
 
@@ -189,33 +190,36 @@ The window picked in the UI decides the table. The UI only offers windows the ta
 | :--- | :--- | :--- | :--- |
 | Overview figures (rates, flows, exporters) | Last 5 minutes of `flow_minute_rollups`, whatever the window | same | same |
 | Network edge (WAN) figures | Last 5 minutes of `flow_interface_minute_rollups` | same | same |
-| Fleet traffic chart | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_daily_rollups`: no ingress/egress split, everything shows as transit |
+| Fleet traffic chart | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_hourly_rollups` |
 | Fleet traffic chart, WAN only | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` | `flow_interface_hourly_rollups` |
-| Applications (protocol/port) | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_daily_rollups` |
-| QoS classes | `flow_minute_rollups` | `flow_minute_rollups` (the aggregates keep no ToS) | `flow_minute_rollups` |
-| Traffic zones | `flow_minute_rollups` | `flow_hourly_rollups` (by endpoint, no addresses) | Not available |
-| Conversations, top talkers, security (anomalies) | `flow_minute_rollups` | `flow_minute_rollups` | `flow_minute_rollups` (complete, the heaviest query) |
+| Applications (protocol/port) | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_hourly_rollups` |
+| QoS classes | `flow_minute_rollups` | `flow_conversation_hourly_rollups` | `flow_conversation_hourly_rollups` |
+| Traffic zones | `flow_minute_rollups` | `flow_conversation_hourly_rollups` | `flow_conversation_hourly_rollups` |
+| Conversations, top talkers, security (anomalies) | `flow_minute_rollups` (6h: as 24h) | `flow_conversation_hourly_rollups` for whole hours, `flow_minute_rollups` for the partial first hour | same |
 | Interfaces (average, p95, busiest minute) | `flow_interface_minute_rollups` | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (p95 over hourly averages) |
 
 **Endpoint detail, Bandwidth & Flow tab:**
 
 | View | 1h, 6h | 24h, 7d |
 | :--- | :--- | :--- |
-| As participant: chart, applications, zones | `flow_minute_rollups` | `flow_hourly_rollups` |
-| As participant: QoS | `flow_minute_rollups` | `flow_minute_rollups` |
+| As participant: chart, applications | `flow_minute_rollups` | `flow_hourly_rollups` |
+| As participant: zones | `flow_minute_rollups` | `flow_conversation_hourly_rollups` |
+| As participant: QoS | `flow_minute_rollups` | `flow_conversation_hourly_rollups` |
 | As exporter: chart | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` |
-| Conversations (either perspective) | `flow_minute_rollups` | `flow_minute_rollups` |
+| Conversations (either perspective) | `flow_minute_rollups` (6h: as 24h) | `flow_conversation_hourly_rollups` for whole hours, `flow_minute_rollups` for the partial first hour |
 
 **PDF bandwidth report** (24 hours, 7 days, 30 days or a custom range):
 
 | Section | Range within the last 7 days | Range reaching further back |
 | :--- | :--- | :--- |
 | Routers, interfaces, network edge (WAN) | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (an hour straddling the start or end counts whole) |
-| Top conversations, QoS, anomalies, traffic zones | `flow_minute_rollups` | `flow_minute_rollups`: covers 90 days, so a longer custom range shows only its last 90 days |
+| Top conversations, QoS, anomalies, traffic zones | Over 2 hours: `flow_conversation_hourly_rollups` (an hour straddling the start or end counts whole) | same: covers 90 days, so a longer custom range shows only its last 90 days |
 
 Per-endpoint views, conversations and top talkers count each conversation once per bucket when several routers export it (the largest report). Fleet totals and charts add the routers' reports up; mark the routers' internet-facing interfaces as WAN (interface settings on the Traffic page or the router's endpoint page) for totals counted once at the network edge.
 
-**API-only `1y` window:** the fleet chart and applications read `flow_daily_rollups` (a full year). Per-endpoint charts read `flow_hourly_rollups` (30 days), and conversations and top talkers read `flow_minute_rollups` (90 days), so for those `1y` returns only what the table keeps.
+**API-only `1y` window:** only what the tables cover is answered. The fleet chart and applications read `flow_daily_rollups` (a full year), and interface views read `flow_interface_hourly_rollups` (a full year). QoS and zones in that response cover the last 90 days and say so (`qos_window_start`, `zones_window_start`). Top talkers, conversations and one endpoint's chart or applications answer `400` naming the longest window, because their tables keep 90 and 30 days.
+
+**PDF ranges past retention:** custom ranges can span 730 days. The report states what they leave out in a note: flow detail (conversations, QoS, anomalies, zones) covers the last 90 days, router and interface totals the last 365.
 
 ---
 
@@ -329,6 +333,11 @@ Migration `0014` sets `timescaledb.materialized_only = false` on both `flow_hour
 Pre-aggregates per-interface minute rollups into 1-hour windows while retaining the busiest single minute (`peak_in_minute_bytes`, `peak_out_minute_bytes`) for accurate peak utilization over 30-day windows (retained 365 days, `materialized_only = false`).
 
 Refresh windows (Migration `0018`): each refresh policy materializes only the buckets inside its window and then moves the aggregate's watermark, below which the real-time view reads materialized data only. Hours the job scheduler misses for longer than the window (workers disabled, database down) would never be filled in, so the windows reach as far back as retention allows: `endpoint_probe_hourly` and `flow_hourly_rollups` 29 days, `flow_daily_rollups` 60 days, `flow_interface_hourly_rollups` 6 days (its source keeps 7), `node_historical_baselines_cagg` 28 days. A refresh only recomputes missing or invalidated buckets, so a normal hourly run still processes about one hour of data.
+
+### Hourly Conversation Continuous Aggregate (`flow_conversation_hourly_rollups` — Migration `0021`)
+One row per hour, exporter and conversation (`src_ip`, `dst_ip`, endpoint ids, `protocol`, `dst_port`) with summed `bytes`, `packets` and `flow_count`, OR-ed `tcp_flags` and the highest `tos`. It serves every view that needs addresses or ToS over more than 2 hours, which used to scan `flow_minute_rollups`. Real-time (`materialized_only = false`), no group indexes, refreshed hourly over the last 31 days and kept 90 days. History older than 31 days at migration time is not materialized. The first refresh is scheduled right after the migration and runs in the background; until it finishes, long windows stay slow and may answer `504`.
+
+A conversation two routers report is counted once by taking the largest report per bucket at query time. In these hourly rows that is per hour: the same as per minute when the routers report it alike, and lower when it moved between routers within the hour. Long-lived flows are bucketed at their start time, so they can reach an already materialized hour; they show up after the next hourly refresh.
 
 ### Hourly Probe Continuous Aggregate (`endpoint_probe_hourly` — Migration `0015`)
 Pre-aggregates `endpoint_probe_samples` into 1-hour buckets (`sample_count`, `sent`, `received`, `rtt_min_ms`, reply-weighted `rtt_sum_ms`/`rtt_weight`, `rtt_max_ms`, `jitter_avg_ms`), retained for 365 days (`materialized_only = false`).

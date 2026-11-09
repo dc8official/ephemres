@@ -36,6 +36,7 @@ from app.services.report_compiler import (
     compile_availability_report_data,
     compile_bandwidth_report_data,
     compile_master_report_data,
+    format_period,
     get_organization_branding,
 )
 from app.core.template import TemplateEnvironment
@@ -740,7 +741,7 @@ async def generate_pdf_report(
     org = await get_organization_branding(db)
     now_utc = datetime.now(timezone.utc)
     generated_at_str = now_utc.strftime("%Y-%m-%d %H:%M")
-    period_label = f"{start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')} UTC"
+    period_label = format_period(start_dt.astimezone(timezone.utc), end_dt.astimezone(timezone.utc))
 
     default_scope = f"{len(request.endpoint_ids)} Infrastructure Targets"
     scope_title = request.scope_title or default_scope
@@ -763,6 +764,7 @@ async def generate_pdf_report(
             "scope_title": scope_title,
             "endpoints": data["endpoints"],
             "incidents": data["incidents"],
+            "incidents_total": data.get("incidents_total", len(data["incidents"])),
             "summary": data["summary"],
         }
     elif ttype == "bandwidth":
@@ -782,11 +784,14 @@ async def generate_pdf_report(
             "theme_accent": theme_accent,
             "scope_title": scope_title,
             "exporters": data["exporters"],
+            "active_exporters": data.get("active_exporters", len(data["exporters"])),
             "interfaces": data["interfaces"],
             "conversations": data["conversations"],
             "qos_classes": data.get("qos_classes", []),
             "anomalies": data.get("anomalies", {}),
             "traffic_zones": data.get("traffic_zones", []),
+            "wan_edge": data.get("wan_edge"),
+            "coverage_notes": data.get("coverage_notes", []),
         }
     else:  # master
         data = await compile_master_report_data(
@@ -806,13 +811,17 @@ async def generate_pdf_report(
             "scope_title": scope_title,
             "endpoints": data["endpoints"],
             "incidents": data["incidents"],
+            "incidents_total": data.get("incidents_total", len(data["incidents"])),
             "summary": data["summary"],
             "exporters": data["exporters"],
+            "active_exporters": data.get("active_exporters", len(data["exporters"])),
             "interfaces": data["interfaces"],
             "conversations": data["conversations"],
             "qos_classes": data.get("qos_classes", []),
             "anomalies": data.get("anomalies", {}),
             "traffic_zones": data.get("traffic_zones", []),
+            "wan_edge": data.get("wan_edge"),
+            "coverage_notes": data.get("coverage_notes", []),
         }
 
     template = jinja_env.get_template(template_name)

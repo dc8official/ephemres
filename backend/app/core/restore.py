@@ -95,6 +95,9 @@ COMPRESSED_DATA_TYPE = "_timescaledb_internal.compressed_data"
 COMPRESSION_ALGORITHM_NULL = 6
 DECOMPRESS_FN = "_timescaledb_functions.compressed_data_to_array"
 
+AGGREGATE_REFRESH_ATTEMPTS = 20
+AGGREGATE_REFRESH_RETRY_SECONDS = 15.0
+
 HYPERTABLE_NAMES = {
     "endpoint_events",
     "endpoint_probe_samples",
@@ -698,10 +701,23 @@ async def _execute_batch(conn: Any, sql: str, args_list: List[List[Any]]) -> Non
             await conn.execute(sql, *args)
 
 
+async def _refresh_aggregate_waiting_for_job(conn: Any, view_literal: str) -> None:
+    """Refreshes one aggregate over its whole history. Its policy job may be running right now
+    (TimescaleDB refuses a concurrent refresh), and skipping it would leave restored history out."""
+    for attempt in range(AGGREGATE_REFRESH_ATTEMPTS):
+        try:
+            await _execute_sql(conn, f"CALL refresh_continuous_aggregate('{view_literal}', NULL, NULL);")
+            return
+        except Exception as exc:
+            if "concurrent refresh" not in str(exc) or attempt == AGGREGATE_REFRESH_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(AGGREGATE_REFRESH_RETRY_SECONDS)
+
+
 async def _refresh_continuous_aggregates(conn: Any, source_tables: Set[str]) -> List[str]:
     """Rematerializes the continuous aggregates built on the restored hypertables.
 
-    Their refresh policies only look back a few days (hourly 3, daily 7, node baselines 28), so
+    Their refresh policies only look back a limited time (29 to 60 days, node baselines 28), so
     older restored history would never reach them otherwise. An aggregate built on another
     aggregate is refreshed after the one it reads from. Returns the refreshed view names.
     """
@@ -731,7 +747,7 @@ async def _refresh_continuous_aggregates(conn: Any, source_tables: Set[str]) -> 
             view_literal = view.replace("'", "''")
             logger.info("Refreshing continuous aggregate %s over the restored history...", view)
             try:
-                await _execute_sql(conn, f"CALL refresh_continuous_aggregate('{view_literal}', NULL, NULL);")
+                await _refresh_aggregate_waiting_for_job(conn, view_literal)
             except Exception as exc:
                 logger.warning("Could not refresh continuous aggregate %s: %s", view, exc)
                 continue

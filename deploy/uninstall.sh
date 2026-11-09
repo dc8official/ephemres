@@ -130,6 +130,7 @@ systemctl disable ephemres-api ephemres-engine ephemres-flowd netmon-api netmon-
 rm -f /etc/systemd/system/ephemres-api.service /etc/systemd/system/ephemres-engine.service /etc/systemd/system/ephemres-flowd.service
 rm -f /etc/systemd/system/netmon-api.service /etc/systemd/system/netmon-engine.service /etc/systemd/system/netmon-flowd.service
 rm -f /etc/sudoers.d/ephemres /etc/sudoers.d/netmon
+rm -f /etc/sysctl.d/90-ephemres.conf
 systemctl daemon-reload
 echo -e "${GREEN}[SUCCESS] Ephemres background services disabled and removed from systemd.${NC}"
 

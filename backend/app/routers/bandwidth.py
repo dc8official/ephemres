@@ -16,6 +16,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.endpoint import Endpoint
 from app.models.flow_rollup import (
+    FlowConversationHourlyRollup,
     FlowDailyRollup,
     FlowHourlyRollup,
     FlowInterfaceMinuteRollup,
@@ -156,26 +157,24 @@ def _get_window_delta(window: str) -> datetime.timedelta:
 def _select_rollup_model_and_bucket_seconds(
     window: str, endpoint_id: Optional[UUID] = None
 ) -> Tuple[Any, float]:
-    """Selects the optimal hypertable or continuous aggregate ORM model and bucket duration (seconds)
+    """The table and bucket length behind the fleet and per-endpoint charts and applications.
 
-    aligned with TimescaleDB continuous aggregate policies:
-    - 1h, 6h: FlowMinuteRollup (60s buckets, full IP/interface/ToS/flag resolution, retained 90 days).
-    - 24h, 7d: FlowHourlyRollup (3600s buckets, endpoint-correlated aggregation, retained 30 days).
-    - 30d, 1y: FlowDailyRollup (86400s buckets, protocol/port compaction, retained 365 days).
-      Note: If endpoint_id filtering is requested for 30d/1y, fall back to FlowHourlyRollup since
-      FlowDailyRollup compresses away individual endpoint keys to optimize disk usage.
+    - 1h, 6h: FlowMinuteRollup (60s buckets, kept 90 days).
+    - 24h, 7d, 30d: FlowHourlyRollup (3600s buckets, kept 30 days, with endpoints).
+    - 1y, fleet only: FlowDailyRollup (86400s buckets, kept 365 days, no endpoints). One endpoint's
+      1y is refused before it gets here (_require_window_covered).
+
+    Addresses and ToS over more than 2 hours come from flow_conversation_hourly_rollups.
+    docs/database.md section 3 has the whole map.
     """
     w = window.lower().strip()
     if w in ("1h", "6h"):
         return FlowMinuteRollup, 60.0
-    elif w in ("24h", "7d"):
+    if w in ("24h", "7d", "30d") or endpoint_id is not None:
         return FlowHourlyRollup, 3600.0
-    elif w in ("30d", "1y"):
-        if endpoint_id is not None:
-            return FlowHourlyRollup, 3600.0
+    if w == "1y":
         return FlowDailyRollup, 86400.0
-    else:
-        return FlowMinuteRollup, 60.0
+    return FlowMinuteRollup, 60.0
 
 
 def _sum_where(condition: Any, column: Any) -> Any:
@@ -186,7 +185,7 @@ def _sum_where(condition: Any, column: Any) -> Any:
 def _counted_once(model: Any, filters: List[Any], with_tos: bool = False) -> Any:
     """`model`'s rows matching `filters` with each conversation counted once per bucket (the
     largest report among the exporters that saw it), as a subquery; see
-    conversation_queries.per_minute_cte. The hourly tier keeps no addresses, so there a
+    conversation_queries.counted_once_cte. The hourly tier keeps no addresses, so there a
     conversation is the endpoint pair, protocol and port: only used for one endpoint's traffic."""
     keys = [model.bucket]
     if hasattr(model, "src_ip"):
@@ -203,6 +202,22 @@ def _select_from(stmt: Any, subquery: Any) -> Any:
 
 # The overview averages the last five complete minutes; the current minute is still filling.
 OVERVIEW_WINDOW_SECONDS = 300
+
+
+# How long the tables behind each kind of view keep their data (migrations 0008 and 0021).
+_ENDPOINT_SERIES_RETENTION = datetime.timedelta(days=30)
+_CONVERSATION_ROLLUP_RETENTION = datetime.timedelta(days=90)
+
+
+def _require_window_covered(delta: datetime.timedelta, kept: datetime.timedelta, what: str) -> None:
+    """400 for a window longer than the data behind it: a 1y answer holding 30 days of traffic
+    looked like a year in which traffic had dropped."""
+    if delta > kept:
+        longest = max((length, name) for name, length in WINDOWS.items() if length <= kept)[1]
+        raise HTTPException(
+            status_code=400,
+            detail=f"{what} are kept {kept.days} days, so the longest window here is {longest}.",
+        )
 
 
 @router.get("/overview", response_model=APIResponse)
@@ -410,6 +425,8 @@ async def get_traffic_series(
         return await _interface_series(db, window, delta, start_time, predicate, params)
 
     # Standard endpoint or fleet-wide flow rollup query
+    if endpoint_id:
+        _require_window_covered(delta, _ENDPOINT_SERIES_RETENTION, "One endpoint's hourly totals")
     model, bucket_seconds = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
     directional = hasattr(model, "src_endpoint_id")
 
@@ -503,7 +520,7 @@ async def _interface_series(
     """Series from the interface rollups for rows matching `predicate` (in -> ingress, out -> egress).
 
     Windows up to 6h use the minute table; longer ones use flow_interface_hourly_rollups, which
-    covers 30 days (the minute table keeps 7) and keeps a 7-day chart at 168 points, not 10,080.
+    is kept 365 days (the minute table keeps 7) and keeps a 7-day chart at 168 points, not 10,080.
     """
     if delta > datetime.timedelta(hours=6):
         source, bucket_seconds = "flow_interface_hourly_rollups", 3600
@@ -558,22 +575,24 @@ async def get_top_talkers(
     so neither side is cut off by a separate per-direction limit.
     """
     delta = _get_window_delta(window)
+    _require_window_covered(delta, _CONVERSATION_ROLLUP_RETENTION, "Conversations")
     start_time = datetime.datetime.now(datetime.timezone.utc) - delta
     where_sql, params = conversation_queries.build_filters(start_time, exporter_id, endpoint_id)
+    counted_once, params = conversation_queries.counted_once_cte(where_sql, params)
 
     talkers_res = await db.execute(
         text(f"""
-            WITH {conversation_queries.per_minute_cte(where_sql)},
+            WITH {counted_once},
             sides AS (
                 SELECT src_ip AS ip, src_endpoint_id AS endpoint_id,
                        0::BIGINT AS ingress_bytes, bytes AS egress_bytes,
                        flow_count, packets
-                FROM per_minute
+                FROM counted_once
                 UNION ALL
                 SELECT dst_ip, dst_endpoint_id,
                        bytes, 0::BIGINT,
                        flow_count, packets
-                FROM per_minute
+                FROM counted_once
             )
             SELECT ip,
                    (array_agg(endpoint_id) FILTER (WHERE endpoint_id IS NOT NULL))[1] AS endpoint_id,
@@ -656,7 +675,9 @@ async def get_conversations(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"'{clean_ip}' is not a valid IP address.")
 
-    start_time = datetime.datetime.now(datetime.timezone.utc) - _get_window_delta(window)
+    delta = _get_window_delta(window)
+    _require_window_covered(delta, _CONVERSATION_ROLLUP_RETENTION, "Conversations")
+    start_time = datetime.datetime.now(datetime.timezone.utc) - delta
     page = await conversation_queries.query_conversations(
         db,
         start_time,
@@ -700,9 +721,6 @@ def _rollup_window_filters(
         )
     return filters
 
-
-# flow_minute_rollups retention (migration 0010); the QoS fallback never reads further back.
-_MINUTE_ROLLUP_RETENTION = datetime.timedelta(days=90)
 
 # (table, column) -> exists; schema only changes through migrations, which restart the API.
 # The cache is per worker, so rebuilding a continuous aggregate also needs an API restart.
@@ -748,6 +766,8 @@ async def get_applications_breakdown(
        - External / Transit: Monitored router transit flows between unmanaged external peers.
     """
     delta = _get_window_delta(window)
+    if endpoint_id:
+        _require_window_covered(delta, _ENDPOINT_SERIES_RETENTION, "One endpoint's hourly totals")
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
 
@@ -810,14 +830,14 @@ async def get_applications_breakdown(
 
     # 2. QoS / DSCP Breakdown
     # On TimescaleDB the hourly/daily tiers are continuous aggregates that migration 0013 could
-    # not extend with `tos`; fall back to the 1-minute tier (90-day retention) for ToS data.
-    # The response reports the tier and start actually used, since a 1y window then only gets
-    # 90 days of QoS data next to 365 days of application data.
+    # not extend with `tos`; fall back to the hourly conversation tier (90-day retention) for ToS
+    # data. The response reports the tier and start actually used, since a 1y window then only
+    # gets 90 days of QoS data next to 365 days of application data.
     qos_model = model
     qos_start = start_time
     if model is not FlowMinuteRollup and not await _db_table_has_column(db, model.__tablename__, "tos"):
-        qos_model = FlowMinuteRollup
-        qos_start = max(start_time, now - _MINUTE_ROLLUP_RETENTION)
+        qos_model = FlowConversationHourlyRollup
+        qos_start = max(start_time, now - _CONVERSATION_ROLLUP_RETENTION)
     qos_filters = _rollup_window_filters(qos_model, qos_start, exporter_id, endpoint_id)
     qos_source, qos_from = qos_model, None
     if counted_once:
@@ -849,75 +869,50 @@ async def get_applications_breakdown(
     # 3. Traffic Zone Breakdown (East-West, North-South, External)
     zone_sums = {zone: {"bytes": 0, "flows": 0} for zone in TRAFFIC_ZONES}
 
-    zones_resolution = "ip" if hasattr(model, "src_ip") else ("endpoint" if hasattr(model, "src_endpoint_id") else "unavailable")
-    if hasattr(model, "src_ip"):
-        zone_stmt = (
-            select(
-                source.src_ip,
-                source.dst_ip,
-                source.src_endpoint_id,
-                source.dst_endpoint_id,
-                func.sum(source.bytes).label("total_bytes"),
-                func.sum(source.flow_count).label("flow_count"),
-            )
-            .where(*app_filters)
-            .group_by(
-                source.src_ip,
-                source.dst_ip,
-                source.src_endpoint_id,
-                source.dst_endpoint_id,
-            )
+    # Zones need addresses: above the minute table they come from the hourly conversation tier,
+    # so the same rule applies at every window. A 1y window gets its last 90 days; the response
+    # says so, like QoS.
+    zone_start = start_time
+    zone_source, zone_filters, zone_from = source, app_filters, app_from
+    if not hasattr(model, "src_ip"):
+        zone_model = FlowConversationHourlyRollup
+        zone_start = max(start_time, now - _CONVERSATION_ROLLUP_RETENTION)
+        zone_source, zone_from = zone_model, None
+        zone_filters = _rollup_window_filters(zone_model, zone_start, exporter_id, endpoint_id)
+        if counted_once:
+            zone_from = _counted_once(zone_model, zone_filters)
+            zone_source, zone_filters = zone_from.c, []
+    zone_stmt = (
+        select(
+            zone_source.src_ip,
+            zone_source.dst_ip,
+            zone_source.src_endpoint_id,
+            zone_source.dst_endpoint_id,
+            func.sum(zone_source.bytes).label("total_bytes"),
+            func.sum(zone_source.flow_count).label("flow_count"),
         )
-        zone_res = await db.execute(_select_from(zone_stmt, app_from))
-        for z_row in zone_res.all():
-            if len(z_row) < 5:
-                continue
-            s_ip = str(z_row[0])
-            d_ip = str(z_row[1])
-            s_ep = z_row[2]
-            d_ep = z_row[3]
-            z_b = int(z_row[4] or 0)
-            z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
-
-            z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
-            zone_sums[z_key]["bytes"] += z_b
-            zone_sums[z_key]["flows"] += z_f
-    elif hasattr(model, "src_endpoint_id"):
-        # Medium-term aggregation tier (FlowHourlyRollup): individual IP addresses are pruned,
-        # but correlated src_endpoint_id and dst_endpoint_id are preserved.
-        zone_stmt = (
-            select(
-                source.src_endpoint_id,
-                source.dst_endpoint_id,
-                func.sum(source.bytes).label("total_bytes"),
-                func.sum(source.flow_count).label("flow_count"),
-            )
-            .where(*app_filters)
-            .group_by(
-                source.src_endpoint_id,
-                source.dst_endpoint_id,
-            )
+        .where(*zone_filters)
+        .group_by(
+            zone_source.src_ip,
+            zone_source.dst_ip,
+            zone_source.src_endpoint_id,
+            zone_source.dst_endpoint_id,
         )
-        zone_res = await db.execute(_select_from(zone_stmt, app_from))
-        for z_row in zone_res.all():
-            if len(z_row) < 3:
-                continue
-            s_ep = z_row[0]
-            d_ep = z_row[1]
-            z_b = int(z_row[2] or 0)
-            z_f = int(z_row[3] or 0) if len(z_row) > 3 else 0
+    )
+    zone_res = await db.execute(_select_from(zone_stmt, zone_from))
+    for z_row in zone_res.all():
+        if len(z_row) < 5:
+            continue
+        s_ip = str(z_row[0])
+        d_ip = str(z_row[1])
+        s_ep = z_row[2]
+        d_ep = z_row[3]
+        z_b = int(z_row[4] or 0)
+        z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
 
-            # Without IPs only known endpoints count as internal.
-            z_key = classify_zone(s_ep is not None, d_ep is not None)
-            zone_sums[z_key]["bytes"] += z_b
-            zone_sums[z_key]["flows"] += z_f
-    else:
-        # Long-term aggregation tier (FlowDailyRollup):
-        # To maintain high compaction across 365-day storage windows, FlowDailyRollup compresses
-        # away individual IP and endpoint telemetry. Traffic zones cannot be resolved at the daily
-        # rollup level without expensive raw joins, so zone distributions remain zeroed rather than
-        # failing with an AttributeError.
-        pass
+        z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
+        zone_sums[z_key]["bytes"] += z_b
+        zone_sums[z_key]["flows"] += z_f
 
     total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
     traffic_zones: List[TrafficZoneItem] = []
@@ -941,7 +936,8 @@ async def get_applications_breakdown(
             qos_window_start=qos_start,
             traffic_zones=traffic_zones,
             total_bytes=overall_bytes,
-            zones_resolution=zones_resolution,
+            zones_resolution="ip",
+            zones_window_start=zone_start,
         )
     )
 

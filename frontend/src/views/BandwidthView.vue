@@ -330,7 +330,7 @@
         />
         <div v-else-if="!loading" class="no-chart-data">
           <template v-if="['1h', '6h'].includes(selectedWindow)">No flow records in the last {{ selectedWindow }}.</template>
-          <template v-else>No {{ selectedWindow === '30d' ? 'daily' : 'hourly' }} totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
+          <template v-else>No hourly totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
         </div>
         <div v-else class="loading-spinner">Loading telemetry series...</div>
       </div>
@@ -417,30 +417,27 @@
             <span class="section-hint">{{ zonesHint }}</span>
           </div>
         </div>
-        <template v-if="zonesResolution !== 'unavailable'">
-          <div v-if="trafficZones.length > 0" class="breakdown-list">
-            <div
-              v-for="zone in trafficZones"
-              :key="zone.zone"
-              class="breakdown-item"
-            >
-              <div class="breakdown-row-top">
-                <span class="zone-badge" :class="getZoneBadgeClass(zone.zone)">
-                  <span class="zone-icon">{{ getZoneIcon(zone.zone) }}</span> {{ zone.zone }}
-                </span>
-                <span class="breakdown-pct tnum font-bold">{{ zone.percentage.toFixed(1) }}%</span>
-              </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill" :class="getZoneFillClass(zone.zone)" :style="{ width: `${Math.min(100, zone.percentage)}%` }"></div>
-              </div>
-              <div class="breakdown-meta tnum text-muted text-xs">
-                <span>{{ formatBytes(zone.total_bytes) }}</span>
-                <span>{{ formatNumber(zone.flow_count) }} flows</span>
-              </div>
+        <div v-if="trafficZones.length > 0" class="breakdown-list">
+          <div
+            v-for="zone in trafficZones"
+            :key="zone.zone"
+            class="breakdown-item"
+          >
+            <div class="breakdown-row-top">
+              <span class="zone-badge" :class="getZoneBadgeClass(zone.zone)">
+                <span class="zone-icon">{{ getZoneIcon(zone.zone) }}</span> {{ zone.zone }}
+              </span>
+              <span class="breakdown-pct tnum font-bold">{{ zone.percentage.toFixed(1) }}%</span>
+            </div>
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill" :class="getZoneFillClass(zone.zone)" :style="{ width: `${Math.min(100, zone.percentage)}%` }"></div>
+            </div>
+            <div class="breakdown-meta tnum text-muted text-xs">
+              <span>{{ formatBytes(zone.total_bytes) }}</span>
+              <span>{{ formatNumber(zone.flow_count) }} flows</span>
             </div>
           </div>
-        </template>
-        <div v-else class="no-chart-data">Zones need address or endpoint detail, which the daily tier does not keep. Pick a window of 7 days or less.</div>
+        </div>
       </div>
     </div>
     </template>
@@ -478,7 +475,7 @@
         />
         <div v-else-if="!loading" class="no-chart-data">
           <template v-if="['1h', '6h'].includes(selectedWindow)">No flow records in the last {{ selectedWindow }}.</template>
-          <template v-else>No {{ selectedWindow === '30d' ? 'daily' : 'hourly' }} totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
+          <template v-else>No hourly totals for the last {{ selectedWindow }} yet. They are built from minute data periodically.</template>
         </div>
         <div v-else class="loading-spinner">Loading telemetry series...</div>
       </div>
@@ -1147,13 +1144,7 @@ watch([selectedIpFilter, selectedPortFilter, selectedDscpFilter], ([ip, port, ds
   replaceQuery({ ip, port, dscp })
 })
 
-const zonesResolution = ref('ip')
-const zonesHint = computed(() => {
-  if (zonesResolution.value === 'endpoint') {
-    return 'Hourly data keeps no addresses: only monitored endpoints count as internal'
-  }
-  return 'Monitored endpoints and private (RFC 1918) addresses count as internal'
-})
+const zonesHint = 'Monitored endpoints and private (RFC 1918) addresses count as internal'
 
 const scopeLabel = computed(() => {
   if (!selectedExporterId.value) return 'all exporters'
@@ -1661,7 +1652,6 @@ async function refreshData() {
       applicationStats.value = appRes.data.data.applications || []
       qosClasses.value = appRes.data.data.qos_classes || []
       trafficZones.value = appRes.data.data.traffic_zones || []
-      zonesResolution.value = appRes.data.data.zones_resolution || 'ip'
     }
     if (expRes.data?.data) {
       unmatchedExporters.value = expRes.data.data.unmatched || []

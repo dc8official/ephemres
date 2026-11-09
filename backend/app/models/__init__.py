@@ -13,6 +13,7 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.flow_rollup import (
     FlowDailyRollup,
+    FlowConversationHourlyRollup,
     FlowHourlyRollup,
     FlowInterfaceMinuteRollup,
     FlowMinuteRollup,
@@ -31,6 +32,7 @@ __all__ = [
     "AuditLog",
     "EndpointEvent",
     "FlowMinuteRollup",
+    "FlowConversationHourlyRollup",
     "FlowHourlyRollup",
     "FlowDailyRollup",
     "FlowInterfaceMinuteRollup",

@@ -13,6 +13,7 @@ from app.core.asgi import TestClient
 from app.database import get_db
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
+from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.routers.auth import get_current_user, require_admin
 from app.routers.reports import router as reports_router
@@ -250,93 +251,122 @@ async def test_render_bandwidth_and_master_templates_pdf():
 # 3. Report Compiler Logic Tests
 # =====================================================================
 
+def _event(ep_id, state, start, end, ok, failed, rtt=None, split=False, since=None):
+    return EndpointEvent(
+        id=uuid4(), endpoint_id=ep_id, operational_state=state, detailed_state=state,
+        success_count=ok, failed_count=failed, start_time=start, end_time=end,
+        duration_seconds=int(((end or start) - start).total_seconds()),
+        avg_rtt_ms=Decimal(str(rtt)) if rtt is not None else None,
+        health_score=Decimal("100.00") if state == "UP" else Decimal("0.00"),
+        is_split_event=split, state_since=since or start,
+    )
+
+
 @pytest.mark.anyio
 async def test_compile_availability_report_data():
-    """Verify compile_availability_report_data compiles endpoint SLA, outages, and metrics."""
+    """Outages, uptime, loss, RTT and root causes over a 3-day window.
+
+    - A 30 h outage the engine stored as a 24 h row plus a split row is one incident, starting
+      at its real start, with its own root cause.
+    - A DATABASE_DISCONNECT gap (events stay open across it) is neither up nor down time.
+    - Loss is failed probes over all probes in the window; RTT is weighted by successful probes.
+    - Each root cause goes to the outage it was taken for.
+    """
+    from app.services.report_compiler import format_duration
+
     mock_db = AsyncMock()
+    w1 = datetime.now(timezone.utc).replace(microsecond=0)
+    w0 = w1 - timedelta(days=3)
+    h = timedelta(hours=1)
+    m = timedelta(minutes=1)
+    gap = (w0 + 50 * h, w0 + 51 * h)
 
-    ep_id = uuid4()
-    now = datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc)
-    start_dt = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
-    end_dt = datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc)
-
-    mock_ep = Endpoint(
-        id=ep_id,
-        hostname="edge-router-01",
-        ip_address="192.168.10.1",
-        device_type="ROUTER",
-        monitoring_enabled=True,
-        endpoint_status="ACTIVE",
-        created_at=start_dt - timedelta(days=10),
-        deleted_at=None,
-    )
-
-    mock_res_ep = MagicMock()
-    mock_res_ep.scalars().all.return_value = [mock_ep]
-
-    # Mock events for the endpoint: 1 UP event (86280s) and 1 DOWN event (120s)
-    ev_up = EndpointEvent(
-        id=uuid4(),
-        endpoint_id=ep_id,
-        operational_state="UP",
-        detailed_state="UP",
-        success_count=60,
-        failed_count=0,
-        start_time=start_dt,
-        end_time=end_dt - timedelta(seconds=120),
-        duration_seconds=86280,
-        avg_rtt_ms=Decimal("1.50"),
-        health_score=Decimal("100.00"),
-    )
-    ev_down = EndpointEvent(
-        id=uuid4(),
-        endpoint_id=ep_id,
-        operational_state="DOWN",
-        detailed_state="DOWN",
-        success_count=0,
-        failed_count=2,
-        start_time=end_dt - timedelta(seconds=120),
-        end_time=end_dt,
-        duration_seconds=120,
-        avg_rtt_ms=None,
-        health_score=Decimal("0.00"),
-    )
-    mock_res_events = MagicMock()
-    mock_res_events.scalars().all.return_value = [ev_up, ev_down]
-
-    # Mock incidents list query
-    mock_res_incidents = MagicMock()
-    mock_res_incidents.all.return_value = [(ev_down, "edge-router-01", "192.168.10.1")]
-
-    # Mock RCA query
-    mock_res_rca = MagicMock()
-    mock_res_rca.scalars().all.return_value = []
-
-    mock_db.execute.side_effect = [
-        mock_res_ep,
-        mock_res_events,
-        mock_res_incidents,
-        mock_res_rca,
+    server, switch, printer = uuid4(), uuid4(), uuid4()
+    endpoints = [
+        Endpoint(id=server, hostname="srv-pacs", ip_address="10.0.10.17", device_type="SERVER",
+                 monitoring_enabled=True, endpoint_status="ACTIVE", created_at=w0 - timedelta(days=30)),
+        Endpoint(id=switch, hostname="sw-ward-b", ip_address="10.0.1.2", device_type="SWITCH",
+                 monitoring_enabled=True, endpoint_status="ACTIVE", created_at=w0 - timedelta(days=30)),
+        Endpoint(id=printer, hostname="printer", ip_address="10.0.30.12", device_type="PRINTER",
+                 monitoring_enabled=False, endpoint_status="ACTIVE", created_at=w0 - timedelta(days=30)),
     ]
+    res_ep = MagicMock()
+    res_ep.scalars().all.return_value = endpoints
+
+    events = [
+        # Server: UP from before the window, 30 h outage (24 h row + split row), UP open.
+        _event(server, "UP", w0 - 24 * h, w0 + 10 * h, ok=34 * 60 * 3, failed=0, rtt=2.0),
+        _event(server, "DOWN", w0 + 10 * h, w0 + 34 * h, ok=0, failed=24 * 60 * 3),
+        _event(server, "DOWN", w0 + 34 * h, w0 + 40 * h, ok=0, failed=6 * 60 * 3, split=True, since=w0 + 10 * h),
+        _event(server, "UP", w0 + 40 * h, None, ok=32 * 60 * 3, failed=0, rtt=2.0),
+        # Switch: two short outages with different root causes; one UP row has slow probes.
+        _event(switch, "UP", w0 - 24 * h, w0 + 5 * h, ok=29 * 60 * 3 - 90, failed=90, rtt=1.0),
+        _event(switch, "DOWN", w0 + 5 * h, w0 + 5 * h + 5 * m, ok=0, failed=15),
+        _event(switch, "UP", w0 + 5 * h + 5 * m, w0 + 20 * h, ok=60, failed=0, rtt=9.0),
+        _event(switch, "DOWN", w0 + 20 * h, w0 + 20 * h + 7 * m, ok=0, failed=21),
+        _event(switch, "UP", w0 + 20 * h + 7 * m, None, ok=52 * 60 * 3, failed=0, rtt=1.0),
+    ]
+    res_events = MagicMock()
+    res_events.scalars().all.return_value = events
+
+    def rca(ep_id, at, text):
+        return EndpointRCAIncident(id=uuid4(), endpoint_id=ep_id, incident_timestamp=at, status_at_execution="DOWN",
+                                   rca_summary=text, baseline_snapshot=[], failure_trace_snapshot=[])
+
+    res_rca = MagicMock()
+    res_rca.scalars().all.return_value = [
+        rca(server, w0 + 10 * h + m, "server cause"),
+        rca(switch, w0 + 5 * h + m, "first switch cause"),
+        rca(switch, w0 + 20 * h + m, "second switch cause"),
+    ]
+    mock_db.execute.side_effect = [res_ep, res_events, res_rca]
 
     with patch("app.services.report_compiler.get_service_gap_intervals", new_callable=AsyncMock) as mock_gaps:
-        mock_gaps.return_value = []
-        data = await compile_availability_report_data(
-            db=mock_db,
-            endpoint_ids=[ep_id],
-            start_dt=start_dt,
-            end_dt=end_dt,
-            include_rca=True,
-        )
-        mock_gaps.assert_called_once_with(mock_db, start_dt, end_dt)
+        mock_gaps.return_value = [gap]
+        data = await compile_availability_report_data(mock_db, [server, switch, printer], w0, w1, include_rca=True)
 
-        assert len(data["endpoints"]) == 1
-        assert data["summary"]["total_incidents"] == 1
-        ep_data = data["endpoints"][0]
-        assert ep_data["hostname"] == "edge-router-01"
-        assert ep_data["incident_count"] == 1
-        assert ep_data["uptime_percentage"] > 99.0
-        assert "2m" in ep_data["formatted_downtime"] or "120s" in ep_data["formatted_downtime"]
+    rows = {r["hostname"]: r for r in data["endpoints"]}
+    srv, sw, prn = rows["srv-pacs"], rows["sw-ward-b"], rows["printer"]
+
+    assert srv["incident_count"] == 1
+    assert srv["downtime_seconds"] == 30 * 3600
+    # Up: 72 h - 30 h down - 1 h gap; the gap is also out of the denominator.
+    assert srv["uptime_percentage"] == round(41 / 71 * 100, 2)
+    assert srv["packet_loss_pct"] == round(100 * 30 / (10 + 30 + 32), 2)  # probe-weighted, by time in window
+    assert srv["avg_rtt_ms"] == 2.0
+
+    assert sw["incident_count"] == 2
+    assert sw["downtime_seconds"] == 12 * 60
+    # RTT weighted by successful probes: the 9 ms period had only 60 of them.
+    assert 1.0 < sw["avg_rtt_ms"] < 1.1
+    assert sw["packet_loss_pct"] < 1.0  # 90 + 36 failed of ~13,000 probes, not a mean of 0 % rows
+
+    assert prn["operational_state"] == "PASSIVE" and prn["incident_count"] == 0
+    assert prn["packet_loss_pct"] is None and prn["avg_rtt_ms"] is None
+
+    ledger = data["incidents"]
+    assert data["incidents_total"] == 3 and len(ledger) == 3
+    assert [i["hostname"] for i in ledger] == ["sw-ward-b", "srv-pacs", "sw-ward-b"]  # newest first
+    srv_outage = ledger[1]
+    assert srv_outage["start_time"] == (w0 + 10 * h).strftime("%Y-%m-%d %H:%M:%S")
+    assert srv_outage["resolved_time"] == (w0 + 40 * h).strftime("%Y-%m-%d %H:%M:%S")
+    assert srv_outage["duration"] == format_duration(30 * 3600) == "1d 6h"
+    assert [i["rca_summary"] for i in ledger] == ["second switch cause", "server cause", "first switch cause"]
+    assert data["summary"]["total_incidents"] == 3
+
+
+def test_format_duration_keeps_the_unit_after_the_largest():
+    from app.services.report_compiler import format_duration, format_period
+
+    assert [format_duration(s) for s in (0, 45, 180, 2832, 18047, 75636, 106462)] == [
+        "0s", "45s", "3m", "47m 12s", "5h", "21h", "1d 5h",
+    ]
+    assert format_duration(21 * 3600 + 36) == "21h"  # was "21h 36s"
+    utc = timezone.utc
+    assert format_period(datetime(2026, 11, 6, 9, 30, tzinfo=utc), datetime(2026, 11, 9, 9, 30, tzinfo=utc)) == \
+        "2026-11-06 09:30 to 2026-11-09 09:30 UTC"
+    assert format_period(datetime(2026, 11, 6, tzinfo=utc), datetime(2026, 11, 8, 23, 59, 59, tzinfo=utc)) == \
+        "2026-11-06 to 2026-11-08 UTC"
 
 
 @pytest.mark.anyio
@@ -387,8 +417,8 @@ async def test_compile_bandwidth_report_data():
     from tests.backend.flow_mocks import mapping_result
     mock_res_anomalies = mapping_result([{
         "flows": 23, "conversations": 2,
-        "syn_flows": 15, "syn_bytes": 750,
-        "rst_flows": 8, "rst_bytes": 400,
+        "syn_flows": 15, "syn_bytes": 750, "syn_conversations": 1,
+        "rst_flows": 8, "rst_bytes": 400, "rst_conversations": 1,
     }])
 
     # 6. Traffic Zones Query (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
@@ -398,10 +428,15 @@ async def test_compile_bandwidth_report_data():
         ("10.0.0.10", "8.8.8.8", ep_id, None, 20000000, 100),
     ]
 
+    # 3b. All traffic in the window: conversation shares are of this total (not of the top ten)
+    mock_res_total = MagicMock()
+    mock_res_total.scalar.return_value = 20000000
+
     mock_db.execute.side_effect = [
         mock_res_ep,
         mock_res_ifs,
         mock_res_convs,
+        mock_res_total,
         mock_res_qos,
         mock_res_anomalies,
         mock_res_zones,
@@ -430,10 +465,16 @@ async def test_compile_bandwidth_report_data():
     assert any(q["dscp"] == 46 for q in data["qos_classes"])
 
     assert "anomalies" in data
-    assert data["anomalies"]["total_count"] == 23
-    assert data["anomalies"]["syn_scan_count"] == 15
-    assert data["anomalies"]["rst_burst_count"] == 8
+    # Counts are conversations; flows are reported beside them (the report used to call flows "bursts").
+    assert data["anomalies"]["total_count"] == 2
+    assert data["anomalies"]["syn_scan_count"] == 1
+    assert data["anomalies"]["syn_scan_flows"] == "15"
+    assert data["anomalies"]["rst_burst_count"] == 1
+    assert data["anomalies"]["rst_burst_flows"] == "8"
+    assert data["anomalies"]["total_flows"] == "23"
     assert data["anomalies"]["has_anomalies"] is True
+    # Shares are of all traffic in the window (20 MB), not of the top ten (5 MB here).
+    assert data["conversations"][0]["pct_of_transit"] == 25.0
 
     assert "traffic_zones" in data
     assert len(data["traffic_zones"]) == 4
@@ -673,7 +714,10 @@ async def test_report_compiler_traffic_zones_with_cidr_masks():
     ]
 
     mock_db = AsyncMock()
-    mock_db.execute.side_effect = [m_routers, m_if, m_conv, m_qos, m_anomaly, m_zone]
+    m_total = MagicMock()
+    m_total.scalar.return_value = 0
+
+    mock_db.execute.side_effect = [m_routers, m_if, m_conv, m_total, m_qos, m_anomaly, m_zone]
 
     now = datetime.now(timezone.utc)
     res = await compile_bandwidth_report_data(
@@ -704,3 +748,86 @@ def test_batch_csv_export_allowed_for_any_authenticated_role(role):
     )
     response = asyncio.run(batch_export_telemetry(request=request, current_user={"id": str(uuid4()), "role": role}))
     assert isinstance(response, StreamingResponse)
+
+
+# =====================================================================
+# 5. Report content reaches the PDF
+# =====================================================================
+
+def test_template_inline_conditional_renders_chosen_branch():
+    """`x if cond else y` must render, not silently become empty (anomaly counts were blank)."""
+    from app.core.template import TemplateEnvironment
+    env = TemplateEnvironment(search_path=".", autoescape=True)
+    tpl = env.from_string("{{ a.n if a else 0 }}|{{ a.b if a else '0 B' }}")
+    assert tpl.render(a={"n": 15, "b": "750 KB"}) == "15|750 KB"
+    assert tpl.render(a={}) == "0|0 B"
+    assert tpl.render(a=None) == "0|0 B"
+    # Only the chosen branch is evaluated, and the result is still escaped.
+    assert env.from_string("{{ x if x else y }}").render(x="<b>", y="unused") == "&lt;b&gt;"
+
+
+@pytest.mark.parametrize("template_name", ["template_b_bandwidth.html", "template_c_master.html"])
+def test_anomaly_counts_and_volumes_appear_in_pdf(template_name):
+    from app.routers.reports import jinja_env
+    from app.core.pdf import _render_pdf_sync
+
+    context = {
+        "org": {"company_name": "Acme Corp"},
+        "report_type_label": "Report",
+        "period_label": "2026-09-01 to 2026-09-02 UTC",
+        "generated_at": "2026-09-02 12:00",
+        "scope_title": "1 exporter",
+        "endpoints": [], "incidents": [], "summary": {}, "exporters": [], "interfaces": [],
+        "conversations": [], "qos_classes": [], "traffic_zones": [],
+        "anomalies": {"total_count": 23, "syn_scan_count": 15, "syn_scan_bytes": "750 KB",
+                      "rst_burst_count": 8, "rst_burst_bytes": "401 KB"},
+    }
+    html_out = jinja_env.get_template(template_name).render(**context)
+    text_out = "\n".join(p.extract_text() for p in PdfReader(_render_pdf_sync(html_out, "t")).pages)
+    for expected in ("15", "750 KB", "8", "401 KB"):
+        assert expected in text_out.split("\n"), expected
+
+
+@pytest.mark.parametrize("template_type,compiler", [("bandwidth", "compile_bandwidth_report_data"),
+                                                   ("master", "compile_master_report_data")])
+def test_pdf_endpoint_passes_wan_edge_and_coverage_notes(template_type, compiler):
+    """The compilers return wan_edge and coverage_notes; the router must hand both to the template."""
+    data = {
+        "endpoints": [], "incidents": [], "summary": {}, "exporters": [], "interfaces": [],
+        "conversations": [], "qos_classes": [], "anomalies": {}, "traffic_zones": [],
+        "wan_edge": {"interfaces_count": 2, "formatted_in_bytes": "4.21 TB", "formatted_out_bytes": "1.07 TB",
+                     "formatted_in_bps": "12.9 Mbps", "formatted_out_bps": "3.3 Mbps"},
+        "coverage_notes": ["Router and interface totals cover 2026-08-01 onward: this data is kept 90 days."],
+    }
+    captured = {}
+
+    async def fake_render(html_content, title=""):
+        captured["html"] = html_content
+        return b"%PDF-1.4 fake"
+
+    async def override_get_db():
+        yield AsyncMock()
+
+    async def override_get_current_user():
+        return {"id": str(uuid4()), "username": "viewer", "role": "VIEWER", "is_active": True}
+
+    test_app.dependency_overrides[get_db] = override_get_db
+    test_app.dependency_overrides[get_current_user] = override_get_current_user
+    try:
+        with patch("app.routers.reports.get_organization_branding", new=AsyncMock(return_value={})), \
+             patch(f"app.routers.reports.{compiler}", new=AsyncMock(return_value=data)), \
+             patch("app.routers.reports.render_pdf_async", new=fake_render):
+            with TestClient(test_app) as client:
+                res = client.post("/reports/pdf", json={
+                    "template_type": template_type,
+                    "endpoint_ids": [str(uuid4())],
+                    "start_date": "2026-09-01T00:00:00Z",
+                    "end_date": "2026-09-02T00:00:00Z",
+                })
+        assert res.status_code == 200
+    finally:
+        test_app.dependency_overrides.clear()
+
+    assert "kept 90 days" in captured["html"]
+    if template_type == "bandwidth":  # the master template has no WAN edge table
+        assert "4.21 TB" in captured["html"]

@@ -1,33 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 from pathlib import Path
 import pytest
-from app.core.watchdog import notify_systemd, start_systemd_watchdog
-
-
-def test_watchdog_notify_socket(tmp_path: Path):
-    sock_path = tmp_path / "systemd_notify.sock"
-    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    server_sock.bind(str(sock_path))
-    server_sock.setblocking(False)
-
-    old_env = os.environ.get("NOTIFY_SOCKET")
-    os.environ["NOTIFY_SOCKET"] = str(sock_path)
-    try:
-        success = notify_systemd("READY=1")
-        assert success is True
-
-        data, _ = server_sock.recvfrom(1024)
-        assert data == b"READY=1"
-    finally:
-        server_sock.close()
-        if old_env is None:
-            os.environ.pop("NOTIFY_SOCKET", None)
-        else:
-            os.environ["NOTIFY_SOCKET"] = old_env
+from app.core.watchdog import start_systemd_watchdog
 
 
 @pytest.mark.anyio

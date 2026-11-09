@@ -68,9 +68,23 @@ class FlowCorrelator:
 
         return exporter_id, src_endpoint_id, dst_endpoint_id
 
-    def _record_unmatched_exporter(self, ip: str) -> None:
+    def admit_exporter(self, exporter_ip: str, records: int = 1) -> bool:
+        """Whether flows from this sender are kept (the collector asks before parsing a packet).
+
+        Only enrolled exporters (an endpoint's primary IP or one of its flow_exporter_ips) are
+        kept. Any other sender is recorded as an unmatched exporter candidate, so the Traffic
+        page can offer to enroll it, and its packets are dropped: anyone who can reach the flow
+        ports could otherwise fill the flow buffer and the database.
+        """
+        ip = exporter_ip.split("/")[0].strip()
+        if ip in self._exporter_map:
+            return True
+        self._record_unmatched_exporter(ip, max(int(records), 1))
+        return False
+
+    def _record_unmatched_exporter(self, ip: str, flows: int = 1) -> None:
         now = time.time()
-        self._unmatched_counts[ip] = self._unmatched_counts.get(ip, 0) + 1
+        self._unmatched_counts[ip] = self._unmatched_counts.get(ip, 0) + flows
         last_recorded = self._unmatched_local.get(ip, 0.0)
         # Rate-limit FastStore updates to once every 10 seconds per unmatched IP
         if now - last_recorded > 10.0:

@@ -30,9 +30,12 @@ class EndpointEvent(Base):
         Index("idx_endpoint_events_start_time_id", "start_time", "id"),
     )
 
-    # Unique event surrogate ID (UUIDv4)
+    # Unique event surrogate ID (UUIDv4). With start_time it forms the table's primary key
+    # (id, start_time): the ORM must know both, or two endpoints' events that start at the same
+    # instant share one identity and one silently replaces the other in query results.
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
+        primary_key=True,
         default=uuid4,
         server_default=func.gen_random_uuid(),
         nullable=False,

@@ -5,13 +5,15 @@ import logging
 import os
 import random
 from datetime import datetime, timezone
+from typing import Any, Optional
 from uuid import UUID
 
 from app.core.orm import select
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocal, is_database_unavailable
 from app.models.endpoint import Endpoint
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task
 from app.services.diagnostics import run_throttled_traceroute, save_diagnostic_trace
+from monitoring.cycle_store import CycleStore, ProbeCycle, new_backlog
 from monitoring.gap_handler import STARTUP_SETTLE_SECONDS, close_startup_gap, resolve_startup_state
 from monitoring.ping import run_ping_cycle
 from monitoring.probe_samples import record_probe_sample
@@ -126,11 +128,47 @@ def _stagger_offset_for_endpoint(endpoint_id: UUID) -> int:
     return int.from_bytes(endpoint_id.bytes[:4], "big") % 60
 
 
+_store: Optional[CycleStore] = None
+
+
+def _cycle_store(state_machine: StateMachine) -> CycleStore:
+    """One per engine: an outage is logged, and a gap recorded, once rather than per endpoint."""
+    global _store
+    if _store is None:
+        _store = CycleStore(state_machine, db_write_semaphore)
+    return _store
+
+
+def _maybe_trace_incident(endpoint_id: UUID, ip_address: str, result: Any, new_state: EndpointState) -> None:
+    """PER-02: Check operational toggles and bound diagnostic trace queue (max 10 in flight).
+    One trace per endpoint at a time, and only on a state change or once per cooldown."""
+    if result.failed_count <= 0:
+        return
+    if not endpoint_registry.get_toggles(endpoint_id).get("allow_incident_trace", True):
+        return
+    traced_state = new_state.confirmed_detailed_state
+    if not endpoint_registry.incident_trace_due(endpoint_id, traced_state, INCIDENT_TRACE_COOLDOWN_SECONDS):
+        logger.debug("Skipping incident diagnostic trace for %s: in flight or within cooldown", ip_address)
+        return
+    active_diag_count = sum(len(s) for s in endpoint_registry._diagnostic_tasks.values())
+    if active_diag_count >= 10:
+        logger.warning(
+            "Skipping incident diagnostic trace for %s: diagnostic queue full (%d active)",
+            ip_address,
+            active_diag_count,
+        )
+        return
+    task = safe_create_task(trigger_incident_diagnostic_trace(endpoint_id, ip_address), "incident_diagnostic_trace")
+    endpoint_registry.register_diagnostic_task(endpoint_id, task)
+    endpoint_registry.record_incident_trace(endpoint_id, traced_state)
+
+
 async def monitor_endpoint(
     endpoint_id: UUID,
     ip_address: str,
     state_machine: StateMachine,
 ) -> None:
+    store = _cycle_store(state_machine)
     # PER-01: Deterministic second-slot staggering based on endpoint UUID (0-59s)
     slot_second = _stagger_offset_for_endpoint(endpoint_id)
     now_utc = datetime.now().astimezone()
@@ -140,9 +178,17 @@ async def monitor_endpoint(
         initial_delay += 60.0
     await asyncio.sleep(initial_delay)
 
-    async with AsyncSessionLocal() as db:
-        state = await state_machine.initialize_endpoint(endpoint_id, db)
-        await db.commit()
+    # A task started during a database outage would otherwise die here and never probe again.
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                state = await state_machine.initialize_endpoint(endpoint_id, db)
+                await db.commit()
+            break
+        except Exception as exc:
+            if not is_database_unavailable(exc):
+                raise
+            await asyncio.sleep(CYCLE_SECONDS)
 
     async with states_lock:
         endpoint_states[str(endpoint_id)] = state
@@ -194,6 +240,7 @@ async def monitor_endpoint(
             delay += 60.0
         await asyncio.sleep(delay)
 
+    backlog = new_backlog()
     while True:
         try:
             # Default 5 pings @ 8.0s: ~32s typical, 42s worst case, inside the 60s slot cycle
@@ -205,63 +252,15 @@ async def monitor_endpoint(
                 timeout=PING_TIMEOUT_SECONDS,
                 privileged=True,
             )
+            store.add(backlog, ProbeCycle(sampled_at, datetime.now(timezone.utc), result))
 
-            baseline = baseline_cache.get_baseline(endpoint_id)
-
-            async with db_write_semaphore:
-                async with AsyncSessionLocal() as db:
-                    current_state = endpoint_states.get(str(endpoint_id))
-
-                    if current_state is None:
-                        new_state = await state_machine.create_initial_event(
-                            endpoint_id, result, db, baseline=baseline
-                        )
-                    else:
-                        new_state = await state_machine.process_cycle(
-                            current_state, result, db, baseline=baseline
-                        )
-
-                    # PER-02: Check operational toggles and bound diagnostic trace queue (max 10 in flight).
-                    # One trace per endpoint at a time, and only on a state change or once per cooldown.
-                    if result.failed_count > 0:
-                        toggles = endpoint_registry.get_toggles(endpoint_id)
-                        if toggles.get("allow_incident_trace", True):
-                            traced_state = new_state.confirmed_detailed_state
-                            if not endpoint_registry.incident_trace_due(
-                                endpoint_id, traced_state, INCIDENT_TRACE_COOLDOWN_SECONDS
-                            ):
-                                logger.debug(
-                                    "Skipping incident diagnostic trace for %s: in flight or within cooldown",
-                                    ip_address,
-                                )
-                            else:
-                                active_diag_count = sum(
-                                    len(s) for s in endpoint_registry._diagnostic_tasks.values()
-                                )
-                                if active_diag_count < 10:
-                                    task = safe_create_task(
-                                        trigger_incident_diagnostic_trace(
-                                            endpoint_id, ip_address
-                                        ),
-                                        "incident_diagnostic_trace",
-                                    )
-                                    endpoint_registry.register_diagnostic_task(
-                                        endpoint_id, task
-                                    )
-                                    endpoint_registry.record_incident_trace(endpoint_id, traced_state)
-                                else:
-                                    logger.warning(
-                                        "Skipping incident diagnostic trace for %s: diagnostic queue full (%d active)",
-                                        ip_address,
-                                        active_diag_count,
-                                    )
-
-                    await db.commit()
-                # Separate transaction: a failed sample write must not undo the state update.
-                await record_probe_sample(endpoint_id, sampled_at, result)
-
-            async with states_lock:
-                endpoint_states[str(endpoint_id)] = new_state
+            new_state = await store.write(
+                endpoint_id, endpoint_states.get(str(endpoint_id)), backlog, baseline_cache.get_baseline(endpoint_id)
+            )
+            if new_state is not None:
+                async with states_lock:
+                    endpoint_states[str(endpoint_id)] = new_state
+                _maybe_trace_incident(endpoint_id, ip_address, result, new_state)
 
         except asyncio.CancelledError:
             logger.info("Monitoring task for endpoint %s cancelled.", endpoint_id)
@@ -287,18 +286,24 @@ async def monitor_endpoint(
 async def _close_startup_gap(gap_id, started_at: datetime) -> None:
     """End the time the engine was not running once every endpoint has run its first cycle."""
     await asyncio.sleep(STARTUP_SETTLE_SECONDS)
-    try:
-        async with AsyncSessionLocal() as db:
-            await close_startup_gap(db, gap_id, started_at)
-            await db.commit()
-    except Exception as e:
-        # The next start closes it instead (resolve_startup_state).
-        logger.error("Failed to close the startup monitoring gap: %s: %s", type(e).__name__, e)
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                await close_startup_gap(db, gap_id, started_at)
+                await db.commit()
+            return
+        except Exception as e:
+            # Left open, availability would leave out everything until the next start.
+            if is_database_unavailable(e):
+                await asyncio.sleep(CYCLE_SECONDS)
+                continue
+            # The next start closes it instead (resolve_startup_state).
+            logger.error("Failed to close the startup monitoring gap: %s: %s", type(e).__name__, e)
+            return
 
 
 async def main() -> None:
     logger.info("Ephemres monitoring engine starting.")
-    driver_manager.migrate_sessions = False
     await driver_manager.initialize()
     started_at = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as db:

@@ -85,7 +85,6 @@ def test_engine_and_flowd_follow_settings_changes():
     for path in ("monitoring/engine.py", "monitoring/flow/daemon.py"):
         text = (ROOT / path).read_text(encoding="utf-8")
         assert "start_settings_sync_listener(AsyncSessionLocal)" in text, path
-        assert "driver_manager.migrate_sessions = False" in text, path
     daemon = (ROOT / "monitoring/flow/daemon.py").read_text(encoding="utf-8")
     # Resolved per event, not bound to the broker of startup.
     assert "event_publisher=driver_manager.get_event_broker().publish" not in daemon

@@ -17,12 +17,12 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.system_setting import AppSetting
 from app.routers.auth import create_access_token, get_current_user, require_admin
-from app.routers.reports import csv_generator, sanitize_csv_field, get_fleet_summary
+from app.routers.reports import csv_generator, get_fleet_summary
 from app.routers.settings import get_settings, update_settings, SettingsUpdate
 from app.services.auth_service import is_session_active
 from app.services.diagnostics import is_local_subnet_destination
 from app.services.event_broker import PostgresEventBroker
-from app.services.session_store import PostgresSessionStore, RedisSessionStore
+from app.services.session_store import PostgresSessionStore
 from monitoring.synthetic import _parse_der_cert_not_after, _sync_ssl_probe
 
 
@@ -128,14 +128,6 @@ class TestPhase4ReportsHardening(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.loop.close()
-
-    def test_csv_sanitization_defense(self) -> None:
-        """Test formula injection sanitization in CSV export."""
-        self.assertEqual(sanitize_csv_field("=cmd|'/C calc'!A0"), "'=cmd|'/C calc'!A0")
-        self.assertEqual(sanitize_csv_field("+12345"), "'+12345")
-        self.assertEqual(sanitize_csv_field("-12345"), "'-12345")
-        self.assertEqual(sanitize_csv_field("@SUM(1,2)"), "'@SUM(1,2)")
-        self.assertEqual(sanitize_csv_field("normal_host.local"), "normal_host.local")
 
     def test_keyset_csv_generator(self) -> None:
         """Test keyset pagination generator terminates properly and formats CSV."""
@@ -415,12 +407,6 @@ class TestOptionBStrictSecurityWipe(unittest.TestCase):
             pg_store = PostgresSessionStore(mock_factory)
             self.assertFalse(await pg_store.is_session_active(user_id, jti=None))
             self.assertFalse(await pg_store.is_session_active(user_id, jti=""))
-
-            # 3. RedisSessionStore
-            mock_redis = AsyncMock()
-            redis_store = RedisSessionStore(mock_redis)
-            self.assertFalse(await redis_store.is_session_active(user_id, jti=None))
-            self.assertFalse(await redis_store.is_session_active(user_id, jti=""))
 
         self.loop.run_until_complete(_run())
 

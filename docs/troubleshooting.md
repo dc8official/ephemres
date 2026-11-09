@@ -62,6 +62,7 @@ sudo journalctl -u ephemres-api --since "2026-09-17 14:00:00" --until "2026-09-1
 #### 4. Reverse Proxy & Upstream Tracing
 ```bash
 # Check if Nginx is returning 502 Bad Gateway or 504 Gateway Timeout
+# (the API also answers 504 itself when a query hits its 10 s limit: "Try a shorter time window")
 sudo tail -n 50 -f /var/log/nginx/error.log
 
 # Track HTTP status codes returned to client browsers
@@ -78,6 +79,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **User repeatedly kicked to login page** | `/var/log/ephemres/ephemres-api.log`<br>`journalctl -u ephemres-api` | `Session evicted`, `quota exceeded`, `HTTPException: 401` | Check multi-worker session store sync (Section 2.I). |
 | **Browser shows "Unable to connect" / HTTP 502** | `/var/log/nginx/error.log`<br>`journalctl -u ephemres-api` | `connect() failed (111: Connection refused)`, `Uvicorn running` | Verify Uvicorn socket listening on `127.0.0.1:8000`. |
 | **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Check the unit's `AmbientCapabilities` (Section 2.A). |
+| **Services fail to start: `Insecure configuration`** or systemd `Failed to load environment files` | `journalctl -u ephemres-api` | `the JWT signing key is the default development secret`, `shorter than 32 characters`, `ephemres.env: No such file` | `/etc/ephemres/ephemres.env` is missing, unreadable by `ephemres`, or lacks `EPHEMRES_SECRET_KEY`. Restore it from the backup's `.key` file (keep the same key, or saved alert channel secrets cannot be decrypted), `chmod 600`, `chown ephemres:ephemres`. |
 | **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait 15 minutes for the lockout to expire, or reset `admin` with `reset-admin-password.sh` (Sections 2.B and 2.C). |
 | **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore `/dev/shm` IPC state. |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
@@ -108,7 +110,8 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 ### B. User Account Temporarily Locked Out (HTTP 403)
 * **Cause**: Repeated failed logins for one username from one client IP (5 by default; set **Lockout Threshold** under **Admin Settings → Security & Discovery**) trigger a 15-minute lockout scoped to that `IP:username` pair. The failure counter resets after 30 minutes without further failures.
 * **Fix**:
-  - Wait 15 minutes for the lockout to expire, or log in from a different client IP.
+  - Wait 15 minutes for the lockout to expire, or log in from a different client IP. Lockouts are shared by all API workers and survive service restarts; to lift one early: `sudo -u postgres psql -d netmon -c "DELETE FROM auth_login_failures WHERE lock_key LIKE '%:admin'"`.
+  - HTTP 429 instead of 403 comes from the Nginx sign-in rate limit (10 a minute per address): wait a minute.
   - If the locked account is `admin` and the password is unknown, reset it from the server CLI (see §2C).
 
 ### C. Forgot Admin Password / Out-of-Band Recovery
@@ -276,30 +279,48 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
      sudo systemctl reload postgresql
      ```
 
-### K. FastStore Shared-Memory IPC Inspection & Diagnostics (`/dev/shm`)
+### K. FastStore Inspection & Diagnostics (`/run/ephemres`)
 * **Symptoms**:
   - NetFlow telemetry not reaching rollup tables, or real-time event broadcasts stalling when Performance Mode is active.
+* **Files**: FastStore keeps its SQLite file in `/run/ephemres` (`/dev/shm` when that is missing): `ephemres_faststore_u<uid>_db0.sqlite3`, shared by every service for events and exporter discovery. Sessions and sign-in lockouts are in PostgreSQL in both modes, so a reboot signs nobody out. Flows themselves no longer pass through FastStore; for flow loss see `journalctl -u ephemres-flowd | grep "last minute"` ([NetFlow guide §7](netflow-guide.md)).
 * **Diagnosis**:
-  1. Inspect FastStore shared-memory database file existence, permissions, and size:
+  1. Inspect the files' existence, permissions, and size:
      ```bash
-     ls -lh /dev/shm/ephemres_faststore*
+     sudo ls -lh /run/ephemres/ephemres_faststore*
      ```
-  2. Query FastStore internal tables and stream backlog using the standard `sqlite3` CLI:
+  2. Query FastStore internal tables using the standard `sqlite3` CLI:
      ```bash
-     FASTSTORE_DB=$(ls /dev/shm/ephemres_faststore_*.sqlite3 2>/dev/null | head -n 1)
-
-     # Inspect queued NetFlow stream batches
-     sqlite3 "${FASTSTORE_DB}" "SELECT stream, COUNT(*) AS queued_batches FROM stream_entries GROUP BY stream;"
-
-     # Inspect active cached sessions
-     sqlite3 "${FASTSTORE_DB}" "SELECT count(*) FROM kv_store WHERE k LIKE 'session:%' AND (expires_at IS NULL OR expires_at > unixepoch());"
+     SHARED_DB=$(sudo ls /run/ephemres/ephemres_faststore_*_db0.sqlite3 2>/dev/null | head -n 1)
+     sudo sqlite3 "${SHARED_DB}" "SELECT k FROM kv_store LIMIT 20;"
      ```
-  3. If the database file is corrupted or locked by an orphaned process:
+  3. A process that finds a FastStore file corrupt recreates it only when no other process has it open; otherwise it stops with
+     `FastStore database ... is corrupt ... but other processes still use it`. A locked file is never recreated: it is waited for.
+     To recreate the files by hand, stop every service first:
      ```bash
      sudo systemctl stop ephemres-api ephemres-engine ephemres-flowd
-     rm -f /dev/shm/ephemres_faststore*
+     sudo rm -f /run/ephemres/ephemres_faststore* /dev/shm/ephemres_faststore*
      sudo systemctl start ephemres-api ephemres-engine ephemres-flowd
      ```
+
+### Database outages
+What each service does while PostgreSQL is unavailable, without anyone restarting it:
+
+* **API:** requests that need the database answer `503` with `Retry-After`, and the UI shows a notice. Nobody is signed out; sessions are valid again as soon as the database returns. `/health/liveness` stays 200 and `/health/readiness` answers 503. Listeners for live events and alerts reconnect by themselves. The alert leader steps down if its database connection dies and takes part in the next election.
+* **Engine:** keeps probing. Each endpoint holds up to 240 cycles (4 hours) in memory and writes them with their real times when the database returns, so history and availability come out as if it had never left. Past that, the oldest are dropped and recorded as a `DATABASE_DISCONNECT` monitoring gap.
+* **Alerts:** a state change still in effect when the database returns alerts then. One that started and ended during the outage is recorded in history without an alert.
+* **flowd:** keeps collecting and holds flows in memory up to `flow.buffer_memory_limit_mb`, then writes the backlog.
+* **Service restarts:** an engine that restarts during an outage loses what it was holding. The stop is recorded as a monitoring gap.
+
+`systemctl stop postgresql` no longer stops the Ephemres services; they wait and retry.
+
+### Stuck API workers
+A worker whose event loop stops running for 30 s exits and uvicorn starts a replacement. The service itself does not restart, and the other worker keeps answering meanwhile. The cause is a bug: something blocking the event loop. To find it, read the stacks the worker printed as it exited:
+
+```bash
+journalctl -u ephemres-api | grep -A25 "Event loop stuck"
+```
+
+Each thread's stack follows. The stuck one is the thread whose frames run through `asyncio/runners.py`: the line above them is where the event loop was blocked. If the stuck worker was sending alerts, the other worker takes over within a few seconds, but a state change in the 30 s it was stuck does not alert. The dashboard and history still show it. If both workers are stuck, both are replaced and requests fail for those 30 s.
 
 ### L. Audit log health and latency from before v3.3.5
 * **What you see**: in an endpoint's audit log (state transition history), some older periods show a health or average latency that doesn't fit the period. For example, an UP period of several hours that ended in an outage shows **0 % health** and no latency, or a DOWN period shows a latency.

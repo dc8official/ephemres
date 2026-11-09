@@ -203,3 +203,4 @@ When a network device begins exporting NetFlow/IPFIX to Ephemres from an IP addr
   > **⚠️ Unmatched Flow Exporters Detected**: Flows were received from `172.16.50.1` which is not mapped to any known device.
 * Administrators can click **"Map Exporter"** directly within the banner. A modal prompts the operator to select an existing endpoint to bind the exporter IP to its `flow_exporter_ips` array.
 * The mapping takes effect immediately ($\mathcal{O}(1)$ in-memory reload) without restarting daemons or dropping active flow streams.
+* Until an exporter is mapped or enrolled, its flows are **not stored**: the banner is the only place it shows up. Traffic charts and reports start counting it from the moment it is mapped.

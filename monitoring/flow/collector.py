@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import json
 import logging
+import os
 import socket
 import struct
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.services.runtime_settings import get_runtime_settings
 from monitoring.flow.ipfix_parser import IPFIXParser
 from monitoring.flow.v5_parser import parse_v5_packet
 from monitoring.flow.v9_parser import V9Parser
+from monitoring.sockbuf import set_receive_buffer
 
 logger = logging.getLogger(__name__)
 
-STREAM_NETFLOW_RAW = "stream:netflow:raw"
-MAX_QUEUE_SIZE = 50000
+# Where flowd buffered flows in FastStore before this release; flowd deletes it on start.
+LEGACY_STREAM_KEY = "stream:netflow:raw"
 
 
 class FlowUDPProtocol(asyncio.DatagramProtocol):
@@ -42,45 +43,41 @@ class FlowUDPProtocol(asyncio.DatagramProtocol):
 class FlowCollector:
     """
     Dual-port UDP Flow Collector listening on UDP 2055 (NetFlow) and UDP 4739 (IPFIX).
-    Buffers and flushes flow records in batches to Redis Stream 'stream:netflow:raw'.
+
+    Each datagram is parsed and its flows handed to `sink` (FlowAggregator.ingest) at once, in
+    the same process. When flowd can't keep up, the kernel drops datagrams at the socket; those
+    drops are read from /proc/net/udp (udp_drops()) and logged by flowd every minute.
     """
 
     def __init__(
         self,
-        store_client: Any = None,
+        sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         bind_host: str = "0.0.0.0",
         netflow_port: int = 2055,
         ipfix_port: int = 4739,
-        batch_size: int = 1000,
-        flush_interval_seconds: float = 0.1,
         *,
-        redis_client: Any = None,
+        exporter_filter: Optional[Callable[[str, int], bool]] = None,
     ):
-        self.store = store_client if store_client is not None else redis_client
+        self.sink = sink
+        # Called with (exporter_ip, records in the packet) before a packet is parsed; False drops
+        # it. flowd passes FlowCorrelator.admit_exporter, so only enrolled exporters reach the
+        # aggregator and the database, and spoofed senders can't fill the v9/IPFIX template caches.
+        self.exporter_filter = exporter_filter
         self.bind_host = bind_host
         self.netflow_port = netflow_port
         self.ipfix_port = ipfix_port
-        self.batch_size = batch_size
-        self.flush_interval = flush_interval_seconds
 
         self.v9_parser = V9Parser()
         self.ipfix_parser = IPFIXParser()
 
-        self._queue: List[dict[str, Any]] = []
-        self._lock = asyncio.Lock()
-        self._running = False
-        self._flush_task: Optional[asyncio.Task] = None
+        # Counters since start, logged by flowd every minute.
+        self.packets_received = 0
+        self.flows_received = 0
+        self._sockets: List[socket.socket] = []
         self._transports: List[asyncio.DatagramTransport] = []
 
-    @property
-    def redis(self) -> Any:
-        return self.store
-
-    @redis.setter
-    def redis(self, val: Any) -> None:
-        self.store = val
-
     def handle_packet(self, data: bytes, addr: tuple[str, int], listen_port: int) -> None:
+        self.packets_received += 1
         exporter_ip = addr[0]
         try:
             ip_obj = ipaddress.ip_address(exporter_ip)
@@ -89,10 +86,15 @@ class FlowCollector:
         except ValueError:
             return
 
-        if len(data) < 2:
+        if len(data) < 4:
             return
 
         version = struct.unpack_from("!H", data, 0)[0]
+        if self.exporter_filter is not None and version in (5, 9, 10):
+            # v5 and v9 headers carry the record count; IPFIX only a length, so count 1 per packet.
+            records = struct.unpack_from("!H", data, 2)[0] if version in (5, 9) else 1
+            if not self.exporter_filter(exporter_ip, records):
+                return
         flows: List[dict[str, Any]] = []
 
         try:
@@ -119,86 +121,46 @@ class FlowCollector:
                         f["bytes"] = int(f.get("bytes", 0) or 0) * multiplier
                         f["packets"] = int(f.get("packets", 0) or 0) * multiplier
 
-            if len(self._queue) >= MAX_QUEUE_SIZE:
-                logger.warning(
-                    "FlowCollector: in-memory queue full (%d items). Dropping %d incoming flows due to backpressure.",
-                    len(self._queue),
-                    len(flows),
-                )
-                return
-            space = MAX_QUEUE_SIZE - len(self._queue)
-            if len(flows) > space:
-                logger.warning(
-                    "FlowCollector: queue near capacity (%d/%d). Accepting %d of %d flows.",
-                    len(self._queue),
-                    MAX_QUEUE_SIZE,
-                    space,
-                    len(flows),
-                )
-                flows = flows[:space]
+            self.flows_received += len(flows)
+            if self.sink is not None:
+                try:
+                    self.sink(flows)
+                except Exception as e:
+                    logger.error("FlowCollector: could not hand %d flows from %s to the aggregator: %s",
+                                 len(flows), exporter_ip, e)
 
-            self._queue.extend(flows)
-            if len(self._queue) >= self.batch_size:
-                asyncio.create_task(self.flush())
-
-    async def flush(self) -> None:
-        async with self._lock:
-            if not self._queue:
-                return
-            to_flush = self._queue
-            self._queue = []
-
-        if not self.store:
-            return
-
-        try:
-            pipe = self.store.pipeline()
-            for f in to_flush:
-                # Encode dict values as strings for FastStore Stream
-                stream_entry = {
-                    "v": str(f.get("version", 0)),
-                    "exp": str(f.get("exporter_ip", "")),
-                    "src": str(f.get("src_ip", "")),
-                    "dst": str(f.get("dst_ip", "")),
-                    "sport": str(f.get("src_port", 0)),
-                    "dport": str(f.get("dst_port", 0)),
-                    "proto": str(f.get("protocol", 0)),
-                    "b": str(f.get("bytes", 0)),
-                    "p": str(f.get("packets", 0)),
-                    "flags": str(int(f.get("tcp_flags", 0) or 0)),
-                    "tos": str(int(f.get("tos", 0) or 0)),
-                    "in_if": str(f.get("input_if", 0)),
-                    "out_if": str(f.get("output_if", 0)),
-                    # Empty when the record carries no next hop (or the all-zero address).
-                    "nh": str(f.get("next_hop") or ""),
-                    "ts_start": f"{f.get('start_time', 0.0):.3f}",
-                    "ts_end": f"{f.get('end_time', 0.0):.3f}",
-                }
-                pipe.xadd(STREAM_NETFLOW_RAW, stream_entry, maxlen=100000, approximate=True)
-            await pipe.execute()
-        except Exception as e:
-            logger.error("Failed to push batch of %d flows to FastStore: %s", len(to_flush), e)
-
-    async def _flush_loop(self) -> None:
-        while self._running:
-            await asyncio.sleep(self.flush_interval)
-            await self.flush()
+    def udp_drops(self) -> int:
+        """Datagrams the kernel dropped on flowd's sockets because they were not read in time."""
+        inodes = set()
+        for sock in self._sockets:
+            try:
+                inodes.add(str(os.fstat(sock.fileno()).st_ino))
+            except OSError:
+                pass
+        drops = 0
+        for table in ("/proc/net/udp", "/proc/net/udp6"):
+            try:
+                with open(table) as fh:
+                    next(fh, None)
+                    for line in fh:
+                        fields = line.split()
+                        if len(fields) >= 13 and fields[9] in inodes:
+                            drops += int(fields[-1])
+            except OSError:
+                continue
+        return drops
 
     def _create_socket(self, port: int) -> socket.socket:
         # No SO_REUSEADDR: UDP has no TIME_WAIT to work around, and on Linux it would let any other
         # local process that also sets it bind the same port and receive the unicast flow datagrams.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # Set 4MB socket receive buffer
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        except Exception as e:
-            logger.warning("Could not set SO_RCVBUF to 4MB: %s", e)
+        set_receive_buffer(sock, f"flow socket UDP {port}")
         sock.setblocking(False)
         sock.bind((self.bind_host, port))
+        self._sockets.append(sock)
         return sock
 
     async def start(self) -> None:
-        self._running = True
         loop = asyncio.get_running_loop()
 
         # Listen on UDP 2055 (NetFlow)
@@ -223,19 +185,10 @@ class FlowCollector:
         except Exception as e:
             logger.error("FlowCollector: Failed to bind UDP %d: %s", self.ipfix_port, e)
 
-        self._flush_task = asyncio.create_task(self._flush_loop())
 
     async def stop(self) -> None:
-        self._running = False
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-
         for t in self._transports:
             t.close()
         self._transports.clear()
-        await self.flush()
+        self._sockets.clear()
         logger.info("FlowCollector stopped cleanly.")

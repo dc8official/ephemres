@@ -4,9 +4,13 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+
+import asyncpg
+
 from app.core.asgi import EphemresApp, FastAPI, Request, status
 from app.core.asgi import CORSMiddleware
 from app.core.asgi import JSONResponse
+from app.core.orm import DatabaseUnavailableError
 from app.core.orm import text
 from app.core.asgi import BaseHTTPMiddleware
 
@@ -35,7 +39,7 @@ from app.services.diagnostics import (
 )
 from app.services.driver_manager import driver_manager
 from app.services.runtime_settings import start_runtime_settings_refresh_task
-from app.core.watchdog import start_systemd_watchdog
+from app.core.watchdog import start_loop_stall_guard, start_systemd_watchdog
 from app.services.telemetry_relay import telemetry_relay
 from app.services.scheduler_leader import scheduler_leader
 from app.services.topology import start_topology_flow_refresh_task, topology_manager
@@ -89,10 +93,13 @@ async def lifespan(app: FastAPI):
         AsyncSessionLocal, interval_seconds=86400
     )
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
+    stall_guard_task = start_loop_stall_guard()
     logger.info(
         "Ephemres v3.3.5 started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
     )
     yield
+    if stall_guard_task is not None:
+        stall_guard_task.cancel()
     watchdog_task.cancel()
     topology_flow_task.cancel()
     settings_sync_task.cancel()
@@ -223,6 +230,37 @@ app.include_router(users.router, prefix="/api/v1")
 app.include_router(telemetry_router)
 
 
+async def database_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    """503, not a bare 500 or a 401: the request may be fine and the session certainly is, so the
+    browser must not sign the user out of it."""
+    logger.warning("Database unavailable on %s %s: %s", request.method, request.url.path, type(exc).__name__)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Ephemres can't reach its database right now. Try again shortly."},
+        headers={"Retry-After": "15"},
+    )
+
+
+for _exc_class in (
+    DatabaseUnavailableError,
+    ConnectionError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+    asyncpg.exceptions.OperatorInterventionError,
+):
+    app.add_exception_handler(_exc_class, database_unavailable_handler)
+
+
+@app.exception_handler(asyncio.TimeoutError)
+async def query_timeout_handler(request: Request, exc: Exception) -> JSONResponse:
+    """A query hit the database command timeout: say so instead of a bare 500."""
+    logging.getLogger(__name__).warning("Query timed out on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=504,
+        content={"detail": "This request took too long to answer. Try a shorter time window."},
+    )
+
+
 @app.get("/api/v1/version", tags=["system"])
 async def get_version():
     return APIResponse.success(
@@ -255,9 +293,12 @@ async def health_readiness():
         # One line per failed probe, no traceback: probes repeat every few seconds while down.
         logger.warning("Readiness check: database connectivity failure: %s", exc)
 
+    # FastStore only matters in performance mode: on a standard-mode server no client exists, and
+    # failing on that made every healthy server answer 503.
+    faststore_in_use = driver_manager.driver_mode == "redis"
     redis_ok = True
     redis_err = None
-    if settings.redis.enabled:
+    if faststore_in_use:
         try:
             client = driver_manager.get_redis_client()
             if client is not None:
@@ -270,7 +311,7 @@ async def health_readiness():
             redis_err = "Redis connection failed"
             logger.warning("Readiness check: redis connectivity failure: %s", exc)
 
-    is_ready = db_ok and (not settings.redis.enabled or redis_ok)
+    is_ready = db_ok and redis_ok
     status_code = (
         status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
     )
@@ -282,8 +323,8 @@ async def health_readiness():
             "ready": is_ready,
             "database": {"status": "ok" if db_ok else "error", "error": db_err},
             "redis": {
-                "status": "ok" if (not settings.redis.enabled or redis_ok) else "error",
-                "enabled": settings.redis.enabled,
+                "status": "ok" if redis_ok else "error",
+                "enabled": faststore_in_use,
                 "error": redis_err,
             },
             "version": "3.3.5",

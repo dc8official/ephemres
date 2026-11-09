@@ -18,6 +18,8 @@ from app.database import AsyncSessionLocal, async_engine
 from app.models.alert_channel import AlertChannel
 
 ADVISORY_LOCK_ID = 992817
+# How often the leader checks its lock connection, and a standby tries for the lock.
+LOCK_CHECK_SECONDS = 2.5
 from app.models.alert_delivery_log import AlertDeliveryLog
 from app.models.system_setting import AppSetting
 from app.services.alert_formatters import (
@@ -61,6 +63,8 @@ class AlertDispatcher:
     def __init__(self) -> None:
         self._running: bool = False
         self._is_leader: bool = False
+        self._listener_tasks: List[asyncio.Task] = []
+        self._watch_task: Optional[asyncio.Task] = None
         self._lock_conn: Any = None
         self._tasks: List[asyncio.Task] = []
         self._queue: asyncio.Queue[Tuple[str, Dict[str, Any]]] = asyncio.Queue(maxsize=1000)
@@ -122,15 +126,60 @@ class AlertDispatcher:
             return
 
         if self._is_leader:
-            self._tasks.append(asyncio.create_task(self._listen_broker("STATE_TRANSITION"), name="alert_broker_state_trans"))
-            self._tasks.append(asyncio.create_task(self._listen_broker("RCA_INCIDENT"), name="alert_broker_rca"))
+            self._start_leading()
             logger.info("[AlertDispatcher] Active leader election won. Broker listeners started.")
+
+    def _start_leading(self) -> None:
+        """Runs the broker listeners, and watches the lock when it is a PostgreSQL session lock."""
+        self._listener_tasks = [
+            asyncio.create_task(self._listen_broker("STATE_TRANSITION"), name="alert_broker_state_trans"),
+            asyncio.create_task(self._listen_broker("RCA_INCIDENT"), name="alert_broker_rca"),
+        ]
+        self._tasks.extend(self._listener_tasks)
+        if self._lock_conn is not None:
+            self._watch_task = asyncio.create_task(self._watch_lock_loop(), name="alert_dispatcher_lock_watch")
+
+    async def _watch_lock_loop(self) -> None:
+        """PostgreSQL drops a session lock with its connection. A leader that doesn't notice keeps
+        sending while a standby takes the lock too, and every alert goes out twice."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=LOCK_CHECK_SECONDS)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._lock_conn.execute(text("SELECT 1"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[AlertDispatcher] Lost the leader lock connection, stepping down: %s", exc)
+                await self._step_down()
+                return
+
+    async def _step_down(self) -> None:
+        self._is_leader = False
+        listeners, self._listener_tasks = self._listener_tasks, []
+        for task in listeners:
+            task.cancel()
+            if task in self._tasks:
+                self._tasks.remove(task)
+        if listeners:
+            await asyncio.gather(*listeners, return_exceptions=True)
+        conn, self._lock_conn = self._lock_conn, None
+        if conn is not None:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+        self._watch_task = None
+        self._election_task = asyncio.create_task(self._standby_election_loop(), name="alert_dispatcher_election")
 
     async def _standby_election_loop(self) -> None:
         """Continuous advisory lock election retry loop for standby worker failover."""
         while not self._stop_event.is_set():
             try:
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(LOCK_CHECK_SECONDS)
                 if self._stop_event.is_set():
                     break
                 if async_engine.dialect.name == "postgresql":
@@ -142,8 +191,7 @@ class AlertDispatcher:
                             self._lock_conn = conn
                             self._is_leader = True
                             logger.info("[AlertDispatcher] Active leader election won during standby retry. Promoting to leader.")
-                            self._tasks.append(asyncio.create_task(self._listen_broker("STATE_TRANSITION"), name="alert_broker_state_trans"))
-                            self._tasks.append(asyncio.create_task(self._listen_broker("RCA_INCIDENT"), name="alert_broker_rca"))
+                            self._start_leading()
                             break
                         else:
                             await conn.close()
@@ -155,8 +203,7 @@ class AlertDispatcher:
                         raise
                 else:
                     self._is_leader = True
-                    self._tasks.append(asyncio.create_task(self._listen_broker("STATE_TRANSITION"), name="alert_broker_state_trans"))
-                    self._tasks.append(asyncio.create_task(self._listen_broker("RCA_INCIDENT"), name="alert_broker_rca"))
+                    self._start_leading()
                     break
             except asyncio.CancelledError:
                 break
@@ -166,6 +213,11 @@ class AlertDispatcher:
     async def stop(self) -> None:
         self._running = False
         self._stop_event.set()
+
+        if self._watch_task:
+            self._watch_task.cancel()
+            await asyncio.gather(self._watch_task, return_exceptions=True)
+            self._watch_task = None
 
         if self._election_task:
             self._election_task.cancel()

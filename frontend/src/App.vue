@@ -56,7 +56,9 @@
     </div>
 
     <main class="app-main">
-      <RouterView />
+      <!-- The API refuses every call until a forced password change is done, so the page
+           behind the modal mounts (and loads its data) only afterwards. -->
+      <RouterView v-if="!displayPasswordModal" />
     </main>
 
     <!-- Forced Password Change Modal -->
@@ -173,7 +175,23 @@ const changePasswordForm = ref({
   confirm_password: ''
 })
 
+// Requests that answered 503 while the database is away; one notice, not one per panel.
+const UNAVAILABLE_NOTICE_MS = 60000
+let lastUnavailableNotice = 0
+function onUnavailable(event) {
+  const now = Date.now()
+  if (now - lastUnavailableNotice < UNAVAILABLE_NOTICE_MS) return
+  lastUnavailableNotice = now
+  toast.add({
+    severity: 'warn',
+    summary: 'Temporarily unavailable',
+    detail: event.detail || 'Ephemres cannot reach its database right now.',
+    life: 15000,
+  })
+}
+
 onMounted(async () => {
+  window.addEventListener('ephemres:unavailable', onUnavailable)
   document.addEventListener('keydown', onDocumentKeydown)
   document.addEventListener('click', onDocumentClick)
   const saved = localStorage.getItem('theme') || 'dark'
@@ -213,6 +231,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('ephemres:unavailable', onUnavailable)
   if (unsubscribeSSE) unsubscribeSSE()
   document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('click', onDocumentClick)

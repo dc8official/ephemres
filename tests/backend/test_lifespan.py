@@ -4,13 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.main import app, lifespan
 
 
-def test_main_module_imports_asyncio():
-    """Verify that backend/app/main.py explicitly imports the asyncio module."""
-    import app.main
-    assert "asyncio" in app.main.__dict__, "asyncio is not imported in app.main"
-    assert app.main.asyncio is asyncio
-
-
 @pytest.mark.anyio
 async def test_app_lifespan_startup_and_shutdown():
     """Verify that lifespan(app) starts and stops background tasks cleanly without NameError."""

@@ -144,12 +144,12 @@ def test_bandwidth_applications(client):
 
 
 @pytest.mark.parametrize("daily_has_tos", [True, False])
-def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
+def test_bandwidth_applications_1y_window_daily_rollup(client, daily_has_tos):
     """
-    Verifies that requesting the 30-day window routes cleanly to FlowDailyRollup
-    without raising AttributeError on missing src_endpoint_id / src_ip attributes,
-    and that QoS falls back to flow_minute_rollups when the daily continuous
-    aggregate has no `tos` column (TimescaleDB installs).
+    Verifies that the fleet-wide 1y window routes to FlowDailyRollup, that QoS falls back to
+    flow_conversation_hourly_rollups when the daily continuous aggregate has no `tos` column
+    (TimescaleDB installs), and that zones come from that tier too, since the daily one keeps
+    no addresses.
     """
     from app.routers import bandwidth
 
@@ -170,31 +170,34 @@ def test_bandwidth_applications_30d_window_daily_rollup(client, daily_has_tos):
     mock_res_total = MagicMock()
     mock_res_total.scalar.return_value = 85000000
 
-    # FlowDailyRollup skips the zone query; executes app query, total, `tos` column check, then qos
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos]
+    mock_res_zones = MagicMock()
+    mock_res_zones.all.return_value = [("10.0.0.1", "8.8.8.8", None, None, 1000, 5)]
+    # App query, total, `tos` column check, qos, then zones.
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos, mock_res_zones]
 
-    resp = test_client.get("/api/v1/bandwidth/applications?window=30d")
+    resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
     assert len(data["data"]["applications"]) == 1
     assert len(data["data"]["qos_classes"]) == 1
     assert data["data"]["qos_classes"][0]["dscp_label"] == "EF (VoIP)"
-    # Traffic zones are safely zeroed out without runtime attribute errors
+    # Traffic zones are resolved by address from the hourly conversation tier
     assert len(data["data"]["traffic_zones"]) == 4
-    for z in data["data"]["traffic_zones"]:
-        assert z["total_bytes"] == 0
-        assert z["percentage"] == 0.0
+    assert sum(z["total_bytes"] for z in data["data"]["traffic_zones"]) == 1000
+    assert data["data"]["zones_resolution"] == "ip"
+    zone_sql = str(mock_session.execute.call_args_list[4].args[0])
+    assert "flow_conversation_hourly_rollups" in zone_sql
 
     qos_sql = str(mock_session.execute.call_args_list[3].args[0])
-    expected_table = "flow_daily_rollups" if daily_has_tos else "flow_minute_rollups"
+    expected_table = "flow_daily_rollups" if daily_has_tos else "flow_conversation_hourly_rollups"
     assert expected_table in qos_sql
     assert data["data"]["qos_source"] == expected_table
     bandwidth._TABLE_COLUMN_CACHE.clear()
 
 
 def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
-    """A 1y window falling back to flow_minute_rollups only has 90 days of ToS data; say so."""
+    """A 1y window falling back to the hourly conversation tier only has 90 days of ToS data; say so."""
     import datetime
 
     from app.routers import bandwidth
@@ -210,12 +213,16 @@ def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
     mock_res_qos.all.return_value = [(0, 1000, 10, 1)]
     mock_res_total = MagicMock()
     mock_res_total.scalar.return_value = 1000
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos]
+    mock_res_zones = MagicMock()
+    mock_res_zones.all.return_value = []
+    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos, mock_res_zones]
 
     resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["qos_source"] == "flow_minute_rollups"
+    zones_start = datetime.datetime.fromisoformat(data["zones_window_start"].replace("Z", "+00:00"))
+    assert datetime.datetime.now(datetime.timezone.utc) - zones_start <= datetime.timedelta(days=90, minutes=1)
+    assert data["qos_source"] == "flow_conversation_hourly_rollups"
     qos_start = datetime.datetime.fromisoformat(data["qos_window_start"].replace("Z", "+00:00"))
     age = datetime.datetime.now(datetime.timezone.utc) - qos_start
     assert datetime.timedelta(days=89) < age <= datetime.timedelta(days=90, minutes=1)
@@ -433,3 +440,51 @@ def test_unknown_window_is_rejected(client, path):
     resp = test_client.get(f"{path}{sep}window=2h")
     assert resp.status_code == 400
     assert "1h, 6h, 24h, 7d, 30d, 1y" in resp.text
+
+
+@pytest.mark.parametrize(
+    "path, longest",
+    [
+        ("/api/v1/bandwidth/top-talkers?window=1y", "30d"),
+        ("/api/v1/bandwidth/conversations?window=1y", "30d"),
+        (f"/api/v1/bandwidth/traffic-series?window=1y&endpoint_id={uuid4()}", "30d"),
+        (f"/api/v1/bandwidth/applications?window=1y&endpoint_id={uuid4()}", "30d"),
+    ],
+)
+def test_window_longer_than_the_data_is_refused(client, path, longest):
+    """A 1y answer holding 30 or 90 days looked like a year in which traffic had dropped."""
+    test_client, _ = client
+    resp = test_client.get(path)
+    assert resp.status_code == 400
+    assert f"longest window here is {longest}" in resp.json()["detail"]
+
+
+def test_report_says_what_a_long_range_leaves_out():
+    import datetime
+
+    from app.services.report_compiler import flow_coverage_notes
+
+    now = datetime.datetime(2026, 11, 7, tzinfo=datetime.timezone.utc)
+    assert flow_coverage_notes(now - datetime.timedelta(days=30), now) == []
+    notes = flow_coverage_notes(now - datetime.timedelta(days=200), now)
+    assert len(notes) == 1 and "2026-08-09 onward" in notes[0] and "kept 90 days" in notes[0]
+    assert len(flow_coverage_notes(now - datetime.timedelta(days=500), now)) == 2
+
+
+def test_restore_waits_for_a_running_refresh_job(monkeypatch):
+    """TimescaleDB refuses a refresh while the aggregate's policy job runs; restore must not skip it."""
+    import asyncio
+
+    from app.core import restore
+
+    calls = []
+
+    async def fake_execute(conn, sql):
+        calls.append(sql)
+        if len(calls) < 3:
+            raise RuntimeError('could not refresh continuous aggregate "x" due to a concurrent refresh')
+
+    monkeypatch.setattr(restore, "_execute_sql", fake_execute)
+    monkeypatch.setattr(restore, "AGGREGATE_REFRESH_RETRY_SECONDS", 0)
+    asyncio.run(restore._refresh_aggregate_waiting_for_job(None, "x"))
+    assert len(calls) == 3

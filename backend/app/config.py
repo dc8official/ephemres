@@ -248,6 +248,26 @@ class FlowSettings:
         return asdict(self)
 
 
+# Config directories the installer and upgrade script create. Settings loaded from one of them
+# default to the production environment, so the secret-key checks below always run on a real
+# server even though neither config.toml nor the env file names an environment.
+PRODUCTION_CONFIG_DIRS = (Path("/etc/ephemres"), Path("/etc/netmon"))
+
+DEV_DEFAULT_SECRET = "dev-secret-key-change-in-production-min-32-chars"
+MIN_SECRET_LENGTH = 32
+
+
+def default_environment_for(cfg_file: Optional[Path]) -> str:
+    """'production' for a config under /etc/ephemres or /etc/netmon, else 'development'."""
+    if cfg_file is None:
+        return "development"
+    try:
+        parent = Path(cfg_file).resolve().parent
+    except OSError:
+        parent = Path(cfg_file).parent
+    return "production" if parent in PRODUCTION_CONFIG_DIRS else "development"
+
+
 def resolve_config_file() -> Optional[Path]:
     """Resolves configuration file path from environment or standard locations."""
     env_path_str = os.environ.get("EPHEMRES_CONFIG_PATH") or os.environ.get("NETMON_CONFIG_PATH")
@@ -376,7 +396,7 @@ class Settings:
 
         env_map = _load_merged_env()
 
-        env_from_toml = toml_data.get("environment", "development")
+        env_from_toml = toml_data.get("environment")
         env_from_vars = (
             env_map.get("EPHEMRES_ENVIRONMENT")
             or env_map.get("NETMON_ENVIRONMENT")
@@ -384,7 +404,9 @@ class Settings:
             or env_map.get("NETMON_ENV")
             or env_map.get("ENVIRONMENT")
         )
-        resolved_env = environment or env_from_vars or env_from_toml or "development"
+        resolved_env = (
+            environment or env_from_vars or env_from_toml or default_environment_for(cfg_file)
+        )
         self.environment: str = str(resolved_env).strip().lower()
 
         self.database: DatabaseSettings = database or _build_section(DatabaseSettings, toml_data, "database", env_map)
@@ -531,16 +553,25 @@ def _apply_env_overrides_and_validate(loaded: Settings, env_map: Dict[str, str])
         except Exception:
             pass
 
-    # FIX-09 (SEC-02): Reject insecure default secret key in production / staging
+    # FIX-09 (SEC-02): Refuse the public development key, or a short one, outside development.
+    # A missing or unreadable env file would otherwise start every daemon with a key printed in
+    # this repository, and anyone could sign admin session tokens.
     if loaded.environment.lower() not in ("development", "test"):
-        if (
-            loaded.security.secret_key == "dev-secret-key-change-in-production-min-32-chars"
-            or loaded.security.effective_jwt_secret == "dev-secret-key-change-in-production-min-32-chars"
-            or loaded.security.effective_crypto_key == "dev-secret-key-change-in-production-min-32-chars"
+        for label, value in (
+            ("JWT signing key", loaded.security.effective_jwt_secret),
+            ("encryption key", loaded.security.effective_crypto_key),
         ):
-            raise ValueError(
-                "Insecure configuration: Secret keys must be changed from the default development secret in non-development environments."
-            )
+            if value == DEV_DEFAULT_SECRET:
+                raise ValueError(
+                    f"Insecure configuration: the {label} is the default development secret. "
+                    "Set EPHEMRES_SECRET_KEY in /etc/ephemres/ephemres.env (is the file present "
+                    "and readable by the service user?)."
+                )
+            if len(value or "") < MIN_SECRET_LENGTH:
+                raise ValueError(
+                    f"Insecure configuration: the {label} is shorter than {MIN_SECRET_LENGTH} "
+                    "characters. Generate one with: openssl rand -hex 32"
+                )
 
     # FIX-10 (SEC-04): Validate that allowed_origins does not contain "*" when allow_credentials=True
     if "*" in loaded.api.allowed_origins:

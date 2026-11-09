@@ -11,7 +11,7 @@ from app.core.orm import (
     async_sessionmaker,
     create_async_engine,
 )
-from app.core.orm import DeclarativeBase
+from app.core.orm import DatabaseUnavailableError, DeclarativeBase
 
 from app.config import settings
 
@@ -81,6 +81,23 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # ---------------------------------------------------------------------------
 # Startup health check
 # ---------------------------------------------------------------------------
+def is_database_unavailable(exc: BaseException) -> bool:
+    """True when an error means the database can't be reached right now, so the same work can
+    succeed later, as opposed to the work itself being wrong."""
+    import asyncpg
+
+    return isinstance(
+        exc,
+        (
+            DatabaseUnavailableError,
+            OSError,  # reset mid-query, and TimeoutError (the command timeout)
+            asyncpg.PostgresConnectionError,
+            asyncpg.InterfaceError,  # "connection is closed"
+            asyncpg.exceptions.OperatorInterventionError,  # shutting down, starting up
+        ),
+    )
+
+
 async def check_database_connection(max_retries: int = 5, retry_delay: float = 2.0) -> None:
     """Verify database connectivity at application startup with retry resilience.
 

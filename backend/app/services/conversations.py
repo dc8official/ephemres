@@ -1,8 +1,11 @@
-"""Server-side conversation queries over flow_minute_rollups.
+"""Server-side conversation queries over flow_minute_rollups and its hourly aggregate.
 
 A conversation is (src_ip, dst_ip, protocol, service port) over the window. Filters, the quick
 triage filters and their counts are evaluated in SQL across every matching conversation, so the
 UI no longer filters a 25-row sample.
+
+Windows over HOURLY_TIER_MIN_SPAN read flow_conversation_hourly_rollups (migration 0021) for
+their whole hours and the minute table only for the partial first hour; see counted_once_cte.
 """
 from __future__ import annotations
 
@@ -27,6 +30,11 @@ from app.services.flow_metrics import (
 QUICK_FILTERS = ("all", "anomalies", "qos", "bulk")
 SORT_COLUMNS = {"bytes": "total_bytes", "flows": "total_flows", "packets": "total_packets"}
 
+# Longer windows read the hourly aggregate; a shorter one has no whole hours worth skipping.
+HOURLY_TIER_MIN_SPAN = datetime.timedelta(hours=2)
+# The start of the window in every filter this module builds or is given.
+START_CLAUSE = "bucket >= :start"
+
 _QUICK_WHERE = {
     "all": "TRUE",
     "anomalies": "anomaly_hint IS NOT NULL",
@@ -35,28 +43,49 @@ _QUICK_WHERE = {
 }
 
 
-def per_minute_cte(where_sql: str) -> str:
-    """`per_minute`: the matching flow_minute_rollups rows with each conversation counted once
-    per minute. Traffic crossing two exporting routers is reported by both; summing the reports
-    showed it twice, so only the largest one is kept."""
+def _counted_once_select(table: str, where_sql: str) -> str:
     return f"""
-        per_minute AS (
             SELECT bucket, src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, protocol, dst_port,
                    MAX(bytes) AS bytes,
                    MAX(flow_count) AS flow_count,
                    MAX(COALESCE(packets, 0)) AS packets,
                    BIT_OR(tcp_flags) AS tcp_flags,
                    MAX(tos) AS tos
-            FROM flow_minute_rollups
+            FROM {table}
             WHERE {where_sql}
-            GROUP BY bucket, src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, protocol, dst_port
-        )
+            GROUP BY bucket, src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, protocol, dst_port"""
+
+
+def counted_once_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """`counted_once`: the matching rollup rows with each conversation counted once per bucket.
+    Traffic crossing two exporting routers is reported by both; summing the reports showed it
+    twice, so only the largest one is kept. Returns the CTE and the parameters to run it with.
+
+    Over HOURLY_TIER_MIN_SPAN, the whole hours come from the hourly aggregate and the partial
+    first hour from the minute table, so the start of the window stays exact. A window's end
+    (`bucket <= :end`) counts its last hour whole. In the whole hours the largest report is taken
+    per hour instead of per minute: the same when routers report a conversation alike, and lower
+    than the minute figure when a conversation moved between routers within the hour.
     """
+    start = params["start"]
+    end = params.get("end") or params.get("window_end") or datetime.datetime.now(datetime.timezone.utc)
+    if end - start <= HOURLY_TIER_MIN_SPAN:
+        return f"counted_once AS ({_counted_once_select('flow_minute_rollups', where_sql)}\n)", params
+
+    hour_start = start.replace(minute=0, second=0, microsecond=0)
+    if hour_start < start:
+        hour_start += datetime.timedelta(hours=1)
+    minutes = _counted_once_select("flow_minute_rollups", f"{where_sql} AND bucket < :hour_start")
+    hours = _counted_once_select(
+        "flow_conversation_hourly_rollups", where_sql.replace(START_CLAUSE, "bucket >= :hour_start")
+    )
+    return f"counted_once AS ({minutes}\n UNION ALL {hours}\n)", {**params, "hour_start": hour_start}
 
 
-def _conversation_cte(where_sql: str) -> str:
+def _conversation_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    counted_once, params = counted_once_cte(where_sql, params)
     return f"""
-        WITH {per_minute_cte(where_sql)},
+        WITH {counted_once},
         conv AS (
             SELECT src_ip, dst_ip, protocol, dst_port,
                    SUM(bytes) AS total_bytes,
@@ -64,7 +93,7 @@ def _conversation_cte(where_sql: str) -> str:
                    SUM(packets) AS total_packets,
                    BIT_OR(tcp_flags) AS tcp_flags_mask,
                    MAX(tos) AS max_tos
-            FROM per_minute
+            FROM counted_once
             GROUP BY src_ip, dst_ip, protocol, dst_port
         ),
         labelled AS (
@@ -74,7 +103,7 @@ def _conversation_cte(where_sql: str) -> str:
                    COALESCE(total_bytes / NULLIF(total_packets, 0), 0) AS avg_packet_size
             FROM conv
         )
-    """
+    """, params
 
 
 def build_filters(
@@ -84,7 +113,7 @@ def build_filters(
     ip: Optional[str] = None,
     port: Optional[int] = None,
 ) -> tuple[str, Dict[str, Any]]:
-    clauses = ["bucket >= :start"]
+    clauses = [START_CLAUSE]
     params: Dict[str, Any] = {"start": start}
     if exporter_id is not None:
         clauses.append("exporter_id = CAST(:exporter_id AS uuid)")
@@ -180,7 +209,7 @@ async def query_conversations(
     if dscp is not None:
         post = "dscp = :dscp"
         params["dscp"] = dscp
-    cte = _conversation_cte(where_sql)
+    cte, params = _conversation_cte(where_sql, params)
 
     counts_res = await db.execute(
         text(f"""
@@ -224,19 +253,28 @@ async def query_conversations(
 
 async def anomaly_summary(db: AsyncSession, where_sql: str, params: Dict[str, Any]) -> Dict[str, int]:
     """Flows and conversations classified anomalous by the shared rule over a filtered window."""
+    cte, params = _conversation_cte(where_sql, params)
     res = await db.execute(
         text(f"""
-            {_conversation_cte(where_sql)}
+            {cte}
             SELECT COALESCE(SUM(total_flows) FILTER (WHERE anomaly_hint IS NOT NULL), 0) AS flows,
                    COUNT(*) FILTER (WHERE anomaly_hint IS NOT NULL) AS conversations,
                    COALESCE(SUM(total_flows) FILTER (WHERE anomaly_hint = 'SYN_ONLY'), 0) AS syn_flows,
                    COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'SYN_ONLY'), 0) AS syn_bytes,
+                   COUNT(*) FILTER (WHERE anomaly_hint = 'SYN_ONLY') AS syn_conversations,
                    COALESCE(SUM(total_flows) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_flows,
-                   COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_bytes
+                   COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_bytes,
+                   COUNT(*) FILTER (WHERE anomaly_hint = 'TCP_RST') AS rst_conversations
             FROM labelled
         """),
         params,
     )
     row = dict(res.mappings().first() or {})
-    return {k: int(row.get(k) or 0) for k in ("flows", "conversations", "syn_flows", "syn_bytes", "rst_flows", "rst_bytes")}
+    return {
+        k: int(row.get(k) or 0)
+        for k in (
+            "flows", "conversations", "syn_flows", "syn_bytes", "syn_conversations",
+            "rst_flows", "rst_bytes", "rst_conversations",
+        )
+    }
 

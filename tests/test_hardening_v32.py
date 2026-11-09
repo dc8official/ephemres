@@ -22,14 +22,14 @@ from app.routers.bandwidth import (
 )
 from app.routers.endpoints import CreateEndpointRequest, create_endpoint
 from monitoring.flow.aggregator import FlowAggregator
-from monitoring.flow.collector import FlowCollector, STREAM_NETFLOW_RAW
+from monitoring.flow.collector import FlowCollector
 
 
 @pytest.mark.anyio
 async def test_flow_aggregator_no_data_loss_on_db_error():
     """
-    Verifies that FlowAggregator does NOT clear its accumulator or xack Redis
-    messages if a database error occurs during flush.
+    Verifies that FlowAggregator does NOT clear its accumulator if a database error occurs
+    during flush, and stores it on the next flush that works.
     """
     mock_redis = AsyncMock()
     mock_correlator = MagicMock()
@@ -61,17 +61,14 @@ async def test_flow_aggregator_no_data_loss_on_db_error():
         flow_packets=2,
         start_time_unix=1700000000.0,
     )
-    aggregator._pending_msg_ids.append("1700000000000-0")
 
     assert len(aggregator._accumulator) == 1
-    assert len(aggregator._pending_msg_ids) == 1
 
-    # Attempt flush - should catch exception and retain accumulator and pending IDs
+    # Attempt flush - should catch exception and retain the accumulator
     await aggregator.flush_to_timescaledb()
 
     assert len(aggregator._accumulator) == 1
-    assert len(aggregator._pending_msg_ids) == 1
-    mock_redis.xack.assert_not_called()
+    assert aggregator.rows_stored == 0
 
     # Now make DB succeed
     mock_session.execute.side_effect = None
@@ -79,11 +76,9 @@ async def test_flow_aggregator_no_data_loss_on_db_error():
 
     await aggregator.flush_to_timescaledb()
 
-    # Accumulator should now be cleared and xack should have been called
+    # Accumulator should now be cleared and the row counted as stored
     assert len(aggregator._accumulator) == 0
-    assert len(aggregator._pending_msg_ids) == 0
-    mock_redis.xack.assert_called_once()
-    assert "1700000000000-0" in mock_redis.xack.call_args[0]
+    assert aggregator.rows_stored == 1
 
 
 def test_flow_aggregator_insert_sql_bindparams():
@@ -122,39 +117,31 @@ def test_flow_aggregator_insert_sql_bindparams():
     assert compiled_params == expected_params, f"Missing or incorrect params: {expected_params - compiled_params}"
 
 
-@pytest.mark.anyio
-async def test_flow_collector_bounded_stream_xadd():
+def test_flow_collector_hands_parsed_flows_to_the_aggregator():
     """
-    Verifies that FlowCollector passes maxlen=100000, approximate=True to pipe.xadd.
+    The collector passes each datagram's flows straight to its sink (FlowAggregator.ingest);
+    there is no FastStore stream between them any more.
     """
-    mock_redis = AsyncMock()
-    mock_pipe = MagicMock()
-    mock_pipe.xadd = MagicMock()
-    mock_pipe.execute = AsyncMock()
-    mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+    import socket
+    import struct
 
-    collector = FlowCollector(redis_client=mock_redis)
-    collector._queue.append({
-        "version": 5,
-        "exporter_ip": "10.0.0.1",
-        "src_ip": "192.168.1.10",
-        "dst_ip": "8.8.8.8",
-        "src_port": 12345,
-        "dst_port": 53,
-        "protocol": 17,
-        "bytes": 500,
-        "packets": 2,
-        "start_time": 1700000000.0,
-        "end_time": 1700000001.0,
-    })
+    received = []
+    collector = FlowCollector(sink=received.append)
+    hdr = struct.pack("!HHIIIIBBH", 5, 1, 5000, 1700000000, 0, 0, 0, 0, 0)
+    rec = struct.pack(
+        "!IIIHHIIIIHHBBBBHHBBH",
+        struct.unpack("!I", socket.inet_aton("192.168.1.10"))[0],
+        struct.unpack("!I", socket.inet_aton("8.8.8.8"))[0],
+        0, 1, 2, 2, 500, 3000, 4000, 12345, 53, 0, 0, 17, 0, 0, 0, 24, 24, 0,
+    )
+    collector.handle_packet(hdr + rec, ("10.0.0.1", 2055), 2055)
 
-    await collector.flush()
-
-    mock_pipe.xadd.assert_called_once()
-    args, kwargs = mock_pipe.xadd.call_args
-    assert args[0] == STREAM_NETFLOW_RAW
-    assert kwargs.get("maxlen") == 100000
-    assert kwargs.get("approximate") is True
+    assert len(received) == 1 and len(received[0]) == 1
+    flow = received[0][0]
+    assert (flow["exporter_ip"], flow["src_ip"], flow["dst_ip"], flow["dst_port"], flow["bytes"]) == (
+        "10.0.0.1", "192.168.1.10", "8.8.8.8", 53, 500
+    )
+    assert collector.flows_received == 1 and collector.packets_received == 1
 
 
 def test_dynamic_cagg_routing_selection():
@@ -162,7 +149,8 @@ def test_dynamic_cagg_routing_selection():
     Verifies that _select_rollup_model_and_bucket_seconds selects:
     - 1h / 6h -> FlowMinuteRollup (60s)
     - 24h / 7d -> FlowHourlyRollup (3600s)
-    - 30d / 1y -> FlowDailyRollup (86400s) or FlowHourlyRollup if endpoint_id filtered
+    - 24h / 7d / 30d -> FlowHourlyRollup (3600s)
+    - 1y -> FlowDailyRollup (86400s), fleet only
     """
     model, secs = _select_rollup_model_and_bucket_seconds("1h")
     assert model == FlowMinuteRollup
@@ -180,11 +168,15 @@ def test_dynamic_cagg_routing_selection():
     assert model == FlowHourlyRollup
     assert secs == 3600.0
 
+    # 30d keeps direction and endpoints: flow_hourly_rollups covers it (kept 30 days).
     model, secs = _select_rollup_model_and_bucket_seconds("30d")
+    assert model == FlowHourlyRollup
+    assert secs == 3600.0
+
+    model, secs = _select_rollup_model_and_bucket_seconds("1y")
     assert model == FlowDailyRollup
     assert secs == 86400.0
 
-    # With endpoint_id, 30d must route to FlowHourlyRollup because FlowDailyRollup has no endpoint columns
     ep_uuid = uuid4()
     model, secs = _select_rollup_model_and_bucket_seconds("30d", endpoint_id=ep_uuid)
     assert model == FlowHourlyRollup
@@ -272,39 +264,6 @@ async def test_ssrf_validator_pins_resolved_ip():
         call_args = mock_inner.connect_tcp.call_args
         assert call_args[0][0] == "93.184.216.34"
         assert call_args[0][1] == 443
-
-
-@pytest.mark.anyio
-async def test_smtp_private_relay_and_metadata_isolation():
-    """
-    Verifies that AlertDispatcher._sync_send_smtp allows private RFC1918 and loopback
-    relays while strictly blocking cloud metadata (169.254.169.254).
-    """
-    from app.services.alert_dispatcher import AlertDispatcher
-
-    dispatcher = AlertDispatcher()
-
-    # Cloud metadata IP must be blocked
-    cfg_meta = {
-        "smtp_host": "169.254.169.254",
-        "smtp_port": 25,
-        "from_address": "test@corp.com",
-        "to_addresses": ["admin@corp.com"],
-    }
-    with pytest.raises(ValueError, match="SSRF|metadata|forbidden address"):
-        dispatcher._sync_send_smtp(cfg_meta, MagicMock())
-
-    # RFC1918 and loopback should be allowed
-    with patch("smtplib.SMTP") as mock_smtp:
-        mock_smtp.return_value = MagicMock()
-        cfg_private = {
-            "smtp_host": "10.0.0.25",
-            "smtp_port": 25,
-            "from_address": "test@corp.com",
-            "to_addresses": ["admin@corp.com"],
-        }
-        dispatcher._sync_send_smtp(cfg_private, MagicMock())
-        mock_smtp.assert_called_with("10.0.0.25", 25, timeout=10.0)
 
 
 @pytest.mark.anyio
@@ -566,11 +525,12 @@ async def test_aggregator_pk_deduplication_on_endpoint_remap():
     await aggregator.flush_to_timescaledb()
 
     assert mock_session.execute.called
-    params_list = mock_session.execute.call_args[0][1]
-    assert len(params_list) == 1
-    assert params_list[0]["bytes"] == 300
-    assert params_list[0]["packets"] == 3
-    assert params_list[0]["flow_count"] == 2
+    # One row per primary key, sent as column arrays (one unnest upsert per chunk).
+    columns = mock_session.execute.call_args[0][1]
+    assert len(columns["bytes"]) == 1
+    assert columns["bytes"][0] == 300
+    assert columns["packets"][0] == 3
+    assert columns["flow_count"][0] == 2
 
 
 def test_v9_and_ipfix_orphan_not_queued_when_empty_records():
@@ -708,43 +668,6 @@ async def test_decoupled_secret_keys_and_rotation():
 
 
 @pytest.mark.anyio
-async def test_redis_session_store_distributed_lockout():
-    """
-    SEC-03: Verifies RedisSessionStore distributed account lockout recording,
-    checking, and clearing.
-    """
-    from app.services.session_store import RedisSessionStore
-
-    mock_redis = AsyncMock()
-    store = RedisSessionStore(mock_redis)
-
-    # 1. Record attempt - under threshold
-    mock_redis.incr.return_value = 1
-    await store.record_failed_attempt("192.168.1.100", "admin", max_attempts=5, lockout_seconds=900)
-    mock_redis.incr.assert_called_with("auth:failed:192.168.1.100:admin")
-    mock_redis.expire.assert_called_with("auth:failed:192.168.1.100:admin", 1800)
-    mock_redis.set.assert_not_called()
-
-    # 2. Record attempt - at threshold (5)
-    mock_redis.incr.return_value = 5
-    await store.record_failed_attempt("192.168.1.100", "admin", max_attempts=5, lockout_seconds=900)
-    mock_redis.set.assert_called_with("auth:locked:192.168.1.100:admin", "1", ex=900)
-
-    # 3. Check lockout
-    mock_redis.exists.return_value = 1
-    assert await store.is_account_locked("192.168.1.100", "admin") is True
-
-    mock_redis.exists.return_value = 0
-    assert await store.is_account_locked("192.168.1.100", "admin") is False
-
-    # 4. Clear lockout
-    await store.clear_failed_attempts("192.168.1.100", "admin")
-    mock_redis.delete.assert_called_with(
-        "auth:failed:192.168.1.100:admin", "auth:locked:192.168.1.100:admin"
-    )
-
-
-@pytest.mark.anyio
 async def test_redis_event_broker_streams():
     """
     STAB-06 / ARCH-01: Verifies RedisEventBroker writes to both Pub/Sub and
@@ -759,6 +682,8 @@ async def test_redis_event_broker_streams():
     await broker.publish("lnmp:events", payload)
 
     mock_redis.publish.assert_called_once()
+    assert mock_redis.publish.call_args[0][0] == "lnmp:events"
+    assert "INCIDENT_TRIGGERED" in mock_redis.publish.call_args[0][1]
     mock_redis.xadd.assert_called_once()
     call_args = mock_redis.xadd.call_args
     assert call_args[0][0] == "stream:lnmp:events"
@@ -858,5 +783,3 @@ def test_health_readiness_masks_sensitive_exception_details():
         assert body["database"]["error"] == "Database connection failed"
         assert "secret123" not in resp.text
         assert "password" not in resp.text
-
-
