@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Tuple
 from uuid import UUID
 
 from app.core.orm import case, func, or_, select, update as sa_update
@@ -12,6 +12,22 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.rca_incident import EndpointRCAIncident
 from app.repositories.base import BaseRepository
+
+
+def _uptime_seconds_expr(
+    clamped_start: Any, clamped_end: Any, gaps: Optional[List[Tuple[datetime, datetime]]]
+) -> Any:
+    """Seconds of one period inside the window, minus its overlap with each monitoring gap.
+
+    A database outage leaves the open period running across its gap; that time is unknown, not
+    up (as on the Reports page and in the PDF). `gaps` must be merged (merge_intervals) so no
+    second is taken off twice; there are only a handful in a 24 h window."""
+    seconds = func.extract("epoch", clamped_end - clamped_start)
+    for g_start, g_end in gaps or []:
+        seconds = seconds - func.greatest(
+            0, func.extract("epoch", func.least(clamped_end, g_end) - func.greatest(clamped_start, g_start))
+        )
+    return func.greatest(0, seconds)
 
 
 class EndpointRepository(BaseRepository[Endpoint]):
@@ -74,10 +90,16 @@ class EndpointRepository(BaseRepository[Endpoint]):
         now_utc: Optional[datetime] = None,
         page: Optional[int] = None,
         page_size: Optional[int] = None,
+        gaps: Optional[List[Tuple[datetime, datetime]]] = None,
     ) -> Sequence[dict[str, Any]]:
         """
         List all active endpoints joined with latest operational state and 24h UP event counts.
         Supports pagination via page and page_size.
+
+        Current state is the endpoint's latest event row. An endpoint with no events yet shows as
+        DOWN, and one with monitoring off as PASSIVE. uptime_seconds is UP time in the window
+        without the time inside the merged monitoring `gaps`, which the uptime % also leaves out
+        of its denominator.
         """
         if now_utc is None:
             now_utc = datetime.now()
@@ -101,7 +123,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
 
         clamped_start = func.greatest(EndpointEvent.start_time, since_utc)
         clamped_end = func.least(func.coalesce(EndpointEvent.end_time, now_utc), now_utc)
-        duration_expr = func.greatest(0, func.extract("epoch", clamped_end - clamped_start))
+        duration_expr = _uptime_seconds_expr(clamped_start, clamped_end, gaps)
 
         up_counts_sub = (
             select(
@@ -198,8 +220,10 @@ class EndpointRepository(BaseRepository[Endpoint]):
         endpoint_id: UUID,
         since_utc: datetime,
         now_utc: datetime,
+        gaps: Optional[List[Tuple[datetime, datetime]]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Fetch a single endpoint joined with latest operational state and 24h UP event counts."""
+        """Fetch a single endpoint joined with latest operational state and 24h UP event counts.
+        Monitoring-gap time is left out of uptime_seconds, as in list_with_stats."""
         latest_event_sub = (
             select(
                 EndpointEvent.endpoint_id,
@@ -218,7 +242,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
 
         clamped_start = func.greatest(EndpointEvent.start_time, since_utc)
         clamped_end = func.least(func.coalesce(EndpointEvent.end_time, now_utc), now_utc)
-        duration_expr = func.greatest(0, func.extract("epoch", clamped_end - clamped_start))
+        duration_expr = _uptime_seconds_expr(clamped_start, clamped_end, gaps)
 
         up_count_sub = (
             select(func.count().label("up_events_count"))
@@ -338,7 +362,8 @@ class EndpointRepository(BaseRepository[Endpoint]):
         endpoint_id: UUID,
         **updates: Any,
     ) -> Optional[Endpoint]:
-        """Dynamically update endpoint attributes using SQLAlchemy update()."""
+        """Update the given columns of a non-deleted endpoint (app.core.orm update()), setting
+        updated_at unless it is passed."""
         if not updates:
             return await self.get_by_id(endpoint_id)
         if "updated_at" not in updates:
@@ -387,6 +412,9 @@ class EndpointRepository(BaseRepository[Endpoint]):
         """
         Check whether linking endpoint_id to parent_id would create a cyclic dependency.
         Returns True if a cycle is detected, False otherwise.
+
+        Walks up from parent_id through each manual_parent_id; reaching endpoint_id (or any
+        endpoint twice) means a loop.
         """
         if not parent_id:
             return False
