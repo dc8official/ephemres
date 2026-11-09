@@ -1,3 +1,11 @@
+"""ICMP echo probing for the monitoring engine, written against the standard library only.
+
+run_ping_cycle tries three ways to ping, in order:
+1. one raw socket shared by every probe (needs CAP_NET_RAW, which ephemres-engine.service grants);
+2. an unprivileged ICMP datagram socket, which Linux allows for groups in net.ipv4.ping_group_range;
+3. the system ping command, parsed from its output.
+classify_ping_result then turns a cycle's result into the UP/DOWN states.
+"""
 from __future__ import annotations
 
 import array
@@ -71,16 +79,24 @@ def result_from_rtts(rtts: List[float], count: int) -> PingResult:
     )
 
 
+# At most 25 ping subprocesses at once, so a fleet on the last fallback cannot start thousands of
+# processes in the same second.
 _subprocess_ping_semaphore = asyncio.Semaphore(25)
 
 # The raw-socket fallback is per cycle; log it once instead of once per endpoint per minute.
 _raw_fallback_logged = False
 
-# Monotonically incrementing identifier counter to prevent (ident, seq) collisions
+# ICMP echo identifier, a new one for each endpoint's cycle. A raw socket receives every ICMP
+# packet the host gets, including replies to other programs' pings and late replies to our own
+# earlier cycles, and (ident, seq) is how a reply finds its probe. Starting from the process ID
+# makes two engine workers unlikely to start on the same numbers, but they do overlap as the
+# counters advance; the source address and timestamp checks in _handle_incoming_packet catch
+# a reply that matches the wrong probe.
 _ident_counter = os.getpid() & 0xFFFF
 
 
 def _next_ident() -> int:
+    """The next identifier: wraps at 16 bits (the size of the field) and skips 0."""
     global _ident_counter
     _ident_counter = (_ident_counter + 1) & 0xFFFF
     if _ident_counter == 0:
@@ -99,15 +115,19 @@ def icmp_checksum(data: bytes | bytearray | memoryview) -> int:
 
     total = 0
     if even_len > 0:
+        # Sum the data as 16-bit words in network (big-endian) order. On a little-endian CPU the
+        # array reads each word byte-swapped, so swap them back first.
         words = array.array("H")
         words.frombytes(mv[:even_len])
         if sys.byteorder == "little":
             words.byteswap()
         total += sum(words)
 
+    # An odd last byte counts as a word padded with a zero byte on the right.
     if length & 1:
         total += mv[-1] << 8
 
+    # Fold the carries back into the low 16 bits, then take the one's complement.
     while total >> 16:
         total = (total & 0xFFFF) + (total >> 16)
 
@@ -127,13 +147,15 @@ def build_icmp_echo_packet(
     """
     if send_ns is None:
         send_ns = time.monotonic_ns()
+    # The payload must at least hold the 8-byte timestamp.
     eff_payload_len = max(8, payload_len)
     buf = bytearray(8 + eff_payload_len)
     icmp_type = ICMPV6_ECHO_REQUEST if is_ipv6 else ICMP_ECHO_REQUEST
 
-    # Pack header with zero checksum first
+    # 8-byte header: type, code, checksum (0 while it is computed), identifier, sequence.
     struct.pack_into("!BBHHH", buf, 0, icmp_type, 0, 0, ident & 0xFFFF, seq & 0xFFFF)
-    # Pack monotonic nanosecond timestamp into first 8 bytes of payload
+    # The send time travels in the payload and comes back in the reply, so a reply can be matched
+    # to the exact probe that caused it, not only to its (ident, seq).
     struct.pack_into("!Q", buf, 8, send_ns & 0xFFFFFFFFFFFFFFFF)
     # Fill remaining payload bytes with deterministic pattern
     for i in range(16, 8 + eff_payload_len):
@@ -144,6 +166,7 @@ def build_icmp_echo_packet(
     return buf
 
 
+# Older name, still imported by the tests.
 _pack_icmp_echo = build_icmp_echo_packet
 
 
@@ -161,6 +184,9 @@ def parse_icmp_echo_reply(
     """
     mv = memoryview(buf)[:nbytes]
     offset = 0
+    # A raw IPv4 socket hands over the IP header in front of the ICMP message. Its length is the
+    # IHL field, in 32-bit words; 28 bytes is the smallest IP header (20) plus the ICMP header (8).
+    # Raw IPv6 and datagram sockets give the ICMP message alone.
     if not is_ipv6 and not is_dgram:
         if nbytes >= 28 and (mv[0] >> 4) == 4:
             ihl = (mv[0] & 0x0F) * 4
@@ -168,6 +194,7 @@ def parse_icmp_echo_reply(
                 return None
             offset = ihl
         elif nbytes >= 8 and mv[0] == 0:
+            # No IP header: the buffer already starts with an echo reply (type 0).
             offset = 0
         else:
             return None
@@ -188,10 +215,13 @@ def parse_icmp_echo_reply(
 
 
 class _RawICMPMultiplexer:
-    """
-    Tier 1 Multiplexed Singleton Raw Socket engine per event loop and address family.
-    Uses a single non-blocking SOCK_RAW socket registered with loop.add_reader()
-    and a pre-allocated 1500-byte receive buffer for zero-jitter RTT measurement.
+    """One raw ICMP socket per event loop and address family, shared by every endpoint's probes.
+
+    A socket per probe would mean thousands of open sockets on a large fleet. Instead each probe
+    registers a future under its (ident, seq), the event loop calls _on_readable when replies
+    arrive, and each reply completes the matching future. The 1500-byte receive buffer (one
+    Ethernet MTU) is allocated once and reused. The receive time is taken right after the read,
+    so a busy event loop adds its own delay to the measured RTT.
     """
 
     def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None, is_ipv6: bool = False) -> None:
@@ -203,6 +233,7 @@ class _RawICMPMultiplexer:
         self.loop = loop
         self.is_ipv6 = is_ipv6
         self._recv_buf = bytearray(1500)
+        # (ident, seq) -> (future for the RTT, target IP, send time in ns)
         self._pending: Dict[Tuple[int, int], Tuple[asyncio.Future[float], str, int]] = {}
         self._closed = False
         self.sock: Optional[socket.socket] = None
@@ -216,6 +247,7 @@ class _RawICMPMultiplexer:
             self.sock.setblocking(False)
             self.loop.add_reader(self.sock.fileno(), self._on_readable)
         except (PermissionError, OSError):
+            # No CAP_NET_RAW. _run_raw_socket_ping_cycle sees sock is None and falls back.
             self.sock = None
 
     def _handle_incoming_packet(
@@ -241,7 +273,8 @@ class _RawICMPMultiplexer:
 
         fut, expected_ip, send_ns = entry
 
-        # Verify source IP matches expected IP
+        # The raw socket sees replies from every host, and another host's reply can carry the
+        # same (ident, seq): it must come from the address we pinged.
         if responder_ip:
             try:
                 if ipaddress.ip_address(responder_ip) != ipaddress.ip_address(expected_ip):
@@ -250,7 +283,7 @@ class _RawICMPMultiplexer:
                 if responder_ip != expected_ip:
                     return
 
-        # Verify embedded send timestamp if available
+        # A different timestamp means a reply to some other probe that used the same (ident, seq).
         if _embedded_ns is not None and _embedded_ns != 0 and _embedded_ns != send_ns:
             return
 
@@ -264,6 +297,7 @@ class _RawICMPMultiplexer:
     def _on_readable(self) -> None:
         if self.sock is None:
             return
+        # Read until the socket is empty, so a burst of replies is handled in one callback.
         while not self._closed:
             try:
                 nbytes, addr = self.sock.recvfrom_into(self._recv_buf)
@@ -319,6 +353,8 @@ class _RawICMPMultiplexer:
             self.sock = None
 
 
+# Weakly keyed by event loop: a socket is registered with one loop and cannot serve another, and
+# when a loop is discarded (the tests create many) its entry goes with it.
 _raw_multiplexers_v4: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _RawICMPMultiplexer] = (
     weakref.WeakKeyDictionary()
 )
@@ -370,9 +406,12 @@ async def _run_dgram_socket_ping_cycle(
     timeout: float,
     is_ipv6: bool,
 ) -> PingResult:
-    """
-    Tier 2: Unprivileged datagram ICMP socket fallback (SOCK_DGRAM, IPPROTO_ICMP / IPPROTO_ICMPV6).
-    Registers the non-blocking socket with the event loop and reads kernel-assigned ICMP IDs after sendto().
+    """Fallback without CAP_NET_RAW: an unprivileged ICMP datagram socket (a Linux "ping socket").
+
+    Linux allows these only for groups in net.ipv4.ping_group_range. The kernel replaces our
+    identifier with its own (the socket's local "port", read with getsockname() after the first
+    send) and delivers only the replies meant for this socket, without an IP header. One socket
+    per cycle, closed at the end.
     """
     loop = asyncio.get_running_loop()
     family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
@@ -461,21 +500,24 @@ async def run_system_ping_fallback(
     interval: float,
     timeout: float,
 ) -> PingResult:
-    """
-    Tier 3 Fallback method that spawns the native system 'ping' command as a subprocess.
-    This works reliably in standard unprivileged user spaces because the system
-    ping binary usually has the SUID capability or raw socket permissions.
-    """
+    """Last resort when neither socket can be opened: run the system ping command and parse its
+    output. The ping binary carries its own permission to send ICMP (setuid or a file capability)."""
     try:
-        # non-root users cannot set ping interval < 0.2
+        # Older iputils ping refuses intervals under 0.2 s unless run as root.
         safe_interval = max(0.2, interval)
+        # -W takes whole seconds, at least 1.
+        reply_wait = int(max(1, timeout))
+        # The longest ping can run: every probe waiting out its timeout, plus the gaps between
+        # probes, plus 5 s to start the process and print the summary. Leaving the gaps out
+        # killed ping -c 5 -i 8 after 15 s, every cycle, and every endpoint read DOWN.
+        deadline = count * reply_wait + max(count - 1, 0) * safe_interval + 5.0
 
         async with _subprocess_ping_semaphore:
             proc = await asyncio.create_subprocess_exec(
                 "ping",
                 "-c", str(count),
                 "-i", str(safe_interval),
-                "-W", str(int(max(1, timeout))),
+                "-W", str(reply_wait),
                 "--",
                 ip_address,
                 stdout=asyncio.subprocess.PIPE,
@@ -484,7 +526,7 @@ async def run_system_ping_fallback(
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=timeout * count + 5.0,
+                    timeout=deadline,
                 )
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 try:
@@ -495,6 +537,7 @@ async def run_system_ping_fallback(
                 raise
         stdout_str = stdout.decode("utf-8", errors="ignore")
 
+        # iputils prints "5 packets transmitted, 5 received", BusyBox "... 5 packets received".
         transmitted = 0
         received = 0
         match_stats = re.search(r"(\d+) packets transmitted,\s+(\d+)\s+(packets\s+)?received", stdout_str)
@@ -519,6 +562,8 @@ async def run_system_ping_fallback(
         if reply_rtts and len(reply_rtts) == received:
             return result_from_rtts(reply_rtts, transmitted)
 
+        # Otherwise only the average from the summary line: "rtt min/avg/max/mdev" on iputils,
+        # "round-trip min/avg/max" on BusyBox.
         avg_rtt = None
         match_rtt = re.search(r"rtt\s+min/avg/max/mdev\s+=\s+[\d\.]+/(?P<avg>[\d\.]+)/", stdout_str)
         if match_rtt:
@@ -546,7 +591,11 @@ async def run_system_ping_fallback(
 
 
 def _resolve_target_ip(address: str) -> Tuple[str, bool]:
-    """Resolves target IP or hostname and returns (canonical_ip_str, is_ipv6)."""
+    """Resolves target IP or hostname and returns (canonical_ip_str, is_ipv6).
+
+    A hostname takes the first address getaddrinfo returns, IPv4 or IPv6. That lookup blocks the
+    event loop while it runs. The engine always passes IP addresses (the endpoints column is inet),
+    so in practice it does not happen."""
     cleaned = address.strip()
     try:
         ip_obj = ipaddress.ip_address(cleaned)
@@ -567,11 +616,11 @@ async def run_ping_cycle(
     timeout: float = 2.0,
     privileged: bool = True,
 ) -> PingResult:
-    """
-    Executes an ICMP Echo probe cycle across the 3-tier engine cascade:
-    - Tier 1: Multiplexed Singleton Raw Socket (SOCK_RAW) when privileged=True
-    - Tier 2: Unprivileged Datagram ICMP Socket (SOCK_DGRAM) fallback
-    - Tier 3: Subprocess 'ping' CLI fallback (bounded by 25-process semaphore)
+    """Ping `ip_address` `count` times, `interval` seconds apart, each probe waiting up to `timeout`
+    for its reply, using the first method that works:
+    1. the shared raw socket (SOCK_RAW), when privileged=True;
+    2. an unprivileged datagram ICMP socket (SOCK_DGRAM);
+    3. the system ping command (at most 25 at once).
     """
     try:
         target_ip, is_ipv6 = _resolve_target_ip(ip_address)
@@ -631,12 +680,15 @@ def classify_ping_result(
     Classifies a ping result into operational state ('UP', 'DOWN') and
     detailed state ('UP', 'UP-UNSTABLE', 'DOWN-UNSTABLE', 'DOWN').
 
-    Uses hybrid adaptive baseline evaluation (Z-score logic) for 5-ping ratio thresholds:
-    - 5/5 received + healthy RTT (<= μ + 3σ) ➔ UP / UP
-    - 5/5 received + degraded RTT (> μ + 3σ) ➔ UP / UP-UNSTABLE
-    - 3/5 or 4/5 received (20–40% loss) ➔ UP / UP-UNSTABLE
-    - 1/5 or 2/5 received (60–80% loss) ➔ DOWN / DOWN-UNSTABLE
-    - 0/5 received (100% loss) ➔ DOWN / DOWN
+    Loss decides first, then RTT against the endpoint's own baseline (mean μ and spread σ of its
+    usual RTT). With the default 5 pings:
+    - 5/5 received, RTT <= μ + 3σ -> UP / UP
+    - 5/5 received, RTT > μ + 3σ -> UP / UP-UNSTABLE
+    - 3/5 or 4/5 received (20 to 40 % loss) -> UP / UP-UNSTABLE
+    - 1/5 or 2/5 received (60 to 80 % loss) -> DOWN / DOWN-UNSTABLE
+    - 0/5 received (100 % loss) -> DOWN / DOWN
+    With no baseline (None), 5/5 is always UP. The engine passes None until the endpoint has
+    real history (its first 7 days, or an empty hour of the week; services/baseline_service).
     """
     if result.total_count == 0 or result.success_count == 0:
         return "DOWN", "DOWN"
@@ -644,16 +696,17 @@ def classify_ping_result(
     ratio = result.success_count / result.total_count
 
     if ratio >= 1.0:
-        # Dynamic Z-score baseline evaluation
         if baseline_mean is not None and baseline_stddev is not None and result.avg_rtt_ms is not None:
+            # The spread is floored at 2 ms: on a very steady link it is tiny, and ordinary
+            # sub-millisecond wobble would otherwise read as degraded.
             safe_stddev = max(baseline_stddev, 2.0)
             threshold = baseline_mean + (k * safe_stddev)
             if result.avg_rtt_ms > threshold:
                 return "UP", "UP-UNSTABLE"
         return "UP", "UP"
-    elif ratio >= 0.6:  # 3/5 or 4/5 (20–40% loss)
+    elif ratio >= 0.6:  # 3/5 or 4/5 (20 to 40 % loss)
         return "UP", "UP-UNSTABLE"
-    elif ratio > 0.0:   # 1/5 or 2/5 (60–80% loss)
+    elif ratio > 0.0:   # 1/5 or 2/5 (60 to 80 % loss)
         return "DOWN", "DOWN-UNSTABLE"
     else:               # 0/5 (100% loss)
         return "DOWN", "DOWN"
