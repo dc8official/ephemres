@@ -2,18 +2,40 @@
 
 {% block content %}
 <!-- Scope Context Banner -->
-<div class="scope-banner" style="background: #faf5ff; border-color: #e9d5ff;">
+<div class="scope-banner">
   <div>
-    <div class="scope-title font-display" style="color: #581c87;">
-      Comprehensive Master Operational Audit Dossier
-    </div>
-    <div class="scope-desc" style="color: #6b21a8;">
-      Synthesizing endpoint availability telemetry alongside core transit utilization, interface line-speed capacity, and algorithmic root-cause analysis (RCA).
+    <div class="scope-title font-display">Scope: {{ scope_title }}</div>
+    <div class="scope-desc">
+      Endpoint availability alongside core transit utilization, interface line-speed capacity, and algorithmic root-cause analysis (RCA).
     </div>
   </div>
-  <span class="scope-badge" style="background: #f3e8ff; color: #6b21a8; border: 0.5pt solid #d8b4fe;">
-    COMBINED AUDIT DOSSIER
+  <span class="scope-badge pill-passive">
+    {{ endpoints|length }} TARGETS · {{ active_exporters }} FLOW EXPORTERS
   </span>
+</div>
+
+<!-- Group Overview Summary Strip -->
+<div class="kpi-grid">
+  <div class="kpi-card">
+    <div class="kpi-label">Mean Group Uptime</div>
+    <div class="kpi-val tnum">{{ summary.mean_uptime }}%</div>
+    <div class="kpi-sub">Monitored targets</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Outages</div>
+    <div class="kpi-val tnum">{{ summary.total_incidents }}</div>
+    <div class="kpi-sub">Across all targets</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Total Downtime</div>
+    <div class="kpi-val tnum">{{ summary.total_downtime }}</div>
+    <div class="kpi-sub">Within the period</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Average RTT</div>
+    <div class="kpi-val tnum">{{ summary.avg_rtt }}{% if summary.avg_rtt != "—" %} ms{% endif %}</div>
+    <div class="kpi-sub">ICMP round-trip</div>
+  </div>
 </div>
 
 <!-- Section 1: Availability & SLA Metrics -->
@@ -43,8 +65,8 @@
       <td class="text-right font-mono tnum" style="font-weight: 700;">{{ "%.3f"|format(ep.uptime_percentage) }}%</td>
       <td class="text-center font-mono tnum">{{ ep.incident_count }}</td>
       <td class="text-right font-mono tnum">{{ ep.formatted_downtime }}</td>
-      <td class="text-right font-mono tnum">{{ "%.2f"|format(ep.packet_loss_pct) }}%</td>
-      <td class="text-right font-mono tnum">{{ "%.1f"|format(ep.avg_rtt_ms) }} ms</td>
+      <td class="text-right font-mono tnum">{% if ep.packet_loss_pct is none %}—{% else %}{{ "%.2f"|format(ep.packet_loss_pct) }}%{% endif %}</td>
+      <td class="text-right font-mono tnum">{% if ep.avg_rtt_ms is none %}—{% else %}{{ "%.1f"|format(ep.avg_rtt_ms) }} ms{% endif %}</td>
       <td class="text-center">
         {% if ep.operational_state == 'UP' %}
           <span class="pill pill-up">UP</span>
@@ -63,7 +85,7 @@
 
 <!-- Section 2: Outage Incident Ledger with RCA -->
 <div class="section-title-row font-display">
-  <div class="section-title" style="color: #991b1b;">2. Outage Incident Ledger & Root Cause Analysis (RCA)</div>
+  <div class="section-title" style="color: #991b1b;">2. Outage Incident Ledger & Root Cause Analysis ({{ incidents_total }} Outages)</div>
 </div>
 {% if incidents and incidents|length > 0 %}
 <table>
@@ -96,15 +118,18 @@
     {% endfor %}
   </tbody>
 </table>
+{% if incidents_total and incidents_total > incidents|length %}
+<p class="ledger-note">Showing the {{ incidents|length }} most recent of {{ incidents_total }} outages.</p>
+{% endif %}
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 6pt; text-align: center; color: #64748b; font-size: 7.5pt; margin-bottom: 10pt;">
+<div class="empty-state">
   Zero outage incidents recorded within the reporting window.
 </div>
 {% endif %}
 
 <!-- Section 3: Core Flow Exporter & Interface Capacity Telemetry -->
 {% if coverage_notes %}
-<div style="background: #fffbeb; border: 0.75pt solid #fde68a; border-radius: 4pt; padding: 6pt 8pt; margin-bottom: 8pt; color: #92400e;">
+<div class="coverage-note">
   {% for note in coverage_notes %}<div>{{ note }}</div>{% endfor %}
 </div>
 {% endif %}
@@ -122,7 +147,7 @@
       <th class="text-right">Avg Ingress</th>
       <th class="text-right">Avg Egress</th>
       <th class="text-right">Peak Rate</th>
-      <th class="text-right">Capacity Util %</th>
+      <th class="text-right">Peak Util %</th>
     </tr>
   </thead>
   <tbody>
@@ -134,7 +159,7 @@
       <td class="text-right font-mono tnum color-rate-in">{{ iface.formatted_in_bps }}</td>
       <td class="text-right font-mono tnum color-rate-out">{{ iface.formatted_out_bps }}</td>
       <td class="text-right font-mono tnum" style="font-weight: 700;">{{ iface.formatted_peak_bps }}</td>
-      <td class="text-right font-mono tnum {% if iface.utilization_pct is none %}text-muted{% elif iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}" style="font-weight: 700;">
+      <td class="text-right font-mono tnum {% if iface.utilization_pct is none %}text-muted{% elif iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}">
         {% if iface.utilization_pct is none %}—{% else %}{{ "%.1f"|format(iface.utilization_pct) }}%{% endif %}
       </td>
     </tr>
@@ -142,7 +167,7 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 6pt; text-align: center; color: #64748b; font-size: 7.5pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No interface rollups recorded for the selected exporters in this window.
 </div>
 {% endif %}
@@ -160,7 +185,7 @@
       <th>Protocol / Port</th>
       <th>Observed Router</th>
       <th class="text-right">Volume</th>
-      <th class="text-right">% of Link</th>
+      <th class="text-right">% of Traffic</th>
     </tr>
   </thead>
   <tbody>
@@ -177,7 +202,7 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 6pt; text-align: center; color: #64748b; font-size: 7.5pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No forensic conversations recorded for this timeframe.
 </div>
 {% endif %}
@@ -244,7 +269,8 @@
     <tr>
       <th>Security Telemetry Vector</th>
       <th>Detection Mechanism</th>
-      <th class="text-center">Incident Bursts</th>
+      <th class="text-right">Conversations</th>
+      <th class="text-right">Flows</th>
       <th class="text-right">Observed Volume</th>
       <th class="text-center">Threat Status</th>
     </tr>
@@ -253,7 +279,8 @@
     <tr>
       <td style="font-weight: 700;">TCP SYN Scans / Probes</td>
       <td class="font-mono text-muted">SYN flag set without ACK (Half-Open Port Scan)</td>
-      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.syn_scan_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ anomalies.syn_scan_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.syn_scan_flows if anomalies else 0 }}</td>
       <td class="text-right font-mono tnum">{{ anomalies.syn_scan_bytes if anomalies else '0 B' }}</td>
       <td class="text-center">
         {% if anomalies and anomalies.syn_scan_count > 0 %}
@@ -266,7 +293,8 @@
     <tr>
       <td style="font-weight: 700;">TCP Connection Resets (RST)</td>
       <td class="font-mono text-muted">RST flag set without FIN (Refused / Aborted)</td>
-      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.rst_burst_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ anomalies.rst_burst_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.rst_burst_flows if anomalies else 0 }}</td>
       <td class="text-right font-mono tnum">{{ anomalies.rst_burst_bytes if anomalies else '0 B' }}</td>
       <td class="text-center">
         {% if anomalies and anomalies.rst_burst_count > 0 %}

@@ -261,12 +261,20 @@ async def anomaly_summary(db: AsyncSession, where_sql: str, params: Dict[str, An
                    COUNT(*) FILTER (WHERE anomaly_hint IS NOT NULL) AS conversations,
                    COALESCE(SUM(total_flows) FILTER (WHERE anomaly_hint = 'SYN_ONLY'), 0) AS syn_flows,
                    COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'SYN_ONLY'), 0) AS syn_bytes,
+                   COUNT(*) FILTER (WHERE anomaly_hint = 'SYN_ONLY') AS syn_conversations,
                    COALESCE(SUM(total_flows) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_flows,
-                   COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_bytes
+                   COALESCE(SUM(total_bytes) FILTER (WHERE anomaly_hint = 'TCP_RST'), 0) AS rst_bytes,
+                   COUNT(*) FILTER (WHERE anomaly_hint = 'TCP_RST') AS rst_conversations
             FROM labelled
         """),
         params,
     )
     row = dict(res.mappings().first() or {})
-    return {k: int(row.get(k) or 0) for k in ("flows", "conversations", "syn_flows", "syn_bytes", "rst_flows", "rst_bytes")}
+    return {
+        k: int(row.get(k) or 0)
+        for k in (
+            "flows", "conversations", "syn_flows", "syn_bytes", "syn_conversations",
+            "rst_flows", "rst_bytes", "rst_conversations",
+        )
+    }
 

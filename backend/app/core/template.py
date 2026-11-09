@@ -145,6 +145,11 @@ def _eval_ast_node(node: ast.AST, context: Dict[str, Any]) -> Any:
                 if res:
                     return res
             return res
+    if isinstance(node, ast.IfExp):
+        # Jinja inline conditional: `a if cond else b`; only the chosen branch is evaluated.
+        if _eval_ast_node(node.test, context):
+            return _eval_ast_node(node.body, context)
+        return _eval_ast_node(node.orelse, context)
     if isinstance(node, ast.BinOp):
         left = _eval_ast_node(node.left, context)
         right = _eval_ast_node(node.right, context)

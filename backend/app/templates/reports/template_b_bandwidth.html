@@ -82,7 +82,7 @@
       <th class="text-right">Avg Ingress</th>
       <th class="text-right">Avg Egress</th>
       <th class="text-right">Peak Rate</th>
-      <th class="text-right">Capacity Util %</th>
+      <th class="text-right">Peak Util %</th>
     </tr>
   </thead>
   <tbody>
@@ -94,7 +94,7 @@
       <td class="text-right font-mono tnum color-rate-in">{{ iface.formatted_in_bps }}</td>
       <td class="text-right font-mono tnum color-rate-out">{{ iface.formatted_out_bps }}</td>
       <td class="text-right font-mono tnum" style="font-weight: 700;">{{ iface.formatted_peak_bps }}</td>
-      <td class="text-right font-mono tnum {% if iface.utilization_pct is none %}text-muted{% elif iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}" style="font-weight: 700;">
+      <td class="text-right font-mono tnum {% if iface.utilization_pct is none %}text-muted{% elif iface.utilization_pct >= 80 %}color-util-danger{% elif iface.utilization_pct >= 60 %}color-util-warn{% endif %}">
         {% if iface.utilization_pct is none %}—{% else %}{{ "%.1f"|format(iface.utilization_pct) }}%{% endif %}
       </td>
     </tr>
@@ -102,13 +102,13 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 8pt; text-align: center; color: #64748b; font-size: 8pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No interface rollups recorded for the selected exporters in this window.
 </div>
 {% endif %}
 
 {% if coverage_notes %}
-<div style="background: #fffbeb; border: 0.75pt solid #fde68a; border-radius: 4pt; padding: 6pt 8pt; margin-bottom: 8pt; color: #92400e;">
+<div class="coverage-note">
   {% for note in coverage_notes %}<div>{{ note }}</div>{% endfor %}
 </div>
 {% endif %}
@@ -126,7 +126,7 @@
       <th>Service / Port</th>
       <th>Observed Router</th>
       <th class="text-right">Total Transferred</th>
-      <th class="text-right">% of Transit</th>
+      <th class="text-right">% of Traffic</th>
     </tr>
   </thead>
   <tbody>
@@ -143,7 +143,7 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 8pt; text-align: center; color: #64748b; font-size: 8pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No conversations recorded for this timeframe.
 </div>
 {% endif %}
@@ -178,7 +178,7 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 8pt; text-align: center; color: #64748b; font-size: 8pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No QoS/DSCP telemetry recorded for the selected exporters in this window.
 </div>
 {% endif %}
@@ -211,7 +211,7 @@
   </tbody>
 </table>
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 8pt; text-align: center; color: #64748b; font-size: 8pt; margin-bottom: 10pt;">
+<div class="empty-state">
   No traffic zone classifications recorded for this window.
 </div>
 {% endif %}
@@ -225,7 +225,8 @@
     <tr>
       <th>Security Telemetry Vector</th>
       <th>Detection Mechanism</th>
-      <th class="text-center">Incident Bursts</th>
+      <th class="text-right">Conversations</th>
+      <th class="text-right">Flows</th>
       <th class="text-right">Observed Volume</th>
       <th class="text-center">Threat Status</th>
     </tr>
@@ -234,7 +235,8 @@
     <tr>
       <td style="font-weight: 700;">TCP SYN Scans / Probes</td>
       <td class="font-mono text-muted">SYN flag set without ACK (Half-Open Port Scan)</td>
-      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.syn_scan_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ anomalies.syn_scan_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.syn_scan_flows if anomalies else 0 }}</td>
       <td class="text-right font-mono tnum">{{ anomalies.syn_scan_bytes if anomalies else '0 B' }}</td>
       <td class="text-center">
         {% if anomalies and anomalies.syn_scan_count > 0 %}
@@ -247,7 +249,8 @@
     <tr>
       <td style="font-weight: 700;">TCP Connection Resets (RST)</td>
       <td class="font-mono text-muted">RST flag set without FIN (Refused / Aborted)</td>
-      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.rst_burst_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ anomalies.rst_burst_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.rst_burst_flows if anomalies else 0 }}</td>
       <td class="text-right font-mono tnum">{{ anomalies.rst_burst_bytes if anomalies else '0 B' }}</td>
       <td class="text-center">
         {% if anomalies and anomalies.rst_burst_count > 0 %}
@@ -260,11 +263,12 @@
     <tr>
       <td style="font-weight: 700;">Aggregated Flag Anomalies</td>
       <td class="font-mono text-muted">Fleet-wide non-standard TCP transition events</td>
-      <td class="text-center font-mono tnum" style="font-weight: 700;">{{ anomalies.total_count if anomalies else 0 }}</td>
-      <td class="text-right font-mono tnum">-</td>
+      <td class="text-right font-mono tnum" style="font-weight: 700;">{{ anomalies.total_count if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">{{ anomalies.total_flows if anomalies else 0 }}</td>
+      <td class="text-right font-mono tnum">—</td>
       <td class="text-center">
         {% if anomalies and anomalies.total_count > 0 %}
-          <span class="pill pill-unstable">{{ anomalies.total_count }} BURSTS</span>
+          <span class="pill pill-unstable">{{ anomalies.total_count }} FLAGGED</span>
         {% else %}
           <span class="pill pill-up">NOMINAL</span>
         {% endif %}

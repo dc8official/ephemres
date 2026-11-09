@@ -33,7 +33,7 @@
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Average Group RTT</div>
-    <div class="kpi-val tnum">{{ summary.avg_rtt }} ms</div>
+    <div class="kpi-val tnum">{{ summary.avg_rtt }}{% if summary.avg_rtt != "—" %} ms{% endif %}</div>
     <div class="kpi-sub">ICMP ping round-trip</div>
   </div>
 </div>
@@ -65,8 +65,8 @@
       <td class="text-right font-mono tnum" style="font-weight: 700;">{{ "%.3f"|format(ep.uptime_percentage) }}%</td>
       <td class="text-center font-mono tnum">{{ ep.incident_count }}</td>
       <td class="text-right font-mono tnum">{{ ep.formatted_downtime }}</td>
-      <td class="text-right font-mono tnum">{{ "%.2f"|format(ep.packet_loss_pct) }}%</td>
-      <td class="text-right font-mono tnum">{{ "%.1f"|format(ep.avg_rtt_ms) }} ms</td>
+      <td class="text-right font-mono tnum">{% if ep.packet_loss_pct is none %}—{% else %}{{ "%.2f"|format(ep.packet_loss_pct) }}%{% endif %}</td>
+      <td class="text-right font-mono tnum">{% if ep.avg_rtt_ms is none %}—{% else %}{{ "%.1f"|format(ep.avg_rtt_ms) }} ms{% endif %}</td>
       <td class="text-center">
         {% if ep.operational_state == 'UP' %}
           <span class="pill pill-up">UP</span>
@@ -85,7 +85,7 @@
 
 <!-- Outage Event Ledger -->
 <div class="section-title-row font-display">
-  <div class="section-title">Recorded Outage Event Ledger ({{ incidents|length }} Events)</div>
+  <div class="section-title">Recorded Outage Event Ledger ({{ incidents_total }} Outages)</div>
 </div>
 {% if incidents and incidents|length > 0 %}
 <table>
@@ -112,8 +112,11 @@
     {% endfor %}
   </tbody>
 </table>
+{% if incidents_total and incidents_total > incidents|length %}
+<p class="ledger-note">Showing the {{ incidents|length }} most recent of {{ incidents_total }} outages.</p>
+{% endif %}
 {% else %}
-<div style="background: #f8fafc; border: 0.75pt solid #e2e8f0; border-radius: 4pt; padding: 8pt; text-align: center; color: #64748b; font-size: 8pt;">
+<div class="empty-state">
   No outage incidents recorded for the selected endpoints within this reporting period. 100% operational continuity.
 </div>
 {% endif %}

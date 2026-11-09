@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from app.core.orm import and_, desc, func, or_, select, text
@@ -68,21 +68,36 @@ def format_bytes(b: int) -> str:
 
 
 def format_duration(seconds: int) -> str:
-    if not seconds or seconds <= 0:
+    """Two most significant units, never skipping one in between: "1d 5h", "21h", "5h 3m",
+    "47m 12s", "45s". (Dropping a zero middle unit read "21h 0m 36s" as "21h 36s".)"""
+    seconds = int(seconds or 0)
+    if seconds <= 0:
         return "0s"
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, secs = divmod(rem, 60)
-    parts = []
-    if days > 0:
-        parts.append(f"{days}d")
-    if hours > 0:
-        parts.append(f"{hours}h")
-    if minutes > 0:
-        parts.append(f"{minutes}m")
-    if secs > 0 or not parts:
-        parts.append(f"{secs}s")
-    return " ".join(parts)
+    units = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
+    for i, (name, size) in enumerate(units):
+        if seconds >= size:
+            major, rest = divmod(seconds, size)
+            parts = [f"{major}{name}"]
+            if i + 1 < len(units):
+                minor = rest // units[i + 1][1]
+                if minor:
+                    parts.append(f"{minor}{units[i + 1][0]}")
+            return " ".join(parts)
+    return "0s"
+
+
+def format_period(start_dt: datetime, end_dt: datetime) -> str:
+    """The report period: dates for whole days, date and time otherwise (a 3-day window from
+    09:30 to 09:30 would otherwise read as four calendar days)."""
+    def at_midnight(t: datetime) -> bool:
+        return t.time() == datetime.min.time()
+
+    def end_of_day(t: datetime) -> bool:
+        return (t.hour, t.minute, t.second) == (23, 59, 59)
+
+    if at_midnight(start_dt) and (at_midnight(end_dt) or end_of_day(end_dt)):
+        return f"{start_dt:%Y-%m-%d} to {end_dt:%Y-%m-%d} UTC"
+    return f"{start_dt:%Y-%m-%d %H:%M} to {end_dt:%Y-%m-%d %H:%M} UTC"
 
 
 def format_speed(mbps: int) -> str:
@@ -183,73 +198,82 @@ async def compile_availability_report_data(
     for ev in all_events:
         grouped_events.setdefault(ev.endpoint_id, []).append(ev)
 
+    gaps = _merge_intervals(gap_intervals)
     endpoint_rows = []
     total_downtime_sec = 0
     total_incidents = 0
     uptime_sum = 0.0
+    outage_list: List[Dict[str, Any]] = []
 
     for ep in endpoints:
         evs = grouped_events.get(ep.id, [])
-        up_count = sum(1 for ev in evs if ev.operational_state == "UP")
-        down_count = sum(1 for ev in evs if ev.operational_state == "DOWN")
-        inc_count = down_count
-        down_sec = 0
-        up_sec = 0
-
-        for ev in evs:
-            ev_start = ev.start_time
-            ev_end = ev.end_time or now_utc
-            dur = max(0, int((min(end_dt, ev_end) - max(start_dt, ev_start)).total_seconds()))
-            if dur == 0 and getattr(ev, "duration_seconds", 0) > 0:
-                dur = int(ev.duration_seconds)
-            if ev.operational_state == "UP":
-                up_sec += dur
-            elif ev.operational_state == "DOWN":
-                down_sec += dur
-
-        op_state = evs[-1].operational_state if evs else ("UP" if ep.endpoint_status == "ACTIVE" else "DOWN")
-        
         created_at = ep.created_at or start_dt
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         else:
             created_at = created_at.astimezone(timezone.utc)
-
         eff_start = max(start_dt, created_at)
         eff_end = min(end_dt, now_utc)
 
-        unknown_sec = calculate_device_gap_seconds(eff_start, eff_end, gap_intervals)
+        up_sec = down_sec = 0.0
+        probes_ok = probes_failed = 0.0
+        rtt_weighted = rtt_weight = 0.0
+        for ev in evs:
+            ev_end = ev.end_time or now_utc
+            seg_start, seg_end = max(eff_start, ev.start_time), min(eff_end, ev_end)
+            if seg_end <= seg_start:
+                continue
+            span = (seg_end - seg_start).total_seconds()
+            # Time inside a monitoring gap is unknown: neither up nor down (it is also left out
+            # of the uptime denominator). DATABASE_DISCONNECT gaps leave events open across them.
+            monitored = span - _overlap_seconds(seg_start, seg_end, gaps)
+            if ev.operational_state == "UP":
+                up_sec += monitored
+            elif ev.operational_state == "DOWN":
+                down_sec += monitored
+            # Probe counts cover the whole event: take the share that falls in the window.
+            length = max((ev_end - ev.start_time).total_seconds(), 1.0)
+            share = min(1.0, span / length)
+            ok = float(ev.success_count or 0) * share
+            probes_ok += ok
+            probes_failed += float(ev.failed_count or 0) * share
+            if ev.avg_rtt_ms is not None and ok > 0:
+                rtt_weighted += float(ev.avg_rtt_ms) * ok
+                rtt_weight += ok
 
+        outages = _group_outages(evs, now_utc)
+        op_state = evs[-1].operational_state if evs else ("UP" if ep.endpoint_status == "ACTIVE" else "DOWN")
+        unknown_sec = calculate_device_gap_seconds(eff_start, eff_end, gaps)
         uptime_pct = calculate_uptime_denominator_and_percentage(
             created_at=created_at,
             start_time=start_dt,
             end_time=end_dt,
             now_utc=now_utc,
-            up_events_count=up_count,
+            up_events_count=len(evs),
             unknown_seconds=unknown_sec,
-            gap_intervals=gap_intervals,
-            uptime_seconds=up_sec,
+            gap_intervals=gaps,
+            uptime_seconds=int(round(up_sec)),
         )
+        probes = probes_ok + probes_failed
+        loss_pct: Optional[float] = round(100.0 * probes_failed / probes, 2) if probes > 0 else None
+        avg_rtt: Optional[float] = round(rtt_weighted / rtt_weight, 2) if rtt_weight > 0 else None
 
         # PASSIVE means ICMP monitoring is off, whatever the device_role (matches the endpoint list).
         if ep.monitoring_enabled is False:
             op_state = "PASSIVE"
             uptime_pct = 100.0
-            inc_count = 0
-            down_sec = 0
+            outages = []
+            down_sec = 0.0
+            loss_pct = None
+            avg_rtt = None
 
-        rtt_vals = [float(ev.avg_rtt_ms) for ev in evs if ev.avg_rtt_ms is not None]
-        avg_rtt = round(sum(rtt_vals) / len(rtt_vals), 2) if rtt_vals else 0.0
-
-        scores = [float(ev.health_score) for ev in evs if ev.health_score is not None]
-        loss_pct = round(100.0 - (sum(scores) / len(scores)), 2) if scores else 0.0
-        if loss_pct < 0.0:
-            loss_pct = 0.0
-
-        total_downtime_sec += down_sec
-        total_incidents += inc_count
+        down_sec_int = int(round(down_sec))
+        total_downtime_sec += down_sec_int
+        total_incidents += len(outages)
         if ep.monitoring_enabled is not False:
             uptime_sum += uptime_pct
+        for outage in outages:
+            outage_list.append({**outage, "endpoint_id": ep.id, "hostname": ep.hostname, "ip_address": ep.ip_address})
 
         endpoint_rows.append({
             "id": ep.id,
@@ -259,62 +283,48 @@ async def compile_availability_report_data(
             "operational_state": op_state,
             "monitoring_enabled": ep.monitoring_enabled,
             "uptime_percentage": uptime_pct,
-            "incident_count": inc_count,
-            "formatted_downtime": format_duration(down_sec),
-            "downtime_seconds": down_sec,
+            "incident_count": len(outages),
+            "formatted_downtime": format_duration(down_sec_int),
+            "downtime_seconds": down_sec_int,
             "packet_loss_pct": loss_pct,
             "avg_rtt_ms": avg_rtt,
         })
 
-    # Query Recorded Outage Incidents
-    incidents_stmt = (
-        select(EndpointEvent, Endpoint.hostname, Endpoint.ip_address)
-        .join(Endpoint, EndpointEvent.endpoint_id == Endpoint.id)
-        .where(
-            EndpointEvent.endpoint_id.in_(endpoint_ids),
-            EndpointEvent.start_time >= start_dt,
-            EndpointEvent.start_time <= end_dt,
-            EndpointEvent.operational_state == "DOWN",
-        )
-        .order_by(EndpointEvent.start_time.desc())
-        .limit(50)
-    )
-    inc_res = await db.execute(incidents_stmt)
-    raw_incidents = inc_res.all()
-
-    # If RCA requested, fetch root cause snapshots
-    rca_map = {}
-    if include_rca and endpoint_ids:
+    # Root-cause snapshots, each matched to the outage whose period contains it.
+    rca_by_endpoint: Dict[UUID, List[Any]] = {}
+    if include_rca and outage_list:
+        earliest = min(o["start"] for o in outage_list) - _RCA_LEAD
         rca_stmt = (
             select(EndpointRCAIncident)
             .where(
                 EndpointRCAIncident.endpoint_id.in_(endpoint_ids),
-                EndpointRCAIncident.incident_timestamp >= start_dt,
+                EndpointRCAIncident.incident_timestamp >= earliest,
                 EndpointRCAIncident.incident_timestamp <= end_dt,
             )
+            .order_by(EndpointRCAIncident.incident_timestamp.asc())
         )
         rca_res = await db.execute(rca_stmt)
         for rca in rca_res.scalars().all():
-            rca_map[rca.endpoint_id] = rca.rca_summary
+            rca_by_endpoint.setdefault(rca.endpoint_id, []).append(rca)
 
+    outage_list.sort(key=lambda o: o["start"], reverse=True)
     incident_rows = []
-    for ev, hname, ip in raw_incidents:
-        dur = int(ev.duration_seconds or 0)
-        resolved_str = ev.end_time.strftime("%Y-%m-%d %H:%M:%S") if ev.end_time else "Active / Ongoing"
-        start_str = ev.start_time.strftime("%Y-%m-%d %H:%M:%S")
-        inc_id = str(ev.id)[:8].upper()
-
-        trigger = getattr(ev, "trigger_reason", None) or "Ping packet loss exceeded failure threshold"
-        rca_summary = rca_map.get(ev.endpoint_id)
-
+    for outage in outage_list:
+        rca_summary = None
+        candidates = rca_by_endpoint.get(outage["endpoint_id"], [])
+        for rca in candidates:
+            if outage["start"] - _RCA_LEAD <= rca.incident_timestamp <= (outage["end"] or now_utc):
+                rca_summary = rca.rca_summary
+                candidates.remove(rca)
+                break
         incident_rows.append({
-            "incident_id": inc_id,
-            "hostname": hname,
-            "ip_address": ip,
-            "start_time": start_str,
-            "resolved_time": resolved_str,
-            "duration": format_duration(dur),
-            "trigger_reason": trigger,
+            "incident_id": outage["incident_id"],
+            "hostname": outage["hostname"],
+            "ip_address": outage["ip_address"],
+            "start_time": outage["start"].strftime("%Y-%m-%d %H:%M:%S"),
+            "resolved_time": outage["end"].strftime("%Y-%m-%d %H:%M:%S") if outage["end"] else "Active / Ongoing",
+            "duration": format_duration(outage["duration_seconds"]),
+            "trigger_reason": "Ping packet loss exceeded failure threshold",
             "rca_summary": rca_summary,
         })
 
@@ -324,22 +334,75 @@ async def compile_availability_report_data(
     ]
     num_monitored = len(monitored_rows)
     mean_uptime = round(uptime_sum / num_monitored, 3) if num_monitored else 100.0
-    avg_rtt_group = (
-        round(sum(r["avg_rtt_ms"] for r in monitored_rows) / num_monitored, 2)
-        if num_monitored
-        else 0.0
-    )
+    rtt_rows = [r["avg_rtt_ms"] for r in monitored_rows if r["avg_rtt_ms"] is not None]
+    avg_rtt_group = round(sum(rtt_rows) / len(rtt_rows), 2) if rtt_rows else None
 
     return {
         "endpoints": endpoint_rows,
-        "incidents": incident_rows,
+        # The ledger lists the most recent outages; incidents_total says how many there were.
+        "incidents": incident_rows[:INCIDENT_LEDGER_LIMIT],
+        "incidents_total": len(incident_rows),
         "summary": {
             "mean_uptime": f"{mean_uptime:.3f}",
             "total_incidents": total_incidents,
             "total_downtime": format_duration(total_downtime_sec),
-            "avg_rtt": f"{avg_rtt_group:.2f}",
+            "avg_rtt": f"{avg_rtt_group:.2f}" if avg_rtt_group is not None else "—",
         },
     }
+
+
+INCIDENT_LEDGER_LIMIT = 100
+# An RCA trace runs once an outage is confirmed; allow for clock skew before the recorded start.
+_RCA_LEAD = timedelta(minutes=5)
+
+
+def _merge_intervals(intervals: List[Tuple[datetime, datetime]]) -> List[Tuple[datetime, datetime]]:
+    merged: List[List[datetime]] = []
+    for g_start, g_end in sorted((a, b) for a, b in intervals if b > a):
+        if merged and g_start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], g_end)
+        else:
+            merged.append([g_start, g_end])
+    return [(a, b) for a, b in merged]
+
+
+def _overlap_seconds(start: datetime, end: datetime, intervals: List[Tuple[datetime, datetime]]) -> float:
+    return sum(
+        max(0.0, (min(end, g_end) - max(start, g_start)).total_seconds()) for g_start, g_end in intervals
+    )
+
+
+def _group_outages(evs: List[Any], now_utc: datetime) -> List[Dict[str, Any]]:
+    """An endpoint's outages from its event rows (sorted by start). Consecutive DOWN rows are one
+    outage until an UP row ends it: the engine splits a period every 24 h and closes and reopens
+    events around a monitoring gap, but the device stayed down. A split row keeps the outage's
+    real start in state_since."""
+    outages: List[Dict[str, Any]] = []
+    current: Optional[List[Any]] = None
+    for ev in evs:
+        if ev.operational_state == "DOWN":
+            if current is None:
+                current = [ev]
+                outages.append({"rows": current})
+            else:
+                current.append(ev)
+        else:
+            current = None
+    result = []
+    for outage in outages:
+        first, last = outage["rows"][0], outage["rows"][-1]
+        start = first.start_time
+        since = getattr(first, "state_since", None)
+        if first.is_split_event and since is not None and since < start:
+            start = since
+        end = last.end_time
+        result.append({
+            "incident_id": str(first.id)[:8].upper(),
+            "start": start,
+            "end": end,
+            "duration_seconds": max(0, int(((end or now_utc) - start).total_seconds())),
+        })
+    return result
 
 
 # flow_interface_minute_rollups is kept 7 days. A report reaching further back reads the hourly
@@ -453,7 +516,7 @@ async def compile_bandwidth_report_data(
 
         aliases = getattr(router, "flow_interface_aliases", {}) or {}
         alias_entry = aliases.get(str(if_idx), {})
-        if_name, speed_mbps = interface_alias(alias_entry, f"Interface #{if_idx}")
+        if_name, speed_mbps = interface_alias(alias_entry, "(no alias)")
         speed_configured = configured_speed_mbps(alias_entry) is not None
         # Without a configured link speed utilization would be measured against a guess.
         util_pct = utilization_pct(peak_rate_bps, speed_mbps) if speed_configured else None
@@ -530,7 +593,16 @@ async def compile_bandwidth_report_data(
     conv_res = await db.execute(conv_stmt)
     raw_convs = conv_res.all()
 
-    total_transit_bytes = sum(int(c[5] or 0) for c in raw_convs) or 1
+    # Each conversation's share of all traffic the selected routers saw in the window (not of
+    # the top ten, which would overstate every share when there are many conversations).
+    total_res = await db.execute(
+        select(func.coalesce(func.sum(conv_model.bytes), 0)).where(
+            conv_model.exporter_id.in_(exporter_ids),
+            conv_model.bucket >= conv_start,
+            conv_model.bucket <= end_dt,
+        )
+    )
+    total_transit_bytes = int(total_res.scalar() or 0) or sum(int(c[5] or 0) for c in raw_convs) or 1
     conversation_rows = []
     for src_ip, dst_ip, port, proto, exp_id, b in raw_convs:
         c_bytes = int(b or 0)
@@ -587,6 +659,7 @@ async def compile_bandwidth_report_data(
     # Same per-conversation rule as the dashboard: a conversation is a SYN scan / probe when the
     # OR of its TCP flags over the period is SYN without ACK, and a reset when RST without FIN.
     syn_scan_count = syn_scan_bytes = rst_burst_count = rst_burst_bytes = 0
+    syn_flows = rst_flows = 0
     if exporter_ids:
         exporter_params = {f"exp{i}": str(e) for i, e in enumerate(exporter_ids)}
         where_sql = (
@@ -597,8 +670,14 @@ async def compile_bandwidth_report_data(
             summary = await conversation_queries.anomaly_summary(
                 db, where_sql, {**exporter_params, "start": start_dt, "end": end_dt}
             )
-            syn_scan_count, syn_scan_bytes = summary["syn_flows"], summary["syn_bytes"]
-            rst_burst_count, rst_burst_bytes = summary["rst_flows"], summary["rst_bytes"]
+            # Counts are conversations (source, destination, port) matching the rule; flows are
+            # the individual flow records within them.
+            syn_scan_count, syn_flows, syn_scan_bytes = (
+                summary["syn_conversations"], summary["syn_flows"], summary["syn_bytes"]
+            )
+            rst_burst_count, rst_flows, rst_burst_bytes = (
+                summary["rst_conversations"], summary["rst_flows"], summary["rst_bytes"]
+            )
         except Exception as exc:
             logger.debug("Failed or skipped Anomaly rollup in report compiler: %s", exc)
 
@@ -606,9 +685,12 @@ async def compile_bandwidth_report_data(
     anomaly_summary = {
         "total_count": total_anomaly_count,
         "syn_scan_count": syn_scan_count,
+        "syn_scan_flows": f"{syn_flows:,}",
         "syn_scan_bytes": format_bytes(syn_scan_bytes),
         "rst_burst_count": rst_burst_count,
+        "rst_burst_flows": f"{rst_flows:,}",
         "rst_burst_bytes": format_bytes(rst_burst_bytes),
+        "total_flows": f"{syn_flows + rst_flows:,}",
         "has_anomalies": total_anomaly_count > 0,
     }
 
@@ -700,6 +782,9 @@ async def compile_bandwidth_report_data(
 
     return {
         "exporters": exporter_rows,
+        # Selected devices that actually exported flows in the window (a master report passes
+        # every selected endpoint here, most of which export nothing).
+        "active_exporters": sum(1 for stats in exporter_stats.values() if stats["if_count"] > 0),
         "interfaces": interface_rows,
         "wan_edge": wan_edge,
         "conversations": conversation_rows,
@@ -726,8 +811,10 @@ async def compile_master_report_data(
     return {
         "endpoints": avail_data["endpoints"],
         "incidents": avail_data["incidents"],
+        "incidents_total": avail_data.get("incidents_total", len(avail_data["incidents"])),
         "summary": avail_data["summary"],
         "exporters": bandwidth_data["exporters"],
+        "active_exporters": bandwidth_data.get("active_exporters", len(bandwidth_data["exporters"])),
         "interfaces": bandwidth_data["interfaces"],
         "wan_edge": bandwidth_data.get("wan_edge"),
         "conversations": bandwidth_data["conversations"],
