@@ -24,7 +24,7 @@
       <button class="btn-close" @click="alertMessage = null">✕</button>
     </div>
 
-    <!-- Spacious 4-Tab Navigation Strip with Dirty Badges (UI-13 / UI-14) -->
+    <!-- Spacious 4-Tab Navigation Strip with Dirty Badges -->
     <div class="settings-tabs-nav" role="tablist">
       <button 
         type="button" 
@@ -126,7 +126,7 @@
       />
     </div>
 
-    <!-- Sticky Dirty-State Banner (UI-14) -->
+    <!-- Sticky Dirty-State Banner -->
     <transition name="slide-up">
       <div v-if="isAnyDirty" class="sticky-dirty-banner">
         <div class="dirty-banner-inner">
@@ -245,7 +245,7 @@ function discardChanges() {
   })
 }
 
-// UI-14 Navigation Guard
+// Ask before leaving the page with unsaved changes.
 onBeforeRouteLeave((to, from, next) => {
   if (isAnyDirty.value) {
     const confirmLeave = window.confirm(
@@ -452,7 +452,7 @@ onMounted(() => {
   color: var(--text-primary);
 }
 
-/* UI-14: Sticky Bottom Dirty State Banner */
+/* Sticky Bottom Dirty State Banner */
 .sticky-dirty-banner {
   position: fixed;
   bottom: 20px;

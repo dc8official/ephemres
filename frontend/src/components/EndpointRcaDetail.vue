@@ -216,6 +216,8 @@ function getBannerClass(rca) {
   return 'banner-down'
 }
 
+// The baseline and failure traceroutes side by side, hop by hop: a hop is divergent when the
+// two differ or one is missing, and the hop the RCA blamed is marked as the failure point.
 const combinedHops = computed(() => {
   if (!rcaData.value) return []
 

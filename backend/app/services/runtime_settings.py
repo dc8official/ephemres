@@ -1,4 +1,4 @@
-"""Ephemres Network Monitoring Platform — Runtime Settings Cache.
+"""Ephemres Network Monitoring Platform: Runtime Settings Cache.
 
 Admin-editable settings (Settings UI -> app_settings table) override their
 config.toml counterparts at runtime. Every process keeps a cached snapshot:

@@ -1,3 +1,10 @@
+"""Traceroute for incident diagnostics and baseline routes, and the cleanup of old traces.
+
+run_traceroute skips targets on the local segment when the admin setting says so, then sends
+ICMP probes with rising TTL from a raw socket when it can, and otherwise falls back to the
+system traceroute (ICMP, then UDP) and tracepath. run_throttled_traceroute allows 3 at a time,
+with a 0.5 s pause after each, so an outage across many endpoints can't flood the network.
+"""
 from __future__ import annotations
 
 import array

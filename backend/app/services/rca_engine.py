@@ -1,3 +1,12 @@
+"""Root-cause analysis when an endpoint goes DOWN, and clean-up when it comes back.
+
+Differential RCA traceroutes to the endpoint now and compares the hops with its baseline route
+(recorded while it was up). The first hop that no longer answers, or answers from a different
+address, is reported as the likely failure point, with the hop before it as the last known good
+one. An endpoint on the local segment (no routers in between) is reported as a Layer 2 problem.
+The result is stored in endpoint_rca_incidents, with flow evidence when there is some, and
+published as RCA_INCIDENT. The traceroute is the verdict; flow data only adds context.
+"""
 from __future__ import annotations
 
 import datetime

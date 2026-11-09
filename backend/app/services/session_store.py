@@ -1,3 +1,9 @@
+"""The shared record of signed-in sessions and failed sign-ins, kept in PostgreSQL.
+
+Every API worker reads and writes the same tables (user_sessions, auth_login_failures), so a
+sign-out, a password change or a lockout on one worker holds on all of them and survives a
+restart. PostgresSessionStore is the only implementation (services/driver_manager.py).
+"""
 from __future__ import annotations
 
 import logging
@@ -75,6 +81,8 @@ class PostgresSessionStore(SessionStore):
         except (ValueError, TypeError):
             return
 
+        # The 24 h default is the longest session timeout Settings allows (1440 minutes); the
+        # token's own expiry usually ends the session sooner.
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=ttl_seconds)
 
@@ -98,7 +106,7 @@ class PostgresSessionStore(SessionStore):
                 db.add(new_session)
                 await db.flush()
 
-                # 3. FIFO session eviction if count > max_sessions
+                # 3. FIFO session eviction if count > max_sessions: keep the newest, delete the rest.
                 stmt = (
                     select(UserSession.id)
                     .where(

@@ -42,7 +42,9 @@ MAX_BACKLOG_CYCLES = 240
 
 @dataclass(frozen=True)
 class ProbeCycle:
+    # When the probes started: stamps the probe sample.
     sampled_at: datetime
+    # When they ended: stamps the event (see probe_samples.closed_event_stats_sql).
     finished_at: datetime
     result: PingResult
 
@@ -52,6 +54,10 @@ def new_backlog() -> Deque[ProbeCycle]:
 
 
 class CycleStore:
+    """Writes the cycles of every endpoint in this engine process; each endpoint brings its own
+    backlog. There is one store per engine, so the outage warning and the lost-cycles gap are
+    logged once, not once per endpoint."""
+
     def __init__(
         self,
         state_machine: StateMachine,
@@ -68,6 +74,8 @@ class CycleStore:
     def add(self, backlog: Deque[ProbeCycle], cycle: ProbeCycle) -> None:
         """Adds a cycle, noting the oldest one when the backlog is full and drops it."""
         if backlog.maxlen is not None and len(backlog) == backlog.maxlen:
+            # The lost span runs from the first dropped cycle to the cycle after it, the oldest
+            # one still kept, so the gap ends where history picks up again.
             dropped = backlog[0].finished_at
             self._lost_from = min(self._lost_from or dropped, dropped)
             self._lost_to = max(self._lost_to or dropped, backlog[1].finished_at if len(backlog) > 1 else dropped)

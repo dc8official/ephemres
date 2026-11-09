@@ -858,6 +858,7 @@ const executeDeleteEndpoint = async () => {
 
 function initSSE() {
   unsubscribeSSE = subscribeBatched((batch) => {
+    // Only the newest event per endpoint in the batch matters; apply each endpoint once.
     const latestByEndpoint = new Map()
     for (const payload of batch) {
       const isStateChange = payload?.type === 'STATE_TRANSITION' || payload?.type === 'NODE_STATE_CHANGE'
@@ -893,7 +894,7 @@ function initSSE() {
   })
 
   unsubscribeReconnect = onReconnect(() => {
-    // FE-02: Auto-refetch when SSE reconnects after connection loss
+    // Reload the list after the live connection comes back: events sent while it was down are lost.
     fetchEndpoints()
   })
 }

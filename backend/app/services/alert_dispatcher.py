@@ -1,3 +1,21 @@
+"""Sends alerts for endpoint state changes to the configured channels (Teams, Slack, Discord,
+generic webhooks, email).
+
+Every API worker runs a dispatcher, but only one, the holder of PostgreSQL advisory lock
+992817, listens to the event broker and sends; the others wait in standby and take over if it
+goes away. The leader keeps its rate-limit and flapping memory in process, so a change of
+leader starts them afresh.
+
+For each STATE_TRANSITION, in order:
+1. Nothing is sent while alerting is switched off in Settings.
+2. Endpoints downstream of an active root-cause incident (RCA_INCIDENT) are suppressed for up
+   to 30 minutes, so one broken router doesn't page once per device behind it.
+3. An endpoint with 4 or more transitions in 10 minutes is flapping and is not alerted.
+4. Per channel: its endpoint, subnet and severity filters, then at most one alert per
+   endpoint and severity every 5 minutes.
+Suppressed and throttled alerts are still written to the delivery log, with the reason.
+Webhook URLs go through the SSRF-safe HTTP client (core/http_client).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -55,9 +73,9 @@ def _safe_uuid(val: Any) -> Optional[UUID]:
 
 class AlertDispatcher:
     """
-    Enterprise Alert Dispatcher and Suppression Engine.
-    Executes in background tasks within the ephemres-api process.
-    Completely decoupled from the monitoring probe loop.
+    The alert dispatcher (see the module docstring for the rules). Runs as background tasks
+    in each ephemres-api worker, apart from the monitoring engine, which only publishes events.
+    Events wait in a queue of 1,000; when it is full, new ones are dropped with a warning.
     """
 
     def __init__(self) -> None:

@@ -1,3 +1,13 @@
+"""Outbound HTTP for alert webhooks, with server-side request forgery (SSRF) protection.
+
+A webhook URL is set by an admin, so without checks it could point the server at itself, the
+internal network or a cloud metadata service. Every address the host name resolves to must be
+public unless the caller allows private ones (alert_dispatcher does for SMTP servers; webhooks
+only with EPHEMRES_ALLOW_PRIVATE_WEBHOOKS), and the connection then goes to the address that
+was checked, so DNS can't answer differently between the check and the connect (DNS
+rebinding). Redirects are refused, responses are capped at 1 MiB, HTTPS requires TLS 1.2 or
+later with certificate verification, and only HTTP/1.1 is spoken.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -71,6 +81,8 @@ def _validate_resolved_ip(
     except ValueError as exc:
         raise ValueError(f"SSRF violation: Host '{hostname}' returned invalid IP '{ip_str}'.") from exc
 
+    # An IPv6 address can carry an IPv4 one (::ffff:a.b.c.d, 6to4, NAT64); check the IPv4
+    # address inside too, or 64:ff9b::7f00:1 (NAT64 for 127.0.0.1) would slip through.
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped  # type: ignore[assignment]
     elif ip.version == 6:

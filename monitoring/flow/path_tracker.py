@@ -217,6 +217,7 @@ class PathTracker:
         if state.streak < self.change_minutes:
             return
 
+        # From a load-balanced set, report one of the old paths (the same one every time).
         old = max(state.current, key=lambda p: (p[0], p[1] or ""))
         exporter_id, endpoint_id, direction = key
         self._changes.append(

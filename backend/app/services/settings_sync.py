@@ -1,3 +1,10 @@
+"""Tells every Ephemres process when an admin changes a setting that needs a reload.
+
+A worker that saved a change broadcasts it on SYSTEM_SETTINGS_SYNC; every other process
+(API workers, engine, flowd) reloads its runtime settings or reconnects its event broker. The
+channel always goes over PostgreSQL LISTEN/NOTIFY, so it keeps working while the event broker
+itself is being switched between FastStore and PostgreSQL.
+"""
 from __future__ import annotations
 
 import asyncio

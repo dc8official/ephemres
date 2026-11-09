@@ -1,4 +1,4 @@
-"""Ephemres Network Monitoring Platform — Cross-Version Database Backup Restore Engine.
+"""Ephemres Network Monitoring Platform: Cross-Version Database Backup Restore Engine.
 
 Restores PostgreSQL and TimescaleDB database dumps created by pg_dump across
 different platform generations (v3.1.35s, v3.2.0, v3.3.0, v3.3.1n, v3.3.2v+).
@@ -15,8 +15,9 @@ Key Capabilities:
    new columns (flow_exporter_ips, flow_interface_aliases, device_role) automatically
    receive schema default values, while removed legacy columns are ignored.
 3. Password Hashing Upgrade:
-   Converts legacy $argon2id$ password hashes to native Scrypt ($scrypt$) hashes with
-   forced password change (must_change_password = TRUE).
+   Legacy $argon2id$ hashes can't be checked without the old library, so they can't be
+   converted. Each such account gets a temporary scrypt password, written to a root-only
+   (0600) report file, and must change it at its next sign-in (must_change_password = TRUE).
 4. Alert Secret Re-encryption:
    Re-encrypts alert channel credentials (ENC:v1:...) using current and old secret keys
    across both current and legacy HKDF salts.

@@ -965,6 +965,9 @@ function relativeTime(iso) {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
+// The status strip at the top. Latency, loss and jitter come from the last 24 h of probe
+// samples (latency falls back to the endpoint's stored value before any sample exists);
+// "since" is when the current state began.
 const statusBar = computed(() => {
   const ep = endpoint.value || {}
   const monitored = icmpMonitored.value
@@ -1145,6 +1148,8 @@ function formatSpeedLabel(mbps) {
   return `${mbps} Mbps`
 }
 
+// One meter per router interface. Without flow telemetry yet, the interfaces configured on the
+// endpoint are shown with zero traffic, so they can still be named and given a speed.
 const interfaceMeters = computed(() => {
   if (interfaceTelemetry.value && interfaceTelemetry.value.length > 0) {
     return interfaceTelemetry.value.map((item) => ({
@@ -1439,6 +1444,8 @@ const setRange = (range) => {
   }
 }
 
+// The audit-table range as ISO UTC strings. Custom dates are local time from the inputs; a
+// missing or invalid one falls back to the last 7 days ending now.
 function getQueryRange() {
   const now = new Date()
   let start = ''
@@ -1616,6 +1623,8 @@ onMounted(() => {
     }
   }, 60000)
 
+  // A state change for this endpoint updates the header at once; everything else waits for
+  // the 60 s refresh above.
   unsubscribeSSE = subscribe((rawEvent) => {
     try {
       const event = typeof rawEvent?.data === 'string' ? JSON.parse(rawEvent.data) : rawEvent

@@ -1,3 +1,17 @@
+"""A small Jinja-like template engine for the PDF report templates (no jinja2 dependency).
+
+Supported: {{ expr }}, {% if/elif/else %}, {% for x in xs %} with loop.index and {% else %},
+{% set %}, {# comments #}, {% extends %} and {% block %}, and the filters in _apply_filter.
+
+Expressions are parsed with Python's ast module and then interpreted node by node by
+_eval_ast_node, never passed to eval(): only names, attributes, indexing, operators,
+comparisons, literals and filters work, and attributes starting with _ are refused, so a
+template cannot reach Python internals.
+
+Unlike Jinja, mistakes are quiet: an unknown name, a failed lookup or an unsupported construct
+renders as an empty string instead of raising. A blank value in a report usually means the
+template uses something this engine does not handle.
+"""
 from __future__ import annotations
 
 import ast
@@ -13,6 +27,7 @@ class SafeString(str):
     pass
 
 
+# Splits a template into text and {{ }}, {% %} and {# #} tokens.
 _TOKEN_RE = re.compile(r"(\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\})", re.DOTALL)
 _BLOCK_RE = re.compile(
     r"\{%\s*block\s+([a-zA-Z_]\w*)\s*%\}(.*?)\{%\s*endblock(?:\s+[a-zA-Z_]\w*)?\s*%\}",
@@ -20,7 +35,8 @@ _BLOCK_RE = re.compile(
 )
 _EXTENDS_RE = re.compile(r'^\s*\{%\s*extends\s+["\']([^"\']+)["\']\s*%\}')
 
-# Matches `<atom> | <filter_name>(<args>)` and `<atom> | <filter_name>`
+# Matches `<atom> | <filter_name>(<args>)` and `<atom> | <filter_name>`. The atom is a string or a
+# dotted name, so a filter applies to one value, not to a whole expression like (a + b) | round.
 _FILTER_CALL_RE = re.compile(
     r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[a-zA-Z_][\w\.]*)\s*\|\s*([a-zA-Z_]\w*)\s*\(([^)]*)\)'
 )
@@ -158,12 +174,14 @@ def _eval_ast_node(node: ast.AST, context: Dict[str, Any]) -> Any:
         if isinstance(node.op, ast.Sub):
             return (left or 0) - (right or 0)
         if isinstance(node.op, ast.Mult):
+            # "x" * n is capped at 10,000 repeats, so a template can't build a huge string.
             if isinstance(left, (str, list, tuple)) and isinstance(right, int):
                 right = max(0, min(10000, right))
             elif isinstance(right, (str, list, tuple)) and isinstance(left, int):
                 left = max(0, min(10000, left))
             return (left or 0) * (right or 0)
         if isinstance(node.op, ast.Div):
+            # Dividing by 0 or a missing value divides by 1 instead of failing the report.
             return (left or 0) / (right or 1)
         if isinstance(node.op, ast.Mod):
             return left % right
@@ -243,6 +261,7 @@ class _VarNode(_Node):
         self.expr = expr.strip()
 
     def render(self, context: Dict[str, Any], autoescape: bool = True) -> str:
+        # HTML-escaped unless marked safe (the | safe filter), so data can't inject markup.
         val = evaluate_expression(self.expr, context)
         if val is None:
             return ""
@@ -303,6 +322,7 @@ class _ForNode(_Node):
 
         out: List[str] = []
         total = len(items)
+        # The loop body sees a copy of the context: variables it sets don't leak out of the loop.
         local_ctx = dict(context)
         for idx, item in enumerate(items):
             local_ctx["loop"] = {
@@ -326,6 +346,8 @@ class _ForNode(_Node):
 
 
 def _parse_nodes(tokens: List[str], pos: int = 0, stop_tags: Tuple[str, ...] = ()) -> Tuple[List[_Node], int, str]:
+    """Builds nodes from tokens[pos:] until a tag in stop_tags (an if or for body ends at its
+    elif/else/endif/endfor). Returns the nodes, the position after the stop tag, and the tag."""
     nodes: List[_Node] = []
     n = len(tokens)
 
@@ -435,12 +457,16 @@ class TemplateEnvironment:
         self._cache: Dict[str, CompiledTemplate] = {}
 
     def _read_template_file(self, name: str) -> str:
+        # Only files inside the template directory: a name like ../../etc/passwd is refused.
         candidate = (self.search_path / name).resolve()
         if not candidate.is_relative_to(self.search_path.resolve()) or not candidate.is_file():
             raise FileNotFoundError(f"Template '{name}' not found in {self.search_path}")
         return candidate.read_text(encoding="utf-8")
 
     def _resolve_inheritance(self, source: str) -> str:
+        # Done on the source text before parsing: the child's blocks replace the parent's,
+        # and anything in the child outside a block is dropped (as in Jinja). Blocks can't be
+        # nested: the pattern ends a block at the first endblock.
         m_ext = _EXTENDS_RE.match(source)
         if not m_ext:
             # Strip any {% block name %}...{% endblock %} wrappers in base template
