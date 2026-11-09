@@ -1,3 +1,11 @@
+"""ephemres-flowd: receives NetFlow v5/v9 and IPFIX from routers and stores per-minute traffic.
+
+The pipeline runs in one process:
+  FlowCollector (UDP sockets, parsing) -> FlowAggregator (1-minute sums in memory, written every
+  10 s) -> flow_minute_rollups and flow_interface_minute_rollups in TimescaleDB.
+FlowCorrelator maps IP addresses to endpoints on the way through, and PathTracker watches which
+way the routers forward traffic to monitored endpoints, to spot route changes.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -41,13 +49,24 @@ async def _log_flow_stats(collector: FlowCollector, aggregator: FlowAggregator) 
         except Exception as e:
             logger.debug("ephemres-flowd: could not read flow counters: %s", e)
             continue
+        # The counters only grow, so the difference from last minute is last minute's figure.
         received, stored, dropped_mem, udp = (n - p for n, p in zip(now, last))
         last = now
         if udp or dropped_mem:
             logger.warning(
                 "ephemres-flowd: last minute %d flows received, %d rollup rows stored; LOST %d datagrams "
-                "(kernel socket buffer full: flowd too slow) and %d flows (flow buffer full: database down?)",
+                "(kernel socket buffer full: flowd too slow) and %d flows (flow buffer full: %s)",
                 received, stored, udp, dropped_mem,
+                aggregator.buffer_full_reason() if dropped_mem else "none dropped",
+            )
+        elif aggregator.last_flush_seconds > aggregator.flush_interval:
+            # Nothing lost yet, but a flush takes longer than the gap between flushes: the
+            # buffer is growing and will fill if this goes on.
+            logger.warning(
+                "ephemres-flowd: last minute %d flows received, %d rollup rows stored; rollup writes are "
+                "falling behind (the last flush wrote %d rows in %.1f s, flushes are %.0f s apart)",
+                received, stored, aggregator.last_flush_rows, aggregator.last_flush_seconds,
+                aggregator.flush_interval,
             )
         elif received:
             logger.info("ephemres-flowd: last minute %d flows received, %d rollup rows stored", received, stored)
@@ -144,6 +163,8 @@ async def run_flow_daemon() -> None:
         ipfix_port,
     )
 
+    # Run until systemd stops the service (SIGTERM) or Ctrl+C, then shut down in order so the
+    # aggregator's last flush still has its database and FastStore connections.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 

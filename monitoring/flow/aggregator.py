@@ -1,3 +1,9 @@
+"""Sums parsed flows into per-minute rollups in memory and writes them to TimescaleDB.
+
+Two tables are fed: flow_minute_rollups (one row per minute, exporter, conversation and service
+port) and flow_interface_minute_rollups (traffic per router interface). Flows with a monitored
+endpoint on one side also go to the PathTracker for route-change detection.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +34,8 @@ ROLLUP_COLUMNS = (
 )
 ROLLUP_ROWS_PER_STATEMENT = 5000
 
+# Stands in for an exporter not matched to an endpoint: exporter_id is part of the rollup key
+# and can't be NULL.
 SENTINEL_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 # flow_path_observations rows not seen for this long, and flow_route_changes older than this,
@@ -36,6 +44,8 @@ PATH_OBSERVATION_RETENTION_DAYS = 30
 ROUTE_CHANGE_RETENTION_DAYS = 90
 
 
+# Registered ports above 1023 that are services, not client ports (databases, VPNs, web
+# admin, the flow ports themselves...), so they are kept as the service port.
 KNOWN_SERVICE_PORTS = frozenset({
     1194, 1433, 1521, 1812, 1813, 2049, 2055, 2181, 2379, 3000, 3306, 3389,
     4500, 4739, 5000, 5060, 5061, 5432, 5601, 5672, 5900, 5985, 5986, 6379,
@@ -47,6 +57,12 @@ KNOWN_SERVICE_PORTS = frozenset({
 def normalize_service_port(src_port: int, dst_port: int, protocol: int = 0) -> int:
     """
     Normalizes service ports to protect index cardinality from ephemeral client ports (1024-65535).
+
+    Each conversation is stored under one port, the service's, so both directions of a
+    connection and every client port land in the same row. Order of preference: no port for
+    ICMP (1) and ICMPv6 (58); a well-known or listed destination port; the same for the source
+    (a reply from the server); a port under 10000 talking to one above it (the lower is the
+    server's); otherwise the destination port.
     """
     if protocol in (1, 58):
         return 0
@@ -83,7 +99,8 @@ class FlowAggregator:
         # FastStore: active interface sets for the API (flows themselves never go there).
         self.store = store_client if store_client is not None else redis_client
         # flow.buffer_memory_limit_mb bounds the flows held here while the database is
-        # unreachable: past it, new conversations are dropped (and counted) until a flush works.
+        # unreachable or writes can't keep up: past it, new conversations are dropped (and
+        # counted) until a flush makes room.
         if memory_limit_mb is None:
             from app.config import settings
 
@@ -94,6 +111,11 @@ class FlowAggregator:
         self.flows_ingested = 0
         self.flows_dropped_memory = 0
         self.rows_stored = 0
+        # How the last rollup flush went, so a full buffer can be blamed on the right thing: a
+        # failing database (last_flush_error) or writes that can't keep up (a slow flush).
+        self.last_flush_error: Optional[str] = None
+        self.last_flush_seconds = 0.0
+        self.last_flush_rows = 0
         self.correlator = correlator
         self.db_factory = db_session_factory
         self.flush_interval = flush_interval_seconds
@@ -117,12 +139,14 @@ class FlowAggregator:
 
         self._active_interfaces_set: Set[Tuple[UUID, int]] = set()
         self._flush_lock = asyncio.Lock()
-        self._memory_cap_logged = False
+        # time.monotonic() of the last "buffer full" error, so it is logged once a minute at most.
+        self._memory_cap_logged_at: Optional[float] = None
 
         self._running = False
         self._flush_task: Optional[asyncio.Task] = None
         self._prune_task: Optional[asyncio.Task] = None
 
+    # Older name for the FastStore client. Tests still pass redis_client=; nothing reads this.
     @property
     def redis(self) -> Any:
         return self.store
@@ -180,7 +204,8 @@ class FlowAggregator:
         flow_packets: int,
     ) -> None:
         """
-        Accumulates per-interface telemetry with single-direction attribution:
+        Accumulates per-interface telemetry with single-direction attribution (the router saw
+        the flow come in on in_if and leave on out_if):
         - in_bytes and in_packets credited strictly to in_if (when in_if > 0)
         - out_bytes and out_packets credited strictly to out_if (when out_if > 0)
         - flow_count incremented on in_if, and also on out_if when out_if > 0 and out_if != in_if
@@ -256,7 +281,8 @@ class FlowAggregator:
         )
         resolved_exporter = exporter_id if exporter_id is not None else SENTINEL_UUID
 
-        # Truncate start_time to 1-minute bucket (UTC)
+        # Truncate start_time to 1-minute bucket (UTC). A long flow's bytes all count in the
+        # minute it started: the export only gives totals, not how they spread over time.
         dt = datetime.datetime.fromtimestamp(start_time_unix, tz=datetime.timezone.utc)
         bucket = dt.replace(second=0, microsecond=0)
 
@@ -274,15 +300,17 @@ class FlowAggregator:
 
         if key not in self._accumulator:
             if len(self._accumulator) >= self.max_accumulator_entries:
-                # Only reachable while flushes fail (database down): keep what is held, drop new
-                # conversations, and say so once until a flush succeeds.
+                # Reached when flushes fail (database down) or can't keep up with new
+                # conversations: keep what is held, drop new conversations, and say why.
                 self.flows_dropped_memory += 1
-                if not self._memory_cap_logged:
-                    self._memory_cap_logged = True
+                now = time.monotonic()
+                if self._memory_cap_logged_at is None or now - self._memory_cap_logged_at >= 60.0:
+                    self._memory_cap_logged_at = now
                     logger.error(
                         "Flow buffer full (%d conversations, flow.buffer_memory_limit_mb=%d): "
-                        "dropping new flows until the database accepts the backlog.",
+                        "dropping new conversations because %s.",
                         len(self._accumulator), self.memory_limit_bytes // (1024 * 1024),
+                        self.buffer_full_reason(),
                     )
                 return
             self._accumulator[key] = [flow_bytes, flow_packets, 1, tcp_flags, tos]
@@ -321,7 +349,8 @@ class FlowAggregator:
             if not self._accumulator and not self._interface_accumulator:
                 return
 
-            # Snapshot current accumulator entries
+            # Snapshot current accumulator entries. Flows keep arriving during the write below
+            # (it awaits), so afterwards the snapshot is subtracted rather than everything cleared.
             snapshot = {k: list(v) for k, v in self._accumulator.items()}
             if_snapshot = {k: list(v) for k, v in self._interface_accumulator.items()}
             active_if_snapshot = set(self._active_interfaces_set)
@@ -450,6 +479,7 @@ class FlowAggregator:
             """)
 
             if rows or if_rows:
+                started = time.monotonic()
                 try:
                     async with self.db_factory() as session:
                         if rows:
@@ -473,10 +503,13 @@ class FlowAggregator:
                         logger.info("Successfully persisted %d interface rollup records to TimescaleDB.", len(if_rows))
                 except Exception as e:
                     logger.error("Failed to commit flow rollup micro-batch to DB: %s", e)
+                    self.last_flush_error = f"{type(e).__name__}: {e}"[:200]
                     # Keep the accumulator intact; the next flush retries.
                     return
+                self.last_flush_error = None
+                self.last_flush_seconds = time.monotonic() - started
+                self.last_flush_rows = len(rows)
                 self.rows_stored += len(rows)
-                self._memory_cap_logged = False
 
                 # Only deduct committed quantities from accumulator on successful DB commit
                 if rows:
@@ -505,11 +538,25 @@ class FlowAggregator:
                         pipe = self.store.pipeline()
                         for exp_id, if_idx in active_if_snapshot:
                             pipe.sadd(f"flow:exporter:{exp_id}:interfaces", if_idx)
+                            # An interface drops out of the API's list 2 h after its last flow.
                             pipe.expire(f"flow:exporter:{exp_id}:interfaces", 7200)
                         await pipe.execute()
                         self._active_interfaces_set.difference_update(active_if_snapshot)
                     except Exception as store_err:
                         logger.warning("Failed to record active interfaces in FastStore: %s", store_err)
+
+    def buffer_full_reason(self) -> str:
+        """Why the flow buffer filled up, for the log: the database refusing writes, or rollup
+        writes too slow for the number of new conversations (measured at about 15,000 to 20,000
+        rows/s on a single TimescaleDB, most of it the upsert and its indexes; scale review S4)."""
+        if self.last_flush_error:
+            return f"the database is not accepting rollup writes ({self.last_flush_error})"
+        if self.last_flush_rows:
+            return (
+                f"rollup writes are not keeping up with new conversations (the last flush wrote "
+                f"{self.last_flush_rows} rows in {self.last_flush_seconds:.1f} s)"
+            )
+        return "rollup writes are not keeping up with new conversations"
 
     async def _flush_loop(self) -> None:
         while self._running:
