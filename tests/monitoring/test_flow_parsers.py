@@ -363,8 +363,10 @@ class TestIPFIXParser(unittest.TestCase):
 
     def test_ipfix_microsecond_and_nanosecond_times_are_ntp_format(self):
         """RFC 7011 6.1.9/6.1.10: seconds since 1900 in the high 32 bits, the fraction of a second
-        in the low 32. They were read as a count of us/ns since 1970: year 546,816, and the
-        aggregator dropped every flow."""
+        in the low 32. They used to be read as a count of us or ns since 1970. For a flow from
+        2025 that gave about year 542,000 for microseconds, which the aggregator could not turn
+        into a date, so it dropped the flow; nanoseconds gave about year 2510, so the flow was
+        stored under the wrong date."""
 
         def ntp(unix_seconds, fraction):
             return ((unix_seconds + 2208988800) << 32) | int(fraction * 2**32)

@@ -88,7 +88,7 @@ For complete architectural references, operational runbooks, and developer guide
 * **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9 and IPFIX setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), and interface metrics.
 * **[Database & TimescaleDB Deep-Dive](docs/database.md):** Full schema dictionary, hypertable partitioning, 7-day chunk compression, flow rollup hypertables, and continuous aggregate policies.
 * **[Disaster Recovery & Restoration Runbook](deploy/RESTORE.md):** Procedures for restoring TimescaleDB backups and executing native async migrations.
-* **[Security Model & Threat Hardening](docs/security.md):** Authentication matrix, Scrypt password hashing, sliding sessions, lockout defense, Linux capability isolation, and SSRF guardrails.
+* **[Security Model & Threat Hardening](docs/security.md):** Authentication matrix, Scrypt password hashing, fixed-lifetime sessions, lockout defense, Linux capability isolation, and SSRF guardrails.
 * **[SLA Calculation Methodology](docs/sla-calculation.md):** Mathematical formulation of uptime availability, flap suppression, and blackout neutralization.
 * **[Troubleshooting Runbook](docs/troubleshooting.md):** Step-by-step diagnostic workflows, permission fixes, flow socket buffer sizing, and log inspection.
 * **[User & Operator Guide](docs/user-guide.md):** Guide to navigating the Live KPI ribbon, Card/Table view switcher, High-Fidelity traceroutes, Bandwidth Fleet Dashboard, and Admin Settings.

@@ -291,16 +291,15 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 ## 5. Enabling Flow Telemetry in Ephemres
 
 1. Log in to the Ephemres Web Interface as an **Administrator**.
-2. Navigate to **System Settings** -> **Tab 2: Performance & Telemetry Engine**.
-3. Under **Network Flow Telemetry Ingestion (v3.2.0)**:
-   - Click **Run Diagnostic Preflight** to check that FastStore opens and the flow UDP ports are free (it also reports `rmem_max`). Performance Mode is not needed for flows.
-   - Toggle **Enable Flow Telemetry Ingestion** to **Active**.
-   - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match your network topology.
-   - Click **Save Changes**.
-4. Start or restart the `ephemres-flowd` service on the host:
+2. Open **Settings** -> **Performance & Telemetry**.
+3. In the **Network Flow Telemetry Engine (NetFlow & IPFIX)** card:
+   - Switch the toggle on. This opens the preflight, which checks that FastStore opens and the flow UDP ports are free (it also reports `rmem_max`). When it passes, click **Activate Flow Telemetry**; the badge then reads **FLOW INGESTION ACTIVE** and the port fields appear. Performance Mode is not needed for flows. **Run Diagnostic Preflight** runs the same check on its own.
+   - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match what your exporters send to.
+   - Click **Save Changes**. Saving runs the preflight again (a failure is refused with its reason), then starts `ephemres-flowd` and enables it at boot.
+4. Check that the service is running. The API starts it through the sudo rule `install.sh` and `upgrade.sh` write to `/etc/sudoers.d/ephemres`; without that rule, start it yourself:
    ```bash
-   sudo systemctl enable --now ephemres-flowd
    sudo systemctl status ephemres-flowd
+   sudo systemctl enable --now ephemres-flowd
    ```
 
 ---

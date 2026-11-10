@@ -37,8 +37,8 @@
 
         <div class="setting-row">
           <div>
-            <label class="setting-label">User Session Inactivity Timeout</label>
-            <p class="setting-hint">Automatic session revocation period for idle user accounts.</p>
+            <label class="setting-label">User Session Timeout</label>
+            <p class="setting-hint">How long a sign-in lasts, counted from sign-in. Activity does not extend it.</p>
           </div>
           <select v-model="settings.sessionTimeout" class="form-select font-mono tnum" @change="emitChange">
             <option value="15">15 Minutes</option>
