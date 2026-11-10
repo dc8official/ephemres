@@ -1095,6 +1095,11 @@ async def _resolve_endpoint_kwargs(
     body_json_invalid = False
 
     for param_name, param in sig.parameters.items():
+        # *args and **kwargs take nothing from the request, as in FastAPI. Now that a
+        # parameter without a default is required (below), they must be skipped or every
+        # handler written as f(*args, **kwargs), such as a mock override, would answer 422.
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
         annotation = type_hints.get(param_name, param.annotation)
         if isinstance(annotation, str):
             if annotation in localns:
@@ -1165,6 +1170,13 @@ async def _resolve_endpoint_kwargs(
             )
             resolved_kwargs[param_name] = dep_val
             continue
+
+        # A parameter without a default is required, as in FastAPI. inspect's "no default"
+        # marker used to be taken as the default itself, so a missing query value reached the
+        # route as inspect._empty and an empty POST to a route taking a schema model crashed
+        # with 500 instead of answering 422 (M3 coverage review, 2026-11-10).
+        if default is inspect._empty:
+            default = ...
 
         # 5. Path parameter
         if param_name in path_params or isinstance(default, PathParamInfo):
@@ -1277,8 +1289,10 @@ async def _resolve_endpoint_kwargs(
                         })
                 continue
 
-            # Generic dict / list body (e.g. Dict[str, InterfaceConfig])
-            if origin in (dict, Dict, list, List):
+            # Generic dict body (e.g. Dict[str, InterfaceConfig]). A bare `dict` has no origin,
+            # so it is matched by itself; it used to fall through to the query-string step and
+            # never read the body (M3 coverage review, 2026-11-10).
+            if origin in (dict, Dict) or annotation in (dict, Dict):
                 if body_data is None:
                     if b_info.is_required():
                         validation_errors.append({

@@ -5,8 +5,9 @@ internal network or a cloud metadata service. Every address the host name resolv
 public unless the caller allows private ones (alert_dispatcher does for SMTP servers; webhooks
 only with EPHEMRES_ALLOW_PRIVATE_WEBHOOKS), and the connection then goes to the address that
 was checked, so DNS can't answer differently between the check and the connect (DNS
-rebinding). Redirects are refused, responses are capped at 1 MiB, HTTPS requires TLS 1.2 or
-later with certificate verification, and only HTTP/1.1 is spoken.
+rebinding). Redirects are refused, response bodies are capped at 1 MiB and headers at 64 KiB
+or 100 lines, HTTPS requires TLS 1.2 or later with certificate verification, and only
+HTTP/1.1 is spoken.
 """
 from __future__ import annotations
 
@@ -42,6 +43,15 @@ class HttpTimeoutError(HttpRequestError, TimeoutError):
 
 
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+
+# Limits on the response head (status line and headers) and on chunked trailers, which
+# MAX_RESPONSE_BYTES does not count. Without them a hostile server could send headers without
+# end and the client kept them all until the timeout: about 56 MB in 3 s on loopback (M3
+# coverage review, 2026-11-10). 64 KiB and 100 lines match common server defaults (nginx's
+# large_client_header_buffers is 4 x 8 KiB; Apache's LimitRequestFields is 100) and are far
+# above what a webhook receiver sends back.
+MAX_HEADER_BYTES = 64 * 1024
+MAX_HEADER_LINES = 100
 
 
 @dataclass
@@ -404,10 +414,16 @@ class SSRFSafeHttpClient:
                     raise HttpRequestError(f"Invalid HTTP status code in line: {status_line!r}") from exc
 
                 resp_headers: dict[str, str] = {}
+                head_bytes = len(status_line_bytes)
+                head_lines = 0
                 while True:
                     hdr_line = await reader.readline()
                     if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                         break
+                    head_bytes += len(hdr_line)
+                    head_lines += 1
+                    if head_bytes > MAX_HEADER_BYTES or head_lines > MAX_HEADER_LINES:
+                        raise HttpRequestError("Response headers too large")
                     decoded_hdr = hdr_line.decode("latin-1", errors="replace").strip()
                     if ":" in decoded_hdr:
                         hk, hv = decoded_hdr.split(":", 1)
@@ -432,10 +448,16 @@ class SSRFSafeHttpClient:
                             raise HttpRequestError(f"Negative chunk size: {chunk_size}")
 
                         if chunk_size == 0:
+                            # Trailers are headers after the body; the same limits apply, or
+                            # they would be a second way to send headers without end.
                             while True:
                                 trailer = await reader.readline()
                                 if not trailer or trailer in (b"\r\n", b"\n"):
                                     break
+                                head_bytes += len(trailer)
+                                head_lines += 1
+                                if head_bytes > MAX_HEADER_BYTES or head_lines > MAX_HEADER_LINES:
+                                    raise HttpRequestError("Response headers too large")
                             break
 
                         if len(body_chunks) + chunk_size > MAX_RESPONSE_BYTES:
