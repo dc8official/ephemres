@@ -35,15 +35,29 @@ API_DB_POOL_ENV = "EPHEMRES_API_DB_POOL"
 def _is_api_process() -> bool:
     """True in uvicorn and its workers (which inherit uvicorn's argv), false in the engine,
     flowd and scripts. They all load /etc/ephemres/ephemres.env, so an API setting placed there
-    by mistake must not shrink the engine's pool."""
-    return os.path.basename(sys.argv[0] if sys.argv else "") == "uvicorn"
+    by mistake must not shrink the engine's pool.
+
+    Both ways of starting uvicorn count: the venv's `uvicorn` command, and `python -m uvicorn`,
+    where argv[0] is .../uvicorn/__main__.py. The second was missed at first, so an API started
+    that way took the full pool of 20 per worker and said nothing (branch review, 2026-11-10)."""
+    argv0 = sys.argv[0] if sys.argv else ""
+    name = os.path.basename(argv0)
+    return name == "uvicorn" or (
+        name == "__main__.py" and os.path.basename(os.path.dirname(argv0)) == "uvicorn"
+    )
+
+
+def _pool_sizes_for_api(raw: str) -> tuple[int, int] | None:
+    """(pool_size, max_overflow) that EPHEMRES_API_DB_POOL=`raw` asks for, or None when it is
+    not a positive whole number."""
+    return (int(raw), 0) if raw.isdigit() and int(raw) > 0 else None
 
 
 def _pool_sizes() -> tuple[int, int]:
     """(pool_size, max_overflow) for this process."""
-    api_pool = os.environ.get(API_DB_POOL_ENV, "").strip()
-    if _is_api_process() and api_pool.isdigit() and int(api_pool) > 0:
-        return int(api_pool), 0
+    api_pool = _pool_sizes_for_api(os.environ.get(API_DB_POOL_ENV, "").strip())
+    if _is_api_process() and api_pool is not None:
+        return api_pool
     return settings.database.pool_size, settings.database.max_overflow
 
 
@@ -165,10 +179,16 @@ async def ping_database(timeout: float = 2.0) -> None:
     answered 200 "ready" after 10 s while users were getting errors; now a full pool raises
     PoolTimeoutError within `timeout`, so a health checker sees this worker as busy in time.
     Uses the pool rather than a connection of its own, so probing every few seconds never adds
-    to the connection count."""
+    to the connection count.
+
+    The query has the same limit as the wait. Left to the pool's 10 s statement timeout, a
+    server that held the connection but had stopped answering kept the probe for 12 s, longer
+    than a health checker waits; it now answers in 4 s (both measured with the database
+    container frozen; branch review, 2026-11-10). The worst case is 3 x `timeout`: the wait,
+    the query, and asyncpg handing back a connection whose query it had to cancel."""
     conn = await async_engine.acquire_connection(timeout=timeout)
     try:
-        await conn.fetchval("SELECT 1")
+        await conn.fetchval("SELECT 1", timeout=timeout)
     finally:
         await async_engine.release_connection(conn)
 
@@ -218,6 +238,18 @@ async def check_connection_budget(api_listeners: int = 1, leader_listeners: int 
         logger.warning("Could not read PostgreSQL connection limits: %s", exc)
         return
     max_conn, su_reserved, reserved = row[0], row[1], row[2]
+    # Say so when the unit's pool setting is not the pool in use. Only the API calls this
+    # function, so here an unused setting is a mistake: a launcher _is_api_process() doesn't
+    # know, or a value that isn't a positive whole number. It used to be dropped in silence.
+    api_pool_raw = os.environ.get(API_DB_POOL_ENV, "").strip()
+    if api_pool_raw and (_POOL_SIZE, _MAX_OVERFLOW) != _pool_sizes_for_api(api_pool_raw):
+        logger.warning(
+            "%s=%s is set but not used: %s. This worker's database pool is %d connections.",
+            API_DB_POOL_ENV, api_pool_raw,
+            "it must be a positive whole number" if _pool_sizes_for_api(api_pool_raw) is None
+            else f"the API was not started by uvicorn ({sys.argv[0] if sys.argv else 'no argv'})",
+            _POOL_SIZE + _MAX_OVERFLOW,
+        )
     workers_raw = os.environ.get(API_WORKERS_ENV, "").strip()
     workers = int(workers_raw) if workers_raw.isdigit() and int(workers_raw) > 0 else 1
     other_pool = settings.database.pool_size + settings.database.max_overflow
@@ -235,4 +267,9 @@ async def check_connection_budget(api_listeners: int = 1, leader_listeners: int 
             need, available, max_conn, su_reserved + reserved,
         )
     else:
-        logger.info("Database connection budget: up to %d of %d connections.", need, available)
+        # The pool size is named so a worker running with a pool other than the unit's is seen
+        # in the log of a normal start.
+        logger.info(
+            "Database connection budget: up to %d of %d connections (this worker's pool: %d).",
+            need, available, _POOL_SIZE + _MAX_OVERFLOW,
+        )

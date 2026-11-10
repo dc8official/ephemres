@@ -72,10 +72,11 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    python3 -m venv .venv
    source .venv/bin/activate
    pip install --upgrade pip
+   pip install --require-hashes -r backend/requirements.lock
    pip install -r backend/requirements-dev.txt
    cd backend
    ```
-   `requirements-dev.txt` installs the runtime packages from `requirements.txt` (`uvicorn`, `httptools`, `uvloop`, `asyncpg`) plus the test tools (`pytest`, `anyio`). Servers install `requirements.lock` instead, the same packages pinned with their hashes; regenerate it after changing `requirements.txt` (the command is in that file). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
+   `requirements.lock` is what the servers install: the runtime packages (`uvicorn`, `httptools`, `uvloop`, `asyncpg`, and uvicorn's `click` and `h11`) pinned with their hashes. Installing it first means the tests run on the same files; a test fails when an installed version differs from the lock. `requirements-dev.txt` then adds the test tools (`pytest`, `anyio`). Regenerate the lock after changing `requirements.txt` (the command is in that file). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
 
 2. **Environment Configuration:**
    Copy `.env.example` to `.env` and configure your credentials:

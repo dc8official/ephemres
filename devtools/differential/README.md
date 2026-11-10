@@ -23,6 +23,7 @@ Set up the venv once:
 
 ```bash
 python3.12 -m venv .venv-diff
+.venv-diff/bin/python -m pip install --require-hashes -r backend/requirements.lock
 .venv-diff/bin/python -m pip install -r devtools/differential/requirements.txt
 ```
 

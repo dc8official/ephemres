@@ -293,3 +293,18 @@ async def test_chunked_trailers_count_toward_the_header_limit():
     async with Server(CHUNKED + b"2\r\nhi\r\n0\r\n" + trailers + b"\r\n") as srv:
         with pytest.raises(HttpRequestError, match="headers too large"):
             await _client().get(srv.url)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reply", [
+    b"HTTP/1.1 200 OK\r\nX-Big: " + b"a" * 100_000 + b"\r\nContent-Length: 0\r\n\r\n",
+    b"HTTP/1.1 200 " + b"a" * 100_000 + b"\r\nContent-Length: 0\r\n\r\n",
+    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;" + b"a" * 100_000 + b"\r\nx\r\n0\r\n\r\n",
+], ids=["header", "status line", "chunk size"])
+async def test_one_line_over_64_kib_is_an_http_request_error(reply):
+    # asyncio refuses the line with a bare ValueError, which skipped the alert dispatcher's
+    # retries and reached the delivery log as "Separator is found, but chunk is longer than
+    # limit" (branch review, 2026-11-10).
+    async with Server(reply) as srv:
+        with pytest.raises(HttpRequestError, match="line too long"):
+            await _client().get(srv.url)

@@ -58,3 +58,24 @@ def test_the_lock_matches_the_versions_in_requirements_txt():
     locked = _locked_pins()
     for name, version in _direct_pins().items():
         assert locked[name][0] == version, f"{name}: requirements.txt {version}, lock {locked[name][0]}"
+
+
+def test_the_tests_run_on_the_locked_versions():
+    # The servers install the lock; a development venv built from requirements-dev.txt alone
+    # resolved uvicorn's dependencies afresh and ran the suite on click 8.5.0 while the lock
+    # said 8.5.1 (branch review, 2026-11-10). Passing here means the suite ran on what ships.
+    from importlib.metadata import PackageNotFoundError, version
+
+    differing = []
+    for name, (locked, _hashes) in sorted(_locked_pins().items()):
+        try:
+            installed = version(name)
+        except PackageNotFoundError:
+            installed = "not installed"
+        if installed != locked:
+            differing.append(f"{name}: {installed} here, {locked} in the lock")
+    assert not differing, (
+        "this environment differs from backend/requirements.lock ("
+        + "; ".join(differing)
+        + "). Run: pip install --require-hashes -r backend/requirements.lock"
+    )

@@ -19,6 +19,13 @@ REMOVED_DEPENDENCIES = {
     "dateutil",
     "argon2",
     "cryptography",
+    # What uvicorn[standard] used to install and the servers no longer have (scale and core
+    # review M5). A development venv built before then may still hold them, where an import
+    # would pass and then fail on a server.
+    "websockets",
+    "watchfiles",
+    "dotenv",
+    "yaml",
 }
 
 

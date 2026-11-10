@@ -6,8 +6,8 @@ public unless the caller allows private ones (alert_dispatcher does for SMTP ser
 only with EPHEMRES_ALLOW_PRIVATE_WEBHOOKS), and the connection then goes to the address that
 was checked, so DNS can't answer differently between the check and the connect (DNS
 rebinding). Redirects are refused, response bodies are capped at 1 MiB and headers at 64 KiB
-or 100 lines, HTTPS requires TLS 1.2 or later with certificate verification, and only
-HTTP/1.1 is spoken.
+or 100 lines (a single line at 64 KiB), HTTPS requires TLS 1.2 or later with certificate
+verification, and only HTTP/1.1 is spoken.
 """
 from __future__ import annotations
 
@@ -52,6 +52,20 @@ MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 # above what a webhook receiver sends back.
 MAX_HEADER_BYTES = 64 * 1024
 MAX_HEADER_LINES = 100
+
+
+async def _read_line(reader: asyncio.StreamReader) -> bytes:
+    """One line of the response: the status line, a header, a chunk size or a trailer.
+
+    asyncio refuses a line longer than its 64 KiB buffer with a bare ValueError. That is not an
+    HttpRequestError, so it skipped the caller's retries and reached the delivery log as
+    "Separator is found, but chunk is longer than limit" (branch review, 2026-11-10). The
+    refusal itself is what keeps one endless line from filling memory, so it stays; only the
+    error changes."""
+    try:
+        return await reader.readline()
+    except ValueError as exc:
+        raise HttpRequestError("Response line too long (over 64 KiB)") from exc
 
 
 @dataclass
@@ -400,7 +414,7 @@ class SSRFSafeHttpClient:
                 writer.write(raw_head + body_bytes)
                 await writer.drain()
 
-                status_line_bytes = await reader.readline()
+                status_line_bytes = await _read_line(reader)
                 if not status_line_bytes:
                     raise HttpRequestError("Remote server closed connection before sending status line.")
 
@@ -417,7 +431,7 @@ class SSRFSafeHttpClient:
                 head_bytes = len(status_line_bytes)
                 head_lines = 0
                 while True:
-                    hdr_line = await reader.readline()
+                    hdr_line = await _read_line(reader)
                     if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                         break
                     head_bytes += len(hdr_line)
@@ -435,7 +449,7 @@ class SSRFSafeHttpClient:
 
                 if is_chunked:
                     while True:
-                        line = await reader.readline()
+                        line = await _read_line(reader)
                         if not line:
                             raise HttpRequestError("Connection closed prematurely during chunked read.")
                         size_str = line.split(b";")[0].strip()
@@ -451,7 +465,7 @@ class SSRFSafeHttpClient:
                             # Trailers are headers after the body; the same limits apply, or
                             # they would be a second way to send headers without end.
                             while True:
-                                trailer = await reader.readline()
+                                trailer = await _read_line(reader)
                                 if not trailer or trailer in (b"\r\n", b"\n"):
                                     break
                                 head_bytes += len(trailer)
@@ -466,7 +480,7 @@ class SSRFSafeHttpClient:
                         chunk_data = await reader.readexactly(chunk_size)
                         body_chunks.extend(chunk_data)
 
-                        crlf = await reader.readline()
+                        crlf = await _read_line(reader)
                         if crlf not in (b"\r\n", b"\n"):
                             raise HttpRequestError("Malformed chunk: missing trailing CRLF")
 

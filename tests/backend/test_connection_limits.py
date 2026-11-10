@@ -16,7 +16,7 @@ import pytest
 
 import app.database as database
 import app.main as main
-from app.core.asgi import TestClient
+from app.core.asgi import EphemresApp, TestClient
 from app.core.orm import DatabaseUnavailableError, PoolTimeoutError, create_async_engine
 from app.database import connection_budget
 
@@ -57,13 +57,20 @@ def test_pool_timeout_is_a_database_unavailable_error():
 
 
 def test_a_pool_timeout_in_a_route_is_a_503():
-    @main.app.get("/test-only/pool-timeout", include_in_schema=False)  # keep out of openapi.json
+    # On an app of its own, with the handler the real app registers. The route used to be added
+    # to main.app itself and stayed there for every test that ran afterwards.
+    assert main.app.exception_handlers[DatabaseUnavailableError] is main.database_unavailable_handler
+    demo = EphemresApp()
+    demo.add_exception_handler(DatabaseUnavailableError, main.database_unavailable_handler)
+
+    @demo.get("/pool-timeout")
     async def _raise():
         raise PoolTimeoutError("no database connection became free within 5 s")
 
-    resp = TestClient(main.app).get("/test-only/pool-timeout")
+    resp = TestClient(demo).get("/pool-timeout")
     assert resp.status_code == 503
     assert resp.headers.get("retry-after") == "15"
+    assert not any("pool-timeout" in route.path for route in main.app.router.routes)
 
 
 def test_the_app_engine_uses_the_configured_pool_timeout():
@@ -92,12 +99,39 @@ def test_readiness_reports_a_busy_pool_as_busy(monkeypatch, raised, status, db_s
     assert waits == [2.0]  # never waits longer than a health checker's usual 5 s
 
 
+@pytest.mark.anyio
+async def test_the_ping_limits_the_query_as_well_as_the_wait(monkeypatch):
+    # A server that holds the connection but has stopped answering kept the probe for 12 s (the
+    # pool's 10 s statement timeout) until the query got the same limit as the wait.
+    calls = {}
+
+    class _Conn:
+        async def fetchval(self, query, timeout=None):
+            calls["query_timeout"] = timeout
+
+    async def acquire(timeout=None):
+        calls["wait"] = timeout
+        return _Conn()
+
+    async def release(conn):
+        calls["released"] = True
+
+    monkeypatch.setattr(database.async_engine, "acquire_connection", acquire)
+    monkeypatch.setattr(database.async_engine, "release_connection", release)
+    await database.ping_database(timeout=2.0)
+    assert calls == {"wait": 2.0, "query_timeout": 2.0, "released": True}
+
+
 # --- pool sizes and the budget -----------------------------------------------------------------
 
 @pytest.mark.parametrize("argv0, env, expected", [
     ("/opt/ephemres/venv/bin/uvicorn", "10", (10, 0)),   # an API worker: its own pool
     ("/opt/ephemres/venv/bin/uvicorn", None, (10, 10)),  # no setting: the config's pool
     ("/opt/ephemres/monitoring/engine.py", "10", (10, 10)),  # the engine ignores the API's
+    # `python -m uvicorn` is the API too; it used to fall through to the config's pool.
+    ("/opt/ephemres/venv/lib/python3.12/site-packages/uvicorn/__main__.py", "10", (10, 0)),
+    ("/opt/ephemres/backend/app/__main__.py", "10", (10, 10)),  # some other module's __main__
+    ("/opt/ephemres/venv/bin/uvicorn", "ten", (10, 10)),  # not a number: the config's pool
 ])
 def test_only_api_workers_take_the_api_pool_size(monkeypatch, argv0, env, expected):
     monkeypatch.setattr(database.sys, "argv", [argv0])
@@ -169,11 +203,11 @@ def test_a_third_worker_with_the_old_pool_did_not_fit():
     assert need == 105 and need > available
 
 
-@pytest.mark.anyio
-async def test_the_budget_check_warns_when_the_pools_do_not_fit(monkeypatch, caplog):
+def _server_limits(monkeypatch, max_connections: int) -> None:
+    """Make the budget check read these limits (3 reserved for superusers) with no database."""
     class _Conn:
         async def execute(self, _q):
-            return type("R", (), {"fetchone": lambda self: (60, 3, 0)})()
+            return type("R", (), {"fetchone": lambda self: (max_connections, 3, 0)})()
 
     class _Connect:
         async def __aenter__(self):
@@ -184,6 +218,36 @@ async def test_the_budget_check_warns_when_the_pools_do_not_fit(monkeypatch, cap
 
     monkeypatch.setattr(database.async_engine, "connect", lambda: _Connect())
     monkeypatch.setenv(database.API_WORKERS_ENV, "2")
+
+
+@pytest.mark.anyio
+async def test_a_normal_start_logs_the_pool_each_worker_uses(monkeypatch, caplog):
+    _server_limits(monkeypatch, 200)
+    monkeypatch.delenv(database.API_DB_POOL_ENV, raising=False)
+    with caplog.at_level("INFO", logger="app.database"):
+        await database.check_connection_budget(**LISTENERS)
+    assert "up to 94 of 197 connections (this worker's pool: 20)." in caplog.text
+    assert "is set but not used" not in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value, reason", [
+    # pytest is not uvicorn, so here a valid setting is one the launcher made no use of.
+    ("10", "the API was not started by uvicorn"),
+    ("ten", "it must be a positive whole number"),
+])
+async def test_an_api_pool_setting_that_is_not_used_is_reported(monkeypatch, caplog, value, reason):
+    _server_limits(monkeypatch, 200)
+    monkeypatch.setenv(database.API_DB_POOL_ENV, value)
+    with caplog.at_level("WARNING", logger="app.database"):
+        await database.check_connection_budget(**LISTENERS)
+    assert f"EPHEMRES_API_DB_POOL={value} is set but not used: {reason}" in caplog.text
+    assert "This worker's database pool is 20 connections." in caplog.text
+
+
+@pytest.mark.anyio
+async def test_the_budget_check_warns_when_the_pools_do_not_fit(monkeypatch, caplog):
+    _server_limits(monkeypatch, 60)
     with caplog.at_level("WARNING", logger="app.database"):
         await database.check_connection_budget(**LISTENERS)
     assert "connection budget exceeded" in caplog.text

@@ -306,7 +306,9 @@ connections, against PostgreSQL's default `max_connections = 100` (3 reserved fo
      sudo systemctl restart postgresql
      sudo systemctl restart ephemres-api ephemres-engine
      ```
-     The API logs `Database connection budget: up to N of M connections.` once the numbers fit.
+     The API logs `Database connection budget: up to N of M connections (this worker's pool: P).`
+     once the numbers fit. If `P` is not the `EPHEMRES_API_DB_POOL` you set, the line before it
+     says why the setting was not used.
 
 ### K. FastStore Inspection & Diagnostics (`/run/ephemres`)
 * **Symptoms**:
