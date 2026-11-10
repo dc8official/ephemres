@@ -114,13 +114,20 @@ async def lifespan(app: FastAPI):
     logger.info("Ephemres v3.3.5 platform shutting down cleanly.")
 
 
+# The OpenAPI document lists every route and the exact version, and is served without signing
+# in, so it is only served in development and test (the same rule as the secret-key check in
+# config.py: any other environment counts as production). Nothing in Ephemres reads it, and a
+# public copy would hand an attacker the route map and version in one request (M3 coverage
+# review, 2026-11-10). docs_url and redoc_url are None because the framework serves neither page.
+_SERVE_OPENAPI = settings.environment.lower() in ("development", "test")
+
 app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
     version="3.3.5",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/api/openapi.json" if _SERVE_OPENAPI else None,
     lifespan=lifespan,
 )
 

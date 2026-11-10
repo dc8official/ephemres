@@ -1,14 +1,43 @@
-"""What /api/openapi.json gives away (M3 coverage review, 2026-11-10).
+"""/api/openapi.json: off in production, and limited where it is served (M3 coverage review,
+2026-11-10).
 
-The document is served without signing in (install.sh prints its URL), so a pen test will read
-it. These tests pin what it holds: route paths, methods, names and tags, the title and version,
-and nothing else. No parameter or body schemas, so it reveals no field names, and no
-/docs or /redoc page. Before this file nothing ever requested it.
+The document is served without signing in and lists every route and the exact version, so it
+is only served in development and test (app/main.py). These tests check that production-like
+environments don't serve it, and pin what it holds where it is served: route paths, methods,
+names and tags, the title and version, and nothing else. No parameter or body schemas, so it
+reveals no field names, and no /docs or /redoc page.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
 from app.core.asgi import EphemresApp, TestClient
 from app.main import app
+
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+
+
+@pytest.mark.parametrize("environment, status", [
+    ("production", 404), ("staging", 404), ("development", 200), ("test", 200),
+])
+def test_the_document_is_served_only_in_development_and_test(environment, status):
+    # A fresh process, because app.main reads the environment once when it is imported.
+    probe = (
+        "import logging; logging.disable(50)\n"
+        "from app.main import app\n"
+        "from app.core.asgi import TestClient\n"
+        "print(TestClient(app).get('/api/openapi.json').status_code)\n"
+    )
+    env = dict(os.environ, PYTHONPATH=str(BACKEND), EPHEMRES_ENVIRONMENT=environment,
+               EPHEMRES_SECRET_KEY="k" * 64)  # production refuses the development key
+    out = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True,
+                         timeout=60, check=True).stdout
+    assert out.strip().splitlines()[-1] == str(status)
 
 
 def test_the_real_document_lists_routes_and_nothing_more():
