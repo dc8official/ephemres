@@ -12,7 +12,10 @@ held only here is gone after a reboot. PostgreSQL is the record.
 
 Each command is a short SQLite transaction run in a worker thread (asyncio.to_thread), one
 at a time per file. Only part of Redis exists: strings with expiry, sets, sorted sets,
-streams with consumer groups, and pub/sub.
+streams with consumer groups, and pub/sub. Within those, only the commands Ephemres calls are
+kept: SETEX, SCAN, ZSCORE, ZRANGE, ZREVRANGE, XLEN, XDEL, XTRIM and from_url() were removed in
+the M3 coverage review (2026-11-10) because nothing called them and no test ran them. Add a
+command back together with a test when a caller needs it.
 """
 from __future__ import annotations
 
@@ -26,7 +29,6 @@ import fcntl
 import threading
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Tuple, Union
-from urllib.parse import urlparse
 import weakref
 
 
@@ -436,17 +438,6 @@ class PubSub:
                 if c_str in _PUBSUB_WAITERS:
                     _PUBSUB_WAITERS[c_str].discard(self._queue)
 
-    async def get_message(
-        self, ignore_subscribe_messages: bool = True, timeout: float = 0.0
-    ) -> Optional[Dict[str, Any]]:
-        self._ensure_poller()
-        try:
-            if timeout and timeout > 0:
-                return await asyncio.wait_for(self._queue.get(), timeout=timeout)
-            return self._queue.get_nowait()
-        except (asyncio.QueueEmpty, asyncio.TimeoutError):
-            return None
-
     async def listen(self) -> AsyncIterator[Dict[str, Any]]:
         self._ensure_poller()
         while not self._closed:
@@ -467,12 +458,15 @@ class PubSub:
 
 
 class Pipeline:
-    """Queues commands and runs them together at execute(). With transaction=True (the
-    default) they run in one SQLite transaction: all are applied or none."""
+    """Queues commands and runs them together at execute(), in one SQLite transaction: all are
+    applied or none.
 
-    def __init__(self, client: "FastStoreClient", transaction: bool = True) -> None:
+    Only the commands listed below can be queued. There is no catch-all for other names (an
+    unknown command is an AttributeError when queued, not a failure at execute()), and no
+    non-transactional mode: nothing in Ephemres used either (M3 coverage review, 2026-11-10)."""
+
+    def __init__(self, client: "FastStoreClient") -> None:
         self._client = client
-        self._transaction = transaction
         self._ops: List[Tuple[str, tuple, dict]] = []
 
     async def __aenter__(self) -> "Pipeline":
@@ -485,15 +479,8 @@ class Pipeline:
         self._ops.append((method_name, args, kwargs))
         return self
 
-    def __getattr__(self, name: str):
-        def _wrapper(*args, **kwargs):
-            return self._enqueue(name, *args, **kwargs)
-
-        return _wrapper
-
     def get(self, *a, **kw) -> "Pipeline": return self._enqueue("get", *a, **kw)
     def set(self, *a, **kw) -> "Pipeline": return self._enqueue("set", *a, **kw)
-    def setex(self, *a, **kw) -> "Pipeline": return self._enqueue("setex", *a, **kw)
     def delete(self, *a, **kw) -> "Pipeline": return self._enqueue("delete", *a, **kw)
     def expire(self, *a, **kw) -> "Pipeline": return self._enqueue("expire", *a, **kw)
     def incr(self, *a, **kw) -> "Pipeline": return self._enqueue("incr", *a, **kw)
@@ -502,13 +489,10 @@ class Pipeline:
     def smembers(self, *a, **kw) -> "Pipeline": return self._enqueue("smembers", *a, **kw)
     def zadd(self, *a, **kw) -> "Pipeline": return self._enqueue("zadd", *a, **kw)
     def zrem(self, *a, **kw) -> "Pipeline": return self._enqueue("zrem", *a, **kw)
-    def zrange(self, *a, **kw) -> "Pipeline": return self._enqueue("zrange", *a, **kw)
-    def zrevrange(self, *a, **kw) -> "Pipeline": return self._enqueue("zrevrange", *a, **kw)
     def zremrangebyscore(self, *a, **kw) -> "Pipeline": return self._enqueue("zremrangebyscore", *a, **kw)
     def zcard(self, *a, **kw) -> "Pipeline": return self._enqueue("zcard", *a, **kw)
     def xadd(self, *a, **kw) -> "Pipeline": return self._enqueue("xadd", *a, **kw)
     def xack(self, *a, **kw) -> "Pipeline": return self._enqueue("xack", *a, **kw)
-    def xtrim(self, *a, **kw) -> "Pipeline": return self._enqueue("xtrim", *a, **kw)
     def publish(self, *a, **kw) -> "Pipeline": return self._enqueue("publish", *a, **kw)
 
     async def execute(self) -> List[Any]:
@@ -518,38 +502,25 @@ class Pipeline:
         if not ops:
             return results
 
-        if self._transaction:
-            def _tx_op(conn: sqlite3.Connection) -> List[Any]:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    res_list = []
-                    for name, args, kwargs in ops:
-                        op_fn = getattr(self._client, f"_{name}_op", None)
-                        if op_fn is None:
-                            raise FastStoreError(f"Operation '{name}' does not support pipeline transactions")
-                        res_list.append(op_fn(conn, *args, **kwargs))
-                    conn.execute("COMMIT")
-                    return res_list
-                except Exception:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-
-            return await self._client._store.execute(_tx_op)
-        else:
-            def _nontx_op(conn: sqlite3.Connection) -> List[Any]:
+        def _tx_op(conn: sqlite3.Connection) -> List[Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
                 res_list = []
                 for name, args, kwargs in ops:
                     op_fn = getattr(self._client, f"_{name}_op", None)
-                    if op_fn is not None:
-                        res_list.append(op_fn(conn, *args, **kwargs))
-                    else:
-                        raise FastStoreError(f"Operation '{name}' does not support pipeline")
+                    if op_fn is None:
+                        raise FastStoreError(f"Operation '{name}' does not support pipeline transactions")
+                    res_list.append(op_fn(conn, *args, **kwargs))
+                conn.execute("COMMIT")
                 return res_list
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
-            return await self._client._store.execute(_nontx_op)
+        return await self._client._store.execute(_tx_op)
 
 
 class FastStoreClient:
@@ -577,24 +548,6 @@ class FastStoreClient:
         self.decode_responses = bool(decode_responses)
         self._store = _SharedSQLiteStore.get(self.db)
 
-    @classmethod
-    def from_url(cls, url: str, **kwargs: Any) -> "FastStoreClient":
-        parsed = urlparse(url)
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 6379
-        db = 0
-        if parsed.path and parsed.path.strip("/"):
-            try:
-                db = int(parsed.path.strip("/").split("/")[0])
-            except ValueError:
-                db = 0
-        merged_kwargs = dict(kwargs)
-        if "decode_responses" not in merged_kwargs:
-            merged_kwargs["decode_responses"] = kwargs.get("decode_responses", False)
-        if parsed.password:
-            merged_kwargs["password"] = parsed.password
-        return cls(host=host, port=port, db=db, **merged_kwargs)
-
     async def __aenter__(self) -> "FastStoreClient":
         return self
 
@@ -615,7 +568,11 @@ class FastStoreClient:
         return await self._store.execute(self._ping_op)
 
     def pipeline(self, transaction: bool = True) -> Pipeline:
-        return Pipeline(self, transaction=transaction)
+        # redis-py's transaction=False sends the commands without MULTI/EXEC. FastStore always
+        # runs a pipeline as one transaction, so refuse False rather than quietly ignore it.
+        if not transaction:
+            raise FastStoreError("FastStore pipelines are always transactional; transaction=False is not supported")
+        return Pipeline(self)
 
     def pubsub(self) -> PubSub:
         return PubSub(self)
@@ -746,24 +703,6 @@ class FastStoreClient:
         xx: bool = False,
     ) -> Optional[bool]:
         return await self._store.execute(self._set_op, name, value, ex=ex, px=px, nx=nx, xx=xx)
-
-    def _setex_op(
-        self,
-        conn: sqlite3.Connection,
-        name: Union[str, bytes],
-        time_sec: Union[int, float],
-        value: Any,
-    ) -> bool:
-        res = self._set_op(conn, name, value, ex=time_sec)
-        return bool(res)
-
-    async def setex(
-        self,
-        name: Union[str, bytes],
-        time_sec: Union[int, float],
-        value: Any,
-    ) -> bool:
-        return await self._store.execute(self._setex_op, name, time_sec, value)
 
     def _delete_op(self, conn: sqlite3.Connection, *names: Union[str, bytes]) -> int:
         if not names:
@@ -914,13 +853,6 @@ class FastStoreClient:
 
     async def keys(self, pattern: Union[str, bytes] = "*") -> List[Any]:
         return await self._store.execute(self._keys_op, pattern)
-
-    async def scan_iter(
-        self, match: Union[str, bytes] = "*", count: Optional[int] = None
-    ) -> AsyncIterator[Any]:
-        all_matched = await self.keys(match)
-        for k in all_matched:
-            yield k
 
     # -----------------------------------------------------------------------
     # Sets Store
@@ -1080,79 +1012,6 @@ class FastStoreClient:
 
     async def zcard(self, name: Union[str, bytes]) -> int:
         return await self._store.execute(self._zcard_op, name)
-
-    def _zscore_op(self, conn: sqlite3.Connection, name: Union[str, bytes], value: Any) -> Optional[float]:
-        k_str = _to_str(name)
-        m_bytes = _encode_val(value)
-        row = conn.execute(
-            "SELECT score FROM zset_store WHERE k = ? AND member = ?",
-            (k_str, m_bytes),
-        ).fetchone()
-        return float(row[0]) if row else None
-
-    async def zscore(self, name: Union[str, bytes], value: Any) -> Optional[float]:
-        return await self._store.execute(self._zscore_op, name, value)
-
-    def _zrange_op(
-        self,
-        conn: sqlite3.Connection,
-        name: Union[str, bytes],
-        start: int,
-        end: int,
-        desc: bool = False,
-        withscores: bool = False,
-    ) -> List[Any]:
-        k_str = _to_str(name)
-        order = "DESC" if desc else "ASC"
-        rows = conn.execute(
-            f"SELECT member, score FROM zset_store WHERE k = ? ORDER BY score {order}, member {order}",
-            (k_str,),
-        ).fetchall()
-        n = len(rows)
-        s_idx = int(start)
-        e_idx = int(end)
-        if s_idx < 0:
-            s_idx = max(0, n + s_idx)
-        if e_idx < 0:
-            e_idx = n + e_idx
-        slice_rows = rows[s_idx : e_idx + 1] if s_idx <= e_idx and s_idx < n else []
-        res = []
-        for m_bytes, score in slice_rows:
-            m = m_bytes.decode("utf-8", errors="replace") if self.decode_responses else m_bytes
-            if withscores:
-                res.append((m, float(score)))
-            else:
-                res.append(m)
-        return res
-
-    async def zrange(
-        self,
-        name: Union[str, bytes],
-        start: int,
-        end: int,
-        desc: bool = False,
-        withscores: bool = False,
-    ) -> List[Any]:
-        return await self._store.execute(self._zrange_op, name, start, end, desc=desc, withscores=withscores)
-
-    def _zrevrange_op(
-        self,
-        conn: sqlite3.Connection,
-        name: Union[str, bytes],
-        start: int,
-        end: int,
-        withscores: bool = False,
-    ) -> List[Any]:
-        return self._zrange_op(conn, name, start, end, desc=True, withscores=withscores)
-
-    async def zrevrange(
-        self,
-        name: Union[str, bytes],
-        start: int,
-        end: int,
-        withscores: bool = False,
-    ) -> List[Any]:
-        return await self._store.execute(self._zrevrange_op, name, start, end, withscores=withscores)
 
     def _zremrangebyscore_op(
         self,
@@ -1553,82 +1412,6 @@ class FastStoreClient:
             return 0
         return await self._store.execute(self._xack_op, name, groupname, *ids)
 
-    def _xtrim_op(
-        self,
-        conn: sqlite3.Connection,
-        name: Union[str, bytes],
-        maxlen: Optional[int] = None,
-        approximate: bool = True,
-        minid: Optional[Union[str, bytes]] = None,
-        limit: Optional[int] = None,
-    ) -> int:
-        s_name = _to_str(name)
-        trimmed = 0
-        if minid is not None:
-            min_ms, min_seq = _parse_stream_id(minid)
-            c = conn.execute(
-                """
-                DELETE FROM stream_entries
-                WHERE stream = ? AND (id_ms < ? OR (id_ms = ? AND id_seq < ?))
-                """,
-                (s_name, min_ms, min_ms, min_seq),
-            ).rowcount
-            trimmed += c
-        if maxlen is not None and int(maxlen) >= 0:
-            c = conn.execute(
-                """
-                DELETE FROM stream_entries
-                WHERE stream = ? AND rowid NOT IN (
-                    SELECT rowid FROM stream_entries WHERE stream = ? ORDER BY id_ms DESC, id_seq DESC LIMIT ?
-                )
-                """,
-                (s_name, s_name, int(maxlen)),
-            ).rowcount
-            trimmed += c
-        return trimmed
-
-    async def xtrim(
-        self,
-        name: Union[str, bytes],
-        maxlen: Optional[int] = None,
-        approximate: bool = True,
-        minid: Optional[Union[str, bytes]] = None,
-        limit: Optional[int] = None,
-    ) -> int:
-        return await self._store.execute(
-            self._xtrim_op, name, maxlen=maxlen, approximate=approximate, minid=minid, limit=limit
-        )
-
-    def _xlen_op(self, conn: sqlite3.Connection, name: Union[str, bytes]) -> int:
-        s_name = _to_str(name)
-        row = conn.execute(
-            "SELECT COUNT(*) FROM stream_entries WHERE stream = ?",
-            (s_name,),
-        ).fetchone()
-        return int(row[0]) if row else 0
-
-    async def xlen(self, name: Union[str, bytes]) -> int:
-        return await self._store.execute(self._xlen_op, name)
-
-    def _xdel_op(self, conn: sqlite3.Connection, name: Union[str, bytes], *ids: Union[str, bytes]) -> int:
-        if not ids:
-            return 0
-        s_name = _to_str(name)
-        deleted = 0
-        for e_id in ids:
-            id_str = _to_str(e_id)
-            c = conn.execute(
-                "DELETE FROM stream_entries WHERE stream = ? AND entry_id = ?",
-                (s_name, id_str),
-            ).rowcount
-            deleted += c
-        return deleted
-
-    async def xdel(self, name: Union[str, bytes], *ids: Union[str, bytes]) -> int:
-        if not ids:
-            return 0
-        return await self._store.execute(self._xdel_op, name, *ids)
-
     # -----------------------------------------------------------------------
     # Pub/Sub publish
     # -----------------------------------------------------------------------
@@ -1673,9 +1456,4 @@ class FastStoreClient:
         return max(recipients, 1)
 
 
-def from_url(url: str, **kwargs: Any) -> FastStoreClient:
-    return FastStoreClient.from_url(url, **kwargs)
-
-
-connect_faststore = from_url
 Redis = FastStoreClient

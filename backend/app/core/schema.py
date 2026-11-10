@@ -12,6 +12,9 @@ Where it differs from Pydantic:
   unchecked.
 - pattern= is matched with re.search, so it may match part of the string; anchor it with ^
   and $ to require a full match.
+- model_validate_json() and TypeAdapter.dump_python() are not provided (removed in the M3
+  coverage review, 2026-11-10, because nothing called them). Parse with json.loads and call
+  model_validate(); dump with model_dump().
 """
 
 from __future__ import annotations
@@ -935,22 +938,6 @@ class SchemaModel(metaclass=ModelMetaclass):
         """Pydantic v1 backward compatibility alias for model_validate(obj, from_attributes=True)."""
         return cls.model_validate(obj, from_attributes=True)
 
-    @classmethod
-    def model_validate_json(
-        cls: Type[T],
-        json_data: Union[str, bytes],
-        *,
-        from_attributes: Optional[bool] = None,
-    ) -> T:
-        """Parse JSON string and validate against schema."""
-        parsed = json.loads(json_data)
-        if not isinstance(parsed, dict):
-            raise ValidationError(
-                [{"loc": ("__root__",), "msg": "Expected JSON dictionary", "type": "value_error"}],
-                title=cls.__name__,
-            )
-        return cls.model_validate(parsed, from_attributes=from_attributes)
-
     # -----------------------------------------------------------------------
     # Serialization
     # -----------------------------------------------------------------------
@@ -1129,14 +1116,6 @@ class TypeAdapter(Generic[T]):
                 return [adapter.validate_python(x) for x in data]
             return data
         return data
-
-    def dump_python(self, data: Any, mode: str = "python", by_alias: bool = False) -> Any:
-        if isinstance(data, BaseModel):
-            return data.model_dump(mode=mode, by_alias=by_alias)
-        if isinstance(data, (list, tuple)):
-            return [TypeAdapter(Any).dump_python(x, mode=mode, by_alias=by_alias) for x in data]
-        return data
-
 
 __all__ = [
     "SchemaModel",

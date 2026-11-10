@@ -14,8 +14,8 @@ providing a 100% Python Standard Library + asyncpg drop-in engine covering:
 
 The names follow SQLAlchemy so existing code kept working, but the behaviour is narrower. Where
 it differs, and where it bites:
-- Relationships are not loaded in general. relationship(), joinedload() and selectinload() are
-  accepted and do nothing, except two hard-coded cases resolved after a SELECT: User.role and
+- Relationships are not loaded in general. relationship() and joinedload() are accepted and do
+  nothing, except two hard-coded cases resolved after a SELECT: User.role and
   UserSession.user (AsyncSession._hydrate_select_results). Any other relationship attribute stays
   None unless the code sets it.
 - A model column is any annotated class attribute, including ones without mapped_column(); its
@@ -29,6 +29,9 @@ it differs, and where it bites:
 - A Python list or dict parameter is sent as JSON text; pass a tuple to get a PostgreSQL array.
 - text() parameters must be typed where PostgreSQL can't infer them (CAST(:x AS timestamptz)),
   because asyncpg asks the server for each $n's type when it prepares the statement.
+- Not provided, because nothing called them (M3 coverage review, 2026-11-10): selectinload(),
+  Select.with_for_update(), AsyncSession.add_all() and Result.scalar_one(). Use
+  scalar_one_or_none() and check for None, or add the method back with a test.
 """
 
 from __future__ import annotations
@@ -1343,9 +1346,6 @@ class Select(SQLElement):
         self._offset: Optional[int] = None
         self._distinct: Optional[Union[bool, List[Any]]] = None
         self._options: List[Any] = []
-        self._for_update: bool = False
-        self._skip_locked: bool = False
-        self._nowait: bool = False
 
     @property
     def selected_columns(self) -> List[Any]:
@@ -1368,9 +1368,6 @@ class Select(SQLElement):
         new_sel._offset = self._offset
         new_sel._distinct = copy.copy(self._distinct) if isinstance(self._distinct, list) else self._distinct
         new_sel._options = list(self._options)
-        new_sel._for_update = self._for_update
-        new_sel._skip_locked = self._skip_locked
-        new_sel._nowait = self._nowait
         return new_sel
 
     def where(self, *conditions: Any) -> Select:
@@ -1438,13 +1435,6 @@ class Select(SQLElement):
     def options(self, *opts: Any) -> Select:
         s = self.clone()
         s._options.extend(opts)
-        return s
-
-    def with_for_update(self, skip_locked: bool = False, nowait: bool = False) -> Select:
-        s = self.clone()
-        s._for_update = True
-        s._skip_locked = skip_locked
-        s._nowait = nowait
         return s
 
     def subquery(self, name: Optional[str] = None) -> Subquery:
@@ -1579,15 +1569,9 @@ class Select(SQLElement):
         if self._offset is not None:
             parts.append(f"OFFSET {self._offset}")
 
-        # FOR UPDATE
-        if self._for_update:
-            lock = "FOR UPDATE"
-            if self._nowait:
-                lock += " NOWAIT"
-            elif self._skip_locked:
-                lock += " SKIP LOCKED"
-            parts.append(lock)
-
+        # No FOR UPDATE: with_for_update() was removed in the M3 coverage review (2026-11-10)
+        # because nothing used it. Ephemres serialises jobs with advisory locks instead
+        # (services/scheduler_leader.py). Add it back with a test if a row lock is ever needed.
         return " ".join(parts)
 
     # FROM is one table: select_from() if given, else the first table found in the selected
@@ -1930,10 +1914,6 @@ def joinedload(rel_prop: Any) -> Any:
     return rel_prop
 
 
-def selectinload(rel_prop: Any) -> Any:
-    return rel_prop
-
-
 def mapped_column(*args: Any, **kwargs: Any) -> Column:
     return Column(*args, **kwargs)
 
@@ -2205,9 +2185,6 @@ class Result:
 
     def scalars(self) -> ScalarResult:
         return ScalarResult(self._rows)
-
-    def scalar_one(self) -> Any:
-        return self.scalars().one()
 
     def scalar_one_or_none(self) -> Optional[Any]:
         return self.scalars().one_or_none()
@@ -2533,10 +2510,6 @@ class AsyncSession:
     def add(self, obj: DeclarativeBase) -> None:
         if obj not in self._new and not getattr(obj, "_orm_persisted", False):
             self._new.append(obj)
-
-    def add_all(self, objs: Iterable[DeclarativeBase]) -> None:
-        for obj in objs:
-            self.add(obj)
 
     def delete(self, obj: DeclarativeBase) -> Any:
         if obj not in self._deleted:

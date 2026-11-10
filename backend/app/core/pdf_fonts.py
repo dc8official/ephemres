@@ -75,10 +75,6 @@ def embedded_font(font: str) -> Optional[TrueTypeFont]:
     return _loaded[font]
 
 
-def is_embedded(font: str) -> bool:
-    return font in _FALLBACK_FILES
-
-
 _HELVETICA_X_HEIGHT = 523 / 1000.0
 
 
