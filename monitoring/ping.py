@@ -505,7 +505,8 @@ async def run_system_ping_fallback(
     try:
         # Older iputils ping refuses intervals under 0.2 s unless run as root.
         safe_interval = max(0.2, interval)
-        # -W takes whole seconds, at least 1.
+        # Whole seconds, at least 1: BusyBox and older iputils accept only an integer -W
+        # (current iputils also takes fractions).
         reply_wait = int(max(1, timeout))
         # The longest ping can run: every probe waiting out its timeout, plus the gaps between
         # probes, plus 5 s to start the process and print the summary. Leaving the gaps out

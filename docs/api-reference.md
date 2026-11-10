@@ -51,23 +51,24 @@ Connects to the real-time Server-Sent Events (SSE) telemetry stream.
   - `NODE_STATE_CHANGE`: Emitted for real-time topology canvas node recoloring.
   - `RCA_INCIDENT`: Emitted on root-cause analysis triggers and resolutions.
   - `ROUTE_HINT`: Emitted when NetFlow route augmentation (`PathTracker` in `ephemres-flowd`) sees a sustained dominant path change for a monitored endpoint; the leader API worker also uses it to queue a targeted traceroute.
+  - `TOPOLOGY_UPDATED`: Emitted when the topology map should be reloaded, with a `reason`: `ROUTE_DISCOVERED` (an endpoint's baseline route was recorded, with its `endpoint_id`), `MANUAL_REBUILD`, `FLEET_DISCOVERY_STARTED` (with `enqueued_count`) or `FLEET_DISCOVERY_COMPLETED`. It does not go through the event broker, so only browsers connected to the API worker that did the work receive it; the others see the change the next time the map is loaded.
   - `: heartbeat\n\n`: Emitted every 15 seconds if idle to prevent proxy timeouts.
 
 ---
 
 ## 2. Authentication (`/auth`)
 
-All routes (except `/login` and `/version`) require a valid session token, sent either as the `ephemres_access_token` cookie (what the browser does) or as a header:
+All routes except `POST /auth/login`, `POST /auth/logout`, `/version` and the health routes (`/api/v1/health` and the liveness and readiness probes) require a valid session token, sent either as the `ephemres_access_token` cookie (what the browser does) or as a header:
 `Authorization: Bearer <your_jwt_token>`
 
 ### `POST /auth/login`
 Authenticates a user and starts a session.
 - **Request Body:** JSON containing `username` and `password`.
 - **Response:** `200 OK` with `data` `{ "username": "...", "role": "ADMIN", "must_change_password": false, "message": "Login successful." }`. The token itself is not in the body: it is set as the `ephemres_access_token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS or with HSTS enabled, lifetime = session timeout). A script can take the token from the `Set-Cookie` response header and send it back as that cookie or as a Bearer header.
-- When `must_change_password` is `true`, every route except `POST /auth/change-password` refuses the session until the password is changed.
+- When `must_change_password` is `true`, every route that needs a session answers `403` until the password is changed through `POST /auth/change-password` (signing out still works).
 
 ### `POST /auth/logout`
-Terminates the active session and invalidates the session token in the active storage driver.
+Ends the session (its row in PostgreSQL `user_sessions` is deleted, so the token stops working on every worker) and clears the cookie. It always answers `200`, even with an expired or invalid token, so a browser can always sign out.
 
 ### `POST /auth/change-password`
 Updates the authenticated user's password.
@@ -352,7 +353,7 @@ Updates runtime parameters (requires `Admin` role).
   - `alerting_enabled` (bool, optional): Global master toggle to enable or suspend all outbound alert notifications.
   - `performance_mode` (bool, optional): Routes live events between processes through FastStore instead of PostgreSQL `LISTEN`/`NOTIFY`. Sessions and lockouts stay in PostgreSQL either way, and flow ingestion does not depend on it.
   - `l2_auto_bypass` (bool, optional): Controls Layer-2 direct ICMP diagnostic bypass.
-  - `session_timeout` (int, 1–1440 min): Idle session expiration duration.
+  - `session_timeout` (int, 1–1440 min): How long a session lasts from sign-in. It is a fixed lifetime, not an idle timeout: activity does not extend it. Sessions that already exist keep the lifetime they started with.
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
   - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection. Turning it on runs the flow preflight below first (with the ports in the same request, if given) and answers `400` if it fails.
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
@@ -417,20 +418,26 @@ Updates corporate organization branding and PDF report headers/footers (requires
 
 Manage user accounts and role-based access control (requires `Admin` role).
 
+An admin can't reset, edit or deactivate their own account through these routes (`400`); their own password changes through `POST /auth/change-password`.
+
 ### `GET /users/`
-Lists all user accounts.
+Lists all user accounts: `id`, `username`, `role`, `is_active`, `must_change_password`, `last_login`, `created_at`.
 
 ### `POST /users/`
-Creates a new user account (assignable as `ADMIN` or `VIEWER`).
+Creates a new user account.
+- **Request Body:** `username` (3 to 50 characters), `role` (`ADMIN` or `VIEWER`), `password` (optional).
+- With no `password`, one is generated and returned once as `generated_password` in the response. It is not stored in readable form and can't be shown again. Every new account must change its password at first sign-in.
 
 ### `POST /users/{id}/reset-password`
-Forces a password reset for a specific user.
+Sets a new password and signs the user out everywhere.
+- **Request Body:** `password` (optional). Without it, a password is generated and returned once as `generated_password`.
+- The user must change it at the next sign-in.
 
 ### `PATCH /users/{id}`
-Updates a user account role (`ADMIN` / `VIEWER`) or active status.
+Changes `role` (`ADMIN` / `VIEWER`) and/or `is_active`. A role change or deactivation signs the user out everywhere.
 
 ### `DELETE /users/{id}`
-Deactivates or deletes a user account.
+Deactivates the account (`is_active = false`) and signs it out everywhere. The account and its audit history are kept; nothing is deleted.
 
 ---
 

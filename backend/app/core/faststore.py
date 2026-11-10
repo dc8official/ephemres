@@ -300,7 +300,8 @@ class _SharedSQLiteStore:
             cur.close()
 
     def execute_sync(self, fn, *args, **kwargs):
-        # One lock per database file: flowd's stream file must not block its other store.
+        # One lock per database file (per FastStore db number), so commands on one file never
+        # wait for another file's.
         with self._lock:
             return fn(self._conn, *args, **kwargs)
 

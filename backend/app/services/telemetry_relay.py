@@ -22,12 +22,13 @@ ROUTE_HINT_MAX_PER_MINUTE = 10
 
 
 class TelemetryRelay:
-    """
-    Inter-process telemetry relay bridge.
-    Subscribes to monitoring engine pub/sub channels (STATE_TRANSITION and NODE_STATE_CHANGE)
-    via the active EventBroker (PostgreSQL LISTEN/NOTIFY or Redis Pub/Sub),
-    updates API server in-memory DAG topology_manager, and broadcasts SSE envelopes
-    to connected browser clients.
+    """Carries events from the other processes into this API worker.
+
+    Listens on STATE_TRANSITION, NODE_STATE_CHANGE, RCA_INCIDENT and ROUTE_HINT through the
+    active event broker (PostgreSQL LISTEN/NOTIFY, or FastStore pub/sub in Performance Mode).
+    State changes update this worker's topology map, and a recovery to UP can start a baseline
+    discovery for an endpoint that has none; a ROUTE_HINT may queue a traceroute (leader worker
+    only). Every event is then passed on to this worker's SSE clients.
     """
 
     def __init__(self) -> None:
