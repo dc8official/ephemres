@@ -66,6 +66,7 @@ def test_a_union_takes_the_first_type_that_converts():
 def test_literal_accepts_only_its_values():
     assert ok("wan", Literal["wan", "lan"]) == "wan"
     refused("WAN", Literal["wan", "lan"])
+    refused(True, Literal[1, 2])  # True == 1 in Python, but it is not the literal 1
 
 
 # --- numbers ------------------------------------------------------------------------------------
@@ -83,6 +84,8 @@ def test_decimal_conversion_goes_through_text_so_floats_keep_their_shortest_form
     assert ok(0.1, Decimal) == Decimal("0.1")  # not 0.1000000000000000055511151231257827...
     assert ok(Decimal("3"), Decimal) == Decimal("3")
     refused("ten", Decimal)
+    for not_finite in ("NaN", "Infinity", float("nan"), float("-inf"), Decimal("NaN")):
+        refused(not_finite, Decimal)
 
 
 # --- text, bytes, ids ---------------------------------------------------------------------------
@@ -113,7 +116,8 @@ def test_uuid_conversion():
 
 def test_date_conversion():
     assert ok("2026-11-10", date) == date(2026, 11, 10)
-    assert ok(datetime(2026, 11, 10, 12, 30), date) == date(2026, 11, 10)
+    assert ok(datetime(2026, 11, 10), date) == date(2026, 11, 10)
+    refused(datetime(2026, 11, 10, 12, 30), date)  # the time of day would be lost
     refused("10/11/2026", date)
     refused(20261110, date)
 
@@ -154,11 +158,10 @@ def test_types_the_validator_does_not_list_are_passed_through_unchecked():
 
 # --- enums and nested models --------------------------------------------------------------------
 
-def test_enum_accepts_its_values_and_its_member_names():
+def test_enum_accepts_its_values_only():
     assert ok("red", Colour) is Colour.RED
     assert ok(Colour.BLUE, Colour) is Colour.BLUE
-    # Pydantic accepts only values; this validator also accepts the member name.
-    assert ok("RED", Colour) is Colour.RED
+    refused("RED", Colour)  # a member name is not a value (as in Pydantic)
     refused("green", Colour)
 
 

@@ -29,6 +29,9 @@ it differs, and where it bites:
 - A Python list or dict parameter is sent as JSON text; pass a tuple to get a PostgreSQL array.
 - text() parameters must be typed where PostgreSQL can't infer them (CAST(:x AS timestamptz)),
   because asyncpg asks the server for each $n's type when it prepares the statement.
+- Results of raw text() SQL are asyncpg's own values: jsonb comes back as JSON text (SQLAlchemy
+  would give a dict) and inet as ipaddress objects. Columns on models and columns selected
+  through the ORM are converted: jsonb parsed, inet as text (hydrate_column_value).
 - Not provided, because nothing called them (M3 coverage review, 2026-11-10): selectinload(),
   Select.with_for_update(), AsyncSession.add_all() and Result.scalar_one(). Use
   scalar_one_or_none() and check for None, or add the method back with a test.
@@ -2882,6 +2885,12 @@ class AsyncSession:
                         val = rec_values[rec_offset]
                     else:
                         val = None
+                    # A column selected on its own (or labelled) is converted like the same
+                    # column on a loaded model: JSONB parsed, inet as text. It used to come back
+                    # raw, so select(Endpoint.flow_interface_aliases) gave JSON text where
+                    # select(Endpoint) gave a dict (differential suite, M3, 2026-11-10).
+                    if isinstance(entity, (ColumnClause, LabelClause)):
+                        val = hydrate_column_value(val, getattr(entity, "type", None))
                     slot_values.append(val)
                     row_mapping[col_name] = val
                     if isinstance(entity, (CTE, Subquery)):

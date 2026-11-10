@@ -108,3 +108,17 @@ def test_pipeline_has_no_catch_all_for_unknown_commands():
     pipe = FastStoreClient(db=93).pipeline()
     with pytest.raises(AttributeError):
         pipe.setx("k", "v")  # a typo of set/setex: refused when queued, not at execute()
+
+
+# --- found by the differential suite against Pydantic (M3, 2026-11-10) ------------------------
+
+def test_int_parses_text_but_no_other_objects():
+    from uuid import UUID
+    assert _coerce_value("12", int, "f", {}) == 12
+    with pytest.raises(ValueError):
+        _coerce_value(UUID(int=5), int, "f", {})  # int() would have turned it into 5
+
+
+@pytest.mark.parametrize("word, expected", [("y", True), ("n", False), ("Y", True)])
+def test_bool_accepts_y_and_n_like_pydantic(word, expected):
+    assert _coerce_value(word, bool, "f", {}) is expected
