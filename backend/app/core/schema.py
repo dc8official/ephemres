@@ -51,6 +51,8 @@ from typing import (
 )
 from uuid import UUID
 
+from app.core.annotations import own_annotations
+
 T = TypeVar("T")
 
 try:
@@ -568,8 +570,10 @@ class ModelMetaclass(type):
             if hasattr(base, "_field_types"):
                 field_types.update(base._field_types)
 
-        # Collect current annotations
-        raw_annotations = namespace.get("__annotations__", {})
+        # Collect current annotations. Not namespace["__annotations__"]: Python 3.14 leaves that
+        # out of the class body, and every model outside a `from __future__ import annotations`
+        # module then had no fields (see own_annotations).
+        raw_annotations = own_annotations(cls, namespace)
 
         # Resolve type hints with fallback
         resolved_hints: Dict[str, Any] = {}

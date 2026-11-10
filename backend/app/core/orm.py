@@ -76,6 +76,8 @@ from typing import (
 )
 from uuid import UUID as PyUUID, uuid4
 
+from app.core.annotations import own_annotations
+
 try:
     import asyncpg
 except ImportError:
@@ -1970,7 +1972,10 @@ class DeclarativeMeta(type):
         relationships: Dict[str, RelationshipProperty] = {}
         primary_keys: List[str] = []
 
-        annotations = namespace.get("__annotations__", {})
+        # Not namespace["__annotations__"], which Python 3.14 leaves out of the class body: a
+        # model outside a `from __future__ import annotations` module would lose its
+        # annotation-only columns and the types inferred from annotations (see own_annotations).
+        annotations = own_annotations(cls, namespace)
 
         # Inspect class attributes & annotations
         for attr_name, val in list(namespace.items()):
