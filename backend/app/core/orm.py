@@ -24,8 +24,11 @@ it differs, and where it bites:
   (both have "id") fills both from the same value.
 - A SELECT has one FROM table, the first one found; any other table must come in with join().
 - Every statement runs with a 10 s timeout (asyncpg command_timeout, AsyncEngine._get_pool).
-- create_async_engine() takes only pool_size and max_overflow (one pool of their sum); any other
-  option raises TypeError instead of being ignored.
+- Waiting for a free pooled connection gives up after pool_timeout seconds (30 by default, as
+  in SQLAlchemy; Ephemres sets database.pool_timeout, 5 s) with PoolTimeoutError, a
+  DatabaseUnavailableError.
+- create_async_engine() takes only pool_size, max_overflow (one pool of their sum) and
+  pool_timeout; any other option raises TypeError instead of being ignored.
 - A Python list or dict parameter is sent as JSON text; pass a tuple to get a PostgreSQL array.
 - text() parameters must be typed where PostgreSQL can't infer them (CAST(:x AS timestamptz)),
   because asyncpg asks the server for each $n's type when it prepares the statement.
@@ -98,6 +101,15 @@ class DBAPIError(SQLAlchemyError):
 class DatabaseUnavailableError(DBAPIError):
     """No connection to the database could be made. When every address fails asyncpg raises a
     plain OSError, which says nothing about where it came from."""
+
+
+class PoolTimeoutError(DatabaseUnavailableError):
+    """Every pooled connection stayed busy for pool_timeout seconds (SQLAlchemy's TimeoutError).
+
+    A subclass of DatabaseUnavailableError on purpose: the API answers it with 503 and
+    Retry-After, and the engine treats it as "try again later", which is right for both. Before
+    it existed, a request waited for a free connection with no limit and then for its own 10 s
+    query timeout; under a 25 s lock the slowest took 24 s (scale and core review S6)."""
 
 
 class OperationalError(DBAPIError):
@@ -2313,8 +2325,9 @@ class AsyncEngine:
 
     # The only options that do something. Others SQLAlchemy accepts (echo, pool_pre_ping,
     # pool_recycle, ...) used to be accepted and silently ignored; they now raise TypeError, so
-    # nobody relies on a setting that isn't there (scale review M2).
-    SUPPORTED_OPTIONS = frozenset({"pool_size", "max_overflow"})
+    # nobody relies on a setting that isn't there (scale review M2). pool_timeout works as in
+    # SQLAlchemy since scale review S6: seconds to wait for a free connection (default 30).
+    SUPPORTED_OPTIONS = frozenset({"pool_size", "max_overflow", "pool_timeout"})
 
     def __init__(self, url: str, **kwargs: Any) -> None:
         unsupported = sorted(set(kwargs) - self.SUPPORTED_OPTIONS)
@@ -2323,6 +2336,9 @@ class AsyncEngine:
         self.url = self._normalize_url(url)
         self.pool_size = kwargs.get("pool_size", 10)
         self.max_overflow = kwargs.get("max_overflow", 10)
+        self.pool_timeout = float(kwargs.get("pool_timeout", 30.0))
+        if self.pool_timeout <= 0:
+            raise ValueError("pool_timeout must be a positive number of seconds")
         self.dialect = types.SimpleNamespace(name="postgresql")
         self._pool: Optional[Any] = None
         self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
@@ -2397,16 +2413,34 @@ class AsyncEngine:
                 )
         return self._pool
 
-    async def acquire_connection(self) -> Any:
-        """A pooled connection, or DatabaseUnavailableError when none can be made. A timeout
-        stays a timeout, and a dropped connection surfaces when it is used."""
+    async def acquire_connection(self, timeout: Optional[float] = None) -> Any:
+        """A pooled connection, or DatabaseUnavailableError when none can be made, or
+        PoolTimeoutError when all stay busy for `timeout` seconds (pool_timeout by default).
+        A timeout while connecting stays a timeout, and a dropped connection surfaces when it
+        is used."""
         try:
             pool = await self._get_pool()
-            return await pool.acquire()
         except TimeoutError:
             raise
         except OSError as exc:
             raise DatabaseUnavailableError(str(exc)) from exc
+        wait = self.pool_timeout if timeout is None else timeout
+        try:
+            return await pool.acquire(timeout=wait)
+        except TimeoutError as exc:
+            # asyncpg raises TimeoutError both when no pooled connection frees up and when
+            # opening a new one times out (pool timeout=5.0 above); either way none came in time.
+            raise PoolTimeoutError(
+                f"no database connection became free within {wait:g} s "
+                f"(pool of {self.pool_size + self.max_overflow})"
+            ) from exc
+        except OSError as exc:
+            raise DatabaseUnavailableError(str(exc)) from exc
+
+    async def release_connection(self, conn: Any) -> None:
+        """Give back a connection from acquire_connection()."""
+        if self._pool is not None:
+            await self._pool.release(conn)
 
     def connect(self) -> _AsyncEngineConnectContext:
         return _AsyncEngineConnectContext(self, begin_tx=False)

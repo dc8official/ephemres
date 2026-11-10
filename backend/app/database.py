@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import AsyncGenerator
 
@@ -23,10 +24,35 @@ logger = logging.getLogger(__name__)
 # echo, pool_pre_ping and pool_recycle used to be passed here and were silently ignored. asyncpg
 # closes a connection idle for 300 s on its own, and a connection that died with the server
 # fails on its next use (the API answers 503 and the next request gets a fresh one).
+#
+# Each API worker gets a pool of EPHEMRES_API_DB_POOL connections when its systemd unit sets it
+# (10: plenty for about 300 requests/s, scale and core review S6), so the workers don't take the
+# engine's and flowd's share of PostgreSQL's connections. Other processes use database.pool_size
+# + database.max_overflow (20 by default).
+API_DB_POOL_ENV = "EPHEMRES_API_DB_POOL"
+
+
+def _is_api_process() -> bool:
+    """True in uvicorn and its workers (which inherit uvicorn's argv), false in the engine,
+    flowd and scripts. They all load /etc/ephemres/ephemres.env, so an API setting placed there
+    by mistake must not shrink the engine's pool."""
+    return os.path.basename(sys.argv[0] if sys.argv else "") == "uvicorn"
+
+
+def _pool_sizes() -> tuple[int, int]:
+    """(pool_size, max_overflow) for this process."""
+    api_pool = os.environ.get(API_DB_POOL_ENV, "").strip()
+    if _is_api_process() and api_pool.isdigit() and int(api_pool) > 0:
+        return int(api_pool), 0
+    return settings.database.pool_size, settings.database.max_overflow
+
+
+_POOL_SIZE, _MAX_OVERFLOW = _pool_sizes()
 async_engine = create_async_engine(
     settings.db_url,
-    pool_size=getattr(settings.database, "pool_size", 10),
-    max_overflow=getattr(settings.database, "max_overflow", 10),
+    pool_size=_POOL_SIZE,
+    max_overflow=_MAX_OVERFLOW,
+    pool_timeout=settings.database.pool_timeout,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,3 +153,76 @@ async def check_database_connection(max_retries: int = 5, retry_delay: float = 2
                     f"Could not connect to the database after {max_retries} attempts: {exc}"
                 )
 
+
+
+# ---------------------------------------------------------------------------
+# Readiness probe and connection budget (scale and core review S6)
+# ---------------------------------------------------------------------------
+async def ping_database(timeout: float = 2.0) -> None:
+    """SELECT 1 on a pooled connection, waiting at most `timeout` s for one to come free.
+
+    For the readiness probe. Through a session it waited for a connection with no limit, then
+    answered 200 "ready" after 10 s while users were getting errors; now a full pool raises
+    PoolTimeoutError within `timeout`, so a health checker sees this worker as busy in time.
+    Uses the pool rather than a connection of its own, so probing every few seconds never adds
+    to the connection count."""
+    conn = await async_engine.acquire_connection(timeout=timeout)
+    try:
+        await conn.fetchval("SELECT 1")
+    finally:
+        await async_engine.release_connection(conn)
+
+
+API_WORKERS_ENV = "EPHEMRES_API_WORKERS"
+
+
+def connection_budget(
+    max_connections: int,
+    reserved: int,
+    api_workers: int,
+    api_pool: int,
+    other_pool: int,
+) -> tuple[int, int]:
+    """(connections Ephemres may open at its peak, connections PostgreSQL lets it open).
+
+    Each API worker holds its pool plus one LISTEN connection for live events; the engine and
+    flowd each hold their pool plus one (the engine measured 17 to 21 against a pool of 20).
+    `reserved` is what only superusers may use (superuser_reserved_connections, plus
+    reserved_connections on PostgreSQL 16 and later)."""
+    need = api_workers * (api_pool + 1) + 2 * (other_pool + 1)
+    return need, max_connections - reserved
+
+
+async def check_connection_budget() -> None:
+    """Log a warning at API startup when every Ephemres pool filled at once would need more
+    connections than PostgreSQL allows; the last ones to connect would then fail with "too many
+    clients". It used to be found only under load: a third API worker on the default
+    max_connections = 100 doesn't fit (docs/troubleshooting.md). Never stops startup."""
+    try:
+        async with async_engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT current_setting('max_connections')::int, "
+                "current_setting('superuser_reserved_connections')::int, "
+                "COALESCE(current_setting('reserved_connections', true), '0')::int"
+            ))).fetchone()
+    except Exception as exc:
+        logger.warning("Could not read PostgreSQL connection limits: %s", exc)
+        return
+    max_conn, su_reserved, reserved = row[0], row[1], row[2]
+    workers_raw = os.environ.get(API_WORKERS_ENV, "").strip()
+    workers = int(workers_raw) if workers_raw.isdigit() and int(workers_raw) > 0 else 1
+    other_pool = settings.database.pool_size + settings.database.max_overflow
+    need, available = connection_budget(
+        max_conn, su_reserved + reserved, workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool
+    )
+    if need > available:
+        logger.warning(
+            "Database connection budget exceeded: %d API worker(s) x (%d + 1) and the engine and "
+            "flowd at %d + 1 each can open %d connections, but PostgreSQL allows %d "
+            "(max_connections %d, %d reserved). Raise max_connections or lower the pools; see "
+            "docs/troubleshooting.md.",
+            workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool, need, available, max_conn,
+            su_reserved + reserved,
+        )
+    else:
+        logger.info("Database connection budget: up to %d of %d connections.", need, available)

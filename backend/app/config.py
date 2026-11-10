@@ -82,6 +82,10 @@ class DatabaseSettings:
     password: str = "postgres"
     pool_size: int = 10
     max_overflow: int = 10
+    # Seconds a request or task waits for a free pooled connection before giving up with
+    # PoolTimeoutError (the API answers 503). With no limit, a full pool made requests queue
+    # until their own 10 s query timeout (scale and core review S6).
+    pool_timeout: int = 5
 
     def __post_init__(self) -> None:
         self.host = str(self.host)
@@ -91,6 +95,7 @@ class DatabaseSettings:
         self.password = str(self.password)
         self.pool_size = _coerce_int(self.pool_size, "database.pool_size", ge=1, le=100)
         self.max_overflow = _coerce_int(self.max_overflow, "database.max_overflow", ge=0, le=100)
+        self.pool_timeout = _coerce_int(self.pool_timeout, "database.pool_timeout", ge=1, le=60)
 
     def model_dump(self) -> Dict[str, Any]:
         return asdict(self)
@@ -532,6 +537,13 @@ def _apply_env_overrides_and_validate(loaded: Settings, env_map: Dict[str, str])
         try:
             loaded.database.max_overflow = int(db_overflow)
         except ValueError:
+            pass
+
+    db_pool_timeout = env_map.get("EPHEMRES_DB_POOL_TIMEOUT")
+    if db_pool_timeout:
+        try:
+            loaded.database.pool_timeout = _coerce_int(db_pool_timeout, "database.pool_timeout", ge=1, le=60)
+        except Exception:
             pass
 
     secret_key = env_map.get("EPHEMRES_SECRET_KEY") or env_map.get("NETMON_SECRET_KEY")

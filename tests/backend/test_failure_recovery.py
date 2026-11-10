@@ -585,11 +585,10 @@ def _readiness(mode, client_obj):
     from app.main import app
     from app.services.driver_manager import driver_manager
 
-    with patch("app.main.AsyncSessionLocal") as sessions, \
+    # The database side is a working ping (readiness uses app.main.ping_database since S6).
+    with patch("app.main.ping_database", new=AsyncMock()), \
          patch.object(driver_manager, "_driver_mode", mode), \
          patch.object(driver_manager, "get_redis_client", return_value=client_obj):
-        sessions.return_value.__aenter__.return_value = AsyncMock()
-        sessions.return_value.__aexit__.return_value = None
         return TestClient(app).get("/health/readiness")
 
 

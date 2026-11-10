@@ -79,7 +79,7 @@ def test_extra_allow_is_refused_rather_than_dropping_keys():
 
 # --- engine options ----------------------------------------------------------------------------
 
-@pytest.mark.parametrize("option", ["echo", "pool_pre_ping", "pool_recycle", "pool_timeout"])
+@pytest.mark.parametrize("option", ["echo", "pool_pre_ping", "pool_recycle"])
 def test_engine_refuses_options_it_would_ignore(option):
     with pytest.raises(TypeError, match=option):
         create_async_engine("postgresql+asyncpg://u:p@localhost/db", **{option: True})
@@ -88,6 +88,14 @@ def test_engine_refuses_options_it_would_ignore(option):
 def test_engine_accepts_its_pool_options():
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db", pool_size=3, max_overflow=1)
     assert (engine.pool_size, engine.max_overflow) == (3, 1)
+    assert engine.pool_timeout == 30.0  # SQLAlchemy's default
+
+
+def test_pool_timeout_works_now_and_must_be_positive():
+    # Refused while it was ignored (M2); supported since scale review S6.
+    assert create_async_engine("postgresql+asyncpg://u:p@localhost/db", pool_timeout=5).pool_timeout == 5.0
+    with pytest.raises(ValueError):
+        create_async_engine("postgresql+asyncpg://u:p@localhost/db", pool_timeout=0)
 
 
 # --- FastStore pipelines (M3 coverage review) --------------------------------------------------

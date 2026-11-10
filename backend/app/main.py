@@ -10,12 +10,12 @@ import asyncpg
 from app.core.asgi import EphemresApp, FastAPI, Request, status
 from app.core.asgi import CORSMiddleware
 from app.core.asgi import JSONResponse
-from app.core.orm import DatabaseUnavailableError
+from app.core.orm import DatabaseUnavailableError, PoolTimeoutError
 from app.core.orm import text
 from app.core.asgi import BaseHTTPMiddleware
 
 from app.config import settings
-from app.database import AsyncSessionLocal, check_database_connection
+from app.database import AsyncSessionLocal, check_connection_budget, check_database_connection, ping_database
 from app.logging_config import setup_logging
 from app.routers import (
     alerts,
@@ -55,6 +55,7 @@ logger = setup_logging(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await check_database_connection()
+    await check_connection_budget()
     # Initialize storage driver manager (Redis / PostgreSQL)
     await driver_manager.initialize()
 
@@ -290,12 +291,20 @@ async def health_liveness():
 @app.get("/api/v1/health/readiness", tags=["system"])
 async def health_readiness():
     db_ok = True
+    db_status = "ok"
     db_err = None
     try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
+        # At most 2 s for a free pooled connection. It used to wait with no limit and answer
+        # 200 "ready" after 10 s while requests were failing (scale and core review S6).
+        await ping_database(timeout=2.0)
+    except PoolTimeoutError:
+        db_ok = False
+        db_status = "busy"
+        db_err = "No database connection free: the pool is in use"
+        logger.warning("Readiness check: every pooled database connection is busy")
     except Exception as exc:
         db_ok = False
+        db_status = "error"
         db_err = "Database connection failed"
         # One line per failed probe, no traceback: probes repeat every few seconds while down.
         logger.warning("Readiness check: database connectivity failure: %s", exc)
@@ -328,7 +337,7 @@ async def health_readiness():
         content={
             "status": "ready" if is_ready else "degraded",
             "ready": is_ready,
-            "database": {"status": "ok" if db_ok else "error", "error": db_err},
+            "database": {"status": db_status, "error": db_err},
             "redis": {
                 "status": "ok" if redis_ok else "error",
                 "enabled": faststore_in_use,

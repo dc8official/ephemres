@@ -102,3 +102,27 @@ def test_daemon_units_grant_net_raw_via_ambient_capabilities():
     import re
 
     assert not re.search(r"^CapabilityBoundingSet=", api, re.MULTILINE)
+
+
+def test_install_and_upgrade_turn_off_timescaledb_telemetry():
+    # Scale and core review M6: TimescaleDB's daily job reports versions and usage to Timescale
+    # unless telemetry_level is off. install.sh sets it on new servers, upgrade.sh on existing ones.
+    # Both set it on the database, which the app user may do (a user-level setting) and the job
+    # reads, checked against TimescaleDB 2.27 (the job made no outside call once it was off).
+    root = Path(__file__).resolve().parents[2]
+    install_sh = (root / "deploy" / "install.sh").read_text(encoding="utf-8")
+    upgrade_sh = (root / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
+    assert "ALTER DATABASE netmon SET timescaledb.telemetry_level = off;" in install_sh
+    assert 'ALTER DATABASE \\"${DB_NAME}\\" SET timescaledb.telemetry_level = off;' in upgrade_sh
+
+
+def test_install_and_upgrade_install_the_hashed_lock():
+    # Scale and core review M5: servers install requirements.lock in hash-checking mode, never the
+    # unhashed requirements.txt, and upgrade.sh removes what uvicorn[standard] used to add.
+    root = Path(__file__).resolve().parents[2]
+    install_sh = (root / "deploy" / "install.sh").read_text(encoding="utf-8")
+    upgrade_sh = (root / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
+    assert '--require-hashes \\\n    -r "$INSTALL_DIR/backend/requirements.lock"' in install_sh
+    assert 'install --require-hashes -r "${INSTALL_DIR}/backend/requirements.lock"' in upgrade_sh
+    assert "requirements.txt" not in install_sh and "requirements.txt" not in upgrade_sh
+    assert "websockets watchfiles python-dotenv PyYAML" in upgrade_sh

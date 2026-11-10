@@ -256,28 +256,55 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   2. **Permanent Resolution**:
      Ephemres stores all sessions and sign-in lockouts in PostgreSQL (`user_sessions`, `auth_login_failures`) across all workers, and broadcasts `performance_mode` updates via PostgreSQL `LISTEN`/`NOTIFY` (`SYSTEM_SETTINGS_SYNC`), eliminating worker split-brain states automatically without service restarts.
 
-### J. PostgreSQL Connection Pool Exhaustion (`TooManyConnectionsError`)
+### J. PostgreSQL Connections: Busy Pool or Too Many Clients
+Each Ephemres process keeps a pool of database connections: every API worker 10 (set in
+`ephemres-api.service`) plus one for live events, and the engine and flowd
+`database.pool_size + database.max_overflow` (20 by default) plus one each. With the default 2
+workers that is at most 64 connections, against PostgreSQL's default `max_connections = 100`
+(3 reserved for superusers).
+
 * **Symptoms**:
+  - At API startup the log warns `Database connection budget exceeded: ...`, naming the numbers.
+    Startup continues, but under load the last connections to open fail.
   - `ephemres-api` or `ephemres-engine` logs display:
     ```text
     asyncpg.exceptions.TooManyConnectionsError: sorry, too many clients already
     ```
-  - Incoming HTTP requests receive `HTTP 500 Internal Server Error`.
+  - Requests answer **503** with `Retry-After` ("Ephemres can't reach its database right now"),
+    and `/health/readiness` answers 503 with `"database": {"status": "busy"}`. Every pooled
+    connection stayed in use for `database.pool_timeout` seconds (5): usually a long lock or a
+    slow query is holding them.
 * **Cause**:
-  - The total number of pooled connections requested across all Uvicorn workers and engine background tasks exceeds PostgreSQL's configured `max_connections` ceiling.
+  - **Too many clients:** the pools together exceed `max_connections`, typically after raising
+    `EPHEMRES_API_WORKERS` (a third worker no longer fits the default 100 with the engine's and
+    flowd's pools).
+  - **Busy pool:** the pool is full of connections waiting on something else.
 * **Fix**:
-  1. Inspect PostgreSQL's active connection count and states:
+  1. See who holds connections and what they wait on:
      ```bash
-     sudo -u postgres psql -c "SELECT count(*), state FROM pg_stat_activity GROUP BY state;"
+     sudo -u postgres psql -c "SELECT usename, application_name, state, wait_event_type, count(*) FROM pg_stat_activity GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC;"
      ```
-  2. Increase `max_connections` in PostgreSQL configuration (`/etc/postgresql/<version>/main/postgresql.conf`), setting it to 150 or higher:
+  2. For a busy pool, find what blocks the waiting sessions (`SELECT pid, pg_blocking_pids(pid), query FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0;`) and end that session or let it finish.
+  3. For too many clients, either lower the pools or raise `max_connections`. The API's worker
+     count and pool are set in its unit; change them with an override, which upgrades keep:
+     ```bash
+     sudo systemctl edit ephemres-api
+     # add:  [Service]
+     #       Environment=EPHEMRES_API_WORKERS=3
+     #       Environment=EPHEMRES_API_DB_POOL=8
+     ```
+     The engine's and flowd's pools are `pool_size` and `max_overflow` under `[database]` in
+     `/etc/ephemres/config.toml`. To raise the limit instead, edit
+     `/etc/postgresql/<version>/main/postgresql.conf`:
      ```text
      max_connections = 150
      ```
-  3. Reload PostgreSQL:
+     `max_connections` only changes when PostgreSQL restarts (a reload is not enough):
      ```bash
-     sudo systemctl reload postgresql
+     sudo systemctl restart postgresql
+     sudo systemctl restart ephemres-api ephemres-engine
      ```
+     The API logs `Database connection budget: up to N of M connections.` once the numbers fit.
 
 ### K. FastStore Inspection & Diagnostics (`/run/ephemres`)
 * **Symptoms**:

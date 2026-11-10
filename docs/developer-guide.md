@@ -40,7 +40,8 @@ ephemres/
 │   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
 │   ├── migrations/         # Migration versions (0001-0021)
-│   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
+│   ├── requirements.txt    # Runtime dependencies (uvicorn, httptools, uvloop, asyncpg)
+│   └── requirements.lock   # The same, with every package pinned and hashed (servers install this)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
 ├── deploy/                 # Systemd units, install.sh, upgrade.sh, restore.sh, nginx config
@@ -74,7 +75,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    pip install -r backend/requirements-dev.txt
    cd backend
    ```
-   `requirements-dev.txt` installs the two runtime packages from `requirements.txt` (`uvicorn`, `asyncpg`) plus the test tools (`pytest`, `anyio`). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
+   `requirements-dev.txt` installs the runtime packages from `requirements.txt` (`uvicorn`, `httptools`, `uvloop`, `asyncpg`) plus the test tools (`pytest`, `anyio`). Servers install `requirements.lock` instead, the same packages pinned with their hashes; regenerate it after changing `requirements.txt` (the command is in that file). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
 
 2. **Environment Configuration:**
    Copy `.env.example` to `.env` and configure your credentials:

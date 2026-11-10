@@ -465,11 +465,11 @@ def test_atomic_shim_cutover_and_requirements():
     assert "alembic" not in content.lower()
     assert "redis" not in content.lower()
 
-    # Assert ONLY uvicorn and asyncpg remain
+    # The exact runtime package list is checked in test_requirements_pinned.py (scale and core
+    # review M5 named httptools and uvloop instead of uvicorn[standard]).
     lines = [line.strip() for line in content.strip().splitlines() if line.strip() and not line.startswith("#")]
-    assert len(lines) == 2, f"Expected exactly 2 dependencies in requirements.txt, got {lines}"
-    assert any("uvicorn" in line for line in lines)
-    assert any("asyncpg" in line for line in lines)
+    assert any(line.startswith("uvicorn==") for line in lines)
+    assert any(line.startswith("asyncpg==") for line in lines)
 
     # Verify that shims are removed
     for removed in ("sqlalchemy", "alembic", "fastapi", "starlette", "pydantic"):
