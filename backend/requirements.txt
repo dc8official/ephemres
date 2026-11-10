@@ -1,2 +1,22 @@
-uvicorn[standard]==0.52.0
+# Ephemres's runtime dependencies: the only packages besides the standard library. Everything
+# else is hand-written in backend/app/core (tests/backend/test_no_removed_deps.py guards this).
+#
+# The servers install requirements.lock, generated from this file with every package pinned and
+# hashed (`pip install --require-hashes`), so each install gets the same, verified files. After
+# changing a line here, regenerate the lock with pip-tools (a dev tool; keep it out of the
+# server venv), from the backend/ directory:
+#   pip-compile --generate-hashes --strip-extras --no-emit-index-url \
+#       --output-file requirements.lock requirements.txt
+# The lock must resolve for every Python the installer supports (3.11 and later).
+#
+# uvicorn's [standard] extra is not used: it pulled in ten more packages, unpinned, of which
+# Ephemres uses two (scale and core review M5). They are named here instead:
+#   httptools - uvicorn's fast HTTP parser, picked automatically when installed
+#   uvloop    - the faster event loop, picked automatically when installed
+# Left out on purpose: websockets (Ephemres has no WebSockets; live updates use Server-Sent
+# Events), watchfiles (only for --reload), python-dotenv (--env-file; systemd loads the env
+# file) and PyYAML (YAML log configs).
+uvicorn==0.52.0
+httptools==0.9.0
+uvloop==0.23.0
 asyncpg==0.31.0

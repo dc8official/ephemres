@@ -46,3 +46,6 @@ migrations/versions/*.pyc
 # Agents & Teamwork
 .agents/
 .claude/
+
+# Dev-only venv for devtools/differential (real Pydantic and SQLAlchemy)
+.venv-diff/

@@ -1,3 +1,12 @@
+# The development and test environment: the runtime packages plus the test tools.
+#
+# Install the lock first, so the runtime packages are the exact files the servers run, then
+# this file for the test tools:
+#   pip install --require-hashes -r backend/requirements.lock
+#   pip install -r backend/requirements-dev.txt
+# With the lock in place the line below changes nothing. Without it, it would resolve uvicorn's
+# own dependencies afresh, and the tests ran on a click the servers didn't have (branch review,
+# 2026-11-10). tests/backend/test_requirements_pinned.py fails when the two differ.
 -r requirements.txt
 pytest==9.1.1
 anyio==4.14.2

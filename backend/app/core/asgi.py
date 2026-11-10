@@ -160,7 +160,11 @@ class Depends:
 
 
 class _ParamInfo(_FieldInfo):
-    """Base class for HTTP parameter extractors (Query, Path, Header, Cookie, Body)."""
+    """Base class for HTTP parameter extractors (Query, Path, Header).
+
+    FastAPI's Cookie() and Body() markers are not provided: no route used them, and a request
+    parser path that nothing uses is attack surface with no tests (M3 coverage review,
+    2026-11-10). Routes read cookies from request.cookies and take bodies as schema models."""
 
     def __init__(
         self,
@@ -213,14 +217,6 @@ class HeaderParamInfo(_ParamInfo):
     pass
 
 
-class CookieParamInfo(_ParamInfo):
-    pass
-
-
-class BodyParamInfo(_ParamInfo):
-    pass
-
-
 def Query(default: Any = ..., **kwargs: Any) -> Any:
     return QueryParamInfo(default=default, **kwargs)
 
@@ -231,14 +227,6 @@ def Path(default: Any = ..., **kwargs: Any) -> Any:
 
 def Header(default: Any = ..., **kwargs: Any) -> Any:
     return HeaderParamInfo(default=default, **kwargs)
-
-
-def Cookie(default: Any = ..., **kwargs: Any) -> Any:
-    return CookieParamInfo(default=default, **kwargs)
-
-
-def Body(default: Any = ..., **kwargs: Any) -> Any:
-    return BodyParamInfo(default=default, **kwargs)
 
 
 class BackgroundTasks:
@@ -1053,23 +1041,10 @@ async def _resolve_dependency(
         dep_val = await target_fn(**sub_kwargs)
     else:
         dep_val = target_fn(**sub_kwargs)
-        if inspect.isasyncgen(dep_val):
-            async def _aiter_wrap(gen=dep_val):
-                try:
-                    yield await anext(gen)
-                finally:
-                    await gen.aclose()
-            cm = contextlib.asynccontextmanager(_aiter_wrap)()
-            dep_val = await exit_stack.enter_async_context(cm)
-        elif inspect.isgenerator(dep_val):
-            def _iter_wrap(gen=dep_val):
-                try:
-                    yield next(gen)
-                finally:
-                    gen.close()
-            cm = contextlib.contextmanager(_iter_wrap)()
-            dep_val = exit_stack.enter_context(cm)
-        elif inspect.isawaitable(dep_val):
+        # A yield dependency is recognised by its def (the two branches above), as in FastAPI.
+        # A plain function that happens to return a generator is not unwrapped: nothing in
+        # Ephemres does that, and the wrapper for it never ran (M3 coverage review, 2026-11-10).
+        if inspect.isawaitable(dep_val):
             dep_val = await dep_val
 
     if dep_obj.use_cache:
@@ -1091,8 +1066,8 @@ async def _resolve_endpoint_kwargs(
     """Resolves parameters for a route handler or dependency function.
 
     Each parameter is filled by the first rule that fits, in the numbered order below: Request,
-    Response, BackgroundTasks, Depends, path, header, cookie, body (a schema model, a dict, or
-    Body()), and anything else from the query string or its default. Values are converted to
+    Response, BackgroundTasks, Depends, path, header, body (a schema model or a dict), and
+    anything else from the query string or its default. Values are converted to
     the annotated type. All problems are collected and raised together as one 422."""
     sig = inspect.signature(handler)
     resolved_kwargs: Dict[str, Any] = {}
@@ -1120,6 +1095,11 @@ async def _resolve_endpoint_kwargs(
     body_json_invalid = False
 
     for param_name, param in sig.parameters.items():
+        # *args and **kwargs take nothing from the request, as in FastAPI. Now that a
+        # parameter without a default is required (below), they must be skipped or every
+        # handler written as f(*args, **kwargs), such as a mock override, would answer 422.
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
         annotation = type_hints.get(param_name, param.annotation)
         if isinstance(annotation, str):
             if annotation in localns:
@@ -1191,6 +1171,13 @@ async def _resolve_endpoint_kwargs(
             resolved_kwargs[param_name] = dep_val
             continue
 
+        # A parameter without a default is required, as in FastAPI. inspect's "no default"
+        # marker used to be taken as the default itself, so a missing query value reached the
+        # route as inspect._empty and an empty POST to a route taking a schema model crashed
+        # with 500 instead of answering 422 (M3 coverage review, 2026-11-10).
+        if default is inspect._empty:
+            default = ...
+
         # 5. Path parameter
         if param_name in path_params or isinstance(default, PathParamInfo):
             p_val = path_params.get(param_name)
@@ -1243,37 +1230,10 @@ async def _resolve_endpoint_kwargs(
                     })
             continue
 
-        # 7. Cookie parameter
-        if isinstance(default, CookieParamInfo):
-            c_alias = default.alias or param_name
-            c_val = request.cookies.get(c_alias)
-            if c_val is None:
-                if default.is_required():
-                    validation_errors.append({
-                        "loc": ("cookie", c_alias),
-                        "msg": "Cookie required",
-                        "type": "missing",
-                    })
-                    continue
-                resolved_kwargs[param_name] = default.get_default()
-            else:
-                try:
-                    coerced = _coerce_value(c_val, annotation, param_name, {})
-                    _validate_constraints(coerced, default, param_name)
-                    resolved_kwargs[param_name] = coerced
-                except Exception as exc:
-                    validation_errors.append({
-                        "loc": ("cookie", c_alias),
-                        "msg": str(exc) if isinstance(exc, (ValueError, TypeError)) else "Invalid value",
-                        "type": "value_error",
-                    })
-            continue
-
-        # 8. Request Body parameter (BaseModel, Dict, List, Body)
+        # 7. Request Body parameter (a schema model or a dict)
         origin = get_origin(annotation)
         is_body = (
-            isinstance(default, BodyParamInfo)
-            or (isinstance(annotation, type) and issubclass(annotation, BaseModel))
+            (isinstance(annotation, type) and issubclass(annotation, BaseModel))
             or (origin in (dict, Dict) and not isinstance(default, QueryParamInfo))
             or (annotation in (dict, Dict) and not isinstance(default, QueryParamInfo))
         )
@@ -1298,7 +1258,7 @@ async def _resolve_endpoint_kwargs(
                 })
                 continue
 
-            b_info = default if isinstance(default, BodyParamInfo) else _FieldInfo(default=default)
+            b_info = _FieldInfo(default=default)
 
             if isinstance(annotation, type) and issubclass(annotation, BaseModel):
                 if body_data is None:
@@ -1329,8 +1289,10 @@ async def _resolve_endpoint_kwargs(
                         })
                 continue
 
-            # Generic dict / list body (e.g. Dict[str, InterfaceConfig])
-            if origin in (dict, Dict, list, List) or isinstance(default, BodyParamInfo):
+            # Generic dict body (e.g. Dict[str, InterfaceConfig]). A bare `dict` has no origin,
+            # so it is matched by itself; it used to fall through to the query-string step and
+            # never read the body (M3 coverage review, 2026-11-10).
+            if origin in (dict, Dict) or annotation in (dict, Dict):
                 if body_data is None:
                     if b_info.is_required():
                         validation_errors.append({
@@ -1360,7 +1322,7 @@ async def _resolve_endpoint_kwargs(
                         })
                 continue
 
-        # 9. Query parameter
+        # 8. Query parameter
         # Any other parameter is extracted from query params or falls back to default.
         q_info = default if isinstance(default, QueryParamInfo) else _FieldInfo(default=default)
         alias = q_info.alias or param_name
@@ -2039,45 +2001,13 @@ class EphemresApp:
 FastAPI = EphemresApp
 
 
-# ---------------------------------------------------------------------------
-# 9. Security Shims
-# ---------------------------------------------------------------------------
-class HTTPAuthorizationCredentials:
-    def __init__(self, scheme: str, credentials: str) -> None:
-        self.scheme = scheme
-        self.credentials = credentials
-
-
-class HTTPBearer:
-    def __init__(self, auto_error: bool = True) -> None:
-        self.auto_error = auto_error
-
-    async def __call__(self, request: Request) -> Optional[HTTPAuthorizationCredentials]:
-        auth = request.headers.get("authorization")
-        if not auth or not auth.startswith("Bearer "):
-            if self.auto_error:
-                raise HTTPException(status_code=401, detail="Not authenticated")
-            return None
-        token = auth.split(" ", 1)[1]
-        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-
-class OAuth2PasswordBearer:
-    def __init__(self, tokenUrl: str, auto_error: bool = True) -> None:
-        self.tokenUrl = tokenUrl
-        self.auto_error = auto_error
-
-    async def __call__(self, request: Request) -> Optional[str]:
-        auth = request.headers.get("authorization")
-        if not auth or not auth.startswith("Bearer "):
-            if self.auto_error:
-                raise HTTPException(status_code=401, detail="Not authenticated")
-            return None
-        return auth.split(" ", 1)[1]
+# FastAPI's HTTPBearer and OAuth2PasswordBearer shims used to live here. No route used them
+# (routers/auth.py reads the token from the cookie or Authorization header itself), so they
+# were removed in the M3 coverage review (2026-11-10).
 
 
 # ---------------------------------------------------------------------------
-# 10. Loop-Safe In-Process TestClient
+# 9. Loop-Safe In-Process TestClient
 # ---------------------------------------------------------------------------
 class TestResponse:
     """Synchronous test response object mirroring requests / httpx."""
@@ -2111,18 +2041,6 @@ class TestResponse:
 
     def json(self) -> Any:
         return json.loads(self.text)
-
-    def iter_lines(self) -> Iterator[str]:
-        for line in self.text.splitlines(keepends=True):
-            yield line
-
-    def iter_bytes(self) -> Iterator[bytes]:
-        yield from self._body_chunks
-
-    def iter_text(self) -> Iterator[str]:
-        for chunk in self._body_chunks:
-            yield chunk.decode("utf-8", errors="replace")
-
 
 class TestClient:
     """Thread-safe, loop-safe in-process ASGI test client.
@@ -2373,14 +2291,10 @@ __all__ = [
     "Depends",
     "Query",
     "Path",
-    "Body",
     "Header",
-    "Cookie",
     "BackgroundTasks",
     "CORSMiddleware",
     "BaseHTTPMiddleware",
     "status",
     "TestClient",
-    "HTTPAuthorizationCredentials",
-    "HTTPBearer",
 ]

@@ -8,7 +8,7 @@ class FakeAsyncpgPool:
         self.acquire_count = 0
         self.release_count = 0
 
-    async def acquire(self):
+    async def acquire(self, timeout=None):
         self.acquire_count += 1
         return AsyncMock()
 

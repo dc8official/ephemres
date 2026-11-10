@@ -10,12 +10,12 @@ import asyncpg
 from app.core.asgi import EphemresApp, FastAPI, Request, status
 from app.core.asgi import CORSMiddleware
 from app.core.asgi import JSONResponse
-from app.core.orm import DatabaseUnavailableError
+from app.core.orm import DatabaseUnavailableError, PoolTimeoutError
 from app.core.orm import text
 from app.core.asgi import BaseHTTPMiddleware
 
 from app.config import settings
-from app.database import AsyncSessionLocal, check_database_connection
+from app.database import AsyncSessionLocal, check_connection_budget, check_database_connection, ping_database
 from app.logging_config import setup_logging
 from app.routers import (
     alerts,
@@ -30,7 +30,7 @@ from app.routers import (
 )
 from app.routers.reports import telemetry_router
 from app.schemas import APIResponse
-from app.services.alert_dispatcher import alert_dispatcher
+from app.services.alert_dispatcher import BROKER_CHANNELS as ALERT_BROKER_CHANNELS, alert_dispatcher
 from app.services.baseline_route import start_midnight_discovery_worker
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task
 from app.services.diagnostics import (
@@ -40,7 +40,7 @@ from app.services.diagnostics import (
 from app.services.driver_manager import driver_manager
 from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_loop_stall_guard, start_systemd_watchdog
-from app.services.telemetry_relay import telemetry_relay
+from app.services.telemetry_relay import CHANNELS as RELAY_CHANNELS, telemetry_relay
 from app.services.scheduler_leader import scheduler_leader
 from app.services.topology import start_topology_flow_refresh_task, topology_manager
 
@@ -52,9 +52,22 @@ logger = setup_logging(
 )
 
 
+# PostgreSQL LISTEN connections a worker opens outside its pool, for the connection budget
+# below: the settings-sync listener (always on PostgreSQL) plus one per telemetry relay channel,
+# and on the worker that sends alerts one more per alert channel. These are the numbers without
+# Performance Mode, where the relay and the alert listeners use FastStore instead and only the
+# settings-sync one remains. The budget uses them in both modes, because a worker falls back to
+# PostgreSQL the moment FastStore is unreachable or the mode is switched off in Settings.
+LISTENERS_PER_WORKER = 1 + len(RELAY_CHANNELS)
+LISTENERS_ON_ALERT_LEADER = len(ALERT_BROKER_CHANNELS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await check_database_connection()
+    await check_connection_budget(
+        api_listeners=LISTENERS_PER_WORKER, leader_listeners=LISTENERS_ON_ALERT_LEADER
+    )
     # Initialize storage driver manager (Redis / PostgreSQL)
     await driver_manager.initialize()
 
@@ -114,13 +127,20 @@ async def lifespan(app: FastAPI):
     logger.info("Ephemres v3.3.5 platform shutting down cleanly.")
 
 
+# The OpenAPI document lists every route and the exact version, and is served without signing
+# in, so it is only served in development and test (the same rule as the secret-key check in
+# config.py: any other environment counts as production). Nothing in Ephemres reads it, and a
+# public copy would hand an attacker the route map and version in one request (M3 coverage
+# review, 2026-11-10). docs_url and redoc_url are None because the framework serves neither page.
+_SERVE_OPENAPI = settings.environment.lower() in ("development", "test")
+
 app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
     version="3.3.5",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/api/openapi.json" if _SERVE_OPENAPI else None,
     lifespan=lifespan,
 )
 
@@ -283,12 +303,20 @@ async def health_liveness():
 @app.get("/api/v1/health/readiness", tags=["system"])
 async def health_readiness():
     db_ok = True
+    db_status = "ok"
     db_err = None
     try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
+        # At most 2 s for a free pooled connection. It used to wait with no limit and answer
+        # 200 "ready" after 10 s while requests were failing (scale and core review S6).
+        await ping_database(timeout=2.0)
+    except PoolTimeoutError:
+        db_ok = False
+        db_status = "busy"
+        db_err = "No database connection free: the pool is in use"
+        logger.warning("Readiness check: every pooled database connection is busy")
     except Exception as exc:
         db_ok = False
+        db_status = "error"
         db_err = "Database connection failed"
         # One line per failed probe, no traceback: probes repeat every few seconds while down.
         logger.warning("Readiness check: database connectivity failure: %s", exc)
@@ -321,7 +349,7 @@ async def health_readiness():
         content={
             "status": "ready" if is_ready else "degraded",
             "ready": is_ready,
-            "database": {"status": "ok" if db_ok else "error", "error": db_err},
+            "database": {"status": db_status, "error": db_err},
             "redis": {
                 "status": "ok" if redis_ok else "error",
                 "enabled": faststore_in_use,

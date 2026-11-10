@@ -14,8 +14,8 @@ providing a 100% Python Standard Library + asyncpg drop-in engine covering:
 
 The names follow SQLAlchemy so existing code kept working, but the behaviour is narrower. Where
 it differs, and where it bites:
-- Relationships are not loaded in general. relationship(), joinedload() and selectinload() are
-  accepted and do nothing, except two hard-coded cases resolved after a SELECT: User.role and
+- Relationships are not loaded in general. relationship() and joinedload() are accepted and do
+  nothing, except two hard-coded cases resolved after a SELECT: User.role and
   UserSession.user (AsyncSession._hydrate_select_results). Any other relationship attribute stays
   None unless the code sets it.
 - A model column is any annotated class attribute, including ones without mapped_column(); its
@@ -24,11 +24,20 @@ it differs, and where it bites:
   (both have "id") fills both from the same value.
 - A SELECT has one FROM table, the first one found; any other table must come in with join().
 - Every statement runs with a 10 s timeout (asyncpg command_timeout, AsyncEngine._get_pool).
-- create_async_engine() takes only pool_size and max_overflow (one pool of their sum); any other
-  option raises TypeError instead of being ignored.
+- Waiting for a free pooled connection gives up after pool_timeout seconds (30 by default, as
+  in SQLAlchemy; Ephemres sets database.pool_timeout, 5 s) with PoolTimeoutError, a
+  DatabaseUnavailableError.
+- create_async_engine() takes only pool_size, max_overflow (one pool of their sum) and
+  pool_timeout; any other option raises TypeError instead of being ignored.
 - A Python list or dict parameter is sent as JSON text; pass a tuple to get a PostgreSQL array.
 - text() parameters must be typed where PostgreSQL can't infer them (CAST(:x AS timestamptz)),
   because asyncpg asks the server for each $n's type when it prepares the statement.
+- Results of raw text() SQL are asyncpg's own values: jsonb comes back as JSON text (SQLAlchemy
+  would give a dict) and inet as ipaddress objects. Columns on models and columns selected
+  through the ORM are converted: jsonb parsed, inet as text (hydrate_column_value).
+- Not provided, because nothing called them (M3 coverage review, 2026-11-10): selectinload(),
+  Select.with_for_update(), AsyncSession.add_all() and Result.scalar_one(). Use
+  scalar_one_or_none() and check for None, or add the method back with a test.
 """
 
 from __future__ import annotations
@@ -67,6 +76,8 @@ from typing import (
 )
 from uuid import UUID as PyUUID, uuid4
 
+from app.core.annotations import own_annotations
+
 try:
     import asyncpg
 except ImportError:
@@ -92,6 +103,15 @@ class DBAPIError(SQLAlchemyError):
 class DatabaseUnavailableError(DBAPIError):
     """No connection to the database could be made. When every address fails asyncpg raises a
     plain OSError, which says nothing about where it came from."""
+
+
+class PoolTimeoutError(DatabaseUnavailableError):
+    """Every pooled connection stayed busy for pool_timeout seconds (SQLAlchemy's TimeoutError).
+
+    A subclass of DatabaseUnavailableError on purpose: the API answers it with 503 and
+    Retry-After, and the engine treats it as "try again later", which is right for both. Before
+    it existed, a request waited for a free connection with no limit and then for its own 10 s
+    query timeout; under a 25 s lock the slowest took 24 s (scale and core review S6)."""
 
 
 class OperationalError(DBAPIError):
@@ -1343,9 +1363,6 @@ class Select(SQLElement):
         self._offset: Optional[int] = None
         self._distinct: Optional[Union[bool, List[Any]]] = None
         self._options: List[Any] = []
-        self._for_update: bool = False
-        self._skip_locked: bool = False
-        self._nowait: bool = False
 
     @property
     def selected_columns(self) -> List[Any]:
@@ -1368,9 +1385,6 @@ class Select(SQLElement):
         new_sel._offset = self._offset
         new_sel._distinct = copy.copy(self._distinct) if isinstance(self._distinct, list) else self._distinct
         new_sel._options = list(self._options)
-        new_sel._for_update = self._for_update
-        new_sel._skip_locked = self._skip_locked
-        new_sel._nowait = self._nowait
         return new_sel
 
     def where(self, *conditions: Any) -> Select:
@@ -1438,13 +1452,6 @@ class Select(SQLElement):
     def options(self, *opts: Any) -> Select:
         s = self.clone()
         s._options.extend(opts)
-        return s
-
-    def with_for_update(self, skip_locked: bool = False, nowait: bool = False) -> Select:
-        s = self.clone()
-        s._for_update = True
-        s._skip_locked = skip_locked
-        s._nowait = nowait
         return s
 
     def subquery(self, name: Optional[str] = None) -> Subquery:
@@ -1579,15 +1586,9 @@ class Select(SQLElement):
         if self._offset is not None:
             parts.append(f"OFFSET {self._offset}")
 
-        # FOR UPDATE
-        if self._for_update:
-            lock = "FOR UPDATE"
-            if self._nowait:
-                lock += " NOWAIT"
-            elif self._skip_locked:
-                lock += " SKIP LOCKED"
-            parts.append(lock)
-
+        # No FOR UPDATE: with_for_update() was removed in the M3 coverage review (2026-11-10)
+        # because nothing used it. Ephemres serialises jobs with advisory locks instead
+        # (services/scheduler_leader.py). Add it back with a test if a row lock is ever needed.
         return " ".join(parts)
 
     # FROM is one table: select_from() if given, else the first table found in the selected
@@ -1930,10 +1931,6 @@ def joinedload(rel_prop: Any) -> Any:
     return rel_prop
 
 
-def selectinload(rel_prop: Any) -> Any:
-    return rel_prop
-
-
 def mapped_column(*args: Any, **kwargs: Any) -> Column:
     return Column(*args, **kwargs)
 
@@ -1975,7 +1972,10 @@ class DeclarativeMeta(type):
         relationships: Dict[str, RelationshipProperty] = {}
         primary_keys: List[str] = []
 
-        annotations = namespace.get("__annotations__", {})
+        # Not namespace["__annotations__"], which Python 3.14 leaves out of the class body: a
+        # model outside a `from __future__ import annotations` module would lose its
+        # annotation-only columns and the types inferred from annotations (see own_annotations).
+        annotations = own_annotations(cls, namespace)
 
         # Inspect class attributes & annotations
         for attr_name, val in list(namespace.items()):
@@ -2206,9 +2206,6 @@ class Result:
     def scalars(self) -> ScalarResult:
         return ScalarResult(self._rows)
 
-    def scalar_one(self) -> Any:
-        return self.scalars().one()
-
     def scalar_one_or_none(self) -> Optional[Any]:
         return self.scalars().one_or_none()
 
@@ -2333,8 +2330,9 @@ class AsyncEngine:
 
     # The only options that do something. Others SQLAlchemy accepts (echo, pool_pre_ping,
     # pool_recycle, ...) used to be accepted and silently ignored; they now raise TypeError, so
-    # nobody relies on a setting that isn't there (scale review M2).
-    SUPPORTED_OPTIONS = frozenset({"pool_size", "max_overflow"})
+    # nobody relies on a setting that isn't there (scale review M2). pool_timeout works as in
+    # SQLAlchemy since scale review S6: seconds to wait for a free connection (default 30).
+    SUPPORTED_OPTIONS = frozenset({"pool_size", "max_overflow", "pool_timeout"})
 
     def __init__(self, url: str, **kwargs: Any) -> None:
         unsupported = sorted(set(kwargs) - self.SUPPORTED_OPTIONS)
@@ -2343,6 +2341,9 @@ class AsyncEngine:
         self.url = self._normalize_url(url)
         self.pool_size = kwargs.get("pool_size", 10)
         self.max_overflow = kwargs.get("max_overflow", 10)
+        self.pool_timeout = float(kwargs.get("pool_timeout", 30.0))
+        if self.pool_timeout <= 0:
+            raise ValueError("pool_timeout must be a positive number of seconds")
         self.dialect = types.SimpleNamespace(name="postgresql")
         self._pool: Optional[Any] = None
         self._loop_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
@@ -2417,16 +2418,34 @@ class AsyncEngine:
                 )
         return self._pool
 
-    async def acquire_connection(self) -> Any:
-        """A pooled connection, or DatabaseUnavailableError when none can be made. A timeout
-        stays a timeout, and a dropped connection surfaces when it is used."""
+    async def acquire_connection(self, timeout: Optional[float] = None) -> Any:
+        """A pooled connection, or DatabaseUnavailableError when none can be made, or
+        PoolTimeoutError when all stay busy for `timeout` seconds (pool_timeout by default).
+        A timeout while connecting stays a timeout, and a dropped connection surfaces when it
+        is used."""
         try:
             pool = await self._get_pool()
-            return await pool.acquire()
         except TimeoutError:
             raise
         except OSError as exc:
             raise DatabaseUnavailableError(str(exc)) from exc
+        wait = self.pool_timeout if timeout is None else timeout
+        try:
+            return await pool.acquire(timeout=wait)
+        except TimeoutError as exc:
+            # asyncpg raises TimeoutError both when no pooled connection frees up and when
+            # opening a new one times out (pool timeout=5.0 above); either way none came in time.
+            raise PoolTimeoutError(
+                f"no database connection became free within {wait:g} s "
+                f"(pool of {self.pool_size + self.max_overflow})"
+            ) from exc
+        except OSError as exc:
+            raise DatabaseUnavailableError(str(exc)) from exc
+
+    async def release_connection(self, conn: Any) -> None:
+        """Give back a connection from acquire_connection()."""
+        if self._pool is not None:
+            await self._pool.release(conn)
 
     def connect(self) -> _AsyncEngineConnectContext:
         return _AsyncEngineConnectContext(self, begin_tx=False)
@@ -2533,10 +2552,6 @@ class AsyncSession:
     def add(self, obj: DeclarativeBase) -> None:
         if obj not in self._new and not getattr(obj, "_orm_persisted", False):
             self._new.append(obj)
-
-    def add_all(self, objs: Iterable[DeclarativeBase]) -> None:
-        for obj in objs:
-            self.add(obj)
 
     def delete(self, obj: DeclarativeBase) -> Any:
         if obj not in self._deleted:
@@ -2909,6 +2924,12 @@ class AsyncSession:
                         val = rec_values[rec_offset]
                     else:
                         val = None
+                    # A column selected on its own (or labelled) is converted like the same
+                    # column on a loaded model: JSONB parsed, inet as text. It used to come back
+                    # raw, so select(Endpoint.flow_interface_aliases) gave JSON text where
+                    # select(Endpoint) gave a dict (differential suite, M3, 2026-11-10).
+                    if isinstance(entity, (ColumnClause, LabelClause)):
+                        val = hydrate_column_value(val, getattr(entity, "type", None))
                     slot_values.append(val)
                     row_mapping[col_name] = val
                     if isinstance(entity, (CTE, Subquery)):

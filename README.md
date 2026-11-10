@@ -153,7 +153,7 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 The upgrade utility automatically:
 1. **Pre-Upgrade Backup:** Dumps a timestamped PostgreSQL SQL backup to `/var/backups/ephemres/`.
 2. **Migrates Legacy Installs:** On a server still running the pre-rename `netmon-*` services, carries over `/etc/netmon` configuration, disables the `netmon-*` units and repoints the nginx site; flow ingestion stays on if `netmon-flowd` was receiving flows. (It does not touch `redis-server`; remove that package yourself if an old release installed it.)
-3. **Synchronizes Dependencies:** Installs the minimal 2-package requirements (`uvicorn`, `asyncpg`) in <3 seconds.
+3. **Synchronizes Dependencies:** Installs the six pinned, hash-checked packages in `backend/requirements.lock` (`uvicorn` with `httptools` and `uvloop`, and `asyncpg`) and removes the unused packages older releases installed with `uvicorn[standard]`.
 4. **Compiles Frontend:** Builds production Vue 3 assets via Vite.
 5. **Executes Native Migrations:** Runs `migrator.py` applying forward schema migrations (`0001`–`0021`) while preserving all historical telemetry and continuous aggregates.
 6. **Restarts Services:** Reloads `ephemres-api` and `ephemres-engine` under systemd, plus `ephemres-flowd` when flow ingestion is enabled.

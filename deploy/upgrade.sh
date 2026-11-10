@@ -487,10 +487,18 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         chown -R ephemres:ephemres "${VENV_PATH}"
     fi
 
-    if [[ -n "${VENV_PATH}" && -f "${INSTALL_DIR}/backend/requirements.txt" ]]; then
+    if [[ -n "${VENV_PATH}" && -f "${INSTALL_DIR}/backend/requirements.lock" ]]; then
         echo -e "${GREEN}[INFO] Upgrading Python dependencies in ${VENV_PATH}...${NC}"
         "${VENV_PATH}/bin/pip" install --upgrade pip
-        "${VENV_PATH}/bin/pip" install -r "${INSTALL_DIR}/backend/requirements.txt" --upgrade
+        # Every package pinned with its file hashes (scale and core review M5); pip moves each one
+        # to the locked version, up or down, and refuses a file whose hash doesn't match.
+        "${VENV_PATH}/bin/pip" install --require-hashes -r "${INSTALL_DIR}/backend/requirements.lock"
+
+        # Releases up to 3.3.5 installed uvicorn[standard], which added packages Ephemres never
+        # used (WebSockets, --reload, --env-file and YAML log support, and what those needed).
+        # The venv belongs to Ephemres alone, so remove them; pip skips any that aren't there.
+        "${VENV_PATH}/bin/pip" uninstall --yes --quiet \
+            websockets watchfiles python-dotenv PyYAML anyio idna sniffio typing_extensions 2>/dev/null || true
 
         # Earlier releases ran `setcap cap_net_raw+ep` on the resolved venv interpreter, which is the
         # system-wide Python. The units now grant CAP_NET_RAW via AmbientCapabilities, so remove that
@@ -611,6 +619,14 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
 
             PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c \
                 "ALTER DATABASE \"${DB_NAME}\" SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;" 2>>"${UPGRADE_LOG}" || true
+
+            # Turn off TimescaleDB's daily telemetry report to Timescale on servers installed before
+            # install.sh did it (scale and core review M6). telemetry_level is a user-level setting,
+            # so the database owner may set it, and the job runs in this database and reads it.
+            echo -e "${GREEN}[INFO] Turning off TimescaleDB telemetry...${NC}"
+            PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c \
+                "ALTER DATABASE \"${DB_NAME}\" SET timescaledb.telemetry_level = off;" 2>>"${UPGRADE_LOG}" \
+                || echo -e "${YELLOW}[WARN] Could not turn off TimescaleDB telemetry; see ${UPGRADE_LOG}.${NC}"
         fi
     fi
 else

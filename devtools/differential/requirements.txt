@@ -1,0 +1,6 @@
+# Dev-only: the real libraries the hand-written core imitates, used to compare its answers with
+# theirs (scale and core review M3). Never install these into a production venv; nothing under
+# backend/ or monitoring/ may import them (tests/backend/test_no_removed_deps.py).
+-r ../../backend/requirements-dev.txt
+pydantic==2.14.3
+sqlalchemy[asyncio]==2.1.8

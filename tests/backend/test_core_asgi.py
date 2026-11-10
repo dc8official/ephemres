@@ -23,7 +23,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.core.asgi import APIRouter, BaseHTTPMiddleware, CORSMiddleware, Cookie, Depends, FastAPI, Header, HTTPException, JSONResponse, Query, Request, Response, StreamingResponse, TestClient, status
+from app.core.asgi import APIRouter, BaseHTTPMiddleware, CORSMiddleware, Depends, FastAPI, Header, HTTPException, JSONResponse, Query, Request, Response, StreamingResponse, TestClient, status
 from app.core.schema import BaseModel, Field
 
 

@@ -575,11 +575,6 @@ def _pdf_literal(encoded: str) -> str:
     return encoded.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").replace("\r", " ").replace("\n", " ")
 
 
-def _pdf_escape_text(text: str) -> str:
-    """Encode text to WinAnsi and escape it for a PDF literal string."""
-    return _pdf_literal(to_winansi(text))
-
-
 def _utf16_hex(text: str) -> str:
     return "<FEFF" + text.encode("utf-16-be").hex().upper() + ">"
 

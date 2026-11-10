@@ -26,18 +26,27 @@ import logging
 import os
 import smtplib
 import ssl
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from app.core.orm import select, text
+from app.core.orm import PoolTimeoutError, select, text
 
 from app.config import settings
-from app.database import AsyncSessionLocal, async_engine
+from app.database import AsyncSessionLocal, async_engine, is_database_unavailable
 from app.models.alert_channel import AlertChannel
 
 ADVISORY_LOCK_ID = 992817
 # How often the leader checks its lock connection, and a standby tries for the lock.
 LOCK_CHECK_SECONDS = 2.5
+# The broker channels the leader listens on. Without Performance Mode each one is a PostgreSQL
+# LISTEN connection outside the pool, which main.py counts in the startup connection budget.
+BROKER_CHANNELS = ("STATE_TRANSITION", "RCA_INCIDENT")
+# How long one alert waits for a database that is busy or restarting before it is given up, and
+# the pauses between tries (the last one repeats). Two minutes outlasts a long lock or a
+# PostgreSQL restart; an alert that late still says when the change happened.
+DB_PATIENCE_SECONDS = 120.0
+DB_RETRY_DELAYS = (1.0, 2.0, 5.0)
 from app.models.alert_delivery_log import AlertDeliveryLog
 from app.models.system_setting import AppSetting
 from app.services.alert_formatters import (
@@ -91,6 +100,10 @@ class AlertDispatcher:
         self._stop_event: asyncio.Event = asyncio.Event()
         self._dispatch_semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
         self._log_semaphore: asyncio.Semaphore = asyncio.Semaphore(5)
+        # One alert at a time reads from the database (_wait_out_busy_database). asyncio.Lock
+        # wakes waiters in the order they arrived, so alerts that had to wait start sending in
+        # the order their events came in: DOWN before the RECOVERED that followed it.
+        self._db_gate: asyncio.Lock = asyncio.Lock()
         self._dispatch_tasks: set[asyncio.Task] = set()
 
         # Rate limiting and flapping memory caches
@@ -149,9 +162,10 @@ class AlertDispatcher:
 
     def _start_leading(self) -> None:
         """Runs the broker listeners, and watches the lock when it is a PostgreSQL session lock."""
+        task_names = {"STATE_TRANSITION": "alert_broker_state_trans", "RCA_INCIDENT": "alert_broker_rca"}
         self._listener_tasks = [
-            asyncio.create_task(self._listen_broker("STATE_TRANSITION"), name="alert_broker_state_trans"),
-            asyncio.create_task(self._listen_broker("RCA_INCIDENT"), name="alert_broker_rca"),
+            asyncio.create_task(self._listen_broker(channel), name=task_names[channel])
+            for channel in BROKER_CHANNELS
         ]
         self._tasks.extend(self._listener_tasks)
         if self._lock_conn is not None:
@@ -358,9 +372,58 @@ class AlertDispatcher:
             except Exception as exc:
                 logger.error("AlertDispatcher queue processing error: %s", exc, exc_info=True)
 
+    async def _retry_while_database_busy(
+        self,
+        what: str,
+        work: Callable[[], Awaitable[Any]],
+        retryable: Callable[[BaseException], bool] = is_database_unavailable,
+    ) -> Any:
+        """Runs `work`, one database step of an alert, again while the database is busy or
+        restarting, for up to DB_PATIENCE_SECONDS. After that, or on any other error, raises.
+
+        Since scale review S6 a full pool raises PoolTimeoutError after database.pool_timeout
+        (5 s) where it used to wait with no limit. The steps of an alert each took that error
+        as final: the alerting switch read as "on" and the channel list as empty, so a pool
+        busy for 10 s lost the alert, with one line in the log (branch review, 2026-11-10).
+        Stopping the dispatcher cancels the task, which ends the wait."""
+        deadline = time.monotonic() + DB_PATIENCE_SECONDS
+        attempt = 0
+        while True:
+            try:
+                return await work()
+            except Exception as exc:
+                if not retryable(exc) or time.monotonic() >= deadline:
+                    raise
+                if attempt == 0:
+                    logger.warning(
+                        "AlertDispatcher: database busy while %s (%s); trying again for up to %d s",
+                        what, exc, DB_PATIENCE_SECONDS,
+                    )
+                delay = DB_RETRY_DELAYS[min(attempt, len(DB_RETRY_DELAYS) - 1)]
+                attempt += 1
+                await asyncio.sleep(delay)
+
+    async def _wait_out_busy_database(self, what: str, work: Callable[[], Awaitable[Any]]) -> Any:
+        """_retry_while_database_busy for the reads an alert depends on, one alert at a time so
+        they finish in the order their events arrived (see _db_gate)."""
+        async with self._db_gate:
+            return await self._retry_while_database_busy(what, work)
+
+    async def _load_enabled_channels(self) -> List[AlertChannel]:
+        """The channels alerts go to, waiting out a busy database."""
+        async def read() -> List[AlertChannel]:
+            async with AsyncSessionLocal() as db:
+                res = await db.execute(select(AlertChannel).where(AlertChannel.is_enabled == True))
+                return res.scalars().all()
+
+        return await self._wait_out_busy_database("loading the alert channels", read)
+
     async def _is_alerting_enabled(self) -> bool:
-        """Checks master alerting toggle from app_settings (defaults to True)."""
-        try:
+        """Checks master alerting toggle from app_settings (defaults to True).
+
+        Waits out a busy database first: answering "on" after one failed read sent alerts an
+        administrator had switched off."""
+        async def read() -> bool:
             async with AsyncSessionLocal() as db:
                 stmt = select(AppSetting).where(AppSetting.setting_key == "alerting_enabled")
                 res = await db.execute(stmt)
@@ -368,6 +431,9 @@ class AlertDispatcher:
                 if setting is not None:
                     return setting.setting_value.strip().lower() in ("true", "1", "yes")
             return True
+
+        try:
+            return await self._wait_out_busy_database("reading the alerting switch", read)
         except Exception as err:
             logger.warning("AlertDispatcher: failed to read master toggle: %s. Defaulting to enabled.", err)
             return True
@@ -521,14 +587,15 @@ class AlertDispatcher:
         ep_key = str(endpoint_id) if endpoint_id else endpoint_name
         is_flapping = self._check_flapping(ep_key, now)
 
-        # Retrieve active channels from DB
+        # Retrieve active channels from DB. Only after DB_PATIENCE_SECONDS of a busy database,
+        # or on an error that waiting can't cure, is the alert given up, and the log says so.
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = select(AlertChannel).where(AlertChannel.is_enabled == True)
-                res = await db.execute(stmt)
-                channels = res.scalars().all()
+            channels = await self._load_enabled_channels()
         except Exception as exc:
-            logger.error("AlertDispatcher: Error loading active channels: %s", exc)
+            logger.error(
+                "AlertDispatcher: Error loading active channels; the %s alert for %s was not sent: %s",
+                new_state, endpoint_name, exc,
+            )
             channels = []
 
         # Concurrent Channel Dispatch
@@ -904,10 +971,19 @@ class AlertDispatcher:
                 db.add(log_entry)
                 await db.commit()
             else:
-                async with self._log_semaphore:
+                async def write() -> None:
                     async with AsyncSessionLocal() as session:
                         session.add(log_entry)
                         await session.commit()
+
+                # Tried again only when no connection came free (PoolTimeoutError): nothing was
+                # sent to the database then, so a second try can't write the row twice. Without
+                # it a busy pool left a delivered alert out of the history.
+                async with self._log_semaphore:
+                    await self._retry_while_database_busy(
+                        "writing the delivery log", write,
+                        retryable=lambda exc: isinstance(exc, PoolTimeoutError),
+                    )
         except Exception as exc:
             logger.error("AlertDispatcher: Failed to write delivery log: %s", exc)
 

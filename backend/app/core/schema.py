@@ -12,6 +12,9 @@ Where it differs from Pydantic:
   unchecked.
 - pattern= is matched with re.search, so it may match part of the string; anchor it with ^
   and $ to require a full match.
+- model_validate_json() and TypeAdapter.dump_python() are not provided (removed in the M3
+  coverage review, 2026-11-10, because nothing called them). Parse with json.loads and call
+  model_validate(); dump with model_dump().
 """
 
 from __future__ import annotations
@@ -47,6 +50,8 @@ from typing import (
     get_origin,
 )
 from uuid import UUID
+
+from app.core.annotations import own_annotations
 
 T = TypeVar("T")
 
@@ -290,11 +295,14 @@ def _coerce_value(
                 errors.append(exc)
         raise ValueError(f"Input '{val}' failed Union validation against {args}")
 
-    # 3. Literal[...]
+    # 3. Literal[...]. The type must match as well as the value: True == 1 and 1.0 == 1 in
+    # Python, so a plain `in` let True through for Literal[1] (and returned True, not 1).
+    # Found by the differential suite against Pydantic (M3, 2026-11-10).
     if origin is Literal:
-        if val not in args:
-            raise ValueError(f"Input should be one of {args}, got '{val}'")
-        return val
+        for allowed in args:
+            if val == allowed and type(val) is type(allowed):
+                return allowed
+        raise ValueError(f"Input should be one of {args}, got '{val}'")
 
     # 4. Primitive int. A whole float (5.0) is accepted; 5.7 is rejected, as in Pydantic, rather
     # than cut down to 5 (scale review M2).
@@ -307,10 +315,14 @@ def _coerce_value(
             if val != val or val in (float("inf"), float("-inf")) or val != int(val):
                 raise ValueError(f"Input should be a valid integer, got a number with a fractional part ({val})")
             return int(val)
-        try:
-            return int(val)
-        except Exception:
-            raise ValueError(f"Input should be a valid integer, got '{val}'")
+        # Only text is parsed. int() accepts any object with __int__ or __index__, so a UUID
+        # used to become a 128-bit number (differential suite, M3, 2026-11-10).
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except Exception:
+                pass
+        raise ValueError(f"Input should be a valid integer, got '{val}'")
 
     # 5. Primitive float
     if target_type is float:
@@ -329,9 +341,10 @@ def _coerce_value(
             return val
         if isinstance(val, str):
             low = val.lower().strip()
-            if low in ("true", "1", "yes", "on", "t"):
+            # The same words Pydantic accepts, "y" and "n" included.
+            if low in ("true", "1", "yes", "y", "on", "t"):
                 return True
-            if low in ("false", "0", "no", "off", "f"):
+            if low in ("false", "0", "no", "n", "off", "f"):
                 return False
             raise ValueError(f"Input should be a valid boolean, got '{val}'")
         # Only 0 and 1 count as numbers for a boolean (as in Pydantic); 2 used to read as True.
@@ -358,14 +371,19 @@ def _coerce_value(
             return val.encode("utf-8")
         raise ValueError(f"Input should be valid bytes, got '{val}'")
 
-    # 8b. Decimal
+    # 8b. Decimal. NaN and Infinity are refused, as in Pydantic: they pass every comparison
+    # check oddly (NaN is neither above nor below a bound) and PostgreSQL NUMERIC columns
+    # reject Infinity (differential suite, M3, 2026-11-10).
     if target_type is Decimal:
-        if isinstance(val, Decimal):
-            return val
+        if isinstance(val, bool):
+            raise ValueError("Input should be a valid Decimal, not boolean")
         try:
-            return Decimal(str(val))
+            dec = val if isinstance(val, Decimal) else Decimal(str(val))
         except Exception as exc:
             raise ValueError(f"Input should be a valid Decimal: {exc}")
+        if not dec.is_finite():
+            raise ValueError(f"Input should be a finite number, got {val}")
+        return dec
 
     # 9. UUID
     if target_type is UUID:
@@ -380,7 +398,11 @@ def _coerce_value(
 
     # 9b. date
     if target_type is date:
+        # A datetime is a date only at midnight, as in Pydantic. Taking .date() of any datetime
+        # dropped the time of day without a word (differential suite, M3, 2026-11-10).
         if isinstance(val, datetime):
+            if val.time() != datetime.min.time():
+                raise ValueError(f"Input should be a date, got a datetime with a time of day ({val})")
             return val.date()
         if isinstance(val, date):
             return val
@@ -429,13 +451,13 @@ def _coerce_value(
     if isinstance(target_type, type) and issubclass(target_type, Enum):
         if isinstance(val, target_type):
             return val
+        # By value only, as in Pydantic. Member names used to be accepted too ("RED" for
+        # Colour.RED = "red"), so the API took input its schema never documented
+        # (differential suite, M3, 2026-11-10).
         try:
             return target_type(val)
         except Exception:
-            try:
-                return target_type[val]
-            except Exception:
-                raise ValueError(f"Input '{val}' is not a valid {target_type.__name__}")
+            raise ValueError(f"Input '{val}' is not a valid {target_type.__name__}")
 
     # 14. Nested BaseModel
     if isinstance(target_type, type) and issubclass(target_type, BaseModel):
@@ -548,8 +570,10 @@ class ModelMetaclass(type):
             if hasattr(base, "_field_types"):
                 field_types.update(base._field_types)
 
-        # Collect current annotations
-        raw_annotations = namespace.get("__annotations__", {})
+        # Collect current annotations. Not namespace["__annotations__"]: Python 3.14 leaves that
+        # out of the class body, and every model outside a `from __future__ import annotations`
+        # module then had no fields (see own_annotations).
+        raw_annotations = own_annotations(cls, namespace)
 
         # Resolve type hints with fallback
         resolved_hints: Dict[str, Any] = {}
@@ -935,22 +959,6 @@ class SchemaModel(metaclass=ModelMetaclass):
         """Pydantic v1 backward compatibility alias for model_validate(obj, from_attributes=True)."""
         return cls.model_validate(obj, from_attributes=True)
 
-    @classmethod
-    def model_validate_json(
-        cls: Type[T],
-        json_data: Union[str, bytes],
-        *,
-        from_attributes: Optional[bool] = None,
-    ) -> T:
-        """Parse JSON string and validate against schema."""
-        parsed = json.loads(json_data)
-        if not isinstance(parsed, dict):
-            raise ValidationError(
-                [{"loc": ("__root__",), "msg": "Expected JSON dictionary", "type": "value_error"}],
-                title=cls.__name__,
-            )
-        return cls.model_validate(parsed, from_attributes=from_attributes)
-
     # -----------------------------------------------------------------------
     # Serialization
     # -----------------------------------------------------------------------
@@ -1129,14 +1137,6 @@ class TypeAdapter(Generic[T]):
                 return [adapter.validate_python(x) for x in data]
             return data
         return data
-
-    def dump_python(self, data: Any, mode: str = "python", by_alias: bool = False) -> Any:
-        if isinstance(data, BaseModel):
-            return data.model_dump(mode=mode, by_alias=by_alias)
-        if isinstance(data, (list, tuple)):
-            return [TypeAdapter(Any).dump_python(x, mode=mode, by_alias=by_alias) for x in data]
-        return data
-
 
 __all__ = [
     "SchemaModel",

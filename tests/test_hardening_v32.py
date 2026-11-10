@@ -743,12 +743,8 @@ def test_deep_health_checks_liveness_and_readiness():
     assert resp_v1.status_code == 200
     assert resp_v1.json()["status"] == "ok"
 
-    # Readiness (with mocked db and redis)
-    with patch("app.main.AsyncSessionLocal") as mock_session_local:
-        mock_session = AsyncMock()
-        mock_session_local.return_value.__aenter__.return_value = mock_session
-        mock_session_local.return_value.__aexit__.return_value = None
-
+    # Readiness (with mocked db and redis; readiness pings through app.main.ping_database)
+    with patch("app.main.ping_database", new=AsyncMock()):
         with patch("app.services.driver_manager.driver_manager.get_redis_client") as mock_get_redis:
             mock_redis = AsyncMock()
             mock_get_redis.return_value = mock_redis
@@ -768,12 +764,9 @@ def test_health_readiness_masks_sensitive_exception_details():
     """
     from app.main import app
     client = TestClient(app)
-    with patch("app.main.AsyncSessionLocal") as mock_session_local:
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = Exception("password authentication failed for user ephemres_super: secret123")
-        mock_session_local.return_value.__aenter__.return_value = mock_session
-        mock_session_local.return_value.__aexit__.return_value = None
-
+    # The secret-bearing error comes from the database ping readiness uses (since scale review S6).
+    leak = Exception("password authentication failed for user ephemres_super: secret123")
+    with patch("app.main.ping_database", new=AsyncMock(side_effect=leak)):
         resp = client.get("/health/readiness")
         assert resp.status_code == 503
         body = resp.json()

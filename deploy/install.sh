@@ -270,11 +270,14 @@ run "Upgrading pip to latest version" \
     --timeout 120 \
     --upgrade pip
 
+# requirements.lock pins every package with its file hashes, so each server gets the same
+# verified files; pip refuses any download whose hash doesn't match (scale and core review M5).
 run "Installing Python dependencies" \
     sudo -H -u ephemres "$VENV_DIR/bin/pip" install \
     --timeout 120 \
     --retries 5 \
-    -r "$INSTALL_DIR/backend/requirements.txt"
+    --require-hashes \
+    -r "$INSTALL_DIR/backend/requirements.lock"
 
 # No file capability on the Python interpreter: the venv python3 resolves to the system-wide
 # interpreter, so setcap there would grant CAP_NET_RAW to every Python process on the host.
@@ -441,6 +444,12 @@ if [ "$DRY_RUN" = false ]; then
     echo "--> Configuring TimescaleDB decompression safety threshold"
     sudo -u postgres psql -d netmon -c \
         "ALTER DATABASE netmon SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;" 2>/dev/null || true
+    # TimescaleDB's daily telemetry job reports the PostgreSQL and TimescaleDB versions and usage
+    # to Timescale unless told not to. A monitoring server shouldn't phone home by default (scale
+    # and core review M6). The job runs inside this database, so a database setting is enough.
+    echo "--> Turning off TimescaleDB telemetry"
+    sudo -u postgres psql -d netmon -c \
+        "ALTER DATABASE netmon SET timescaledb.telemetry_level = off;"
 else
     echo "[DRY RUN] Would create PostgreSQL user, database, and TimescaleDB extension"
 fi
@@ -609,7 +618,6 @@ else
     echo "Ephemres v3.3.5 is now running."
     echo ""
     echo "  Dashboard:  https://$DOMAIN_NAME"
-    echo "  OpenAPI:    https://$DOMAIN_NAME/api/openapi.json"
     echo ""
     echo "--------------------------------------------------------"
     if [ "$ADMIN_PASS_SET" = true ]; then

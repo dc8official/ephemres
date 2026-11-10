@@ -40,7 +40,8 @@ ephemres/
 │   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
 │   ├── migrations/         # Migration versions (0001-0021)
-│   └── requirements.txt    # Minimal dependencies (uvicorn, asyncpg)
+│   ├── requirements.txt    # Runtime dependencies (uvicorn, httptools, uvloop, asyncpg)
+│   └── requirements.lock   # The same, with every package pinned and hashed (servers install this)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
 ├── deploy/                 # Systemd units, install.sh, upgrade.sh, restore.sh, nginx config
@@ -71,10 +72,11 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
    python3 -m venv .venv
    source .venv/bin/activate
    pip install --upgrade pip
+   pip install --require-hashes -r backend/requirements.lock
    pip install -r backend/requirements-dev.txt
    cd backend
    ```
-   `requirements-dev.txt` installs the two runtime packages from `requirements.txt` (`uvicorn`, `asyncpg`) plus the test tools (`pytest`, `anyio`). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
+   `requirements.lock` is what the servers install: the runtime packages (`uvicorn`, `httptools`, `uvloop`, `asyncpg`, and uvicorn's `click` and `h11`) pinned with their hashes. Installing it first means the tests run on the same files; a test fails when an installed version differs from the lock. `requirements-dev.txt` then adds the test tools (`pytest`, `anyio`). Regenerate the lock after changing `requirements.txt` (the command is in that file). Keep the environment limited to these: a stray legacy package (e.g. `fastapi`, `sqlalchemy`) would let an accidental import pass locally and fail in production.
 
 2. **Environment Configuration:**
    Copy `.env.example` to `.env` and configure your credentials:

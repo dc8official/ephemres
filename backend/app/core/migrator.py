@@ -205,22 +205,6 @@ def set_current_proxy(proxy: Optional[OperationsProxy]) -> None:
                 pass
 
 
-def get_current_proxy() -> Optional[OperationsProxy]:
-    if _active_proxy is not None:
-        return _active_proxy
-    canonical = sys.modules.get("app.core.migrator")
-    if canonical is not None and canonical is not sys.modules.get(__name__):
-        target = getattr(canonical, "_active_proxy", None)
-        if target is not None:
-            return target
-    main_mod = sys.modules.get("__main__")
-    if main_mod is not None and main_mod is not sys.modules.get(__name__):
-        target = getattr(main_mod, "_active_proxy", None)
-        if target is not None:
-            return target
-    return None
-
-
 class _DynamicOpProxy:
     """Routes op.<method>(...) calls to the active migration's OperationsProxy."""
 

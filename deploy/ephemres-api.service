@@ -16,10 +16,17 @@ RuntimeDirectoryPreserve=yes
 # `sudo -n systemctl ... ephemres-flowd`, and sudo needs CAP_SETUID/CAP_SETGID from the bounding set.
 AmbientCapabilities=CAP_NET_RAW
 WorkingDirectory=/opt/ephemres/backend
+# Worker count and each worker's database pool (scale and core review S6). Change the worker
+# count here, not in ExecStart: the API reads EPHEMRES_API_WORKERS at startup to check that every
+# pool fits PostgreSQL's max_connections. 10 connections per worker is plenty for about 300
+# requests/s and leaves the engine and flowd their share. To change them, use an override that
+# upgrades keep (`sudo systemctl edit ephemres-api`, then [Service] and the Environment= line).
+Environment=EPHEMRES_API_WORKERS=2
+Environment=EPHEMRES_API_DB_POOL=10
 EnvironmentFile=/etc/ephemres/ephemres.env
 EnvironmentFile=-/opt/ephemres/.env
 EnvironmentFile=-/opt/ephemres/backend/.env
-ExecStart=/opt/ephemres/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2
+ExecStart=/opt/ephemres/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers ${EPHEMRES_API_WORKERS}
 Restart=always
 RestartSec=5
 StandardOutput=journal
