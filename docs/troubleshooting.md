@@ -258,10 +258,12 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 
 ### J. PostgreSQL Connections: Busy Pool or Too Many Clients
 Each Ephemres process keeps a pool of database connections: every API worker 10 (set in
-`ephemres-api.service`) plus one for live events, and the engine and flowd
-`database.pool_size + database.max_overflow` (20 by default) plus one each. With the default 2
-workers that is at most 64 connections, against PostgreSQL's default `max_connections = 100`
-(3 reserved for superusers).
+`ephemres-api.service`), and the engine and flowd `database.pool_size + database.max_overflow`
+(20 by default) plus one each. On top of its pool an API worker holds up to five connections
+that listen for live events, and the one worker that sends alerts two more (with Performance
+Mode on it is one per worker, but a worker goes back to five whenever FastStore is
+unreachable, so the startup check counts five). With the default 2 workers that is at most 74
+connections, against PostgreSQL's default `max_connections = 100` (3 reserved for superusers).
 
 * **Symptoms**:
   - At API startup the log warns `Database connection budget exceeded: ...`, naming the numbers.
@@ -276,8 +278,8 @@ workers that is at most 64 connections, against PostgreSQL's default `max_connec
     slow query is holding them.
 * **Cause**:
   - **Too many clients:** the pools together exceed `max_connections`, typically after raising
-    `EPHEMRES_API_WORKERS` (a third worker no longer fits the default 100 with the engine's and
-    flowd's pools).
+    `EPHEMRES_API_WORKERS` (three workers fit the default 100 with the engine's and flowd's
+    pools, at 89 connections; a fourth does not, at 104).
   - **Busy pool:** the pool is full of connections waiting on something else.
 * **Fix**:
   1. See who holds connections and what they wait on:

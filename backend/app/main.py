@@ -30,7 +30,7 @@ from app.routers import (
 )
 from app.routers.reports import telemetry_router
 from app.schemas import APIResponse
-from app.services.alert_dispatcher import alert_dispatcher
+from app.services.alert_dispatcher import BROKER_CHANNELS as ALERT_BROKER_CHANNELS, alert_dispatcher
 from app.services.baseline_route import start_midnight_discovery_worker
 from app.services.baseline_service import baseline_cache, start_baseline_refresh_task
 from app.services.diagnostics import (
@@ -40,7 +40,7 @@ from app.services.diagnostics import (
 from app.services.driver_manager import driver_manager
 from app.services.runtime_settings import start_runtime_settings_refresh_task
 from app.core.watchdog import start_loop_stall_guard, start_systemd_watchdog
-from app.services.telemetry_relay import telemetry_relay
+from app.services.telemetry_relay import CHANNELS as RELAY_CHANNELS, telemetry_relay
 from app.services.scheduler_leader import scheduler_leader
 from app.services.topology import start_topology_flow_refresh_task, topology_manager
 
@@ -52,10 +52,22 @@ logger = setup_logging(
 )
 
 
+# PostgreSQL LISTEN connections a worker opens outside its pool, for the connection budget
+# below: the settings-sync listener (always on PostgreSQL) plus one per telemetry relay channel,
+# and on the worker that sends alerts one more per alert channel. These are the numbers without
+# Performance Mode, where the relay and the alert listeners use FastStore instead and only the
+# settings-sync one remains. The budget uses them in both modes, because a worker falls back to
+# PostgreSQL the moment FastStore is unreachable or the mode is switched off in Settings.
+LISTENERS_PER_WORKER = 1 + len(RELAY_CHANNELS)
+LISTENERS_ON_ALERT_LEADER = len(ALERT_BROKER_CHANNELS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await check_database_connection()
-    await check_connection_budget()
+    await check_connection_budget(
+        api_listeners=LISTENERS_PER_WORKER, leader_listeners=LISTENERS_ON_ALERT_LEADER
+    )
     # Initialize storage driver manager (Redis / PostgreSQL)
     await driver_manager.initialize()
 

@@ -108,10 +108,59 @@ def test_only_api_workers_take_the_api_pool_size(monkeypatch, argv0, env, expect
     assert database._pool_sizes() == expected
 
 
+# What main.py passes: 5 LISTEN connections per worker and 2 more on the alert leader.
+LISTENERS = dict(api_listeners=5, leader_listeners=2)
+
+
 def test_the_default_layout_fits_postgresql_defaults():
-    # 2 workers x (10 + LISTEN) + engine and flowd x (20 + 1) against max_connections 100 with
-    # 3 reserved for superusers.
-    assert connection_budget(100, 3, api_workers=2, api_pool=10, other_pool=20) == (64, 97)
+    # 2 workers x (10 + 5 LISTEN) + 2 on the alert leader + engine and flowd x (20 + 1), against
+    # max_connections 100 with 3 reserved for superusers.
+    assert connection_budget(100, 3, api_workers=2, api_pool=10, other_pool=20, **LISTENERS) == (74, 97)
+
+
+def test_a_fourth_worker_does_not_fit_once_every_listener_is_counted():
+    # Counting one LISTEN connection per worker called this 86 of 97 and said nothing; the
+    # workers really open 104 (branch review, 2026-11-10).
+    assert connection_budget(100, 3, api_workers=4, api_pool=10, other_pool=20)[0] == 86
+    need, available = connection_budget(100, 3, api_workers=4, api_pool=10, other_pool=20, **LISTENERS)
+    assert need == 104 and need > available
+    assert connection_budget(100, 3, api_workers=3, api_pool=10, other_pool=20, **LISTENERS)[0] == 89
+
+
+def test_the_api_counts_one_listener_per_channel_it_subscribes_to():
+    # The budget is only right while these follow the code that opens the connections:
+    # settings sync, the relay's channels, and the alert leader's.
+    from app.services import alert_dispatcher, telemetry_relay
+
+    assert main.LISTENERS_PER_WORKER == 1 + len(telemetry_relay.CHANNELS) == 5
+    assert main.LISTENERS_ON_ALERT_LEADER == len(alert_dispatcher.BROKER_CHANNELS) == 2
+
+
+@pytest.mark.anyio
+async def test_the_relay_and_the_alert_leader_subscribe_to_exactly_their_channel_lists(monkeypatch):
+    from app.services import alert_dispatcher, telemetry_relay
+
+    subscribed = []
+
+    async def subscribe(channel):
+        subscribed.append(channel)
+        await asyncio.Event().wait()  # a subscription that never delivers
+        yield {}
+
+    monkeypatch.setattr(telemetry_relay.driver_manager, "subscribe", subscribe)
+    relay = telemetry_relay.TelemetryRelay()
+    await relay.start()
+    await asyncio.sleep(0)
+    await relay.stop()
+    assert subscribed == list(telemetry_relay.CHANNELS)
+
+    subscribed.clear()
+    dispatcher = alert_dispatcher.AlertDispatcher()
+    dispatcher._running = True
+    dispatcher._start_leading()
+    await asyncio.sleep(0)
+    await dispatcher.stop()
+    assert subscribed == list(alert_dispatcher.BROKER_CHANNELS)
 
 
 def test_a_third_worker_with_the_old_pool_did_not_fit():
@@ -136,9 +185,10 @@ async def test_the_budget_check_warns_when_the_pools_do_not_fit(monkeypatch, cap
     monkeypatch.setattr(database.async_engine, "connect", lambda: _Connect())
     monkeypatch.setenv(database.API_WORKERS_ENV, "2")
     with caplog.at_level("WARNING", logger="app.database"):
-        await database.check_connection_budget()
+        await database.check_connection_budget(**LISTENERS)
     assert "connection budget exceeded" in caplog.text
-    assert "PostgreSQL allows 57" in caplog.text
+    assert "2 API worker(s) x (20 + 5 for live events), 2 more on the worker that sends alerts" in caplog.text
+    assert "can open 94 connections, but PostgreSQL allows 57" in caplog.text
 
 
 def test_the_api_unit_sets_workers_and_pool_in_one_place():

@@ -182,22 +182,31 @@ def connection_budget(
     api_workers: int,
     api_pool: int,
     other_pool: int,
+    api_listeners: int = 1,
+    leader_listeners: int = 0,
 ) -> tuple[int, int]:
     """(connections Ephemres may open at its peak, connections PostgreSQL lets it open).
 
-    Each API worker holds its pool plus one LISTEN connection for live events; the engine and
-    flowd each hold their pool plus one (the engine measured 17 to 21 against a pool of 20).
-    `reserved` is what only superusers may use (superuser_reserved_connections, plus
-    reserved_connections on PostgreSQL 16 and later)."""
-    need = api_workers * (api_pool + 1) + 2 * (other_pool + 1)
+    Each API worker holds its pool plus `api_listeners` LISTEN connections outside it, and the
+    one worker that sends alerts `leader_listeners` more. The engine and flowd each hold their
+    pool plus one (the engine measured 17 to 21 against a pool of 20). `reserved` is what only
+    superusers may use (superuser_reserved_connections, plus reserved_connections on
+    PostgreSQL 16 and later)."""
+    need = api_workers * (api_pool + api_listeners) + leader_listeners + 2 * (other_pool + 1)
     return need, max_connections - reserved
 
 
-async def check_connection_budget() -> None:
+async def check_connection_budget(api_listeners: int = 1, leader_listeners: int = 0) -> None:
     """Log a warning at API startup when every Ephemres pool filled at once would need more
     connections than PostgreSQL allows; the last ones to connect would then fail with "too many
-    clients". It used to be found only under load: a third API worker on the default
-    max_connections = 100 doesn't fit (docs/troubleshooting.md). Never stops startup."""
+    clients". It used to be found only under load: with the old pool of 20 a third API worker
+    didn't fit the default max_connections = 100 (docs/troubleshooting.md). Never stops startup.
+
+    The caller passes the LISTEN connections each worker opens outside its pool, and the extra
+    ones on the alert leader (main.py knows which listeners it starts). The first version
+    counted one per worker, but without Performance Mode a worker opens five and the leader two
+    more: two idle workers held 20 connections, and four workers were reported as 86 of 97
+    when they can open 104 (branch review, 2026-11-10)."""
     try:
         async with async_engine.connect() as conn:
             row = (await conn.execute(text(
@@ -213,16 +222,17 @@ async def check_connection_budget() -> None:
     workers = int(workers_raw) if workers_raw.isdigit() and int(workers_raw) > 0 else 1
     other_pool = settings.database.pool_size + settings.database.max_overflow
     need, available = connection_budget(
-        max_conn, su_reserved + reserved, workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool
+        max_conn, su_reserved + reserved, workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool,
+        api_listeners=api_listeners, leader_listeners=leader_listeners,
     )
     if need > available:
         logger.warning(
-            "Database connection budget exceeded: %d API worker(s) x (%d + 1) and the engine and "
-            "flowd at %d + 1 each can open %d connections, but PostgreSQL allows %d "
-            "(max_connections %d, %d reserved). Raise max_connections or lower the pools; see "
-            "docs/troubleshooting.md.",
-            workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool, need, available, max_conn,
-            su_reserved + reserved,
+            "Database connection budget exceeded: %d API worker(s) x (%d + %d for live events), "
+            "%d more on the worker that sends alerts, and the engine and flowd at %d + 1 each can "
+            "open %d connections, but PostgreSQL allows %d (max_connections %d, %d reserved). "
+            "Raise max_connections or lower the pools; see docs/troubleshooting.md.",
+            workers, _POOL_SIZE + _MAX_OVERFLOW, api_listeners, leader_listeners, other_pool,
+            need, available, max_conn, su_reserved + reserved,
         )
     else:
         logger.info("Database connection budget: up to %d of %d connections.", need, available)

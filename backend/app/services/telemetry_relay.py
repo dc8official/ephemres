@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 ROUTE_HINT_COOLDOWN_SECONDS = 900
 ROUTE_HINT_MAX_PER_MINUTE = 10
 
+# The broker channels every API worker listens on. Without Performance Mode each one is a
+# PostgreSQL LISTEN connection outside the pool, which main.py counts in the startup connection
+# budget, so add a channel here and nowhere else.
+CHANNELS = ("STATE_TRANSITION", "NODE_STATE_CHANGE", "RCA_INCIDENT", "ROUTE_HINT")
+
 
 class TelemetryRelay:
     """Carries events from the other processes into this API worker.
@@ -42,30 +47,13 @@ class TelemetryRelay:
         if self._running:
             return
         self._running = True
-        self._tasks.append(
-            asyncio.create_task(
-                self._listen_channel("STATE_TRANSITION"),
-                name="telemetry_relay_state_transition",
+        for channel in CHANNELS:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._listen_channel(channel),
+                    name=f"telemetry_relay_{channel.lower()}",
+                )
             )
-        )
-        self._tasks.append(
-            asyncio.create_task(
-                self._listen_channel("NODE_STATE_CHANGE"),
-                name="telemetry_relay_node_state_change",
-            )
-        )
-        self._tasks.append(
-            asyncio.create_task(
-                self._listen_channel("RCA_INCIDENT"),
-                name="telemetry_relay_rca_incident",
-            )
-        )
-        self._tasks.append(
-            asyncio.create_task(
-                self._listen_channel("ROUTE_HINT"),
-                name="telemetry_relay_route_hint",
-            )
-        )
         logger.info("TelemetryRelay started listening to inter-process broker channels.")
 
     async def stop(self) -> None:
