@@ -135,6 +135,7 @@ import { useToast } from 'primevue/usetoast'
 import { logout, changePassword, getVersion } from './services/api.js'
 import { currentUser, isAdmin, mustChangePassword, loadUserFromStorage, setUserState, clearUserState } from './services/auth.js'
 import { useSSE } from './composables/useSSE.js'
+import { startActivityTracker } from './composables/useActivityTracker.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -144,6 +145,8 @@ const appVersion = ref('v3.3.5')
 const liveAnnouncement = ref('')
 const { subscribe } = useSSE()
 let unsubscribeSSE = null
+// Reports real interaction so the session's idle timeout restarts; polling does not count.
+let stopActivityTracker = null
 
 const noNavRoutes = ['/login', '/change-password']
 
@@ -193,6 +196,7 @@ function onUnavailable(event) {
 }
 
 onMounted(async () => {
+  stopActivityTracker = startActivityTracker(router)
   window.addEventListener('ephemres:unavailable', onUnavailable)
   document.addEventListener('keydown', onDocumentKeydown)
   document.addEventListener('click', onDocumentClick)
@@ -233,6 +237,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (stopActivityTracker) stopActivityTracker()
   window.removeEventListener('ephemres:unavailable', onUnavailable)
   if (unsubscribeSSE) unsubscribeSSE()
   document.removeEventListener('keydown', onDocumentKeydown)

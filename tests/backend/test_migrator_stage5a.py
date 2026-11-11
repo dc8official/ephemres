@@ -29,17 +29,17 @@ def test_migrator_loads_all_19_revisions():
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 21
-    expected_chain = [f"{i:04d}" for i in range(1, 22)]
+    assert len(ordered) == 22
+    expected_chain = [f"{i:04d}" for i in range(1, 23)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0021"
+    assert ordered[-1].revision == "0022"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 21):
+    for i in range(1, 22):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
@@ -57,8 +57,8 @@ def test_all_19_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 71 total statements across all 21 migrations
-    assert total_statements == 72
+    # 0022 adds 11 upgrade statements to the 72 before it
+    assert total_statements == 83
 
     full_sql = "\n".join(all_statements)
 
@@ -142,6 +142,11 @@ def test_all_19_revisions_upgrade_ddl_compilation():
     # 0021 hourly conversation tier
     assert "CREATE MATERIALIZED VIEW IF NOT EXISTS flow_conversation_hourly_rollups" in full_sql
 
+    # 0022 per-account sessions
+    assert "ADD COLUMN IF NOT EXISTS session_idle_minutes INTEGER NOT NULL DEFAULT 30" in full_sql
+    assert "ADD COLUMN IF NOT EXISTS last_activity_at" in full_sql
+    assert "CREATE TABLE IF NOT EXISTS ended_sessions" in full_sql
+
 
 def test_all_19_revisions_downgrade_ddl_compilation():
     """Execute dry-run DDL compilation for all 21 downgrades and verify generated SQL."""
@@ -157,8 +162,8 @@ def test_all_19_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 58 total downgrade statements
-    assert total_statements == 59
+    # 0022 adds 8 downgrade statements to the 59 before it
+    assert total_statements == 67
 
     full_sql = "\n".join(all_statements)
 
@@ -182,13 +187,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0021 (head)" in captured.out
+    assert "0022 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0021 (head)" in captured.out
+    assert "0022 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])

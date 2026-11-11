@@ -6,10 +6,13 @@ Welcome to the Ephemres Network Monitoring Platform v3.3.5 user guide. This docu
 
 ## 1. Authentication & Session Security
 
-Ephemres v3.3.5 provides enterprise-grade session protection:
+Ephemres provides enterprise-grade session protection:
 * **Browser Password Autofill:** The login page supports native browser credential managers (Chrome, Edge, Safari, Firefox, Bitwarden, 1Password) for 1-click authentication.
-* **Session Timeout:** Sessions expire after the configured session timeout (default 120 minutes; **Admin Settings → Security & Discovery**), after which you are asked to log in again.
-* **Concurrent Device Quotas:** Accounts are allowed up to 2 active sessions by default (configurable by the operator); a further login signs out the oldest session.
+* **Idle Timeout (v3.3.6):** You are signed out after a period without activity, set per account by an administrator. Only clicks, key presses and moving between pages count as activity: a dashboard left open on a screen still times out, because its automatic refreshes don't count. Admin accounts choose 15 minutes, 30 minutes (default) or 1 hour; viewer accounts 30 minutes, 1, 2 (default) or 4 hours.
+* **Admin 12-Hour Limit:** An admin session also ends 12 hours after sign-in, even while it is in use.
+* **Session Limit per Account:** Each account may be signed in on a set number of devices at once (default 2, from 1 to 10). Signing in on one more device signs out the oldest session.
+* **Why You Were Signed Out:** The sign-in page says why the last session ended: after N minutes without activity, because the account signed in on another device, because the password was changed, or because an administrator ended it.
+* **One Account per Person:** Give each colleague a named account rather than sharing `admin`. With a shared account, one person signing in can sign another out mid-presentation (the session limit), and the audit log can't tell who did what.
 * **IP-Scoped Lockouts:** Brute-force protection isolates failed attempts by `<Client_IP>:<Username>`, ensuring legitimate users on other networks are never locked out.
 * **Forced Initial Password Reset:** First-time logins require setting a secure replacement password before platform access is granted.
 
@@ -70,8 +73,8 @@ Clicking any endpoint opens its detailed forensic view with a live status bar (S
 Administrators can configure platform behavior across five dedicated tabs:
 1. **🔔 Alert Channels:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
 2. **⚡ Performance & Telemetry:** FastStore event-routing toggle (`performance_mode`; flows don't depend on it), flow diagnostic preflight, NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), and sampling rate.
-3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle, session timeout (minutes from sign-in; activity does not extend it), and IP-scoped brute-force lockout threshold.
-4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation.
+3. **🛡️ Security & Discovery:** Layer-2 subnet auto-bypass toggle and IP-scoped brute-force lockout threshold.
+4. **👥 User Governance:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation. **Edit** sets an account's role, idle timeout and session limit; the table's **Session** column shows the timeout and how many sessions are open against the limit ("1 of 2 sessions"). Click that count to see each session (device, address, when it signed in, when it last saw activity, when it ends if left alone) and to end one, or all of them. On your own account, "End all sessions" keeps the browser you are using. A new timeout applies to the account's open sessions at once; a new session limit applies from its next sign-in. An admin can change their own timeout and limit, but not their own role.
 5. **🏢 Organization & Branding:** Company name, department / NOC unit, report footer disclaimer, and corporate logo upload (PNG or JPEG, up to 1 MB) for branded PDF report generation.
 
 ---

@@ -19,13 +19,14 @@
               <th>Role</th>
               <th>Status</th>
               <th>Credential State</th>
+              <th>Session</th>
               <th>Last Active Sign-in</th>
               <th class="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="usersLoading">
-              <td colspan="6" class="text-center py-6 text-muted">Loading user accounts...</td>
+              <td colspan="7" class="text-center py-6 text-muted">Loading user accounts...</td>
             </tr>
             <tr v-for="u in users" :key="u.id">
               <td class="font-bold">{{ u.username }}</td>
@@ -47,11 +48,29 @@
                   ✓ Secure
                 </span>
               </td>
+              <!-- Idle timeout and session limit of this account (v3.3.6). -->
+              <td class="session-cell">
+                <span class="tnum">{{ formatMinutes(u.session_idle_minutes) }} idle</span>
+                <!-- "1 of 2 sessions": in use against the limit; opens the session list. -->
+                <button
+                  v-if="u.active_sessions !== null && u.active_sessions !== undefined"
+                  type="button"
+                  class="session-count tnum"
+                  :title="`Show ${u.username}'s sessions`"
+                  @click="openSessionsModal(u)"
+                >
+                  {{ u.active_sessions }} of {{ u.max_sessions }} {{ u.max_sessions === 1 ? 'session' : 'sessions' }}
+                </button>
+                <span v-else class="session-limit tnum">
+                  {{ u.max_sessions }} {{ u.max_sessions === 1 ? 'session' : 'sessions' }}
+                </span>
+              </td>
               <td class="font-mono tnum">
                 {{ u.last_login ? new Date(u.last_login).toLocaleString() : 'Never' }}
               </td>
               <td class="text-right">
                 <div class="table-actions">
+                  <button class="btn-action" @click="openEditModal(u)" title="Edit role and session settings">✎ Edit</button>
                   <button class="btn-action" @click="openResetPasswordModal(u)" title="Reset Password">🔑 Reset</button>
                   <button 
                     v-if="u.username !== currentUser" 
@@ -105,11 +124,30 @@
           </div>
           <div class="form-group">
             <label>Account Role *</label>
-            <select v-model="userForm.role" class="form-select">
+            <select v-model="userForm.role" class="form-select" @change="fitIdleToRole(userForm)">
               <option value="VIEWER">VIEWER (Read-Only Access)</option>
               <option value="ADMIN">ADMIN (Full Administrative Control)</option>
             </select>
           </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="add-session-idle">Session Timeout</label>
+              <select id="add-session-idle" v-model.number="userForm.session_idle_minutes" class="form-select">
+                <option v-for="m in idleChoices(userForm.role)" :key="m" :value="m">
+                  {{ formatMinutes(m) }}{{ m === defaultIdle(userForm.role) ? ' (default)' : '' }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="add-max-sessions">Session Limit</label>
+              <select id="add-max-sessions" v-model.number="userForm.max_sessions" class="form-select">
+                <option v-for="n in sessionLimitChoices" :key="n" :value="n">
+                  {{ n }} {{ n === 1 ? 'session' : 'sessions' }}
+                </option>
+              </select>
+            </div>
+          </div>
+          <p class="form-hint">{{ sessionHint(userForm.role) }}</p>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="closeAddModal">Cancel</button>
             <button type="submit" class="btn-primary" :disabled="userSaving">
@@ -117,6 +155,146 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Edit User Modal: role, session timeout and session limit. -->
+    <div
+      class="modal-overlay"
+      v-if="showEditModal"
+      @click.self="closeEditModal"
+      @keydown="onEditModalKeydown"
+    >
+      <div
+        ref="editModalRef"
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-user-modal-title"
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h3 id="edit-user-modal-title">Edit {{ targetUser?.username }}</h3>
+          <button class="btn-close" @click="closeEditModal" aria-label="Close dialog">✕</button>
+        </div>
+        <form @submit.prevent="saveEditUser" class="modal-form">
+          <div class="form-group">
+            <label for="edit-role">Account Role</label>
+            <!-- An admin can't change their own role (the API refuses it too). -->
+            <select
+              id="edit-role"
+              v-model="editForm.role"
+              class="form-select"
+              :disabled="isSelf(targetUser)"
+              @change="fitIdleToRole(editForm)"
+            >
+              <option value="VIEWER">VIEWER (Read-Only Access)</option>
+              <option value="ADMIN">ADMIN (Full Administrative Control)</option>
+            </select>
+            <p v-if="isSelf(targetUser)" class="form-hint">You can't change the role of your own account.</p>
+            <p v-else-if="editForm.role !== targetUser?.role" class="form-hint warn">
+              Changing the role signs {{ targetUser?.username }} out everywhere.
+            </p>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="edit-session-idle">Session Timeout</label>
+              <select id="edit-session-idle" v-model.number="editForm.session_idle_minutes" class="form-select">
+                <option v-for="m in idleChoices(editForm.role)" :key="m" :value="m">
+                  {{ formatMinutes(m) }}{{ m === defaultIdle(editForm.role) ? ' (default)' : '' }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="edit-max-sessions">Session Limit</label>
+              <select id="edit-max-sessions" v-model.number="editForm.max_sessions" class="form-select">
+                <option v-for="n in sessionLimitChoices" :key="n" :value="n">
+                  {{ n }} {{ n === 1 ? 'session' : 'sessions' }}
+                </option>
+              </select>
+            </div>
+          </div>
+          <p class="form-hint">{{ sessionHint(editForm.role) }} A new timeout applies at once; a new limit from the next sign-in.</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" @click="closeEditModal">Cancel</button>
+            <button type="submit" class="btn-primary" :disabled="userSaving">
+              {{ userSaving ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Sessions Modal: the account's live sessions, with End per session and End all. -->
+    <div
+      class="modal-overlay"
+      v-if="showSessionsModal"
+      @click.self="closeSessionsModal"
+      @keydown="onSessionsModalKeydown"
+    >
+      <div
+        ref="sessionsModalRef"
+        class="modal-card modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sessions-modal-title"
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h3 id="sessions-modal-title">Sessions of {{ targetUser?.username }}</h3>
+          <button class="btn-close" @click="closeSessionsModal" aria-label="Close dialog">✕</button>
+        </div>
+        <p v-if="sessionsLoading" class="form-hint">Loading sessions...</p>
+        <p v-else-if="!sessions.length" class="form-hint">No active sessions.</p>
+        <ul v-else class="session-list">
+          <li v-for="sess in sessions" :key="sess.id" class="session-row">
+            <div class="session-main">
+              <span class="session-device" :title="sess.user_agent || ''">
+                {{ describeDevice(sess.user_agent) }}
+                <span v-if="sess.is_current" class="current-tag">This browser</span>
+              </span>
+              <span class="session-meta tnum">
+                {{ sess.client_ip || 'Address not recorded' }} · signed in {{ formatWhen(sess.created_at) }}
+              </span>
+              <span class="session-meta tnum">
+                Last active {{ formatAgo(sess.last_activity_at) }} · ends {{ formatUntil(sess.ends_at) }} if left alone
+              </span>
+            </div>
+            <button
+              v-if="!sess.is_current"
+              type="button"
+              class="btn-action text-down"
+              :disabled="sessionEnding === sess.id"
+              @click="endOneSession(sess)"
+            >
+              {{ sessionEnding === sess.id ? 'Ending...' : 'End' }}
+            </button>
+          </li>
+        </ul>
+        <!-- "End all" confirms in place: a second dialog stacked on this one had no backdrop
+             of its own and its text ran over this list. -->
+        <div v-if="confirmingEndAll" class="modal-actions confirm-row" role="alert">
+          <span class="confirm-text">
+            {{ isSelf(targetUser)
+              ? 'Sign out every other device using your account? This browser stays signed in.'
+              : `Sign out every device using '${targetUser?.username}'?` }}
+          </span>
+          <button type="button" class="btn-secondary" @click="confirmingEndAll = false">Cancel</button>
+          <button type="button" class="btn-danger" :disabled="endingAll" @click="endAllSessionsNow">
+            {{ endingAll ? 'Ending...' : 'End all' }}
+          </button>
+        </div>
+        <div v-else class="modal-actions">
+          <button
+            v-if="sessions.some((x) => !x.is_current)"
+            type="button"
+            class="btn-secondary text-down end-all"
+            @click="confirmingEndAll = true"
+          >
+            End all sessions
+          </button>
+          <button type="button" class="btn-primary" @click="closeSessionsModal">Close</button>
+        </div>
       </div>
     </div>
 
@@ -201,11 +379,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useToast } from 'primevue/usetoast'
 import { useConfirm } from 'primevue/useconfirm'
 import {
   getUsers,
+  getSessionOptions,
+  getUserSessions,
+  endUserSession,
+  endAllUserSessions,
   createUser,
   resetUserPassword,
   updateUser,
@@ -275,10 +457,72 @@ function onGeneratedModalKeydown(e) {
   }
 }
 
+// Per-account session settings (v3.3.6). The choices come from the API
+// (GET /users/session-options) so the form offers exactly what the server accepts; these are
+// only the fallback while it loads or if it fails.
+const sessionOptions = ref({
+  idle_minutes: { ADMIN: [15, 30, 60], VIEWER: [30, 60, 120, 240] },
+  default_idle_minutes: { ADMIN: 30, VIEWER: 120 },
+  admin_absolute_hours: 12,
+  max_sessions: { min: 1, max: 10, default: 2 },
+})
+
+async function loadSessionOptions() {
+  try {
+    const res = await getSessionOptions()
+    if (res.data?.data) sessionOptions.value = res.data.data
+  } catch (err) {
+    console.error('Failed to load session options:', err)
+  }
+}
+
+function idleChoices(role) {
+  return sessionOptions.value.idle_minutes[role] || sessionOptions.value.idle_minutes.VIEWER
+}
+
+function defaultIdle(role) {
+  return sessionOptions.value.default_idle_minutes[role] ?? idleChoices(role)[0]
+}
+
+const sessionLimitChoices = computed(() => {
+  const { min, max } = sessionOptions.value.max_sessions
+  return Array.from({ length: max - min + 1 }, (_, i) => min + i)
+})
+
+// After a role change, keep the timeout if the new role offers it, else the largest choice
+// below it (the server does the same when only the role is sent).
+function fitIdleToRole(form) {
+  const choices = idleChoices(form.role)
+  if (choices.includes(form.session_idle_minutes)) return
+  const fitting = choices.filter((c) => c <= form.session_idle_minutes)
+  form.session_idle_minutes = fitting.length ? Math.max(...fitting) : choices[0]
+}
+
+function sessionHint(role) {
+  const hours = sessionOptions.value.admin_absolute_hours
+  return role === 'ADMIN'
+    ? `Signed out after this long without activity, and always ${hours} hours after sign-in. A sign-in past the limit ends the oldest session.`
+    : 'Signed out after this long without activity. A sign-in past the limit ends the oldest session.'
+}
+
+// "15 min", "1 hour", "4 hours".
+function formatMinutes(minutes) {
+  const m = Number(minutes)
+  if (!Number.isFinite(m) || m <= 0) return '—'
+  if (m % 60 === 0) return m === 60 ? '1 hour' : `${m / 60} hours`
+  return `${m} min`
+}
+
+function isSelf(u) {
+  return !!u && u.username === props.currentUser
+}
+
 const userForm = reactive({
   username: '',
   password: '',
   role: 'VIEWER',
+  session_idle_minutes: 120,
+  max_sessions: 2,
 })
 
 function openAddUserModal() {
@@ -286,6 +530,8 @@ function openAddUserModal() {
   userForm.username = ''
   userForm.password = ''
   userForm.role = 'VIEWER'
+  userForm.session_idle_minutes = defaultIdle('VIEWER')
+  userForm.max_sessions = sessionOptions.value.max_sessions.default
   showAddModal.value = true
   nextTick(() => {
     addModalRef.value?.querySelector('input')?.focus()
@@ -303,6 +549,218 @@ function onAddModalKeydown(e) {
   if (e.key === 'Escape') {
     closeAddModal()
   }
+}
+
+const showEditModal = ref(false)
+const editModalRef = ref(null)
+let editOpenerElement = null
+const editForm = reactive({ role: 'VIEWER', session_idle_minutes: 120, max_sessions: 2 })
+
+function openEditModal(u) {
+  editOpenerElement = document.activeElement
+  targetUser.value = u
+  editForm.role = u.role
+  editForm.session_idle_minutes = u.session_idle_minutes ?? defaultIdle(u.role)
+  editForm.max_sessions = u.max_sessions ?? sessionOptions.value.max_sessions.default
+  showEditModal.value = true
+  nextTick(() => {
+    editModalRef.value?.querySelector('select:not([disabled])')?.focus()
+  })
+}
+
+function closeEditModal() {
+  showEditModal.value = false
+  nextTick(() => {
+    editOpenerElement?.focus()
+  })
+}
+
+function onEditModalKeydown(e) {
+  if (e.key === 'Escape') {
+    closeEditModal()
+  }
+}
+
+async function saveEditUser() {
+  const u = targetUser.value
+  if (!u) return
+  // Send only what changed: the API refuses a role field for the admin's own account.
+  const payload = {}
+  if (editForm.role !== u.role) payload.role = editForm.role
+  if (editForm.session_idle_minutes !== u.session_idle_minutes) {
+    payload.session_idle_minutes = editForm.session_idle_minutes
+  }
+  if (editForm.max_sessions !== u.max_sessions) payload.max_sessions = editForm.max_sessions
+  if (!Object.keys(payload).length) {
+    closeEditModal()
+    return
+  }
+  userSaving.value = true
+  try {
+    await updateUser(u.id, payload)
+    closeEditModal()
+    toast.add({
+      severity: 'success',
+      summary: 'User Updated',
+      detail: `User '${u.username}' updated.`,
+      life: 3000,
+    })
+    await fetchUsersList()
+    emit('user-changed')
+  } catch (err) {
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: err.response?.data?.detail || 'Failed to update user.',
+      life: 4000,
+    })
+  } finally {
+    userSaving.value = false
+  }
+}
+
+// --- Sessions dialog ---------------------------------------------------------------------
+const showSessionsModal = ref(false)
+const sessionsModalRef = ref(null)
+let sessionsOpenerElement = null
+const sessions = ref([])
+const sessionsLoading = ref(false)
+const sessionEnding = ref(null)
+
+async function loadSessions() {
+  if (!targetUser.value) return
+  sessionsLoading.value = true
+  try {
+    const res = await getUserSessions(targetUser.value.id)
+    sessions.value = res.data?.data || []
+  } catch (err) {
+    sessions.value = []
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: err.response?.data?.detail || 'Failed to load sessions.',
+      life: 4000,
+    })
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+function openSessionsModal(u) {
+  sessionsOpenerElement = document.activeElement
+  targetUser.value = u
+  sessions.value = []
+  confirmingEndAll.value = false
+  showSessionsModal.value = true
+  loadSessions()
+  nextTick(() => {
+    sessionsModalRef.value?.focus()
+  })
+}
+
+function closeSessionsModal() {
+  showSessionsModal.value = false
+  // Counts in the table may have changed (ended here, or sessions timed out meanwhile).
+  fetchUsersList()
+  nextTick(() => {
+    sessionsOpenerElement?.focus()
+  })
+}
+
+function onSessionsModalKeydown(e) {
+  if (e.key === 'Escape') {
+    closeSessionsModal()
+  }
+}
+
+async function endOneSession(sess) {
+  sessionEnding.value = sess.id
+  try {
+    await endUserSession(targetUser.value.id, sess.id)
+    toast.add({ severity: 'success', summary: 'Session Ended', detail: 'That device is signed out.', life: 3000 })
+  } catch (err) {
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: err.response?.data?.detail || 'Failed to end the session.',
+      life: 4000,
+    })
+  } finally {
+    sessionEnding.value = null
+    await loadSessions()
+  }
+}
+
+const confirmingEndAll = ref(false)
+const endingAll = ref(false)
+
+async function endAllSessionsNow() {
+  const name = targetUser.value?.username
+  endingAll.value = true
+  try {
+    await endAllUserSessions(targetUser.value.id)
+    toast.add({ severity: 'success', summary: 'Sessions Ended', detail: `Sessions of '${name}' ended.`, life: 3000 })
+  } catch (err) {
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: err.response?.data?.detail || 'Failed to end sessions.',
+      life: 4000,
+    })
+  } finally {
+    endingAll.value = false
+    confirmingEndAll.value = false
+    await loadSessions()
+  }
+}
+
+// "Chrome on Windows" from a user agent string; the full string is in the row's tooltip.
+// Only a label for telling devices apart, so a rough match is enough.
+function describeDevice(ua) {
+  if (!ua) return 'Unknown device'
+  const browser =
+    /Edg\//.test(ua) ? 'Edge'
+      : /OPR\//.test(ua) ? 'Opera'
+        : /Firefox\//.test(ua) ? 'Firefox'
+          : /Chrome\//.test(ua) ? 'Chrome'
+            : /Safari\//.test(ua) ? 'Safari'
+              : /curl\//i.test(ua) ? 'curl'
+                : null
+  const os =
+    /Windows/.test(ua) ? 'Windows'
+      : /iPhone|iPad/.test(ua) ? 'iOS'
+        : /Android/.test(ua) ? 'Android'
+          : /Mac OS X|Macintosh/.test(ua) ? 'macOS'
+            : /CrOS/.test(ua) ? 'ChromeOS'
+              : /Linux/.test(ua) ? 'Linux'
+                : null
+  if (browser && os) return `${browser} on ${os}`
+  return browser || os || ua.slice(0, 40)
+}
+
+function formatWhen(iso) {
+  return iso ? new Date(iso).toLocaleString() : '—'
+}
+
+// "just now", "4 min ago", "2 h 5 min ago".
+function spanText(ms) {
+  const minutes = Math.max(0, Math.round(ms / 60000))
+  if (minutes < 1) return null
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return h ? (m ? `${h} h ${m} min` : `${h} h`) : `${m} min`
+}
+
+function formatAgo(iso) {
+  if (!iso) return '—'
+  const text = spanText(Date.now() - new Date(iso).getTime())
+  return text ? `${text} ago` : 'just now'
+}
+
+function formatUntil(iso) {
+  if (!iso) return '—'
+  const text = spanText(new Date(iso).getTime() - Date.now())
+  return text ? `in ${text}` : 'within a minute'
 }
 
 function openResetPasswordModal(u) {
@@ -349,6 +807,8 @@ async function saveNewUser() {
       username: userForm.username,
       role: userForm.role,
       password: userForm.password || undefined,
+      session_idle_minutes: userForm.session_idle_minutes,
+      max_sessions: userForm.max_sessions,
     }
     const res = await createUser(payload)
     closeAddModal()
@@ -454,6 +914,7 @@ async function confirmDeleteUser(u) {
 }
 
 onMounted(() => {
+  loadSessionOptions()
   fetchUsersList()
 })
 </script>
@@ -462,6 +923,128 @@ onMounted(() => {
 .generated-password {
   font-family: var(--font-mono, ui-monospace, monospace);
   letter-spacing: 0.02em;
+}
+
+.session-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.session-limit {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.session-count {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.session-count:hover,
+.session-count:focus-visible {
+  color: var(--text-primary);
+}
+
+.modal-card.modal-wide {
+  max-width: 620px;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.session-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.session-row:last-child {
+  border-bottom: none;
+}
+
+.session-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.session-device {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.session-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.current-tag {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+
+.end-all {
+  margin-right: auto;
+}
+
+.confirm-row {
+  align-items: center;
+}
+
+.confirm-row button {
+  white-space: nowrap;
+}
+
+.confirm-text {
+  margin-right: auto;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form-row .form-group {
+  margin-bottom: 8px;
+}
+
+.form-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.form-hint.warn {
+  color: #f59e0b;
 }
 
 .generated-note {

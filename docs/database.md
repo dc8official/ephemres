@@ -19,6 +19,7 @@ erDiagram
     endpoints ||--o{ flow_route_changes : "records dominant path changes"
     alert_channels ||--o{ alert_delivery_logs : "records dispatch audit"
     users ||--o{ user_sessions : "maintains active sessions"
+    users ||--o{ ended_sessions : "remembers why sessions ended"
     users ||--o{ audit_logs : "records admin actions"
 ```
 
@@ -150,6 +151,29 @@ Audit log of all outbound dispatch attempts.
 * `retry_count` (`INTEGER`, Default: 0, Not Null)
 * `response_message` (`TEXT`, Nullable) — Truncated response body or error detail.
 * `delivered_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed) — Dispatch time (UTC). Delivery latency is not stored.
+
+### `users` — session columns (Migration `0022`, v3.3.6)
+Each account's own session rules (`services/session_policy.py`). The other `users` columns are unchanged.
+* `session_idle_minutes` (`INTEGER`, Default: 30, Not Null, `CHECK 15–240`) — Minutes without interaction before the account's sessions end. The API allows 15, 30 or 60 for `ADMIN` and 30, 60, 120 or 240 for `VIEWER`. The upgrade sets admins to 30 and viewers to the old `session_timeout` setting (else `[security] session_timeout_minutes`, else 120), fitted down to a viewer choice. A restore of an older backup gives each account its role's default (admin 30, viewer 120).
+* `max_sessions` (`INTEGER`, Default: 2, Not Null, `CHECK 1–10`) — Concurrent sessions allowed. The upgrade and new accounts take `[security] max_active_sessions_per_user`.
+
+### `user_sessions`
+One row per signed-in session; every API worker checks it on every request.
+* `id` (`UUID`, Primary Key), `user_id` (`UUID`, Foreign Key to `users.id` `ON DELETE CASCADE`, Indexed), `jti` (`VARCHAR(64)`, Unique) — the token's id.
+* `created_at` (`TIMESTAMPTZ`, Not Null) — Sign-in time; an admin session ends 12 hours after it.
+* `last_activity_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null; Migration `0022`) — Last real interaction (`POST /auth/activity`). Ordinary requests and the live-event stream do not move it.
+* `expires_at` (`TIMESTAMPTZ`, Not Null, Indexed) — Absolute end: sign-in plus 12 hours for admin, plus 7 days for viewers (a backstop so abandoned rows are cleaned up).
+* `client_ip` (`VARCHAR(45)`, Nullable) and `user_agent` (`VARCHAR(255)`, Nullable; Migration `0022`) — Where the session signed in from, shown in the Users tab's session list. Display only.
+* Never backed up or restored. Timed-out rows are deleted at each sign-in, and each deletion is recorded in `ended_sessions`.
+
+### `ended_sessions` (Migration `0022`)
+Why a session ended, so the browser that held it can be told (`X-Session-End-Reason` on its next `401`).
+* `jti` (`VARCHAR(64)`, Primary Key) — The ended session's token id.
+* `user_id` (`UUID`, Foreign Key to `users.id` `ON DELETE CASCADE`, Not Null)
+* `reason` (`VARCHAR(32)`, Not Null): `idle_timeout`, `absolute_timeout`, `signed_in_elsewhere`, `signed_out`, `password_changed`, `ended_by_admin`.
+* `idle_minutes` (`INTEGER`, Nullable) — The timeout that applied, for `idle_timeout`.
+* `ended_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed) — Rows older than 8 days are deleted at each sign-in, by which time the token they explain has expired.
+* Transient like `user_sessions`: never backed up or restored.
 
 ---
 

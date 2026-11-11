@@ -4,6 +4,19 @@ All notable technical changes, architectural upgrades, security enhancements, an
 
 The versioning format follows [Semantic Versioning](https://semver.org/).
 
+## [Version 3.3.6] — Unreleased (branch `v3.3.6`)
+### 🔐 Per-Account Sessions
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **Idle Timeout per Account (`0022`)** | `users.session_idle_minutes` (admin 15/30/60 min, default 30; viewer 30 min/1/2/4 h, default 2 h) and `user_sessions.last_activity_at`. The browser reports clicks, key presses and navigation through the new `POST /auth/activity` at most once a minute (`composables/useActivityTracker.js`); polling and the live-event stream don't count. The session check reads the account's timeout on every request (`services/session_policy.py`, `PostgresSessionStore`). | Nobody is signed out mid-click any more, and an unattended screen still times out. A changed timeout applies to open sessions at once. |
+| **Admin 12-Hour Cap** | Admin sessions end 12 hours after sign-in whatever the activity. Tokens and cookies last until the absolute end plus one hour (viewers: a 7-day backstop plus one hour); the session row decides. | Limits how long an admin session left open on a shared machine stays usable. |
+| **Session Limit per Account** | `users.max_sessions` (1–10) replaces the single `[security] max_active_sessions_per_user`, which now only seeds new accounts and the upgrade. Timed-out sessions are swept at each sign-in so they never count against the limit. | Different accounts can have different limits. |
+| **Why a Session Ended (`ended_sessions`)** | Every ended session is recorded with a reason (`idle_timeout`, `absolute_timeout`, `signed_in_elsewhere`, `signed_out`, `password_changed`, `ended_by_admin`, kept 8 days). A refused request answers `401` with `X-Session-End-Reason` (and `X-Session-Idle-Minutes`), and the sign-in page explains it. | "You were signed out because this account signed in on another device" instead of an unexplained return to the sign-in page. |
+| **Users Tab and Settings** | Users table gains a Session column and an Edit dialog (role, timeout, session limit); Add User takes both values. `GET /users/session-options` serves the choices. The global "User Session Timeout" control and the fixed "Max Concurrent Traces" text are removed from Security & Discovery; `session_timeout` is still accepted by `PATCH /settings`. | Session rules are set where the accounts are. |
+| **Active Sessions List** | The Users table's "1 of 2 sessions" count opens the account's live sessions (device from the browser string, address, sign-in time, last activity, when it ends if left alone), with End per session and End all (`GET`/`DELETE /users/{id}/sessions[/{session_id}]`, audited). `user_sessions.client_ip` and `user_agent` are recorded at sign-in. | Find a shared login still open on another screen and close it, without resetting the password. |
+| **Upgrade and Restore** | Migration `0022` sets admins to 30 minutes and viewers to the old `session_timeout` (else the config value, else 120) fitted down to a viewer choice, and the session limit from the config. A restore of an older backup gives each account its role's default. Open sessions survive the upgrade. | Upgrading from v3.2.0, v3.3.0 or v3.3.5 signs nobody out and shortens no viewer's sign-in by surprise. |
+
 ## [Version 3.3.5] — Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals & NetFlow Route Augmentation
 ### 🧭 NetFlow Route Discovery, WAN Perimeter Accounting, Sub-Cycle Probe Telemetry & Server-Side Conversation Forensics
 

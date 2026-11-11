@@ -64,14 +64,23 @@ All routes except `POST /auth/login`, `POST /auth/logout`, `/version` and the he
 ### `POST /auth/login`
 Authenticates a user and starts a session.
 - **Request Body:** JSON containing `username` and `password`.
-- **Response:** `200 OK` with `data` `{ "username": "...", "role": "ADMIN", "must_change_password": false, "message": "Login successful." }`. The token itself is not in the body: it is set as the `ephemres_access_token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS or with HSTS enabled, lifetime = session timeout). A script can take the token from the `Set-Cookie` response header and send it back as that cookie or as a Bearer header.
+- **Response:** `200 OK` with `data` `{ "username": "...", "role": "ADMIN", "must_change_password": false, "message": "Login successful." }`. The token itself is not in the body: it is set as the `ephemres_access_token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS or with HSTS enabled). The token and cookie last until the session's absolute end plus one hour: 13 hours for an admin, 7 days and 1 hour for a viewer. The session itself usually ends sooner, after the account's idle timeout (see "Session rules" below). A script can take the token from the `Set-Cookie` response header and send it back as that cookie or as a Bearer header.
+- Past the account's session limit (`max_sessions`), the account's oldest session ends.
 - When `must_change_password` is `true`, every route that needs a session answers `403` until the password is changed through `POST /auth/change-password` (signing out still works).
 
 ### `POST /auth/logout`
 Ends the session (its row in PostgreSQL `user_sessions` is deleted, so the token stops working on every worker) and clears the cookie. It always answers `200`, even with an expired or invalid token, so a browser can always sign out.
 
 ### `POST /auth/change-password`
-Updates the authenticated user's password.
+Updates the authenticated user's password. The account's other sessions end (reason `password_changed`); the one making the change stays signed in.
+
+### `POST /auth/activity`
+Records real user interaction on the calling session and restarts its idle timeout. The browser calls it at most once a minute while the user clicks, types or moves between pages. No other route restarts the idle timeout: polling and the live-event stream don't. Writes at most once per 30 seconds per session. Allowed while a password change is pending.
+- **Response:** `200 OK` with `data` `{ "recorded": true }`.
+
+### Session rules (v3.3.6)
+- A session is accepted while its row exists in `user_sessions`, the account's idle timeout (`users.session_idle_minutes`) has not passed since its last activity, and, for an admin, it is less than 12 hours old. The timeout is read from the account on every request, so changing it applies to open sessions at once.
+- A refused session answers `401` with the header `X-Session-End-Reason`, one of `idle_timeout`, `absolute_timeout`, `signed_in_elsewhere` (ended by the session limit), `signed_out`, `password_changed` or `ended_by_admin` (role change, deactivation). For `idle_timeout`, `X-Session-Idle-Minutes` gives the timeout that applied. With no record of why (an old or unknown token), the header is left out.
 
 ---
 
@@ -353,7 +362,7 @@ Updates runtime parameters (requires `Admin` role).
   - `alerting_enabled` (bool, optional): Global master toggle to enable or suspend all outbound alert notifications.
   - `performance_mode` (bool, optional): Routes live events between processes through FastStore instead of PostgreSQL `LISTEN`/`NOTIFY`. Sessions and lockouts stay in PostgreSQL either way, and flow ingestion does not depend on it.
   - `l2_auto_bypass` (bool, optional): Controls Layer-2 direct ICMP diagnostic bypass.
-  - `session_timeout` (int, 1–1440 min): How long a session lasts from sign-in. It is a fixed lifetime, not an idle timeout: activity does not extend it. Sessions that already exist keep the lifetime they started with.
+  - `session_timeout` (int, 1–1440 min): No longer used since v3.3.6, where each account has its own idle timeout (`/users`). Still accepted and stored so older clients and restored backups don't fail; migration `0022` used it once to set existing viewer accounts' timeouts.
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
   - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection. Turning it on runs the flow preflight below first (with the ports in the same request, if given) and answers `400` if it fails.
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
@@ -418,14 +427,18 @@ Updates corporate organization branding and PDF report headers/footers (requires
 
 Manage user accounts and role-based access control (requires `Admin` role).
 
-An admin can't reset, edit or deactivate their own account through these routes (`400`); their own password changes through `POST /auth/change-password`.
+An admin can't reset, deactivate or change the role of their own account through these routes (`400`); their own password changes through `POST /auth/change-password`. They can change their own `session_idle_minutes` and `max_sessions`.
+
+### `GET /users/session-options`
+The idle timeout choices and defaults per role and the session limit bounds, so a form offers exactly what the API accepts:
+`{ "idle_minutes": { "ADMIN": [15, 30, 60], "VIEWER": [30, 60, 120, 240] }, "default_idle_minutes": { "ADMIN": 30, "VIEWER": 120 }, "admin_absolute_hours": 12, "max_sessions": { "min": 1, "max": 10, "default": 2 } }`. The session limit default is `[security] max_active_sessions_per_user`.
 
 ### `GET /users/`
-Lists all user accounts: `id`, `username`, `role`, `is_active`, `must_change_password`, `last_login`, `created_at`.
+Lists all user accounts: `id`, `username`, `role`, `is_active`, `must_change_password`, `last_login`, `created_at`, `session_idle_minutes`, `max_sessions`, `active_sessions` (live sessions now; `null` if the session store could not be read).
 
 ### `POST /users/`
 Creates a new user account.
-- **Request Body:** `username` (3 to 50 characters), `role` (`ADMIN` or `VIEWER`), `password` (optional).
+- **Request Body:** `username` (3 to 50 characters), `role` (`ADMIN` or `VIEWER`), `password` (optional), `session_idle_minutes` (optional, one of the role's choices; default: the role's default), `max_sessions` (optional, 1 to 10; default: `[security] max_active_sessions_per_user`). A timeout the role doesn't offer answers `400`.
 - With no `password`, one is generated and returned once as `generated_password` in the response. It is not stored in readable form and can't be shown again. Every new account must change its password at first sign-in.
 
 ### `POST /users/{id}/reset-password`
@@ -434,7 +447,16 @@ Sets a new password and signs the user out everywhere.
 - The user must change it at the next sign-in.
 
 ### `PATCH /users/{id}`
-Changes `role` (`ADMIN` / `VIEWER`) and/or `is_active`. A role change or deactivation signs the user out everywhere.
+Changes any of `role` (`ADMIN` / `VIEWER`), `is_active`, `session_idle_minutes` and `max_sessions`. A role change or deactivation signs the user out everywhere (reason `ended_by_admin`). `session_idle_minutes` must be one of the choices of the role the account will have after the request (`400` otherwise). A role change without a new timeout fits the old one to the new role: the largest choice not above it, or the smallest choice (a viewer's 240 becomes an admin's 60, an admin's 15 becomes a viewer's 30). A new timeout applies to open sessions on their next request; a new `max_sessions` from the next sign-in.
+
+### `GET /users/{id}/sessions`
+The account's live sessions, newest first: `id` (the session's row id), `created_at`, `last_activity_at`, `ends_at` (when it ends if nobody uses it: the earlier of the idle end and the absolute end), `client_ip`, `user_agent` (both recorded at sign-in; empty for sessions from before v3.3.6), and `is_current` (the caller's own session). The token id is never returned. Sessions that have timed out are ended first, so they are not listed.
+
+### `DELETE /users/{id}/sessions/{session_id}`
+Ends one session; that browser is told an administrator ended it. Audited as `USER:END_SESSION`. `404` if there is no such live session for the account; `400` for the caller's own current session (use `POST /auth/logout`).
+
+### `DELETE /users/{id}/sessions`
+Ends every session of the account, keeping the caller's current session when it is their own account. Audited as `USER:END_ALL_SESSIONS`.
 
 ### `DELETE /users/{id}`
 Deactivates the account (`is_active = false`) and signs it out everywhere. The account and its audit history are kept; nothing is deleted.

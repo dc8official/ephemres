@@ -18,7 +18,11 @@ port = 8000
 allowed_origins = ["https://monitor.yourdomain.com"]
 
 [security]
+# Since v3.3.6 each account has its own idle timeout and session limit (Settings → User
+# Governance). session_timeout_minutes is only read once, by the v3.3.6 upgrade (migration 0022),
+# to set existing viewer accounts' timeouts when the Settings page never set one.
 session_timeout_minutes = 120
+# The session limit new accounts start with (1 to 10).
 max_active_sessions_per_user = 2
 hsts_enabled = true
 # Secret key loaded from environment variable: EPHEMRES_SECRET_KEY (or NETMON_SECRET_KEY)

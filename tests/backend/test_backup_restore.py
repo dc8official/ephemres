@@ -306,10 +306,12 @@ INHERITS (public.flow_interface_minute_rollups);
 
 COPY public.roles (id, role_name, description, created_at) FROM stdin;
 a0000000-0000-0000-0000-000000000001	ADMIN	System Administrator	2026-01-01 00:00:00+00
+a0000000-0000-0000-0000-000000000002	VIEWER	Read-only	2026-01-01 00:00:00+00
 \\.
 
 COPY public.users (id, username, password_hash, role_id, is_active, must_change_password, last_login, created_at, updated_at) FROM stdin;
 b0000000-0000-0000-0000-000000000001	admin	$argon2id$v=19$m=65536,t=3,p=4$v33hash	a0000000-0000-0000-0000-000000000001	t	f	\\N	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00
+b0000000-0000-0000-0000-000000000002	noc-screen	$scrypt$n=16384,r=8,p=1$c2FsdA$aGFzaA	a0000000-0000-0000-0000-000000000002	t	f	\\N	2026-01-01 00:00:00+00	2026-01-01 00:00:00+00
 \\.
 
 -- Child endpoint appears BEFORE parent endpoint to verify two-pass manual_parent_id FK safety
@@ -376,6 +378,15 @@ COPY _timescaledb_internal._hyper_3_1_chunk (bucket, exporter_id, interface_idx,
     assert if_row["interface_idx"] == 1
     assert if_row["in_bytes"] == 524288
     assert if_row["out_bytes"] == 1048576
+
+    # 4. A backup from before v3.3.6 has no per-account session columns: each restored account
+    #    gets its role's default idle timeout and the configured session limit (migration 0022).
+    from app.services import session_policy
+
+    by_name = {u["username"]: u for u in mock_conn.tables["users"]}
+    assert by_name["admin"]["session_idle_minutes"] == 30
+    assert by_name["noc-screen"]["session_idle_minutes"] == 120
+    assert by_name["noc-screen"]["max_sessions"] == session_policy.default_max_sessions()
 
 
 # ---------------------------------------------------------------------------

@@ -68,14 +68,19 @@ class AuthRepository(BaseRepository[User]):
         username: str,
         password_hash: str,
         role_id: UUID,
+        session_idle_minutes: int = 30,
+        max_sessions: int = 2,
     ) -> User:
-        """Create a new user account."""
+        """Create a new user account. The router picks the session values for the role
+        (services/session_policy.py); the defaults here only suit callers that do not care."""
         user = User(
             username=username,
             password_hash=password_hash,
             role_id=role_id,
             is_active=True,
             must_change_password=True,
+            session_idle_minutes=session_idle_minutes,
+            max_sessions=max_sessions,
         )
         self.session.add(user)
         await self.session.flush()

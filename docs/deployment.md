@@ -139,8 +139,8 @@ port = 8000
 allowed_origins = ["https://monitor.yourdomain.com"]
 
 [security]
-session_timeout_minutes = 120
-max_active_sessions_per_user = 2
+session_timeout_minutes = 120       # v3.3.6+: only seeds viewer timeouts at the upgrade; set per account in the UI
+max_active_sessions_per_user = 2    # v3.3.6+: the session limit new accounts start with
 hsts_enabled = true
 
 [redis]

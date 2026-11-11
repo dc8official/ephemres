@@ -17,6 +17,10 @@
           <div v-if="error" class="error-container" role="alert">
             <Message severity="error" :closable="false">{{ error }}</Message>
           </div>
+          <!-- Why the last session ended (from the server's 401, passed along by services/api.js). -->
+          <div v-else-if="endedNotice" class="error-container" role="status">
+            <Message severity="info" :closable="false">{{ endedNotice }}</Message>
+          </div>
 
           <div class="form-group">
             <label for="username">Username</label>
@@ -84,18 +88,52 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { login } from '../services/api.js'
 import { setUserState } from '../services/auth.js'
 import Message from 'primevue/message'
 
 const router = useRouter()
+const route = useRoute()
 const username = ref('')
 const password = ref('')
 const showPassword = ref(false)
 const loading = ref(false)
 const error = ref(null)
+
+// "30 minutes", "1 hour", "4 hours".
+function formatMinutes(raw) {
+  const minutes = parseInt(raw, 10)
+  if (!Number.isFinite(minutes) || minutes <= 0) return null
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60
+    return hours === 1 ? '1 hour' : `${hours} hours`
+  }
+  return `${minutes} minutes`
+}
+
+// Shown until the user tries to sign in again. A plain sign-out needs no explanation.
+const endedNotice = computed(() => {
+  switch (route.query.ended) {
+    case 'idle_timeout': {
+      const after = formatMinutes(route.query.after)
+      return after
+        ? `You were signed out after ${after} without activity.`
+        : 'You were signed out after a period without activity.'
+    }
+    case 'absolute_timeout':
+      return 'You were signed out because admin sessions last at most 12 hours.'
+    case 'signed_in_elsewhere':
+      return 'You were signed out because this account signed in on another device.'
+    case 'password_changed':
+      return "You were signed out because this account's password was changed."
+    case 'ended_by_admin':
+      return 'An administrator ended your session.'
+    default:
+      return null
+  }
+})
 
 const handleLogin = async () => {
   const u = (username.value || '').trim()

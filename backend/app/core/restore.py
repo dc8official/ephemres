@@ -289,6 +289,9 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "last_login": "timestamptz",
             "created_at": "timestamptz",
             "updated_at": "timestamptz",
+            # Migration 0022 (v3.3.6). Older backups lack them; see "2. Restore users".
+            "session_idle_minutes": "int4",
+            "max_sessions": "int4",
         },
         "app_settings": {
             "id": "uuid",
@@ -430,6 +433,9 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "jti": "varchar",
             "created_at": "timestamptz",
             "expires_at": "timestamptz",
+            "last_activity_at": "timestamptz",
+            "client_ip": "varchar",
+            "user_agent": "varchar",
         },
         "endpoint_events": {
             "id": "uuid",
@@ -1195,6 +1201,22 @@ async def reconcile_and_restore_database(
         target_user_map = {str(r["username"]): str(r["id"]) for r in existing_users}
         temporary_passwords: List[Tuple[str, str]] = []
 
+        # A backup from before v3.3.6 has no per-account session columns. Left out, every
+        # restored account would get the column default (30 minutes), which cuts a viewer's
+        # previous 2 hours to 30; fill in each role's default and the configured session limit
+        # instead. Only for new rows' sake: an account that already exists on this server
+        # keeps its own values, because these columns are not in the dump's update set then.
+        fill_session_idle = "session_idle_minutes" not in cols and "session_idle_minutes" in target_cols
+        fill_max_sessions = "max_sessions" not in cols and "max_sessions" in target_cols
+        role_names_by_id: Dict[str, str] = {}
+        if fill_session_idle:
+            for r in await _fetch_all(conn, "SELECT id, role_name FROM roles;"):
+                role_names_by_id[str(r["id"])] = str(r["role_name"]).upper()
+            usable.append("session_idle_minutes")
+        if fill_max_sessions:
+            usable.append("max_sessions")
+        from app.services import session_policy
+
         for row in rows:
             uname = str(row.get("username", ""))
             dump_id = str(row.get("id"))
@@ -1208,6 +1230,12 @@ async def reconcile_and_restore_database(
             # Remap role_id
             if row.get("role_id") and str(row["role_id"]) in role_id_map:
                 row["role_id"] = role_id_map[str(row["role_id"])]
+
+            if fill_session_idle:
+                role_name = role_names_by_id.get(str(row.get("role_id") or ""), "VIEWER")
+                row["session_idle_minutes"] = str(session_policy.default_idle_minutes(role_name))
+            if fill_max_sessions:
+                row["max_sessions"] = str(session_policy.default_max_sessions())
 
             if not pwd.startswith("$scrypt$"):
                 summary["legacy_hashes_upgraded"] += 1
@@ -1231,7 +1259,12 @@ async def reconcile_and_restore_database(
             placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
             vals = [_prepare_column_val(row.get(c), target_cols.get(c, "varchar")) for c in usable]
 
-            update_cols = [c for c in usable if c not in ("id", "username", "created_at", "updated_at")]
+            filled = {"session_idle_minutes"} if fill_session_idle else set()
+            if fill_max_sessions:
+                filled.add("max_sessions")
+            update_cols = [
+                c for c in usable if c not in ("id", "username", "created_at", "updated_at") and c not in filled
+            ]
             set_parts = [f'"{c}" = EXCLUDED."{c}"' for c in update_cols]
             if "updated_at" in target_cols:
                 set_parts.append('"updated_at" = NOW()')

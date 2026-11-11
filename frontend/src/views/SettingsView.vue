@@ -187,10 +187,11 @@ const saving = ref(false)
 const alertMessage = ref(null)
 const alertType = ref('alert-success')
 
+// No sessionTimeout here since v3.3.6: each account has its own idle timeout (Users tab). The
+// API still accepts session_timeout for older clients, but nothing reads it any more.
 const settings = reactive({
   performanceMode: false,
   l2AutoBypass: true,
-  sessionTimeout: '120',
   lockoutThreshold: '5',
   alertingEnabled: true,
   flowIngestionEnabled: false,
@@ -225,7 +226,6 @@ const isSecurityDirty = computed(() => {
   if (!savedSettings.value) return false
   return (
     settings.l2AutoBypass !== savedSettings.value.l2AutoBypass ||
-    String(settings.sessionTimeout) !== String(savedSettings.value.sessionTimeout) ||
     String(settings.lockoutThreshold) !== String(savedSettings.value.lockoutThreshold)
   )
 })
@@ -266,7 +266,6 @@ async function loadSettings() {
       const d = res.data.data
       settings.performanceMode = Boolean(d.performance_mode ?? d.performanceMode ?? false)
       settings.l2AutoBypass = Boolean(d.l2_auto_bypass ?? d.l2AutoBypass ?? true)
-      settings.sessionTimeout = String(d.session_timeout ?? d.sessionTimeout ?? 120)
       settings.lockoutThreshold = String(d.lockout_threshold ?? d.lockoutThreshold ?? 5)
       settings.alertingEnabled = Boolean(d.alerting_enabled ?? d.alertingEnabled ?? true)
       settings.flowIngestionEnabled = Boolean(d.flow_ingestion_enabled ?? d.flowIngestionEnabled ?? false)
@@ -288,7 +287,6 @@ async function saveAllSettings() {
     const payload = {
       performance_mode: settings.performanceMode,
       l2_auto_bypass: settings.l2AutoBypass,
-      session_timeout: parseInt(settings.sessionTimeout, 10),
       lockout_threshold: parseInt(settings.lockoutThreshold, 10),
       alerting_enabled: settings.alertingEnabled,
       flow_ingestion_enabled: settings.flowIngestionEnabled,

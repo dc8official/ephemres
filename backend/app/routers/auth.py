@@ -2,8 +2,13 @@
 other API request (get_current_user, require_admin).
 
 A request is accepted when its token is validly signed and unexpired, its session (jti) is still
-in the session store, and the account still exists and is active. Role and the forced password
-change come from the database row each time, not from the token.
+in the session store and within the account's idle timeout (and, for admin, under 12 hours
+old), and the account still exists and is active. Role and the forced password change come from
+the database row each time, not from the token.
+
+A refused session answers 401 with X-Session-End-Reason (session_policy.END_REASONS) and, for an
+idle timeout, X-Session-Idle-Minutes, so the sign-in page can say why the user was signed out.
+POST /auth/activity is the only call that counts as interaction.
 """
 from __future__ import annotations
 
@@ -25,8 +30,8 @@ from app.schemas.auth import (
     LoginResponse,
 )
 import secrets
+from app.services import session_policy
 from app.services.driver_manager import driver_manager
-from app.services.runtime_settings import get_runtime_settings
 from app.services.auth_service import (
     burn_password_check_async,
     create_access_token,
@@ -39,6 +44,8 @@ from app.services.auth_service import (
     is_session_active,
     needs_rehash,
     register_session_async,
+    session_end_reason_async,
+    touch_session_async,
     verify_password,
     verify_password_async,
 )
@@ -139,11 +146,19 @@ async def login(
         )
         await db.commit()
 
-    # Register the session before handing out the token. Past max_active_sessions_per_user the
-    # oldest session of the account is ended (with the default of 2, a third sign-in ends the first).
+    # Register the session before handing out the token. Past the account's own session limit
+    # (users.max_sessions) the oldest session of the account is ended, and its browser is told
+    # it was signed in elsewhere.
     session_id = str(secrets.token_hex(16))
-    max_sess = getattr(settings.security, "max_active_sessions_per_user", 2)
-    await register_session_async(str(user_id), session_id, max_sessions=max_sess)
+    max_sess = getattr(user, "max_sessions", None)
+    if not isinstance(max_sess, int):
+        max_sess = session_policy.default_max_sessions()
+    # Address and browser go with the session only so the Users tab can tell devices apart.
+    user_agent = http_request.headers.get("user-agent") if hasattr(http_request, "headers") else None
+    await register_session_async(
+        str(user_id), session_id, max_sessions=max_sess, role_name=str(role_name),
+        client_ip=client_ip, user_agent=user_agent if isinstance(user_agent, str) else None,
+    )
 
     token = create_access_token(
         user_id=str(user_id),
@@ -174,7 +189,9 @@ async def login(
         secure=is_secure,
         samesite="lax",
         path="/",
-        max_age=get_runtime_settings().session_timeout_minutes * 60,
+        # The cookie lives as long as the token (the session's absolute end plus a grace); the
+        # session row ends it earlier when the account is idle.
+        max_age=int(session_policy.token_lifetime(str(role_name)).total_seconds()),
     )
 
     return APIResponse.success(data=response_body)
@@ -223,6 +240,27 @@ def _role_name_of(user) -> str:
     return "VIEWER"
 
 
+# Plain-language 401 messages for scripts and API clients; the browser builds its own from the
+# X-Session-End-Reason header.
+_SESSION_ENDED_DETAIL = {
+    session_policy.IDLE_TIMEOUT: "Session ended after a period without activity.",
+    session_policy.ABSOLUTE_TIMEOUT: "Session reached its maximum length. Please sign in again.",
+    session_policy.SIGNED_IN_ELSEWHERE: "Session ended because this account signed in elsewhere.",
+    session_policy.SIGNED_OUT: "Session was signed out.",
+    session_policy.PASSWORD_CHANGED: "Session ended because the account's password was changed.",
+    session_policy.ENDED_BY_ADMIN: "Session was ended by an administrator.",
+}
+
+
+def _session_end_headers(reason: Optional[str], idle_minutes: Optional[int]) -> dict:
+    if not reason:
+        return {}
+    headers = {"X-Session-End-Reason": reason}
+    if reason == session_policy.IDLE_TIMEOUT and idle_minutes:
+        headers["X-Session-Idle-Minutes"] = str(int(idle_minutes))
+    return headers
+
+
 async def get_current_user_allow_password_change(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -262,14 +300,15 @@ async def get_current_user_allow_password_change(
         raise HTTPException(status_code=401, detail="Session expired or invalid.")
 
     # Signed and unexpired is not enough: the session must not have been ended by sign-out, a
-    # password change or reset, or a newer sign-in (the per-user session limit).
+    # password change or reset, a newer sign-in (the per-user session limit), or a timeout.
     if not await is_session_active(str(user_id_str), jti):
-        logger.warning(
-            "Authentication session evicted (quota exceeded or expired)"
-        )
+        found = await session_end_reason_async(str(user_id_str), jti)
+        reason, idle_minutes = found if found else (None, None)
+        logger.info("Session refused for user %s: %s", user_id_str, reason or "unknown reason")
         raise HTTPException(
             status_code=401,
-            detail="Session terminated: maximum active sessions reached or session expired.",
+            detail=_SESSION_ENDED_DETAIL.get(reason, "Your session has ended. Please sign in again."),
+            headers=_session_end_headers(reason, idle_minutes),
         )
 
     try:
@@ -381,7 +420,9 @@ async def change_password(
     # Sign out every other session of this account (another device, or whoever had the old
     # password); the one making the change stays signed in.
     current_jti = current_user.get("jti")
-    await invalidate_all_user_sessions_async(str(user_uuid), except_jti=current_jti)
+    await invalidate_all_user_sessions_async(
+        str(user_uuid), except_jti=current_jti, reason=session_policy.PASSWORD_CHANGED
+    )
     await auth_repo.create_audit_log(
         user_id=user_uuid,
         action="USER:CHANGE_PASSWORD",
@@ -392,3 +433,19 @@ async def change_password(
     await db.commit()
 
     return APIResponse.success(data={"message": "Password changed successfully."})
+
+
+@router.post("/activity")
+async def record_activity(
+    current_user: dict = Depends(get_current_user_allow_password_change),
+):
+    """The browser reports real interaction (clicks, key presses, navigation) here, at most once
+    a minute; it restarts the session's idle timeout. Nothing else does: dashboard polling and
+    the live-event stream go through other routes, so a screen left open still idles out.
+
+    Allowed while a password change is pending, so the change form does not time out under a
+    user who is typing. A user could call this from a script to stay signed in; that is
+    accepted, as they could equally keep clicking (v3.3.6 build plan).
+    """
+    await touch_session_async(str(current_user.get("sub")), current_user.get("jti"))
+    return APIResponse.success(data={"recorded": True})

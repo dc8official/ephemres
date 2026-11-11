@@ -64,16 +64,20 @@ def test_refresh_keeps_previous_snapshot_on_db_error():
 
 
 # --- session_timeout --------------------------------------------------------------------------
+# From v3.3.6 the global session_timeout no longer sets the token's life: each account has its
+# own idle timeout, enforced by the session store, and the token lasts until the session's
+# absolute end plus a grace (services/session_policy.py). The key is still accepted by the
+# settings API for older clients and restored backups.
 
 
-def test_access_token_expiry_follows_session_timeout():
+@pytest.mark.parametrize("role, hours", [("ADMIN", 12 + 1), ("VIEWER", 7 * 24 + 1)])
+def test_access_token_expiry_follows_the_role_not_session_timeout(role, hours):
     from app.services.auth_service import create_access_token, decode_access_token
 
     _with(session_timeout_minutes=15)
-    token = create_access_token(user_id="u1", username="alice", role_name="ADMIN")
+    token = create_access_token(user_id="u1", username="alice", role_name=role)
     claims = decode_access_token(token)
-    lifetime = claims["exp"] - claims["iat"]
-    assert lifetime == 15 * 60
+    assert claims["exp"] - claims["iat"] == hours * 3600
 
 
 # --- lockout_threshold ------------------------------------------------------------------------

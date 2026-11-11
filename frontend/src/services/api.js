@@ -85,12 +85,20 @@ class ApiClient {
           headers: headerObj,
         }
 
-        // Not signed in (expired, signed out elsewhere, or ended by a password change): forget
-        // the stored profile and go to the sign-in page.
+        // Not signed in (timed out, signed in elsewhere, ended by a password change...): forget
+        // the stored profile and go to the sign-in page. The server says why in
+        // X-Session-End-Reason (and X-Session-Idle-Minutes for an idle timeout); the reason
+        // goes along in the URL so LoginView can explain it instead of showing a bare form.
         if (response.status === 401) {
           clearUserState()
           if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-            window.location.href = '/login'
+            const reason = headerObj['x-session-end-reason']
+            const minutes = headerObj['x-session-idle-minutes']
+            const query = new URLSearchParams()
+            if (reason) query.set('ended', reason)
+            if (reason && minutes) query.set('after', minutes)
+            const qs = query.toString()
+            window.location.href = qs ? `/login?${qs}` : '/login'
           }
         }
 
@@ -273,6 +281,31 @@ export function deleteEndpoint(id) {
 
 export function changePassword(data) {
   return api.post('/auth/change-password', data)
+}
+
+// Real interaction (clicks, keys, navigation), sent at most once a minute by
+// composables/useActivityTracker.js. The only call that restarts the idle timeout.
+export function recordActivity() {
+  return api.post('/auth/activity')
+}
+
+// Idle timeout choices and defaults per role, and the session limit bounds, for the Users forms.
+export function getSessionOptions() {
+  return api.get('/users/session-options')
+}
+
+// An account's live sessions (admin): when and where each signed in, and when it ends.
+export function getUserSessions(userId) {
+  return api.get(`/users/${userId}/sessions`)
+}
+
+export function endUserSession(userId, sessionId) {
+  return api.delete(`/users/${userId}/sessions/${sessionId}`)
+}
+
+// Ends every session of the account; on your own account your current session stays.
+export function endAllUserSessions(userId) {
+  return api.delete(`/users/${userId}/sessions`)
 }
 
 export function getUsers() {

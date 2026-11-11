@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
-from app.core.orm import Boolean, DateTime, ForeignKey, String, Text, func
+from app.core.orm import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from app.core.orm import UUID as PG_UUID
 from app.core.orm import Mapped, mapped_column, relationship
 
@@ -104,6 +104,23 @@ class User(Base):
         Boolean,
         default=True,
         server_default="true",
+        nullable=False,
+    )
+
+    # Minutes without interaction before this account's sessions end (migration 0022). The
+    # allowed values depend on the role: services/session_policy.py.
+    session_idle_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default="30",
+        nullable=False,
+    )
+
+    # Concurrent sessions this account may hold; a further sign-in ends the oldest one.
+    max_sessions: Mapped[int] = mapped_column(
+        Integer,
+        default=2,
+        server_default="2",
         nullable=False,
     )
 

@@ -27,7 +27,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from app.config import settings
-from app.services.runtime_settings import get_runtime_settings
+from app.services import session_policy
 
 logger = logging.getLogger(__name__)
 
@@ -409,17 +409,29 @@ def get_trusted_client_ip(
     return peer_ip
 
 
-async def register_session_async(user_id: str, jti: str, max_sessions: int = 2) -> None:
+async def register_session_async(
+    user_id: str,
+    jti: str,
+    max_sessions: int = 2,
+    role_name: Optional[str] = None,
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> None:
     """Records a new session (jti) for the user in the shared session store; past
-    `max_sessions` the store ends the user's oldest one.
+    `max_sessions` the store ends the user's oldest one. The session's absolute end depends on
+    the role (12 hours for admin, a 7-day backstop otherwise: services/session_policy.py).
 
     A store failure is only logged. That fails closed: the token is issued, but every request
     with it gets 401 because its jti is not in the store."""
     u_id = str(user_id)
+    ttl = int(session_policy.session_lifetime(role_name).total_seconds())
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
-        await store.register_session(u_id, jti, max_sessions=max_sessions)
+        await store.register_session(
+            u_id, jti, max_sessions=max_sessions, ttl_seconds=ttl,
+            client_ip=client_ip, user_agent=user_agent,
+        )
     except Exception:
         logger.exception("Failed to register session for user %s, jti %s in store", u_id, jti)
 
@@ -440,7 +452,40 @@ async def is_session_active(user_id: str, jti: Optional[str]) -> bool:
     return bool(await store.is_session_active(str(user_id), jti))
 
 
-async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
+async def session_end_reason_async(user_id: str, jti: Optional[str]) -> Optional[tuple]:
+    """(reason, idle minutes) for an ended session, or None when the store does not know.
+
+    Only explains a 401 that is already decided, so any failure here yields None rather than
+    an error: the request is refused either way."""
+    if not jti:
+        return None
+    try:
+        from app.services.driver_manager import driver_manager
+        store = driver_manager.get_session_store()
+        found = await store.session_end_reason(str(user_id), jti)
+    except Exception:
+        logger.exception("Could not look up why session %s ended", jti)
+        return None
+    # Test doubles and mocks may answer with something that is not a (reason, minutes) pair.
+    if not isinstance(found, tuple) or len(found) != 2 or found[0] not in session_policy.END_REASONS:
+        return None
+    return found
+
+
+async def touch_session_async(user_id: str, jti: Optional[str]) -> None:
+    """Records user interaction on a session (POST /auth/activity), restarting its idle timeout.
+    A store error propagates, so the browser sees the failure and tries again next minute."""
+    if not jti:
+        return
+    from app.services.driver_manager import driver_manager
+
+    store = driver_manager.get_session_store()
+    await store.touch_session(str(user_id), jti)
+
+
+async def invalidate_session_async(
+    user_id: str, jti: Optional[str], reason: str = session_policy.SIGNED_OUT
+) -> None:
     """Ends one session (sign-out) in the shared session store."""
     if not jti:
         return
@@ -448,19 +493,22 @@ async def invalidate_session_async(user_id: str, jti: Optional[str]) -> None:
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
-        await store.invalidate_session(u_id, jti)
+        await store.invalidate_session(u_id, jti, reason=reason)
     except Exception:
         logger.exception("Failed to invalidate session for user %s, jti %s in store", u_id, jti)
 
 
-async def invalidate_all_user_sessions_async(user_id: str, except_jti: Optional[str] = None) -> None:
+async def invalidate_all_user_sessions_async(
+    user_id: str, except_jti: Optional[str] = None, reason: str = session_policy.SIGNED_OUT
+) -> None:
     """Ends every session of a user in the shared session store, except `except_jti` when given
-    (the session making a password change stays signed in)."""
+    (the session making a password change stays signed in). `reason` is what the browsers of
+    the ended sessions are told (session_policy.END_REASONS)."""
     u_id = str(user_id)
     try:
         from app.services.driver_manager import driver_manager
         store = driver_manager.get_session_store()
-        await store.invalidate_all_user_sessions(u_id, except_jti=except_jti)
+        await store.invalidate_all_user_sessions(u_id, except_jti=except_jti, reason=reason)
     except Exception:
         logger.exception("Failed to invalidate all sessions for user %s in store", u_id)
 
@@ -476,13 +524,16 @@ def create_access_token(
     now_utc = datetime.now(timezone.utc)
     # username and role are for display only: the API reads the role from the database on
     # every request (routers/auth.get_current_user), so a changed role applies at once.
+    # exp is the session's absolute end plus a grace: the session row decides when the session
+    # really ends (idle or absolute), and the grace lets the server say why
+    # (session_policy.TOKEN_GRACE).
     payload = {
         "sub": user_id,
         "username": username,
         "role": role_name,
         "jti": session_id,
         "iat": now_utc,
-        "exp": now_utc + timedelta(minutes=get_runtime_settings().session_timeout_minutes),
+        "exp": now_utc + session_policy.token_lifetime(role_name),
     }
     return jwt_encode(
         payload,

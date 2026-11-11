@@ -21,7 +21,7 @@ from app.models.flow_rollup import (
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting, SystemSetting
 from app.models.user import Role, User
-from app.models.user_session import UserSession
+from app.models.user_session import EndedSession, UserSession
 
 __all__ = [
     "AlertChannel",
@@ -42,4 +42,5 @@ __all__ = [
     "EndpointBaselineRoute",
     "EndpointRCAIncident",
     "UserSession",
+    "EndedSession",
 ]

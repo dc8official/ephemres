@@ -19,13 +19,9 @@
           </label>
         </div>
 
-        <div class="setting-row">
-          <div>
-            <label class="setting-label">Max Concurrent Traces</label>
-            <p class="setting-hint">Global concurrency semaphore bound for simultaneous diagnostic traceroutes.</p>
-          </div>
-          <span class="font-mono tnum font-bold">3 Traces (500ms pacing)</span>
-        </div>
+        <!-- "Max Concurrent Traces" was a fixed line of text here, not a control (it mirrored the
+             hard-coded Semaphore(3) in services/diagnostics.py). It returns as a real setting
+             with parallel discovery (v3.3.6 build plan, phase 4). -->
       </div>
 
       <!-- Security & Access Policies -->
@@ -33,21 +29,11 @@
         <div class="card-header">
           <h2 class="card-title">🔒 Security & Access Policies</h2>
         </div>
-        <p class="card-desc">Enforce session lifetime limits, brute-force throttling, and token revocation controls.</p>
-
-        <div class="setting-row">
-          <div>
-            <label class="setting-label">User Session Timeout</label>
-            <p class="setting-hint">How long a sign-in lasts, counted from sign-in. Activity does not extend it.</p>
-          </div>
-          <select v-model="settings.sessionTimeout" class="form-select font-mono tnum" @change="emitChange">
-            <option value="15">15 Minutes</option>
-            <option value="30">30 Minutes</option>
-            <option value="60">1 Hour</option>
-            <option value="120">2 Hours (Default)</option>
-            <option value="240">4 Hours</option>
-          </select>
-        </div>
+        <!-- Session timeouts and limits are per account since v3.3.6, in the User Governance tab. -->
+        <p class="card-desc">
+          Brute-force throttling for sign-in. Session timeouts and session limits are set per
+          account in User Governance.
+        </p>
 
         <div class="setting-row">
           <div>

@@ -142,7 +142,8 @@ def test_role_change_signs_the_account_out():
         repo.create_audit_log = AsyncMock()
         _run(update_user(target.id, UpdateUserRequest(role="VIEWER"),
                          current_user={"sub": str(uuid4()), "role": "ADMIN"}, db=AsyncMock()))
-    revoke.assert_awaited_once_with(str(target.id))
+    # The ended browsers are told an administrator ended the session (X-Session-End-Reason).
+    revoke.assert_awaited_once_with(str(target.id), reason="ended_by_admin")
 
 
 # --- H2: the shared store is the only session authority ------------------------------------
