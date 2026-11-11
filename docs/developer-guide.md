@@ -45,6 +45,7 @@ ephemres/
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
 ├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
 ├── deploy/                 # Systemd units, install.sh, upgrade.sh, restore.sh, nginx config
+├── devtools/differential/  # Dev-only: the core checked against real Pydantic and SQLAlchemy
 └── tests/                  # Pytest unit & integration test suite
 ```
 
@@ -208,3 +209,13 @@ Always verify that all tests pass before opening a Pull Request:
 .venv/bin/python -m pytest
 ```
 All tests must pass with 0 failures. `pytest.ini` sets `pythonpath = .` and `testpaths = tests`; `tests/backend/test_no_removed_deps.py` fails if any source or test file imports a removed framework.
+
+The installer picks the newest Python it finds (3.14 first), so run the suite on that version as
+well as on the one you develop with before a release. Python 3.14 evaluates annotations lazily,
+and a difference there once left models without fields while every test passed on 3.12.
+
+When you change the validator (`app.core.schema`) or the ORM (`app.core.orm`), also run the
+differential suite in [`devtools/differential`](../devtools/differential/README.md). It sends the
+same input through the core and through real Pydantic and SQLAlchemy and fails on any difference
+that isn't listed with its reason. Those libraries live in their own venv (`.venv-diff`) and never
+reach the servers; the README explains the setup.
