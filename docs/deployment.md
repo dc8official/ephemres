@@ -72,7 +72,7 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 
 ### Automated Upgrade Lifecycle Steps:
 1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
-2. **System Dependencies Cleanup**: Verifies essential packages (`traceroute`, `libcap2-bin`) without installing legacy bloatware (`redis-server`, `libpango-1.0-0`).
+2. **System Dependencies**: Verifies essential packages (`traceroute`, `libcap2-bin`). It installs no `redis-server` or `libpango-1.0-0`, but doesn't remove them either (see below).
 3. **Network Capabilities**: Sets `cap_net_raw+ep` on `traceroute`, and removes the host-wide `cap_net_raw` file capability that earlier releases placed on the system Python interpreter (other file capabilities are left untouched). The refreshed unit files grant `CAP_NET_RAW` to the daemons.
 4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.5 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections including `route_change_minutes` and `route_ecmp_share`).
 5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
@@ -80,6 +80,16 @@ sudo bash /opt/ephemres/deploy/upgrade.sh
 7. **Native Async Migrations**: Runs `python3 -m app.core.migrator upgrade head` to apply all database revisions while preserving all historical TimescaleDB hypertable data.
 8. **Unit Refresh & Daemon Restart**: Refreshes `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `ephemres-api`, `ephemres-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `ephemres-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
 9. **Health Verification**: Verifies API health and version endpoints (`/api/v1/version`).
+
+### After Upgrading from v3.2.0 / v3.3.0 (netmon layout)
+The upgrade keeps the old install so you can roll back: `/opt/netmon`, `/etc/netmon` (with a second copy of the database password and secret key), the disabled `netmon-*` units, their sudo rule and logrotate file, `/var/log/netmon`, the `netmon` user, and `redis-server`, which keeps running although v3.3.5 never uses it. Once the upgraded server has proved itself, remove them with the optional cleanup script. It lists what it would remove and changes nothing until you add `--apply`:
+
+```bash
+sudo /opt/ephemres/deploy/cleanup-netmon.sh
+sudo /opt/ephemres/deploy/cleanup-netmon.sh --apply
+```
+
+It refuses to run while `ephemres-api` or `ephemres-engine` is down, while a `netmon-*` unit is enabled, when `/etc/ephemres/ephemres.env` lacks its own secret key or database password, when `/etc/ephemres/config.toml` is missing (the app would be reading `/etc/netmon/config.toml`), or when an Ephemres unit, env or config file or an enabled nginx site still refers to `/opt/netmon`, `/etc/netmon` or `/var/log/netmon`. It never touches the database (`netmon` / `netmon_user` stay in use), keeps the nginx site that is live, and keeps Redis while any client is connected to it (a client that connects only now and then can't be seen, so check for one first). Kept backups are handed to root before the `netmon` user is deleted. `--remove-backups` also deletes `/var/backups/netmon`; `--purge-packages` also purges `redis-server` and the PDF libraries v3.3.0 needed, each only when apt would remove nothing else with it. Afterwards, a rollback to v3.3.0 means a fresh v3.3.0 install restored from the pre-upgrade backup.
 
 ---
 

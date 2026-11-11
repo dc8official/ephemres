@@ -893,7 +893,13 @@ echo -e "${GREEN}===============================================================
 if [[ ${LEGACY_NETMON} -eq 1 ]]; then
     echo -e "${YELLOW}[NOTICE] This install was migrated from the netmon layout. The old /opt/netmon, /etc/netmon,${NC}"
     echo -e "${YELLOW}         netmon-* units (now disabled) and nginx site netmon were kept: with the pre-upgrade backup${NC}"
-    echo -e "${YELLOW}         above they allow a rollback (the database itself is migrated). Remove them once you are satisfied.${NC}"
+    echo -e "${YELLOW}         above they allow a rollback (the database itself is migrated).${NC}"
+    # v3.2/v3.3.0 installed and enabled redis-server; nothing here stops it, and v3.3.5 never uses it.
+    if systemctl is-active --quiet redis-server 2>/dev/null; then
+        echo -e "${YELLOW}         redis-server, which the old install needed, is still running unused.${NC}"
+    fi
+    echo -e "${YELLOW}         Once you are satisfied, list what can go, then remove it with --apply:${NC}"
+    echo -e "${YELLOW}           sudo ${INSTALL_DIR}/deploy/cleanup-netmon.sh${NC}"
     echo -e "${YELLOW}[NOTICE] Passwords from v3.2/v3.3.0 cannot be carried over: users were given temporary passwords${NC}"
     echo -e "${YELLOW}         listed in /opt/ephemres/legacy_password_resets.txt.${NC}"
 fi
