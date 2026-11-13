@@ -4,7 +4,9 @@ These tests read the typesetter's own drawing operations, so they need no PDF to
 text never overlaps or leaves the page, table cells are never cut short, text meets
 contrast and size floors, and the document is tagged for assistive technology.
 """
+import random
 import re
+import types
 
 import pytest
 
@@ -351,6 +353,38 @@ def test_typographic_characters_survive_and_read_back():
     text = P.NativePdfReader(pdf).pages[0].extract_text()
     assert "3 exporters · 16 interfaces — “quoted”" in text
     assert "Confidential — Internal" in text
+
+
+@pytest.mark.parametrize("data", [b"ab\r", b"ab\r\n", b"\r", b"ab"])
+def test_reader_takes_stream_data_by_length_not_by_end_of_line(data):
+    """Stream data that ends in CR or CRLF keeps those bytes: only the marker before
+    endstream is dropped. The old delimiter match cut a trailing 0x0D off the data."""
+    pdf = (
+        b"%PDF-1.5\n1 0 obj\n<< /Length " + str(len(data)).encode() + b" >>\nstream\n"
+        + data + b"\nendstream\nendobj\n"
+    )
+    assert P.NativePdfReader(pdf)._stream(1) == data
+
+
+def test_encrypted_stream_ending_in_carriage_return_reads_back(monkeypatch):
+    """The flake behind test_typographic_characters_survive_and_read_back (1 run in ~150):
+    random file IDs and owner passwords change the RC4 key, so 1 page stream in 256 ends in
+    0x0D. Seeded passwords and IDs make that case happen in every run, in the same place
+    (the 14th render with this seed; if layout changes move it, the loop still finds one)."""
+    seeded = random.Random(20261132)
+    monkeypatch.setattr(
+        P, "secrets", types.SimpleNamespace(token_hex=lambda n: seeded.randbytes(n).hex())
+    )
+    html = "<html><body><p>3 exporters · 16 interfaces — “quoted”</p></body></html>"
+    for _ in range(3000):
+        pdf = P._render_pdf_sync(html, "t", encrypted=True)
+        content_id = re.search(rb"/Contents (\d+) 0 R", pdf).group(1)
+        m = re.search(rb"\n" + content_id + rb" 0 obj\n<< /Length (\d+)[^>]*>>\nstream\n", pdf)
+        if pdf[m.end() + int(m.group(1)) - 1] == 0x0D:
+            break
+    else:
+        pytest.fail("no seeded render put 0x0D at the end of the page stream")
+    assert "3 exporters · 16 interfaces — “quoted”" in P.NativePdfReader(pdf).pages[0].extract_text()
 
 
 def test_wrap_text_breaks_identifiers_at_separators_and_keeps_every_character():

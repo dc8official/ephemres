@@ -47,6 +47,10 @@ class PingResult:
     max_rtt_ms: Optional[float] = None
     # Mean absolute difference between consecutive replies (RFC 3550 style, unsmoothed).
     jitter_ms: Optional[float] = None
+    # TTL the replies arrived with (the most common one in the cycle), v3.3.6. It drops by one
+    # per router on the way back, so a change that lasts means the return path changed length
+    # (monitoring/ttl_watch.py). Only the raw IPv4 socket sees it; None otherwise.
+    reply_ttl: Optional[int] = None
 
     @property
     def health_score(self) -> float:
@@ -60,8 +64,15 @@ class PingResult:
         return self.success_count + self.failed_count
 
 
-def result_from_rtts(rtts: List[float], count: int) -> PingResult:
-    """Build a cycle result from the RTTs (ms) of the replies that arrived out of `count` probes."""
+def _most_common(values: List[int]) -> Optional[int]:
+    if not values:
+        return None
+    return max(set(values), key=values.count)
+
+
+def result_from_rtts(rtts: List[float], count: int, ttls: Optional[List[int]] = None) -> PingResult:
+    """Build a cycle result from the RTTs (ms) of the replies that arrived out of `count` probes,
+    and the TTLs they arrived with when the socket shows them."""
     success_count = len(rtts)
     failed_count = max(0, count - success_count)
     if success_count == 0:
@@ -76,6 +87,7 @@ def result_from_rtts(rtts: List[float], count: int) -> PingResult:
         min_rtt_ms=round(min(rtts), 3),
         max_rtt_ms=round(max(rtts), 3),
         jitter_ms=jitter,
+        reply_ttl=_most_common(list(ttls or [])),
     )
 
 
@@ -235,6 +247,8 @@ class _RawICMPMultiplexer:
         self._recv_buf = bytearray(1500)
         # (ident, seq) -> (future for the RTT, target IP, send time in ns)
         self._pending: Dict[Tuple[int, int], Tuple[asyncio.Future[float], str, int]] = {}
+        # (ident, seq) -> TTL of the reply, for the probes still being collected (IPv4 only).
+        self._reply_ttls: Dict[Tuple[int, int], int] = {}
         self._closed = False
         self.sock: Optional[socket.socket] = None
 
@@ -288,6 +302,9 @@ class _RawICMPMultiplexer:
             return
 
         self._pending.pop(key, None)
+        # A raw IPv4 read starts with the IP header: byte 8 is the TTL the reply arrived with.
+        if not self.is_ipv6 and len(raw_bytes) >= 20 and (raw_bytes[0] >> 4) == 4:
+            self._reply_ttls[key] = int(raw_bytes[8])
         if not fut.done():
             if recv_ns is None:
                 recv_ns = time.monotonic_ns()
@@ -314,7 +331,31 @@ class _RawICMPMultiplexer:
                 recv_ns=recv_ns,
             )
 
+    async def send_probe_with_ttl(
+        self,
+        target_ip: str,
+        ident: int,
+        seq: int,
+        timeout: float,
+    ) -> Tuple[Optional[float], Optional[int]]:
+        """(RTT in ms, reply TTL) for one probe; (None, None) when no reply came in time."""
+        try:
+            rtt = await self._send_one(target_ip, ident, seq, timeout)
+        finally:
+            ttl = self._reply_ttls.pop((ident & 0xFFFF, seq & 0xFFFF), None)
+        return rtt, (ttl if rtt is not None else None)
+
     async def send_probe(
+        self,
+        target_ip: str,
+        ident: int,
+        seq: int,
+        timeout: float,
+    ) -> Optional[float]:
+        rtt, _ttl = await self.send_probe_with_ttl(target_ip, ident, seq, timeout)
+        return rtt
+
+    async def _send_one(
         self,
         target_ip: str,
         ident: int,
@@ -389,14 +430,17 @@ async def _run_raw_socket_ping_cycle(
     ident = _next_ident()
 
     rtts: List[float] = []
+    ttls: List[int] = []
     for seq in range(1, count + 1):
-        rtt = await mux.send_probe(ip_address, ident, seq, timeout=timeout)
+        rtt, ttl = await mux.send_probe_with_ttl(ip_address, ident, seq, timeout=timeout)
         if rtt is not None:
             rtts.append(rtt)
+            if ttl is not None:
+                ttls.append(ttl)
         if seq < count and interval > 0:
             await asyncio.sleep(interval)
 
-    return result_from_rtts(rtts, count)
+    return result_from_rtts(rtts, count, ttls)
 
 
 async def _run_dgram_socket_ping_cycle(

@@ -40,6 +40,10 @@
         <span class="card-separator">·</span>
         <span class="card-device-type">{{ endpoint.device_type }}</span>
       </div>
+      <!-- Site · location (v3.3.6), only when set; tags stay in the table view to keep cards calm. -->
+      <div v-if="endpoint.site || endpoint.location" class="card-place" :title="(endpoint.tags || []).join(', ')">
+        {{ [endpoint.site, endpoint.location].filter(Boolean).join(' · ') }}
+      </div>
 
       <div class="card-footer">
         <div class="uptime-row">
@@ -255,6 +259,15 @@ const timeAgo = computed(() => {
   color: var(--text-secondary);
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 12px;
+}
+
+.card-place {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .card-separator {

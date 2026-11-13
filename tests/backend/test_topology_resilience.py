@@ -242,7 +242,9 @@ def test_refresh_baseline_route_preserves_last_known_good():
         ]
 
         mock_db = AsyncMock()
-        check_row = MagicMock(total_hops=2, hops=good_hops)
+        # The stored row as route_paths.record_trace reads it: current path, current_since,
+        # normal path, pinned, pending, pending_at, recent changes, flapping, last logged.
+        check_row = (good_hops, None, good_hops, False, None, None, [], None, None)
         check_res = MagicMock()
         check_res.fetchone.return_value = check_row
         mock_db.execute.return_value = check_res

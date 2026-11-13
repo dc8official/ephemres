@@ -1,5 +1,11 @@
 """Endpoint routes: list, detail, probe history, create, update, delete, and route discovery.
 
+Site, location and tags (v3.3.6) are optional free text with autocomplete (GET /suggestions).
+Every list here takes the shared filter (?site=&location=&tag=&type=&q=, services/
+endpoint_filter.py); GET /match gives just the matching ids, which the dashboard and the map use.
+Admins can assign them to many endpoints at once (POST /bulk-update) and rename or merge a value
+everywhere (POST /rename); both are audited.
+
 Deleting is soft: the row is marked DELETED and keeps its history. Adding an endpoint with the
 IP of a deleted one restores that row (its history comes back) rather than making a new one;
 ip_address is unique, so a second row with the same address can't exist anyway. The engine
@@ -10,10 +16,10 @@ from __future__ import annotations
 import ipaddress
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
-from app.core.asgi import APIRouter, Depends, HTTPException, Query
+from app.core.asgi import APIRouter, Depends, HTTPException, Query, Request
 from app.core.background import spawn
 from app.core.schema import BaseModel, ConfigDict, field_validator
 from app.core.orm import AsyncSession
@@ -22,6 +28,18 @@ from app.database import get_db
 from app.repositories.auth_repo import AuthRepository
 from app.repositories.endpoint_repo import EndpointRepository
 from app.services import probe_history
+from app.services import snmp_credentials
+from app.services.endpoint_filter import (
+    EndpointFilter,
+    filter_from_body,
+    filter_from_request,
+    matching_ids,
+    normalise_label,
+    normalise_tag,
+    normalise_tags,
+    or_empty,
+    resolve_scope,
+)
 from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse, PaginationMeta
 from app.services.uptime_calculator import (
@@ -43,7 +61,7 @@ async def _bg_run_initial_discovery(endpoint_id: UUID, ip_address: str) -> None:
 
     async with AsyncSessionLocal() as bg_db:
         try:
-            await refresh_baseline_route(endpoint_id, ip_address, db=bg_db)
+            await refresh_baseline_route(endpoint_id, ip_address, db=bg_db, trigger="added")
             await bg_db.commit()
             await topology_manager.full_rebuild(bg_db)
         except Exception as exc:
@@ -54,11 +72,37 @@ async def _bg_run_initial_discovery(endpoint_id: UUID, ip_address: str) -> None:
             )
 
 
+async def endpoint_filter_dep(request: Request) -> EndpointFilter:
+    """The shared filter from the query string, for any route that lists endpoints."""
+    return filter_from_request(request)
+
+
+async def _place_fields(repo: EndpointRepository, request: Any, fields_set: set) -> dict:
+    """Site, location and tags from a create or update request, normalised: trimmed, an empty
+    value cleared (None), a site or location typed in another case stored in the spelling
+    already in use, tags lower case and deduplicated. Only fields the request sent are returned.
+    A tag that can't exist answers 400."""
+    out: dict = {}
+    for column in ("site", "location"):
+        if column in fields_set:
+            value = normalise_label(getattr(request, column))
+            # Empty clears the field; only a real value needs the spelling lookup.
+            out[column] = await repo.canonical_label(column, value) if value else None
+    if "tags" in fields_set and request.tags is not None:
+        try:
+            out["tags"] = normalise_tags(request.tags)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return out
+
+
 class CreateEndpointRequest(BaseModel):
     ip_address: str
     hostname: str
     device_type: str
+    site: Optional[str] = None
     location: Optional[str] = None
+    tags: Optional[list[str]] = None
     description: Optional[str] = None
     monitoring_enabled: bool = True
     allow_incident_trace: bool = True
@@ -69,6 +113,8 @@ class CreateEndpointRequest(BaseModel):
     flow_exporter_ips: Optional[list[str]] = None
     flow_interface_aliases: Optional[dict[str, str]] = None
     manual_parent_id: Optional[UUID] = None
+    # SNMP credential set (v3.3.6); None: no SNMP.
+    snmp_credential_id: Optional[UUID] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,7 +134,10 @@ class CreateEndpointRequest(BaseModel):
 class UpdateEndpointRequest(BaseModel):
     hostname: Optional[str] = None
     device_type: Optional[str] = None
+    # Sent as "" or null: cleared. Left out: unchanged.
+    site: Optional[str] = None
     location: Optional[str] = None
+    tags: Optional[list[str]] = None
     description: Optional[str] = None
     monitoring_enabled: Optional[bool] = None
     allow_incident_trace: Optional[bool] = None
@@ -99,6 +148,8 @@ class UpdateEndpointRequest(BaseModel):
     flow_exporter_ips: Optional[list[str]] = None
     flow_interface_aliases: Optional[dict[str, str]] = None
     manual_parent_id: Optional[UUID] = None
+    # Sent as null: SNMP off for this endpoint. Left out: unchanged.
+    snmp_credential_id: Optional[UUID] = None
     endpoint_status: Optional[Literal["ACTIVE", "DISABLED"]] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -179,9 +230,11 @@ async def list_endpoints(
     status: Optional[str] = Query(default=None),
     page: Optional[int] = Query(default=None, ge=1),
     page_size: Optional[int] = Query(default=None, ge=1, le=500),
+    endpoint_filter: EndpointFilter = Depends(endpoint_filter_dep),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    endpoint_filter = or_empty(endpoint_filter)
     now_utc = datetime.now(timezone.utc)
     since_utc = now_utc - timedelta(hours=24)
 
@@ -214,6 +267,7 @@ async def list_endpoints(
         page=calc_page,
         page_size=calc_page_size,
         gaps=merge_intervals(gap_intervals),
+        endpoint_filter=endpoint_filter,
     )
 
     data = []
@@ -233,7 +287,9 @@ async def list_endpoints(
             "hostname": row["hostname"],
             "ip_address": row["ip_address"],
             "device_type": row["device_type"],
+            "site": row.get("site"),
             "location": row["location"],
+            "tags": list(row.get("tags") or []),
             "endpoint_status": row["endpoint_status"],
             "monitoring_enabled": row["monitoring_enabled"],
             "allow_incident_trace": row["allow_incident_trace"],
@@ -244,6 +300,7 @@ async def list_endpoints(
             "manual_parent_id": (
                 str(row["manual_parent_id"]) if row["manual_parent_id"] else None
             ),
+            "snmp_credential_id": str(row["snmp_credential_id"]) if row.get("snmp_credential_id") else None,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "current_operational_state": row["current_operational_state"],
@@ -258,7 +315,7 @@ async def list_endpoints(
         })
 
     if calc_page is not None and calc_page_size is not None:
-        total = await repo.count_listed(status=clean_status)
+        total = await repo.count_listed(status=clean_status, endpoint_filter=endpoint_filter)
         meta = PaginationMeta(
             total=total,
             page=calc_page,
@@ -273,6 +330,168 @@ async def list_endpoints(
             total_pages=1,
         )
     return APIResponse.success(data=data, meta=meta)
+
+
+@router.get("/match", response_model=APIResponse)
+async def match_endpoints(
+    endpoint_filter: EndpointFilter = Depends(endpoint_filter_dep),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ids of the endpoints the filter matches, plus the filter as the server read it and a
+    one-line description. The dashboard and the map keep their full endpoint list (for live
+    updates and whole-fleet counts) and use this to know which ones are in the filter."""
+    endpoint_filter = or_empty(endpoint_filter)
+    ids = await matching_ids(db, endpoint_filter)
+    return APIResponse.success(data={
+        "ids": [str(i) for i in ids],
+        "total": len(ids),
+        "filter": endpoint_filter.as_dict(),
+        "description": endpoint_filter.describe(),
+    })
+
+
+@router.get("/suggestions", response_model=APIResponse)
+async def endpoint_suggestions(
+    site: Optional[str] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sites, locations, tags and device types in use, each with its endpoint count, for
+    autocomplete and the filter bar. With `site`, only the locations used within that site."""
+    data = await EndpointRepository(db).label_suggestions(site=normalise_label(site))
+    return APIResponse.success(data=data)
+
+
+class BulkUpdateRequest(BaseModel):
+    # Which endpoints: a list, a filter, or both (the listed ones the filter matches).
+    endpoint_ids: Optional[list[UUID]] = None
+    filter: Optional[dict] = None
+    # What to change. A field left out is unchanged; site / location sent as "" or null clear it.
+    site: Optional[str] = None
+    location: Optional[str] = None
+    add_tags: Optional[list[str]] = None
+    remove_tags: Optional[list[str]] = None
+    # SNMP credential set for all of them (v3.3.6); sent as null: SNMP off. Left out: unchanged.
+    snmp_credential_id: Optional[UUID] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@router.post("/bulk-update", response_model=APIResponse)
+async def bulk_update_endpoints(
+    request: BulkUpdateRequest,
+    current_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sets site or location, or adds or removes tags, on many endpoints at once (bulk assign in
+    the dashboard table). One audit entry records the change and the endpoints it touched."""
+    endpoint_filter = filter_from_body(request.filter)
+    if not request.endpoint_ids and (endpoint_filter is None or endpoint_filter.is_empty()):
+        # An empty filter would mean "every endpoint": too easy to send by mistake.
+        raise HTTPException(status_code=400, detail="Choose endpoints or a filter.")
+    ids = await resolve_scope(db, endpoint_filter, request.endpoint_ids)
+
+    repo = EndpointRepository(db)
+    changes = await _place_fields(repo, request, request.model_fields_set & {"site", "location"})
+    try:
+        if request.add_tags:
+            changes["add_tags"] = normalise_tags(request.add_tags)
+        if request.remove_tags:
+            changes["remove_tags"] = [t for t in (normalise_tag(x) for x in request.remove_tags) if t]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if "snmp_credential_id" in request.model_fields_set:
+        if request.snmp_credential_id:
+            await snmp_credentials.require_set(db, request.snmp_credential_id)
+        changes["snmp_credential_id"] = str(request.snmp_credential_id) if request.snmp_credential_id else None
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to change.")
+
+    try:
+        changed = await repo.bulk_assign(ids, changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await AuthRepository(db).create_audit_log(
+        user_id=_admin_uuid(current_user),
+        action="ENDPOINT:BULK_UPDATE",
+        target_type="endpoints",
+        target_id=FLEET_TARGET_ID,
+        details={
+            "changes": changes,
+            "matched": len(ids),
+            "changed": changed,
+            "filter": endpoint_filter.as_dict() if endpoint_filter else None,
+            "endpoint_ids": [str(i) for i in ids][:500],
+        },
+    )
+    await db.commit()
+    return APIResponse.success(data={"matched": len(ids), "changed": changed})
+
+
+class RenameRequest(BaseModel):
+    field: Literal["site", "location", "tag"]
+    # Matched case-insensitively. "to" empty removes the value from every endpoint.
+    from_value: str
+    to_value: Optional[str] = None
+    # Location only: rename it within this site (other sites' locations of the same name stay).
+    site: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@router.post("/rename", response_model=APIResponse)
+async def rename_endpoint_label(
+    request: RenameRequest,
+    current_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Renames a site, location or tag on every endpoint that has it: fixes a misspelling, or
+    merges two spellings into one (rename the wrong one to the right one). Audited."""
+    try:
+        if request.field == "tag":
+            old = normalise_tag(request.from_value)
+            new = normalise_tag(request.to_value)
+        else:
+            old = normalise_label(request.from_value)
+            new = normalise_label(request.to_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not old:
+        raise HTTPException(status_code=400, detail="Say which value to rename.")
+
+    repo = EndpointRepository(db)
+    if new and request.field != "tag":
+        # Merging into an existing value takes that value's spelling.
+        existing = await repo.canonical_label(request.field, new)
+        if existing.lower() != old.lower():
+            new = existing
+    changed = await repo.rename_label(
+        request.field, old, new,
+        within_site=normalise_label(request.site) if request.field == "location" else None,
+    )
+    await AuthRepository(db).create_audit_log(
+        user_id=_admin_uuid(current_user),
+        action="ENDPOINT:RENAME_LABEL",
+        target_type="endpoints",
+        target_id=FLEET_TARGET_ID,
+        details={"field": request.field, "from": old, "to": new, "site": request.site, "changed": changed},
+    )
+    await db.commit()
+    return APIResponse.success(data={"changed": changed, "to": new})
+
+
+# audit_logs.target_id is NOT NULL. Bulk assign and rename act on many endpoints, so they
+# record the nil UUID as their target and list the endpoints in the details instead.
+FLEET_TARGET_ID = UUID(int=0)
+
+
+def _admin_uuid(current_user: dict) -> Optional[UUID]:
+    try:
+        return UUID(str(current_user.get("sub")))
+    except (ValueError, TypeError):
+        return None
 
 
 @router.get("/probe-summary", response_model=APIResponse)
@@ -345,7 +564,9 @@ async def get_endpoint(
         "hostname": row["hostname"],
         "ip_address": row["ip_address"],
         "device_type": row["device_type"],
+        "site": row.get("site"),
         "location": row["location"],
+        "tags": list(row.get("tags") or []),
         "description": row["description"],
         "monitoring_enabled": row["monitoring_enabled"],
         "device_role": row.get("device_role") or "ACTIVE_HOST",
@@ -359,6 +580,7 @@ async def get_endpoint(
         "manual_parent_id": (
             str(row["manual_parent_id"]) if row["manual_parent_id"] else None
         ),
+        "snmp_credential_id": str(row["snmp_credential_id"]) if row.get("snmp_credential_id") else None,
         "endpoint_status": row["endpoint_status"],
         "created_by": str(row["created_by"]) if row["created_by"] else None,
         "created_at": row["created_at"],
@@ -383,6 +605,7 @@ async def create_endpoint(
 ):
     repo = EndpointRepository(db)
     auth_repo = AuthRepository(db)
+    place = await _place_fields(repo, request, {"site", "location", "tags"})
 
     admin_uuid = None
     if current_user.get("sub"):
@@ -406,7 +629,9 @@ async def create_endpoint(
             endpoint_id=existing_deleted.id,
             hostname=request.hostname,
             device_type=request.device_type,
-            location=request.location,
+            site=place.get("site"),
+            location=place.get("location"),
+            tags=place.get("tags") or [],
             description=request.description,
             monitoring_enabled=request.monitoring_enabled,
             allow_incident_trace=request.allow_incident_trace,
@@ -444,7 +669,9 @@ async def create_endpoint(
         ip_address=request.ip_address,
         hostname=request.hostname,
         device_type=request.device_type,
-        location=request.location,
+        site=place.get("site"),
+        location=place.get("location"),
+        tags=place.get("tags") or [],
         description=request.description,
         monitoring_enabled=request.monitoring_enabled,
         allow_incident_trace=request.allow_incident_trace,
@@ -460,6 +687,10 @@ async def create_endpoint(
     )
 
     new_id = getattr(new_endpoint, "id", None)
+    if new_id and request.snmp_credential_id:
+        # Set after the insert so create_endpoint stays as it is; the set must exist.
+        await snmp_credentials.require_set(db, request.snmp_credential_id)
+        await repo.update_endpoint(new_id, snmp_credential_id=request.snmp_credential_id)
     if new_id:
         await auth_repo.create_audit_log(
             user_id=admin_uuid,
@@ -509,9 +740,10 @@ async def update_endpoint(
     if request.device_type is not None:
         updates["device_type"] = request.device_type
         audit_details["device_type"] = request.device_type
-    if request.location is not None:
-        updates["location"] = request.location
-        audit_details["location"] = request.location
+    # Site, location and tags: sent means set (an empty or null value clears site/location).
+    place = await _place_fields(repo, request, request.model_fields_set & {"site", "location", "tags"})
+    updates.update(place)
+    audit_details.update(place)
     if request.description is not None:
         updates["description"] = request.description
         audit_details["description"] = request.description
@@ -557,6 +789,12 @@ async def update_endpoint(
                 )
         updates["manual_parent_id"] = request.manual_parent_id
         audit_details["manual_parent_id"] = str(request.manual_parent_id) if request.manual_parent_id else None
+
+    if "snmp_credential_id" in request.model_fields_set:
+        if request.snmp_credential_id:
+            await snmp_credentials.require_set(db, request.snmp_credential_id)
+        updates["snmp_credential_id"] = request.snmp_credential_id
+        audit_details["snmp_credential_id"] = str(request.snmp_credential_id) if request.snmp_credential_id else None
 
     if not updates:
         return APIResponse.success(data={"message": "No changes provided."})
@@ -646,8 +884,9 @@ async def trigger_refresh_baseline(
     if not endpoint:
         raise HTTPException(status_code=404, detail="Endpoint not found.")
 
+    # An admin asked for it: a new path counts at once, without the second confirming trace.
     res = await refresh_baseline_route(
-        endpoint_id, str(endpoint.ip_address), db=db
+        endpoint_id, str(endpoint.ip_address), db=db, trigger="manual", confirm_now=True
     )
     await db.commit()
 
@@ -663,3 +902,78 @@ async def trigger_refresh_baseline(
             "route": res,
         }
     )
+
+
+# --- normal and current route (v3.3.6 build plan 6.4) ----------------------------------------
+
+
+@router.get("/{endpoint_id}/route", response_model=APIResponse)
+async def get_endpoint_route(
+    endpoint_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The endpoint's current path (what root-cause analysis compares with), its normal path,
+    whether it is on the normal path, a pending path waiting for confirmation, flapping, and the
+    latest route-change log entries. `data` is null while it has no path yet."""
+    from app.services.route_paths import path_status
+
+    return APIResponse.success(data=await path_status(db, endpoint_id))
+
+
+class NormalPathRequest(BaseModel):
+    # True: the current path becomes normal and stays so until unpinned. False: it becomes
+    # normal now, and later paths take over after 24 hours as usual.
+    pinned: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@router.post("/{endpoint_id}/route/normal", response_model=APIResponse)
+async def make_current_path_normal(
+    endpoint_id: UUID,
+    request: NormalPathRequest,
+    current_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: the current path becomes the normal one now (optionally pinned). Logged in the
+    route-change log and the audit log."""
+    from app.services.route_paths import set_normal_path
+
+    if not await set_normal_path(db, endpoint_id, pinned=request.pinned):
+        raise HTTPException(status_code=404, detail="This endpoint has no recorded path yet.")
+    await AuthRepository(db).create_audit_log(
+        user_id=_admin_uuid(current_user),
+        action="ENDPOINT:SET_NORMAL_PATH",
+        target_type="endpoints",
+        target_id=endpoint_id,
+        details={"pinned": request.pinned},
+    )
+    await db.commit()
+    # The map draws the normal path faded while an endpoint is off it: redraw everywhere.
+    from app.services.baseline_route import _announce_topology_change
+
+    await _announce_topology_change("NORMAL_PATH_SET", endpoint_id)
+    return APIResponse.success(data={"message": "Normal path set.", "pinned": request.pinned})
+
+
+@router.delete("/{endpoint_id}/route/pin", response_model=APIResponse)
+async def unpin_normal_path_route(
+    endpoint_id: UUID,
+    current_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: the normal path is no longer pinned; it follows the current path after 24 hours."""
+    from app.services.route_paths import unpin_normal_path
+
+    if not await unpin_normal_path(db, endpoint_id):
+        raise HTTPException(status_code=404, detail="The normal path of this endpoint is not pinned.")
+    await AuthRepository(db).create_audit_log(
+        user_id=_admin_uuid(current_user),
+        action="ENDPOINT:UNPIN_NORMAL_PATH",
+        target_type="endpoints",
+        target_id=endpoint_id,
+        details={},
+    )
+    await db.commit()
+    return APIResponse.success(data={"message": "Normal path unpinned."})

@@ -24,6 +24,45 @@
       </div>
     </div>
 
+    <!-- Traffic alerts on WAN links (v3.3.6 build plan 7.4). Plain settings: they wait for the
+         page's shared Save bar. Each link can override the default or opt out in its interface
+         editor (Traffic → Interfaces). Channels receive them only where ticked below. -->
+    <div v-if="settings" class="settings-card mb-4">
+      <div class="card-header">
+        <div class="flex-1">
+          <h2 class="card-title">📈 Traffic alerts on WAN links</h2>
+          <p class="card-desc mt-1">
+            Alerts when a WAN link's inbound or outbound traffic stays above the threshold, again
+            when it is back to normal (10 points under for 5 minutes), and when a link sends no
+            flow data for 15 minutes. Only WAN links with a speed set are watched. Channels get
+            these only when you tick the traffic severities on them.
+          </p>
+        </div>
+        <div class="master-toggle-wrap">
+          <label class="switch" title="Traffic alerts on WAN links">
+            <input
+              type="checkbox"
+              v-model="settings.trafficAlertsEnabled"
+              aria-label="Traffic alerts on WAN links"
+              @change="emit('change')"
+            />
+            <span class="slider round"></span>
+          </label>
+        </div>
+      </div>
+      <div class="traffic-rule" :class="{ muted: !settings.trafficAlertsEnabled }">
+        <span>Default rule: above</span>
+        <select v-model.number="settings.trafficAlertThresholdPct" class="inline-select" aria-label="Threshold" @change="emit('change')">
+          <option v-for="n in [70, 75, 80, 85, 90, 95]" :key="n" :value="n">{{ n }}%</option>
+        </select>
+        <span>for</span>
+        <select v-model.number="settings.trafficAlertMinutes" class="inline-select" aria-label="Minutes" @change="emit('change')">
+          <option v-for="n in [5, 10, 15, 30, 60]" :key="n" :value="n">{{ n }} minutes</option>
+        </select>
+        <span>, inbound or outbound.</span>
+      </div>
+    </div>
+
     <!-- Configured Alert Channels Table -->
     <div class="settings-card full-width mb-4">
       <div class="card-header">
@@ -81,9 +120,9 @@
                     v-for="s in (ch.severity_filters || ['DOWN', 'RECOVERED'])" 
                     :key="s" 
                     class="severity-tag"
-                    :class="s.toLowerCase()"
+                    :class="severityTone(s)"
                   >
-                    {{ s }}
+                    {{ severityLabel(s) }}
                   </span>
                 </div>
               </td>
@@ -360,6 +399,22 @@
                 <span class="severity-tag unstable">UNSTABLE / FLAPPING</span>
               </label>
             </div>
+            <!-- Traffic alerts (v3.3.6): never sent to a channel unless ticked here. -->
+            <label class="setting-label traffic-sev-label">Traffic on WAN links</label>
+            <div class="severity-checkbox-group">
+              <label v-for="t in TRAFFIC_SEVERITIES" :key="t.value" class="checkbox-label">
+                <input type="checkbox" :value="t.value" v-model="channelForm.severity_filters" />
+                <span class="severity-tag" :class="t.tone">{{ t.label }}</span>
+              </label>
+            </div>
+            <!-- WAN link state from SNMP (v3.3.6): never sent unless ticked here. -->
+            <label class="setting-label traffic-sev-label">WAN links (SNMP)</label>
+            <div class="severity-checkbox-group">
+              <label v-for="t in LINK_SEVERITIES" :key="t.value" class="checkbox-label">
+                <input type="checkbox" :value="t.value" v-model="channelForm.severity_filters" />
+                <span class="severity-tag" :class="t.tone">{{ t.label }}</span>
+              </label>
+            </div>
           </div>
 
           <!-- Channel Active Toggle -->
@@ -422,7 +477,34 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  // The page's shared settings (traffic alert switch and default rule).
+  settings: {
+    type: Object,
+    default: null,
+  },
 })
+
+const TRAFFIC_SEVERITIES = [
+  { value: 'TRAFFIC_HIGH', label: 'Traffic high', tone: 'unstable' },
+  { value: 'TRAFFIC_NORMAL', label: 'Back to normal', tone: 'recovered' },
+  { value: 'TRAFFIC_SILENT', label: 'Link silent', tone: 'down' },
+  { value: 'TRAFFIC_RESUMED', label: 'Traffic again', tone: 'recovered' },
+]
+
+// A WAN link going down or coming back, read by ephemres-snmpd (v3.3.6 SNMP poller).
+const LINK_SEVERITIES = [
+  { value: 'LINK_DOWN', label: 'Link down', tone: 'down' },
+  { value: 'LINK_UP', label: 'Link up', tone: 'recovered' },
+]
+const OPT_IN_SEVERITIES = [...TRAFFIC_SEVERITIES, ...LINK_SEVERITIES]
+
+function severityLabel(s) {
+  return OPT_IN_SEVERITIES.find((t) => t.value === s)?.label || s
+}
+
+function severityTone(s) {
+  return OPT_IN_SEVERITIES.find((t) => t.value === s)?.tone || String(s).toLowerCase()
+}
 
 const emit = defineEmits(['update:alertingEnabled', 'change'])
 
@@ -1044,6 +1126,33 @@ input:checked + .slider:before {
 .severity-tag.unstable {
   background: rgba(245, 158, 11, 0.2);
   color: #f59e0b;
+}
+
+.traffic-sev-label {
+  margin-top: 12px;
+}
+
+.traffic-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.traffic-rule.muted {
+  opacity: 0.55;
+}
+
+.inline-select {
+  background: var(--bg-surface-selected);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
 }
 
 .status-pill {

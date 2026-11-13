@@ -4,13 +4,14 @@
     <div class="view-header">
       <div>
         <h1 class="page-title">Platform Administration & Governance</h1>
-        <p class="page-sub">Configure enterprise alerting channels, performance acceleration, security policies, and access control</p>
+        <p class="page-sub">Accounts and sign-in, route discovery, data collection, alerts, and your organization</p>
       </div>
       <div class="header-actions">
-        <button 
-          v-if="activeTab !== 'alerts' && activeTab !== 'users' && activeTab !== 'organization'" 
-          class="btn-primary" 
-          @click="saveAllSettings" 
+        <!-- One save for every plain setting on every tab (v3.3.6 layout). Lists (users, alert
+             channels, renames) still save when their own dialog is confirmed. -->
+        <button
+          class="btn-primary"
+          @click="saveAllSettings"
           :disabled="saving || !isAnyDirty"
         >
           {{ saving ? 'Saving...' : (isAnyDirty ? '💾 Save Changes *' : '✓ Saved') }}
@@ -24,106 +25,61 @@
       <button class="btn-close" @click="alertMessage = null">✕</button>
     </div>
 
-    <!-- Spacious 4-Tab Navigation Strip with Dirty Badges -->
+    <!-- Tabs in the v3.3.6 order, agreed with Kenneth on 2026-11-12. A dot marks unsaved changes. -->
     <div class="settings-tabs-nav" role="tablist">
-      <button 
-        type="button" 
-        class="tab-btn" 
-        :class="{ active: activeTab === 'alerts' }" 
-        @click="switchTab('alerts')"
+      <button
+        v-for="tab in TABS"
+        :key="tab.key"
+        type="button"
+        class="tab-btn"
+        :class="{ active: activeTab === tab.key }"
         role="tab"
-        :aria-selected="activeTab === 'alerts'"
+        :aria-selected="activeTab === tab.key"
+        @click="switchTab(tab.key)"
       >
-        <span class="tab-icon">🔔</span>
-        <span class="tab-label">Alert Channels</span>
-        <span v-if="isAlertsDirty" class="tab-dirty-dot" title="Unsaved changes"></span>
-      </button>
-
-      <button 
-        type="button" 
-        class="tab-btn" 
-        :class="{ active: activeTab === 'performance' }" 
-        @click="switchTab('performance')"
-        role="tab"
-        :aria-selected="activeTab === 'performance'"
-      >
-        <span class="tab-icon">⚡</span>
-        <span class="tab-label">Performance & Telemetry</span>
-        <span v-if="isFlowDirty" class="tab-dirty-dot" title="Unsaved changes"></span>
-      </button>
-
-      <button 
-        type="button" 
-        class="tab-btn" 
-        :class="{ active: activeTab === 'security' }" 
-        @click="switchTab('security')"
-        role="tab"
-        :aria-selected="activeTab === 'security'"
-      >
-        <span class="tab-icon">🛡️</span>
-        <span class="tab-label">Security & Discovery</span>
-        <span v-if="isSecurityDirty" class="tab-dirty-dot" title="Unsaved changes"></span>
-      </button>
-
-      <button 
-        type="button" 
-        class="tab-btn" 
-        :class="{ active: activeTab === 'users' }" 
-        @click="switchTab('users')"
-        role="tab"
-        :aria-selected="activeTab === 'users'"
-      >
-        <span class="tab-icon">👥</span>
-        <span class="tab-label">User Governance</span>
-      </button>
-
-      <button 
-        type="button" 
-        class="tab-btn" 
-        :class="{ active: activeTab === 'organization' }" 
-        @click="switchTab('organization')"
-        role="tab"
-        :aria-selected="activeTab === 'organization'"
-      >
-        <span class="tab-icon">🏢</span>
-        <span class="tab-label">Organization & Branding</span>
+        <span class="tab-icon">{{ tab.icon }}</span>
+        <span class="tab-label">{{ tab.label }}</span>
+        <span v-if="tabDirty[tab.key]" class="tab-dirty-dot" title="Unsaved changes"></span>
       </button>
     </div>
 
-    <!-- Tab Panels Container -->
     <div class="settings-content">
-      <!-- TAB 1: Enterprise Alert Channels -->
-      <SettingsAlerts 
-        v-if="activeTab === 'alerts'" 
-        v-model:alertingEnabled="settings.alertingEnabled"
+      <SettingsUsers
+        v-if="activeTab === 'users'"
+        :currentUser="currentUser"
+        :settings="settings"
         @change="markDirty"
       />
 
-      <!-- TAB 2: Performance & Telemetry (NetFlow + Cache) -->
-      <SettingsFlow 
-        v-if="activeTab === 'performance'" 
+      <SettingsDiscovery
+        v-if="activeTab === 'discovery'"
+        :settings="settings"
+        @change="markDirty"
+      />
+
+      <SettingsFlow
+        v-if="activeTab === 'data'"
         :settings="settings"
         :saving="saving"
         @change="markDirty"
       />
+      <!-- SNMP poller (v3.3.6): the switch and interval join the shared Save bar; credential
+           sets save when their dialog is confirmed, like users and alert channels. -->
+      <SettingsSnmp v-if="activeTab === 'data'" :settings="settings" />
 
-      <!-- TAB 3: Security & Discovery -->
-      <SettingsSecurity 
-        v-if="activeTab === 'security'" 
+      <SettingsAlerts
+        v-if="activeTab === 'alerts'"
+        v-model:alertingEnabled="settings.alertingEnabled"
         :settings="settings"
         @change="markDirty"
       />
 
-      <!-- TAB 4: User Account Governance -->
-      <SettingsUsers 
-        v-if="activeTab === 'users'" 
-        :currentUser="currentUser"
-      />
-
-      <!-- TAB 5: Organization Profile & Report Branding -->
-      <SettingsOrganization 
-        v-if="activeTab === 'organization'" 
-      />
+      <!-- Kept mounted (v-show) so unsaved branding survives switching tabs until it is saved
+           or discarded from the shared bar. -->
+      <div v-show="activeTab === 'organization'">
+        <SettingsOrganization ref="organizationRef" @dirty-change="(v) => (brandingDirty = v)" />
+        <SettingsLabels />
+      </div>
     </div>
 
     <!-- Sticky Dirty-State Banner -->
@@ -157,16 +113,34 @@ import { currentUser, loadUserFromStorage } from '../services/auth.js'
 
 import SettingsAlerts from '../components/settings/SettingsAlerts.vue'
 import SettingsFlow from '../components/settings/SettingsFlow.vue'
-import SettingsSecurity from '../components/settings/SettingsSecurity.vue'
+import SettingsSnmp from '../components/settings/SettingsSnmp.vue'
+import SettingsDiscovery from '../components/settings/SettingsDiscovery.vue'
 import SettingsUsers from '../components/settings/SettingsUsers.vue'
 import SettingsOrganization from '../components/settings/SettingsOrganization.vue'
+import SettingsLabels from '../components/settings/SettingsLabels.vue'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 
+const TABS = [
+  { key: 'users', icon: '👥', label: 'Users & access' },
+  { key: 'discovery', icon: '🌐', label: 'Discovery & topology' },
+  { key: 'data', icon: '📡', label: 'Data collection' },
+  { key: 'alerts', icon: '🔔', label: 'Alerts' },
+  { key: 'organization', icon: '🏢', label: 'Organization' },
+]
+const TAB_KEYS = TABS.map((t) => t.key)
+// Links and bookmarks from before v3.3.6 use the old tab names.
+const OLD_TAB_KEYS = { performance: 'data', security: 'discovery' }
+
+function tabFromQuery(raw) {
+  const key = OLD_TAB_KEYS[raw] || raw
+  return TAB_KEYS.includes(key) ? key : null
+}
+
 const activeTab = ref(
-  route.path === '/users' ? 'users' : (route.query.tab?.toString() || 'alerts')
+  route.path === '/users' ? 'users' : (tabFromQuery(route.query.tab?.toString()) || 'users')
 )
 
 function switchTab(tab) {
@@ -177,9 +151,8 @@ function switchTab(tab) {
 watch(
   () => route.query.tab,
   (newTab) => {
-    if (newTab && ['alerts', 'performance', 'security', 'users', 'organization'].includes(newTab)) {
-      activeTab.value = newTab
-    }
+    const key = tabFromQuery(newTab?.toString())
+    if (key) activeTab.value = key
   }
 )
 
@@ -198,6 +171,13 @@ const settings = reactive({
   flowNetflowPort: 2055,
   flowIpfixPort: 4739,
   flowSamplingMultiplier: 1,
+  discoveryParallel: 2,
+  rediscoveryHours: 24,
+  trafficAlertsEnabled: false,
+  trafficAlertThresholdPct: 80,
+  trafficAlertMinutes: 15,
+  snmpEnabled: false,
+  snmpPollSeconds: 60,
 })
 
 const savedSettings = ref(null)
@@ -208,7 +188,12 @@ function markDirty() {
 
 const isAlertsDirty = computed(() => {
   if (!savedSettings.value) return false
-  return settings.alertingEnabled !== savedSettings.value.alertingEnabled
+  return (
+    settings.alertingEnabled !== savedSettings.value.alertingEnabled ||
+    settings.trafficAlertsEnabled !== savedSettings.value.trafficAlertsEnabled ||
+    settings.trafficAlertThresholdPct !== savedSettings.value.trafficAlertThresholdPct ||
+    settings.trafficAlertMinutes !== savedSettings.value.trafficAlertMinutes
+  )
 })
 
 const isFlowDirty = computed(() => {
@@ -218,23 +203,45 @@ const isFlowDirty = computed(() => {
     settings.flowIngestionEnabled !== savedSettings.value.flowIngestionEnabled ||
     settings.flowNetflowPort !== savedSettings.value.flowNetflowPort ||
     settings.flowIpfixPort !== savedSettings.value.flowIpfixPort ||
-    settings.flowSamplingMultiplier !== savedSettings.value.flowSamplingMultiplier
+    settings.flowSamplingMultiplier !== savedSettings.value.flowSamplingMultiplier ||
+    settings.snmpEnabled !== savedSettings.value.snmpEnabled ||
+    settings.snmpPollSeconds !== savedSettings.value.snmpPollSeconds
   )
 })
 
-const isSecurityDirty = computed(() => {
+const isUsersDirty = computed(() => {
+  if (!savedSettings.value) return false
+  return String(settings.lockoutThreshold) !== String(savedSettings.value.lockoutThreshold)
+})
+
+const isDiscoveryDirty = computed(() => {
   if (!savedSettings.value) return false
   return (
     settings.l2AutoBypass !== savedSettings.value.l2AutoBypass ||
-    String(settings.lockoutThreshold) !== String(savedSettings.value.lockoutThreshold)
+    settings.discoveryParallel !== savedSettings.value.discoveryParallel ||
+    settings.rediscoveryHours !== savedSettings.value.rediscoveryHours
   )
 })
 
-const isAnyDirty = computed(() => {
-  return isAlertsDirty.value || isFlowDirty.value || isSecurityDirty.value
-})
+// Branding lives in its own component and API (organization settings); it reports here.
+const organizationRef = ref(null)
+const brandingDirty = ref(false)
+
+const tabDirty = computed(() => ({
+  users: isUsersDirty.value,
+  discovery: isDiscoveryDirty.value,
+  data: isFlowDirty.value,
+  alerts: isAlertsDirty.value,
+  organization: brandingDirty.value,
+}))
+
+const isSettingsDirty = computed(
+  () => isAlertsDirty.value || isFlowDirty.value || isUsersDirty.value || isDiscoveryDirty.value
+)
+const isAnyDirty = computed(() => isSettingsDirty.value || brandingDirty.value)
 
 function discardChanges() {
+  if (brandingDirty.value) organizationRef.value?.discard()
   if (!savedSettings.value) return
   Object.assign(settings, JSON.parse(JSON.stringify(savedSettings.value)))
   toast.add({
@@ -272,6 +279,13 @@ async function loadSettings() {
       settings.flowNetflowPort = Number(d.flow_netflow_port ?? d.flowNetflowPort ?? 2055)
       settings.flowIpfixPort = Number(d.flow_ipfix_port ?? d.flowIpfixPort ?? 4739)
       settings.flowSamplingMultiplier = Number(d.flow_sampling_multiplier ?? d.flowSamplingMultiplier ?? 1)
+      settings.discoveryParallel = Number(d.discovery_parallel ?? d.discoveryParallel ?? 2)
+      settings.rediscoveryHours = Number(d.rediscovery_hours ?? d.rediscoveryHours ?? 24)
+      settings.trafficAlertsEnabled = Boolean(d.traffic_alerts_enabled ?? d.trafficAlertsEnabled ?? false)
+      settings.trafficAlertThresholdPct = Number(d.traffic_alert_threshold_pct ?? d.trafficAlertThresholdPct ?? 80)
+      settings.trafficAlertMinutes = Number(d.traffic_alert_minutes ?? d.trafficAlertMinutes ?? 15)
+      settings.snmpEnabled = Boolean(d.snmp_enabled ?? d.snmpEnabled ?? false)
+      settings.snmpPollSeconds = Number(d.snmp_poll_seconds ?? d.snmpPollSeconds ?? 60)
 
       savedSettings.value = JSON.parse(JSON.stringify(settings))
     }
@@ -293,10 +307,21 @@ async function saveAllSettings() {
       flow_netflow_port: parseInt(settings.flowNetflowPort, 10),
       flow_ipfix_port: parseInt(settings.flowIpfixPort, 10),
       flow_sampling_multiplier: parseInt(settings.flowSamplingMultiplier, 10),
+      discovery_parallel: settings.discoveryParallel,
+      rediscovery_hours: settings.rediscoveryHours,
+      traffic_alerts_enabled: settings.trafficAlertsEnabled,
+      traffic_alert_threshold_pct: settings.trafficAlertThresholdPct,
+      traffic_alert_minutes: settings.trafficAlertMinutes,
+      snmp_enabled: settings.snmpEnabled,
+      snmp_poll_seconds: settings.snmpPollSeconds,
     }
 
-    await updateSettings(payload)
-    savedSettings.value = JSON.parse(JSON.stringify(settings))
+    // Both parts save from the one bar; each only when it has changes.
+    if (isSettingsDirty.value) {
+      await updateSettings(payload)
+      savedSettings.value = JSON.parse(JSON.stringify(settings))
+    }
+    if (brandingDirty.value) await organizationRef.value?.save()
     alertMessage.value = 'Platform configuration successfully saved and synchronized.'
     alertType.value = 'alert-success'
     toast.add({

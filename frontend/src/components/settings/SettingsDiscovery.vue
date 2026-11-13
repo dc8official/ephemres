@@ -1,12 +1,15 @@
 <template>
-  <div class="settings-security-pane">
+  <!-- Settings → Discovery & topology (v3.3.6 layout): how routes to endpoints are discovered.
+       Parallel discovery joins this tab in phase 4. The lockout threshold that shared the old
+       "Security & Discovery" tab moved to Users & access. -->
+  <div class="settings-discovery-pane">
     <div class="settings-grid">
       <!-- Network Discovery & Diagnostics -->
       <div class="settings-card">
         <div class="card-header">
-          <h2 class="card-title">🌐 Network Discovery & Diagnostics</h2>
+          <h2 class="card-title">🌐 Route discovery</h2>
         </div>
-        <p class="card-desc">Control automated traceroute behavior and subnet traversal optimization.</p>
+        <p class="card-desc">How routes to endpoints are traced: how many at once, how often, and when to skip it.</p>
 
         <div class="setting-row">
           <div>
@@ -19,34 +22,51 @@
           </label>
         </div>
 
-        <!-- "Max Concurrent Traces" was a fixed line of text here, not a control (it mirrored the
-             hard-coded Semaphore(3) in services/diagnostics.py). It returns as a real setting
-             with parallel discovery (v3.3.6 build plan, phase 4). -->
-      </div>
-
-      <!-- Security & Access Policies -->
-      <div class="settings-card">
-        <div class="card-header">
-          <h2 class="card-title">🔒 Security & Access Policies</h2>
+        <!-- v3.3.6 phase 4: real controls in place of the old fixed "Max Concurrent Traces"
+             text. Both wait for the page's shared Save bar. -->
+        <div class="setting-row">
+          <div>
+            <label class="setting-label" for="discovery-parallel">Parallel route traces</label>
+            <p class="setting-hint">
+              Traceroutes run at once. Traces through the same router still take turns, because
+              routers answer only about once a second and a crowd of traces comes back full of
+              gaps. Incident and root-cause traces always get 2 more slots.
+            </p>
+          </div>
+          <select
+            id="discovery-parallel"
+            v-model.number="settings.discoveryParallel"
+            class="form-select font-mono tnum"
+            @change="emitChange"
+          >
+            <option v-for="n in [1, 2, 3, 4, 6, 8]" :key="n" :value="n">
+              {{ n }}{{ n === 2 ? ' (default)' : '' }}
+            </option>
+          </select>
         </div>
-        <!-- Session timeouts and limits are per account since v3.3.6, in the User Governance tab. -->
-        <p class="card-desc">
-          Brute-force throttling for sign-in. Session timeouts and session limits are set per
-          account in User Governance.
-        </p>
 
         <div class="setting-row">
           <div>
-            <label class="setting-label">Brute-Force Lockout Threshold</label>
-            <p class="setting-hint">Consecutive failed login attempts before IP and account cooldown is applied.</p>
+            <label class="setting-label" for="rediscovery-hours">Re-trace every</label>
+            <p class="setting-hint">
+              Each endpoint's route is traced again on this schedule, spread out over the period.
+              Route changes noticed in between (a transit device down, replies arriving with a
+              different hop count, flow data) are traced straight away.
+            </p>
           </div>
-          <select v-model="settings.lockoutThreshold" class="form-select font-mono tnum" @change="emitChange">
-            <option value="3">3 Failed Attempts</option>
-            <option value="5">5 Failed Attempts (Default)</option>
-            <option value="10">10 Failed Attempts</option>
+          <select
+            id="rediscovery-hours"
+            v-model.number="settings.rediscoveryHours"
+            class="form-select font-mono tnum"
+            @change="emitChange"
+          >
+            <option :value="6">6 hours</option>
+            <option :value="12">12 hours</option>
+            <option :value="24">24 hours (default)</option>
           </select>
         </div>
       </div>
+
     </div>
   </div>
 </template>
@@ -67,7 +87,7 @@ function emitChange() {
 </script>
 
 <style scoped>
-.settings-security-pane {
+.settings-discovery-pane {
   display: flex;
   flex-direction: column;
 }

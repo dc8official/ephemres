@@ -5,6 +5,9 @@
 <div class="scope-banner">
   <div>
     <div class="scope-title font-display">Scope: {{ scope_title }}</div>
+    {% if scope_filter %}
+    <div class="scope-filter">Filter: {{ scope_filter }}. Sites, locations and tags as assigned on {{ generated_at }}.</div>
+    {% endif %}
     <div class="scope-desc">
       Endpoint availability alongside core transit utilization, interface line-speed capacity, and algorithmic root-cause analysis (RCA).
     </div>

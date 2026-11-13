@@ -318,61 +318,10 @@ def test_flow_aggregator_sentinel_and_bounds_rejection():
 # ==============================================================================
 
 
-def test_get_interface_telemetry(client):
-    test_client, mock_session = client
-    exporter_id = uuid4()
-
-    # Mock endpoint query
-    mock_ep = MagicMock()
-    mock_ep.id = exporter_id
-    mock_ep.hostname = "Core-Router"
-    mock_ep.device_role = "FLOW_EXPORTER"
-    mock_ep.flow_interface_aliases = {
-        "1": {"name": "Gi0/1", "speed_mbps": 1000},
-        "2": {"name": "Ten0/1", "speed_mbps": 10000},
-    }
-
-    mock_ep_res = MagicMock()
-    mock_ep_res.scalar_one_or_none.return_value = mock_ep
-
-    # Coverage query: first bucket with data in the window (here: the whole hour).
-    import datetime as _dt
-    mock_cov_res = MagicMock()
-    mock_cov_res.scalar.return_value = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=2)
-
-    # Interface rollups query: (if_idx, in, out, in_pkts, out_pkts, flows, peak_in, peak_out,
-    # sorted per-minute in_bytes, sorted per-minute out_bytes)
-    mock_rollup_rows = [
-        (1, 75000000, 37500000, 50000, 25000, 1000, 5000000, 2500000, [1250000] * 60, [625000] * 60),
-        (2, 500000000, 250000000, 300000, 150000, 5000, 9000000, 4500000, [8333333] * 60, [4166666] * 60),
-    ]
-    mock_rollups_res = MagicMock()
-    mock_rollups_res.all.return_value = mock_rollup_rows
-
-    mock_session.execute.side_effect = [mock_ep_res, mock_cov_res, mock_rollups_res]
-
-    resp = test_client.get(f"/api/v1/bandwidth/interfaces?exporter_id={exporter_id}&window=1h")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert data["data"]["exporter_id"] == str(exporter_id)
-    assert len(data["data"]["interfaces"]) == 2
-
-    if1 = next(i for i in data["data"]["interfaces"] if i["interface_idx"] == 1)
-    assert if1["name"] == "Gi0/1"
-    assert if1["speed_mbps"] == 1000
-    assert if1["in_bps"] > 0
-    assert if1["out_bps"] > 0
-    assert 0 <= if1["utilization_percentage"] <= 100
-    # 75 MB over the covered hour -> 166,667 bps; busiest minute 5 MB -> 666,667 bps
-    assert if1["in_bps"] == pytest.approx(75_000_000 * 8 / 3600, rel=0.01)
-    assert if1["in_peak_bps"] == pytest.approx(5_000_000 * 8 / 60, rel=0.001)
-    assert if1["in_p95_bps"] == pytest.approx(1_250_000 * 8 / 60, rel=0.001)
-    assert data["data"]["covered_seconds"] == pytest.approx(3600, abs=2)
-
-    if2 = next(i for i in data["data"]["interfaces"] if i["interface_idx"] == 2)
-    assert if2["name"] == "Ten0/1"
-    assert if2["speed_mbps"] == 10000
+# The interfaces route's figures (average over the covered period, P95 with idle minutes, busiest
+# minute, SNMP or flow source) are tested against a real database in
+# tests/integration/test_interface_table.py since build plan 7.5 step 6 moved them into
+# services/interface_table; a mock here would only replay that service's queries in order.
 
 
 def test_enroll_flow_exporter(client):
@@ -459,9 +408,9 @@ def test_bandwidth_top_talkers_with_exporter_id(client):
     assert len(data["data"]["top_endpoints"]) == 1
     assert len(data["data"]["top_conversations"]) == 1
     assert data["data"]["top_conversations"][0]["src_ip"] == "10.0.0.5"
-    # The exporter filter reaches both the talker and the conversation SQL
+    # The device scope (its old name exporter_id) reaches both the talker and the conversation SQL
     sqls = [str(c.args[0]) for c in mock_session.execute.call_args_list]
-    assert sum("exporter_id = CAST(:exporter_id AS uuid)" in q for q in sqls) >= 2
+    assert sum("exporter_id = ANY(CAST(:exporter_ids AS uuid[]))" in q for q in sqls) >= 2
 
 
 # ==============================================================================

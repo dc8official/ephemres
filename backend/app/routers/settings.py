@@ -11,7 +11,7 @@ import base64
 import binascii
 import logging
 import socket
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from app.core.asgi import APIRouter, Depends, HTTPException
 from app.core.background import spawn
@@ -148,6 +148,17 @@ class SettingsUpdate(BaseModel):
     flowIpfixPort: Optional[int] = Field(default=None, ge=1, le=65535)
     flow_sampling_multiplier: Optional[int] = Field(default=None, ge=1)
     flowSamplingMultiplier: Optional[int] = Field(default=None, ge=1)
+    # Route discovery (v3.3.6): traceroutes at once (1-8), and hours between scheduled re-traces
+    # of each endpoint (6, 12 or 24 in the UI; the API takes 1-168).
+    discovery_parallel: Optional[int] = Field(default=None, ge=1, le=8)
+    rediscovery_hours: Optional[int] = Field(default=None, ge=1, le=168)
+    # Traffic alerts on WAN links (v3.3.6 build plan 7.4).
+    traffic_alerts_enabled: Optional[bool] = None
+    traffic_alert_threshold_pct: Optional[int] = Field(default=None, ge=50, le=99)
+    traffic_alert_minutes: Optional[int] = Field(default=None, ge=5, le=60)
+    # SNMP poller (v3.3.6 build plan 8.3): on/off and the poll interval in seconds.
+    snmp_enabled: Optional[bool] = None
+    snmp_poll_seconds: Optional[Literal[30, 60, 120, 300]] = None
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -171,6 +182,13 @@ class SettingsPayload(BaseModel):
     flowIpfixPort: int
     flow_sampling_multiplier: int
     flowSamplingMultiplier: int
+    discovery_parallel: int = 2
+    rediscovery_hours: int = 24
+    traffic_alerts_enabled: bool = False
+    traffic_alert_threshold_pct: int = 80
+    traffic_alert_minutes: int = 15
+    snmp_enabled: bool = False
+    snmp_poll_seconds: int = 60
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -254,6 +272,13 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
         "flowIpfixPort": flow_ipfix_port,
         "flow_sampling_multiplier": flow_sampling,
         "flowSamplingMultiplier": flow_sampling,
+        "discovery_parallel": rt.discovery_parallel,
+        "rediscovery_hours": rt.rediscovery_hours,
+        "traffic_alerts_enabled": rt.traffic_alerts_enabled,
+        "traffic_alert_threshold_pct": rt.traffic_alert_threshold_pct,
+        "traffic_alert_minutes": rt.traffic_alert_minutes,
+        "snmp_enabled": rt.snmp_enabled,
+        "snmp_poll_seconds": rt.snmp_poll_seconds,
     }
 
 
@@ -354,6 +379,21 @@ async def update_settings(
 
     if lockout_val is not None:
         await _upsert_setting(db, "lockout_threshold", str(lockout_val))
+
+    if payload.discovery_parallel is not None:
+        await _upsert_setting(db, "discovery_parallel", str(payload.discovery_parallel))
+    if payload.rediscovery_hours is not None:
+        await _upsert_setting(db, "rediscovery_hours", str(payload.rediscovery_hours))
+    if payload.traffic_alerts_enabled is not None:
+        await _upsert_setting(db, "traffic_alerts_enabled", "true" if payload.traffic_alerts_enabled else "false")
+    if payload.traffic_alert_threshold_pct is not None:
+        await _upsert_setting(db, "traffic_alert_threshold_pct", str(payload.traffic_alert_threshold_pct))
+    if payload.traffic_alert_minutes is not None:
+        await _upsert_setting(db, "traffic_alert_minutes", str(payload.traffic_alert_minutes))
+    if payload.snmp_enabled is not None:
+        await _upsert_setting(db, "snmp_enabled", "true" if payload.snmp_enabled else "false")
+    if payload.snmp_poll_seconds is not None:
+        await _upsert_setting(db, "snmp_poll_seconds", str(payload.snmp_poll_seconds))
 
     if alerting_val is not None:
         await _upsert_setting(db, "alerting_enabled", "true" if alerting_val else "false")

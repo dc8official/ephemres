@@ -166,17 +166,58 @@ def dscp_breakdown(rows: Iterable[Sequence[Any]]) -> List[Dict[str, Any]]:
     return classes
 
 
+# Addresses counted as inside the network when no monitored endpoint claims them: RFC 1918,
+# loopback, link-local and IPv6 unique-local. A fixed list rather than ipaddress.is_private,
+# whose ranges change between Python versions and include the documentation ranges, and so the
+# SQL rule (internal_sql) reads the same list as the Python one.
+INTERNAL_NETWORKS: Tuple[str, ...] = (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "fc00::/7",
+    "fe80::/10",
+    "::1/128",
+)
+_INTERNAL_NETS = tuple(ipaddress.ip_network(n) for n in INTERNAL_NETWORKS)
+
+
 def is_internal_address(ip_value: Any, endpoint_id: Optional[Any]) -> bool:
-    """True for a monitored endpoint or a private (RFC 1918 etc.) address."""
+    """True for a monitored endpoint or an address in INTERNAL_NETWORKS. The one meaning of
+    "internal" on the Traffic page and in the PDF (zones, inbound/outbound, transit)."""
     if endpoint_id is not None:
         return True
     try:
         clean_ip = str(ip_value or "").split("/")[0].strip()
         if not clean_ip:
             return False
-        return ipaddress.ip_address(clean_ip).is_private
-    except Exception:
+        addr = ipaddress.ip_address(clean_ip)
+    except ValueError:
         return False
+    return any(addr.version == net.version and addr in net for net in _INTERNAL_NETS)
+
+
+def internal_sql(ip_expr: str, endpoint_expr: str) -> str:
+    """SQL boolean for `is_internal_address` over an inet column and an endpoint id column.
+    `<<=` between an IPv4 and an IPv6 value is false, so one list serves both families."""
+    nets = ", ".join(f"'{n}'" for n in INTERNAL_NETWORKS)
+    return (
+        f"({endpoint_expr} IS NOT NULL OR "
+        f"COALESCE({ip_expr} <<= ANY(CAST(ARRAY[{nets}] AS inet[])), FALSE))"
+    )
+
+
+def zone_sql(src_ip: str, src_endpoint: str, dst_ip: str, dst_endpoint: str) -> str:
+    """SQL CASE yielding the traffic zone name; the same rule as `classify_zone`. Zones are
+    summed in the database instead of pulling every address pair into Python."""
+    src_in, dst_in = internal_sql(src_ip, src_endpoint), internal_sql(dst_ip, dst_endpoint)
+    return (
+        f"CASE WHEN {src_in} AND {dst_in} THEN '{ZONE_EAST_WEST}' "
+        f"WHEN {src_in} THEN '{ZONE_NORTH_SOUTH_EGRESS}' "
+        f"WHEN {dst_in} THEN '{ZONE_NORTH_SOUTH_INGRESS}' "
+        f"ELSE '{ZONE_EXTERNAL_TRANSIT}' END"
+    )
 
 
 def classify_zone(src_internal: bool, dst_internal: bool) -> str:
@@ -190,8 +231,124 @@ def classify_zone(src_internal: bool, dst_internal: bool) -> str:
     return ZONE_EXTERNAL_TRANSIT
 
 
-# Conversations whose average packet is at least this large count as bulk transfers.
+# Bulk: a conversation moving a lot of data in full-size packets while it runs (a backup, a
+# replication job). Packet size alone made every Microsoft 365 or Windows Update download
+# "bulk", so the filter no longer singled out the jobs that fill a link (review C2). The rate is
+# taken over the time the conversation was seen, not over the window: a nightly backup is two
+# busy hours a night, whether the window is a day or a week. All must hold:
 BULK_MIN_AVG_PACKET_BYTES = 1100
+# - it was seen for at least this long (the buckets it appears in, added up);
+BULK_MIN_SEEN_SECONDS = 1800
+# - it averaged at least this rate over that time. An office's web and Microsoft 365 traffic
+#   seldom holds 5 Mb/s on one conversation; a backup or replication job does.
+BULK_MIN_AVG_BPS = 5_000_000
+
+
+def is_bulk(avg_packet_size: float, seen_seconds: float, total_bytes: float) -> bool:
+    """The Bulk rule; `bulk_sql` is the same rule in SQL (conversation table and quick filter)."""
+    return (
+        avg_packet_size >= BULK_MIN_AVG_PACKET_BYTES
+        and seen_seconds >= BULK_MIN_SEEN_SECONDS
+        and total_bytes * 8 >= BULK_MIN_AVG_BPS * seen_seconds
+    )
+
+
+def bulk_sql(avg_packet_expr: str, seen_seconds_expr: str, bytes_expr: str) -> str:
+    """SQL boolean for `is_bulk` over a conversation's aggregated columns. Floats, so the
+    products cannot overflow an integer column."""
+    return (
+        f"({avg_packet_expr} >= {BULK_MIN_AVG_PACKET_BYTES} "
+        f"AND {seen_seconds_expr} >= {BULK_MIN_SEEN_SECONDS} "
+        f"AND {bytes_expr} * 8.0 >= {float(BULK_MIN_AVG_BPS)} * {seen_seconds_expr})"
+    )
+
+
+# Service names by (protocol, service port), then by port alone. The one table for the
+# Applications panel, the conversation table and the PDF. flowd stores the service port
+# (monitoring/flow/aggregator.py), so a reply carries its service's port too.
+_TCP, _UDP = 6, 17
+SERVICE_NAMES_BY_PROTOCOL: Dict[Tuple[int, int], str] = {
+    # UDP 443 is QUIC, not HTTPS over TCP: two "HTTPS" rows used to appear in Applications.
+    (_UDP, 443): "QUIC (HTTP/3)",
+    (_UDP, 500): "IPsec IKE",
+    (_UDP, 4500): "IPsec NAT-T",
+    (_UDP, 514): "Syslog",
+    (_TCP, 514): "rsh",
+    (_UDP, 1194): "OpenVPN",
+    (_UDP, 3478): "STUN/TURN",
+    (_UDP, 3389): "RDP (UDP)",
+}
+SERVICE_NAMES: Dict[int, str] = {
+    20: "FTP data",
+    21: "FTP",
+    22: "SSH",
+    23: "Telnet",
+    25: "SMTP",
+    53: "DNS",
+    67: "DHCP",
+    68: "DHCP",
+    69: "TFTP",
+    80: "HTTP",
+    88: "Kerberos",
+    110: "POP3",
+    123: "NTP",
+    135: "MS RPC",
+    137: "NetBIOS",
+    138: "NetBIOS",
+    139: "NetBIOS",
+    143: "IMAP",
+    161: "SNMP",
+    162: "SNMP trap",
+    179: "BGP",
+    389: "LDAP",
+    443: "HTTPS",
+    445: "SMB",
+    465: "SMTPS",
+    587: "SMTP submission",
+    636: "LDAPS",
+    873: "rsync",
+    993: "IMAPS",
+    995: "POP3S",
+    1433: "MS SQL",
+    1521: "Oracle",
+    1723: "PPTP",
+    1812: "RADIUS",
+    1813: "RADIUS accounting",
+    2049: "NFS",
+    2055: "NetFlow",
+    3268: "LDAP GC",
+    3306: "MySQL",
+    3389: "RDP",
+    4739: "IPFIX",
+    5060: "SIP",
+    5061: "SIP TLS",
+    5222: "XMPP",
+    5432: "PostgreSQL",
+    5900: "VNC",
+    5985: "WinRM",
+    5986: "WinRM",
+    6343: "sFlow",
+    6379: "Redis",
+    8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+    8801: "Zoom",
+    9200: "Elasticsearch",
+}
+
+
+def service_name(protocol: int, port: int) -> Optional[str]:
+    """The service's name, or None for a port with no name."""
+    key = (int(protocol or 0), int(port or 0))
+    return SERVICE_NAMES_BY_PROTOCOL.get(key) or SERVICE_NAMES.get(key[1])
+
+
+def service_label(protocol: int, port: int) -> str:
+    """"HTTPS", "QUIC (HTTP/3)", or "TCP/1434" when the port has no name."""
+    name = service_name(protocol, port)
+    if name:
+        return name
+    proto = PROTOCOL_MAP.get(int(protocol or 0), f"PROTO-{protocol}")
+    return f"{proto}/{port}"
 
 
 def tcp_anomaly_sql(flags_expr: str, protocol_expr: str) -> str:

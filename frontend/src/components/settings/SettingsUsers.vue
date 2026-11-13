@@ -3,7 +3,7 @@
     <div class="settings-card full-width">
       <div class="card-header">
         <div>
-          <h2 class="card-title">👥 User Account Governance</h2>
+          <h2 class="card-title">👥 User accounts</h2>
           <p class="card-desc">Manage user credentials, system access roles (ADMIN / VIEWER), and status.</p>
         </div>
         <button class="btn-primary btn-small" @click="openAddUserModal">
@@ -91,6 +91,36 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Sign-in protection (moved here from the old "Security & Discovery" tab in the v3.3.6
+         layout). A plain setting: it waits for the page's shared Save bar, unlike the account
+         actions above, which save when their dialog is confirmed. -->
+    <div v-if="settings" class="settings-card full-width signin-card">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">🔒 Sign-in protection</h2>
+          <p class="card-desc">
+            Failed sign-ins from one address for one username lock that pair out for 15 minutes.
+          </p>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div>
+          <label class="setting-label" for="lockout-threshold">Lockout threshold</label>
+          <p class="setting-hint">Failed attempts in a row before the lockout starts.</p>
+        </div>
+        <select
+          id="lockout-threshold"
+          v-model="settings.lockoutThreshold"
+          class="inline-select font-mono tnum"
+          @change="emit('change')"
+        >
+          <option value="3">3 attempts</option>
+          <option value="5">5 attempts (default)</option>
+          <option value="10">10 attempts</option>
+        </select>
       </div>
     </div>
 
@@ -399,9 +429,14 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  // The page's shared settings object (SettingsView), for the lockout threshold.
+  settings: {
+    type: Object,
+    default: null,
+  },
 })
 
-const emit = defineEmits(['user-changed'])
+const emit = defineEmits(['user-changed', 'change'])
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -1056,6 +1091,46 @@ onMounted(() => {
 .settings-users-pane {
   display: flex;
   flex-direction: column;
+  gap: 20px;
+}
+
+.signin-card .card-desc {
+  margin-bottom: 4px;
+}
+
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0 0;
+}
+
+.setting-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+}
+
+.setting-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.inline-select {
+  background: var(--bg-surface-selected);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.inline-select:focus {
+  border-color: #0ea5e9;
+  outline: none;
 }
 
 .settings-card {

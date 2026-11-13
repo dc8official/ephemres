@@ -69,6 +69,26 @@
       </div>
     </div>
 
+    <!-- Shared endpoint filter (v3.3.6). The map shows matching endpoints and the path to them;
+         Dim / Hide decides how endpoints on that path that don't match are shown. -->
+    <FilterBar :state="filterState" class="map-filter-bar">
+      <div v-if="filterState.isActive.value" class="filter-field">
+        <span>Path devices outside the filter</span>
+        <SegmentedControl
+          v-model="pathMode"
+          aria-label="Devices on the path that don't match the filter"
+          size="sm"
+          :options="[
+            { value: 'dim', label: 'Dim', title: 'Show them faded' },
+            { value: 'hide', label: 'Hide', title: 'Leave out endpoints that do not match; keep the routers between' },
+          ]"
+        />
+      </div>
+      <span v-if="filterState.isActive.value && filterState.matchTotal.value !== null" class="map-match-count text-muted tnum">
+        {{ filterState.matchTotal.value }} matching endpoint{{ filterState.matchTotal.value === 1 ? '' : 's' }}
+      </span>
+    </FilterBar>
+
     <!-- Canvas Container -->
     <div class="canvas-wrapper">
       <div ref="container" class="vis-network-canvas"></div>
@@ -139,6 +159,11 @@
             <span class="node-icon box state-subnet"></span>
             <span>Subnet Hub (L2)</span>
             <span class="count-badge glow-subnet">{{ legendCounts.subnet }}</span>
+          </div>
+          <div class="legend-item" v-if="legendCounts.neighbourLinks > 0" title="Devices traceroute cannot place, placed by the LLDP/CDP neighbours their switches report (SNMP)">
+            <span class="edge-swatch neighbour"></span>
+            <span>Link found by LLDP/CDP</span>
+            <span class="count-badge">{{ legendCounts.neighbourLinks }}</span>
           </div>
           <div class="legend-item" v-if="legendCounts.flowConfirmed > 0" title="An exporter's flows send traffic along this traceroute link">
             <span class="edge-swatch confirmed"></span>
@@ -243,10 +268,37 @@ import { getTopology, rebuildTopology, discoverAllTopologyRoutes, refreshEndpoin
 import { isAdmin } from '../services/auth.js'
 import EndpointRcaDetail from './EndpointRcaDetail.vue'
 import SegmentedControl from './ui/SegmentedControl.vue'
+import FilterBar from './ui/FilterBar.vue'
+import { useEndpointFilter } from '../composables/useEndpointFilter.js'
+import { applyTopologyFilter } from '../utils/topologyFilter.js'
 import { useSSE } from '../composables/useSSE.js'
 
 const container = ref(null)
 const loading = ref(true)
+
+// Shared endpoint filter, and how path devices outside it are shown (remembered per browser).
+const filterState = useEndpointFilter()
+const PATH_MODE_KEY = 'topologyPathMode'
+function initialPathMode() {
+  try {
+    return localStorage.getItem(PATH_MODE_KEY) === 'hide' ? 'hide' : 'dim'
+  } catch {
+    return 'dim'
+  }
+}
+const pathMode = ref(initialPathMode())
+watch(pathMode, (mode) => {
+  try {
+    localStorage.setItem(PATH_MODE_KEY, mode)
+  } catch {
+    // storage unavailable: keep the choice for this page only
+  }
+})
+// A new match set or mode redraws the map and frames what is left.
+watch([() => filterState.matchIds.value, pathMode], async () => {
+  await fetchTopology()
+  if (network) network.fit({ animation: true })
+})
 const error = ref(null)
 const networkInitialized = ref(false)
 const stabilized = ref(false)
@@ -339,6 +391,7 @@ const legendCounts = reactive({
   l2: 0,
   subnet: 0,
   flowConfirmed: 0,
+  neighbourLinks: 0,
   flowDiffers: 0,
   flowInferred: 0,
 })
@@ -424,10 +477,13 @@ function updateLegendCounts() {
   legendCounts.subnet = subnet
 
   const flowCounts = { confirmed: 0, differs: 0, inferred: 0 }
+  let neighbourLinks = 0
   for (const e of edgesDataSet ? edgesDataSet.get() : []) {
     const status = e.rawEdge?.flow_status
     if (status in flowCounts) flowCounts[status]++
+    if (e.rawEdge?.via) neighbourLinks++
   }
+  legendCounts.neighbourLinks = neighbourLinks
   legendCounts.flowConfirmed = flowCounts.confirmed
   legendCounts.flowDiffers = flowCounts.differs
   legendCounts.flowInferred = flowCounts.inferred
@@ -439,6 +495,14 @@ function updateLegendCounts() {
 function edgeFlowStyle(edge) {
   const stroke = getCssVar('--topo-edge-stroke', isDark.value ? '#475569' : '#94A3B8')
   const highlight = getCssVar('--topo-edge-highlight', isDark.value ? '#60A5FA' : '#2563EB')
+  // Part of an endpoint's normal path that traffic is not using now (v3.3.6 failover view).
+  if (edge.normal_only) {
+    return { color: { color: stroke, highlight, opacity: 0.45 }, width: 1.5, dashes: [6, 6], title: 'Normal path, not in use now' }
+  }
+  // Placed by LLDP/CDP neighbours (v3.3.6 SNMP poller): a cabled link traceroute cannot see.
+  if (edge.via) {
+    return { color: { color: getCssVar('--accent-teal', '#0d9488'), highlight }, width: 2, dashes: [2, 3], title: `Link found by ${edge.via} (the device reports this neighbour)` }
+  }
   const status = edge.flow_status
   if (status === 'confirmed') {
     return { color: { color: getCssVar('--status-text-up', '#15803d'), highlight }, width: 3, dashes: false, title: `Confirmed by traffic. ${edge.flow_detail || ''}`.trim() }
@@ -667,6 +731,12 @@ function formatVisData(nodesData, edgesData) {
       if (isL2) {
         labelText += '\n[L2 Segment]'
       }
+      // Off its normal path (v3.3.6): the map shows when it moved and what it normally uses.
+      if (node.alternate_since) {
+        const t = new Date(node.alternate_since)
+        const since = Number.isNaN(t.getTime()) ? '' : ` since ${t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        labelText += `\n⤳ alternate path${since}`
+      }
       if (nodeStatus === 'FAILURE_POINT') {
         labelText += '\n⚠️ FAILURE POINT'
       }
@@ -681,6 +751,10 @@ function formatVisData(nodesData, edgesData) {
       color: colors,
       group: node.subnet || 'default',
       font: { color: getNodeFontColor(nodeStatus, nodeType), size: 12, face: 'Inter, sans-serif' },
+      // On the path to a filtered endpoint but not in the filter (dim mode), or a router only
+      // the unused normal path goes through: faded.
+      opacity: node.filterRole === 'path' || node.normal_only ? 0.35 : 1,
+      ...(node.normal_only ? { title: 'On the normal path, not in use now' } : {}),
       rawNode: { ...node, status: nodeStatus, state: nodeStatus }
     }
   })
@@ -690,6 +764,8 @@ function formatVisData(nodesData, edgesData) {
     from: edge.source,
     to: edge.target,
     ...edgeFlowStyle(edge),
+    // Joined over endpoints the filter hides (hide mode): dashed, so it doesn't read as a link.
+    ...(edge.bridged ? { dashes: [4, 6], title: 'Path continues through devices hidden by the filter' } : {}),
     rawEdge: edge,
     arrows: { to: { enabled: true, scaleFactor: 0.7 } },
     smooth: {
@@ -754,8 +830,14 @@ async function fetchTopology() {
   try {
     const res = await getTopology()
     const rawData = res.data?.data || res.data || {}
-    const rawNodes = rawData.nodes || []
-    const rawEdges = rawData.edges || []
+    const filtered = applyTopologyFilter(
+      rawData.nodes || [],
+      rawData.edges || [],
+      filterState.matchIds.value,
+      pathMode.value
+    )
+    const rawNodes = filtered.nodes
+    const rawEdges = filtered.edges
 
     const { visNodes, visEdges } = formatVisData(rawNodes, rawEdges)
 
@@ -901,7 +983,11 @@ function initSSE() {
     }
 
     if (needsFetch) {
-      isDiscoveringAll.value = false
+      // Routes now update one endpoint at a time (v3.3.6); the "discovering" pill ends when the
+      // whole queue has been worked through.
+      if (batch.some((p) => p?.type === 'TOPOLOGY_UPDATED' && p?.reason === 'FLEET_DISCOVERY_COMPLETED')) {
+        isDiscoveringAll.value = false
+      }
       fetchTopology()
       return
     }
@@ -1101,8 +1187,31 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
+/* Inside the map card, under the toolbar, on the same side margins. */
+.map-filter-bar {
+  margin: 0;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* The Dim / Hide control sits in the filter bar's slot, styled like the bar's own fields. */
+.map-filter-bar .filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.map-match-count {
+  align-self: center;
+  font-size: var(--text-sm);
+}
+
 .canvas-wrapper {
   flex: 1;
+  /* Lets the canvas shrink when the filter bar wraps onto a second row. */
+  min-height: 0;
   position: relative;
   width: 100%;
   height: 100%;
@@ -1216,6 +1325,7 @@ onUnmounted(() => {
 }
 
 .edge-swatch.confirmed { border-top-color: var(--status-text-up); }
+.edge-swatch.neighbour { border-top: 2px dotted var(--accent-teal, #0d9488); }
 .edge-swatch.differs { border-top: 2px dashed var(--status-text-warn); }
 .edge-swatch.inferred { border-top: 2px dotted var(--status-text-info); }
 

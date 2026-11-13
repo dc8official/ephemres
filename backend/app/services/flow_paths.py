@@ -14,6 +14,7 @@ import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import UUID
 
+from app.services import snmp_inventory
 from app.core.orm import AsyncSession, text
 from app.services.flow_metrics import interface_alias
 
@@ -79,8 +80,10 @@ async def flow_evidence(
 
     paths: List[Dict[str, Any]] = []
     last_seen_any: Optional[datetime.datetime] = None
+    # Interface names: manual, else SNMP's (v3.3.6).
+    named = await snmp_inventory.merged_for(db, {r["exporter_id"]: _aliases(r["aliases"]) for r in rows})
     for r in rows:
-        aliases = _aliases(r["aliases"])
+        aliases = named.get(str(r["exporter_id"]), {})
         last_seen = r["last_seen"]
         if last_seen_any is None or last_seen > last_seen_any:
             last_seen_any = last_seen
@@ -261,8 +264,10 @@ async def endpoint_flow_paths(
     )
     active_since = now - datetime.timedelta(minutes=ACTIVE_PATH_MINUTES)
     paths = []
-    for r in res.mappings().all():
-        aliases = _aliases(r["aliases"])
+    found = res.mappings().all()
+    named = await snmp_inventory.merged_for(db, {r["exporter_id"]: _aliases(r["aliases"]) for r in found})
+    for r in found:
+        aliases = named.get(str(r["exporter_id"]), {})
         paths.append({
             "exporter_id": str(r["exporter_id"]),
             "exporter_hostname": r["exporter_hostname"],

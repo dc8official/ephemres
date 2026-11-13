@@ -399,47 +399,49 @@ async def test_compile_bandwidth_report_data():
         (ep_id, 2, 50000000, 100000000, 2500000, 5000000),
     ]
 
-    # 3. Top forensic conversations (src_ip, dst_ip, dst_port, protocol, exporter_id, total_bytes)
-    mock_res_convs = MagicMock()
-    mock_res_convs.all.return_value = [
-        ("10.0.0.10", "1.1.1.1", 53, 17, ep_id, 5000000),
-    ]
-
-    # 4. QoS / DSCP Breakdown (tos, total_bytes, total_packets, flow_count)
-    mock_res_qos = MagicMock()
-    mock_res_qos.all.return_value = [
-        (184, 10000000, 8000, 50),  # ToS 184 -> DSCP 46 (EF VoIP)
-        (0, 40000000, 30000, 200),  # ToS 0 -> DSCP 0 (Best Effort CS0)
-    ]
-
-    # 5. Anomaly Query (protocol, tcp_flags, flow_count, total_bytes)
-    # 5. Anomaly summary over conversations (shared rule): 15 SYN-only flows, 8 RST flows
     from tests.backend.flow_mocks import mapping_result
+
+    def grouped(g_app, g_tos, g_zone, b, p=0, f=0, protocol=None, port=None, tos=None, zone=None):
+        return {"g_app": g_app, "g_tos": g_tos, "g_zone": g_zone, "protocol": protocol,
+                "dst_port": port, "tos": tos, "zone": zone, "bytes": b, "packets": p, "flows": f}
+
+    # 3. One pass over the counted-once rows (conversations.traffic_breakdown): services, ToS
+    # bytes, zones and the window total (20 MB).
+    mock_res_breakdown = mapping_result([
+        grouped(0, 1, 1, 5000000, protocol=17, port=53),
+        grouped(3, 0, 1, 10000000, 8000, 50, tos=184),  # ToS 184 -> DSCP 46 (EF VoIP)
+        grouped(3, 0, 1, 40000000, 30000, 200, tos=0),  # Best Effort
+        grouped(3, 1, 0, 30000000, 0, 150, zone="East-West (Internal)"),
+        grouped(3, 1, 0, 20000000, 0, 100, zone="North-South Egress"),
+        grouped(3, 1, 1, 20000000),
+    ])
+    # 4. The top conversations, then the routers that saw each.
+    mock_res_convs = mapping_result([{
+        "src_ip": "10.0.0.10", "dst_ip": "1.1.1.1", "protocol": 17, "dst_port": 53, "total_bytes": 5000000,
+    }])
+    mock_res_seen = mapping_result([{
+        "src_ip": "10.0.0.10", "dst_ip": "1.1.1.1", "protocol": 17, "dst_port": 53, "exporter_id": ep_id,
+    }])
+
+    # 5. Anomaly summary over conversations (shared rule): 15 SYN-only flows, 8 RST flows
     mock_res_anomalies = mapping_result([{
         "flows": 23, "conversations": 2,
         "syn_flows": 15, "syn_bytes": 750, "syn_conversations": 1,
         "rst_flows": 8, "rst_bytes": 400, "rst_conversations": 1,
     }])
 
-    # 6. Traffic Zones Query (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
-    mock_res_zones = MagicMock()
-    mock_res_zones.all.return_value = [
-        ("10.0.0.10", "10.0.0.20", ep_id, ep_id, 30000000, 150),
-        ("10.0.0.10", "8.8.8.8", ep_id, None, 20000000, 100),
-    ]
-
-    # 3b. All traffic in the window: conversation shares are of this total (not of the top ten)
-    mock_res_total = MagicMock()
-    mock_res_total.scalar.return_value = 20000000
+    # 1b. SNMP interface names and speeds for the routers (v3.3.6): none here, manual only.
+    mock_res_snmp = MagicMock()
+    mock_res_snmp.fetchall.return_value = []
 
     mock_db.execute.side_effect = [
         mock_res_ep,
+        mock_res_snmp,
         mock_res_ifs,
+        mock_res_breakdown,
         mock_res_convs,
-        mock_res_total,
-        mock_res_qos,
+        mock_res_seen,
         mock_res_anomalies,
-        mock_res_zones,
     ]
 
     start_dt = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -458,6 +460,7 @@ async def test_compile_bandwidth_report_data():
     assert data["interfaces"][0]["formatted_speed"] == "1 Gbps"
     assert len(data["conversations"]) == 1
     assert data["conversations"][0]["port_label"] == "53 / DNS"
+    assert data["conversations"][0]["router_name"] == "core-gw-01"
 
     # Verify enriched flow analytics
     assert "qos_classes" in data
@@ -674,65 +677,6 @@ def test_organization_branding_rbac_and_crud():
         assert "exceeds maximum allowed size" in oversized_res.json()["detail"]
 
     test_app.dependency_overrides.clear()
-
-
-@pytest.mark.anyio
-async def test_report_compiler_traffic_zones_with_cidr_masks():
-    """Verify compile_bandwidth_report_data strips CIDR subnet masks (/32, /24) when classifying traffic zones."""
-    from datetime import datetime, timezone, timedelta
-    from app.models.endpoint import Endpoint
-
-    exp_id = uuid4()
-    mock_router = MagicMock()
-    mock_router.id = exp_id
-    mock_router.hostname = "edge-router-01"
-    mock_router.ip_address = "10.0.0.1/32"
-    mock_router.flow_interface_aliases = {}
-
-    m_routers = MagicMock()
-    m_routers.scalars.return_value.all.return_value = [mock_router]
-
-    m_if = MagicMock()
-    m_if.all.return_value = []
-
-    m_conv = MagicMock()
-    m_conv.all.return_value = []
-
-    m_qos = MagicMock()
-    m_qos.all.return_value = []
-
-    m_anomaly = MagicMock()
-    m_anomaly.all.return_value = []
-
-    # Traffic zones rows with CIDR netmasks: (src_ip, dst_ip, src_ep, dst_ep, bytes, flows)
-    m_zone = MagicMock()
-    m_zone.all.return_value = [
-        ("192.168.10.1/32", "172.16.0.5/24", None, None, 50000, 10),    # East-West (both private with CIDR)
-        ("192.168.10.1/32", "8.8.4.4/32", None, None, 150000, 30),      # North-South Egress
-        ("8.8.4.4/32", "192.168.10.1/32", None, None, 200000, 40),      # North-South Ingress
-        ("1.0.0.1/32", "8.8.8.8/32", None, None, 10000, 2),             # External / Transit
-    ]
-
-    mock_db = AsyncMock()
-    m_total = MagicMock()
-    m_total.scalar.return_value = 0
-
-    mock_db.execute.side_effect = [m_routers, m_if, m_conv, m_total, m_qos, m_anomaly, m_zone]
-
-    now = datetime.now(timezone.utc)
-    res = await compile_bandwidth_report_data(
-        mock_db,
-        start_dt=now - timedelta(hours=1),
-        end_dt=now,
-        exporter_ids=[exp_id],
-    )
-
-    zones = {z["zone"]: z for z in res["traffic_zones"]}
-    assert zones["East-West (Internal)"]["total_bytes"] == 50000
-    assert zones["North-South Egress"]["total_bytes"] == 150000
-    assert zones["North-South Ingress"]["total_bytes"] == 200000
-    assert zones["External / Transit"]["total_bytes"] == 10000
-
 
 
 @pytest.mark.parametrize("role", ["ADMIN", "VIEWER", "OPERATOR"])

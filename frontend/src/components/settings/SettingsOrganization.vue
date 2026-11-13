@@ -3,16 +3,10 @@
     <div class="settings-grid">
       <!-- Organization Profile & Report Branding Card -->
       <div class="settings-card full-width">
+        <!-- No Save button of its own since v3.3.6: branding changes wait for the page's shared
+             Save bar like every other setting (SettingsView calls save()/discard()). -->
         <div class="card-header">
           <h2 class="card-title font-display">🏢 Organization Profile & Report Branding</h2>
-          <button 
-            type="button" 
-            class="btn-primary" 
-            @click="saveBranding" 
-            :disabled="saving || !isDirty"
-          >
-            {{ saving ? 'Saving Branding...' : (isDirty ? '💾 Save Branding *' : '✓ Branding Saved') }}
-          </button>
         </div>
         <p class="card-desc">
           Configure corporate identity, departments, confidentiality disclaimers, and company logo embedded across generated PDF audit reports.
@@ -116,8 +110,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { getOrganizationSettings, updateOrganizationSettings } from '../../services/api.js'
+
+// Tells the page whether branding has unsaved changes, so its Save bar and tab dot include them.
+const emit = defineEmits(['dirty-change'])
 
 const form = ref({
   companyName: '',
@@ -135,6 +132,8 @@ const toastType = ref('success')
 function markDirty() {
   isDirty.value = true
 }
+
+watch(isDirty, (v) => emit('dirty-change', v))
 
 function triggerFileInput() {
   if (fileInputRef.value) {
@@ -169,7 +168,7 @@ function handleFileUpload(event) {
   reader.onload = (e) => {
     form.value.logoData = e.target.result
     markDirty()
-    toastMessage.value = 'Logo selected. Click "Save Branding" to persist changes.'
+    toastMessage.value = 'Logo selected. Save from the bar at the bottom of the page.'
     toastType.value = 'success'
   }
   reader.readAsDataURL(file)
@@ -193,7 +192,9 @@ async function loadBranding() {
   }
 }
 
+// Called by the page's Save bar. Throws on failure so the page can report it with the rest.
 async function saveBranding() {
+  if (!isDirty.value) return
   saving.value = true
   toastMessage.value = null
   try {
@@ -211,10 +212,13 @@ async function saveBranding() {
     console.error('Failed to save organization branding:', err)
     toastMessage.value = err.response?.data?.detail || 'Failed to save organization branding.'
     toastType.value = 'error'
+    throw err
   } finally {
     saving.value = false
   }
 }
+
+defineExpose({ save: saveBranding, discard: loadBranding })
 
 onMounted(() => {
   loadBranding()

@@ -15,6 +15,13 @@ For each STATE_TRANSITION, in order:
    endpoint and severity every 5 minutes.
 Suppressed and throttled alerts are still written to the delivery log, with the reason.
 Webhook URLs go through the SSRF-safe HTTP client (core/http_client).
+
+Traffic alerts (v3.3.6, services/traffic_alerts.py) come from a check the leader runs once a
+minute, not from the broker: WAN links above their threshold, back to normal, silent, traffic
+again. They take the same master switch, channel filters, rate limit and delivery log, with two
+differences: a channel gets them only when it ticked the traffic severities (an empty severity
+filter means "state changes" here, so nobody is paged by surprise after the upgrade), and the
+rate limit counts per link and direction rather than per exporter.
 """
 from __future__ import annotations
 
@@ -161,12 +168,17 @@ class AlertDispatcher:
             logger.info("[AlertDispatcher] Active leader election won. Broker listeners started.")
 
     def _start_leading(self) -> None:
-        """Runs the broker listeners, and watches the lock when it is a PostgreSQL session lock."""
+        """Runs the broker listeners and the traffic check, and watches the lock when it is a
+        PostgreSQL session lock."""
         task_names = {"STATE_TRANSITION": "alert_broker_state_trans", "RCA_INCIDENT": "alert_broker_rca"}
         self._listener_tasks = [
             asyncio.create_task(self._listen_broker(channel), name=task_names[channel])
             for channel in BROKER_CHANNELS
         ]
+        # Stopped with the listeners on _step_down, so only the leader checks traffic and acts
+        # on SNMP link events.
+        self._listener_tasks.append(asyncio.create_task(self._traffic_alert_loop(), name="alert_traffic_check"))
+        self._listener_tasks.append(asyncio.create_task(self._link_event_loop(), name="alert_link_events"))
         self._tasks.extend(self._listener_tasks)
         if self._lock_conn is not None:
             self._watch_task = asyncio.create_task(self._watch_lock_loop(), name="alert_dispatcher_lock_watch")
@@ -617,6 +629,187 @@ class AlertDispatcher:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    # --- traffic alerts (v3.3.6 build plan 7.4) -------------------------------------------
+
+    # Seconds past each minute the check runs: after the Traffic page's update (15 s) and after
+    # flowd's 10-second flush; the minutes it reads are at least 2 minutes old anyway.
+    TRAFFIC_CHECK_SECOND = 20
+
+    async def _traffic_settings(self) -> Tuple[bool, int, int, bool]:
+        """(on, default threshold %, default minutes, flow collection on), read fresh from
+        app_settings each minute: a change saved on another worker applies within a minute."""
+        from app.services.runtime_settings import resolve
+
+        async def read():
+            async with AsyncSessionLocal() as db:
+                res = await db.execute(select(AppSetting))
+                return {r.setting_key: r.setting_value for r in res.scalars().all()}
+
+        kv = await self._wait_out_busy_database("traffic alert settings", read)
+        rt = resolve(kv)
+        if "flow_ingestion_enabled" in kv:
+            flows_on = kv["flow_ingestion_enabled"].strip().lower() in ("true", "1", "yes")
+        else:
+            flows_on = bool(getattr(getattr(settings, "flow", None), "enabled", False))
+        return rt.traffic_alerts_enabled, rt.traffic_alert_threshold_pct, rt.traffic_alert_minutes, flows_on
+
+    async def _traffic_alert_loop(self) -> None:
+        from app.services.traffic_alerts import evaluate
+
+        while not self._stop_event.is_set():
+            now = datetime.now(timezone.utc)
+            wait = (self.TRAFFIC_CHECK_SECOND - now.second) % 60 or 60
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait - now.microsecond / 1e6)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                enabled, pct, minutes, flows_on = await self._traffic_settings()
+                if not enabled:
+                    continue
+                async with AsyncSessionLocal() as db:
+                    events = await evaluate(db, default_pct=pct, default_minutes=minutes, flow_collection_on=flows_on)
+                    await db.commit()
+                for event in events:
+                    await self._dispatch_traffic_event(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("AlertDispatcher: traffic alert check failed: %s", exc)
+
+    async def _dispatch_traffic_event(self, event: Any) -> None:
+        """Sends one traffic alert to every channel that ticked its severity."""
+        if not await self._is_alerting_enabled():
+            logger.debug("AlertDispatcher: alerting is off; traffic alert not sent: %s", event.summary)
+            return
+        try:
+            channels = await self._load_enabled_channels()
+        except Exception as exc:
+            logger.error("AlertDispatcher: could not load channels; traffic alert not sent (%s): %s", event.summary, exc)
+            return
+        now = datetime.now(timezone.utc)
+        details = {"summary": event.summary, **event.facts}
+        link = event.link
+        await asyncio.gather(*[
+            self._evaluate_and_send_channel(
+                db=None,
+                channel=channel,
+                endpoint_id=str(link.exporter_id),
+                endpoint_name=f"{link.exporter_name} {link.name}",
+                ip_address=link.exporter_ip,
+                event_type="TRAFFIC_ALERT",
+                severity=event.severity,
+                timestamp=now,
+                details=details,
+                is_flapping=False,
+                rate_key=event.rate_key,
+            )
+            for channel in channels
+        ], return_exceptions=True)
+
+    # --- SNMP link events (v3.3.6 build plan 8.3) ------------------------------------------
+
+    LINK_CHECK_SECONDS = 10
+    # Older unhandled events (a leader that was down for a while) are marked handled unsent: an
+    # alert about a link that went down an hour ago helps nobody, and they could be many.
+    LINK_EVENT_MAX_AGE = timedelta(minutes=15)
+
+    async def _claim_link_events(self) -> List[Dict[str, Any]]:
+        """Takes the interface up/down events nobody has acted on yet (FOR UPDATE SKIP LOCKED
+        and handled_at, so each is acted on once, even if two workers briefly both lead)."""
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(text("""
+                UPDATE snmp_interface_events ev SET handled_at = NOW()
+                WHERE ev.id IN (
+                    SELECT id FROM snmp_interface_events
+                    WHERE handled_at IS NULL AND kind IN ('up', 'down')
+                    ORDER BY id LIMIT 200 FOR UPDATE SKIP LOCKED
+                )
+                RETURNING ev.id, ev.endpoint_id, ev.if_index, ev.if_name, ev.kind, ev.detail, ev.at
+            """))
+            claimed = [dict(zip(("id", "endpoint_id", "if_index", "if_name", "kind", "detail", "at"), tuple(r)))
+                       for r in res.fetchall()]
+            if claimed:
+                ids = tuple({str(c["endpoint_id"]) for c in claimed})
+                info = await db.execute(text("""
+                    SELECT id, hostname, host(ip_address), flow_interface_aliases FROM endpoints
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                """), {"ids": ids})
+                by_id = {str(r[0]): (r[1], r[2], r[3]) for r in info.fetchall()}
+                for c in claimed:
+                    host, ip, aliases = by_id.get(str(c["endpoint_id"]), (None, None, {}))
+                    if isinstance(aliases, str):
+                        aliases = json.loads(aliases or "{}")
+                    c.update(hostname=host, ip=ip, alias=(aliases or {}).get(str(c["if_index"])))
+            await db.commit()
+        return claimed
+
+    async def _link_event_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.LINK_CHECK_SECONDS)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                events = await self._claim_link_events()
+                now = datetime.now(timezone.utc)
+                for ev in events:
+                    if ev.get("hostname") is None:
+                        continue  # endpoint deleted meanwhile
+                    if ev["at"] and now - ev["at"] > self.LINK_EVENT_MAX_AGE:
+                        continue
+                    # Re-trace the paths through this device (any link, WAN or not): the relay's
+                    # transit trigger on the scheduler leader finds them, waits a cycle, applies
+                    # its cooldown (services/telemetry_relay).
+                    await self._publish_link_hint(ev)
+                    alias = ev.get("alias")
+                    if isinstance(alias, dict) and alias.get("role") == "wan":
+                        await self._dispatch_link_event(ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("AlertDispatcher: link event check failed: %s", exc)
+
+    async def _publish_link_hint(self, ev: Dict[str, Any]) -> None:
+        try:
+            await driver_manager.get_event_broker().publish("ROUTE_HINT", {
+                "type": "SNMP_LINK", "endpoint_id": str(ev["endpoint_id"]), "ip_address": ev.get("ip"),
+                "state": "DOWN" if ev["kind"] == "down" else "UP", "if_index": ev.get("if_index"),
+            })
+        except Exception as exc:
+            logger.debug("AlertDispatcher: link re-trace hint not published: %s", exc)
+
+    async def _dispatch_link_event(self, ev: Dict[str, Any]) -> None:
+        """A WAN link down or up: LINK_DOWN / LINK_UP to every channel that ticked it."""
+        if not await self._is_alerting_enabled():
+            return
+        try:
+            channels = await self._load_enabled_channels()
+        except Exception as exc:
+            logger.error("AlertDispatcher: could not load channels; link alert not sent: %s", exc)
+            return
+        alias = ev.get("alias") or {}
+        name = alias.get("name") or ev.get("if_name") or f"interface {ev.get('if_index')}"
+        down = ev["kind"] == "down"
+        severity = "LINK_DOWN" if down else "LINK_UP"
+        summary = f"{ev['hostname']} {name}: WAN link {'down' if down else 'back up'}"
+        facts = {"Link": name, "Interface": ev.get("if_name") or f"ifIndex {ev.get('if_index')}",
+                 "Device": f"{ev['hostname']} ({ev.get('ip')})"}
+        if ev.get("detail"):
+            facts["Detail"] = ev["detail"]
+        details = {"summary": summary, **facts}
+        await asyncio.gather(*[
+            self._evaluate_and_send_channel(
+                db=None, channel=channel, endpoint_id=str(ev["endpoint_id"]),
+                endpoint_name=f"{ev['hostname']} {name}", ip_address=ev.get("ip"), event_type="LINK_ALERT",
+                severity=severity, timestamp=datetime.now(timezone.utc), details=details, is_flapping=False,
+                rate_key=f"link:{ev['endpoint_id']}:{ev.get('if_index')}",
+            )
+            for channel in channels
+        ], return_exceptions=True)
+
     def _check_flapping(self, endpoint_key: str, now: datetime) -> bool:
         """Sliding window tracking for endpoint flapping."""
         if endpoint_key not in self._flapping_tracker:
@@ -640,6 +833,7 @@ class AlertDispatcher:
         timestamp: datetime,
         details: Dict[str, Any],
         is_flapping: bool,
+        rate_key: Optional[str] = None,
     ) -> None:
         # Check endpoint filter
         if channel.endpoint_ids and len(channel.endpoint_ids) > 0:
@@ -663,6 +857,13 @@ class AlertDispatcher:
                 if not matched:
                     return
             except ValueError:
+                return
+
+        # Traffic and link alerts only where ticked: an empty filter ("all") predates them and
+        # means state changes, so an upgrade pages nobody about what they never asked for.
+        if severity.upper().startswith(("TRAFFIC_", "LINK_")):
+            allowed = [s.upper() for s in (channel.severity_filters or [])]
+            if severity.upper() not in allowed:
                 return
 
         # Check severity filter
@@ -691,7 +892,7 @@ class AlertDispatcher:
             return
 
         # Check Rate Limit (5 minutes per channel, endpoint, severity)
-        ep_key = str(endpoint_id) if endpoint_id else f"event:{event_type}:{endpoint_name or 'global'}"
+        ep_key = rate_key or (str(endpoint_id) if endpoint_id else f"event:{event_type}:{endpoint_name or 'global'}")
         rl_key = (str(channel.id), ep_key, severity)
         last_sent = self._rate_limits.get(rl_key)
         if last_sent and (timestamp - last_sent) < timedelta(minutes=5):

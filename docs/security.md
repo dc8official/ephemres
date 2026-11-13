@@ -117,6 +117,14 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 * **Sensitive Query Parameters:** Query parameters matching `sig`, `token`, `key`, `secret`, `webhook`, `auth`, `api_key`, `password`, `access_token`, `apikey`, `bearer`, or `code` are masked.
 * **Header Preservation:** Custom headers (e.g. `Authorization: Bearer <token>`) are masked in the UI. When an administrator saves channel modifications, existing secrets are preserved without overwriting them with bullet masks.
 
+### D. SNMP Credentials (v3.3.6)
+* **Storage:** SNMP communities and v3 passwords are stored as one AES-256-GCM value per credential set (`snmp_credentials.secrets`), like alert channel secrets, and restored with re-encryption.
+* **Write-only:** the API never returns them, only whether each is set; leaving a field empty when editing keeps the stored value.
+* **Audit:** changes are audited without the secrets.
+* **Test button:** admin only, at most 6 runs a minute per API worker, and audited (`SNMP:TEST` with the address). It sends SNMP from the server to any address an admin types.
+* **Read-only:** the poller and the survey only read (GET, GETNEXT, GETBULK); there is no SET and no traps.
+* **Recommended:** SNMPv3 with SHA-2 and AES on devices, and an ACL that allows only the Ephemres server.
+
 ---
 
 ## 6. Authentication, Session Governance & Multi-Worker State
@@ -155,7 +163,7 @@ When determining the client's real IP address for audit logs and security polici
 * Direct external requests attempting to spoof `X-Forwarded-For: 127.0.0.1` are rejected, preventing bypass of brute-force shields and IP audit spoofing.
 
 ### B. IP-Scoped Brute-Force Lockouts
-* **Threshold:** After `lockout_threshold` failed attempts (default 5; **Admin Settings → Security & Discovery**) the `IP:username` pair is locked for 15 minutes. The failure counter resets after 30 minutes without further failures.
+* **Threshold:** After `lockout_threshold` failed attempts (default 5; **Admin Settings → Users & access → Sign-in protection**) the `IP:username` pair is locked for 15 minutes. The failure counter resets after 30 minutes without further failures.
 * **Shared, Persistent Counters:** Failures are counted in the store all workers share (the `auth_login_failures` table, in both modes), with one atomic upsert per failure. Counters survive API restarts and cannot be pushed out by flooding sign-ins with other usernames.
 * **No Username Oracle:** A sign-in for an unknown or disabled username spends the same scrypt verification as a real one, so response time does not reveal which usernames exist. Concurrent scrypt work is capped per worker (128 MiB each).
 * **Edge Rate Limit:** The shipped Nginx site limits `POST /api/v1/auth/login` to 10 requests a minute per client address (burst 5) and answers `429` beyond that. Existing sites are not rewritten by upgrades: copy the `limit_req_zone` line and the `location = /api/v1/auth/login` block from `deploy/nginx.conf.template`.

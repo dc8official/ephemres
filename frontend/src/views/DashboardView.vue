@@ -35,7 +35,7 @@
         <button 
           v-if="isAdmin" 
           class="btn-primary" 
-          @click="openAddDialog"
+          @click="openAddDialog()"
         >
           + Add Endpoint
         </button>
@@ -47,6 +47,7 @@
       <KpiTile
         label="Total"
         :value="kpiStats.total"
+        :sub="fleetSub('total')"
         clickable
         :active="statusFilter === 'ALL'"
         @select="statusFilter = 'ALL'"
@@ -55,6 +56,7 @@
         label="Up"
         :value="kpiStats.up"
         :tone="kpiStats.up ? 'up' : 'neutral'"
+        :sub="fleetSub('up')"
         clickable
         :active="statusFilter === 'UP'"
         @select="toggleStatusFilter('UP')"
@@ -63,6 +65,7 @@
         label="Unstable"
         :value="kpiStats.unstable"
         :tone="kpiStats.unstable ? 'warn' : 'neutral'"
+        :sub="fleetSub('unstable')"
         clickable
         :active="statusFilter === 'UNSTABLE'"
         @select="toggleStatusFilter('UNSTABLE')"
@@ -71,6 +74,7 @@
         label="Down"
         :value="kpiStats.down"
         :tone="kpiStats.down ? 'down' : 'neutral'"
+        :sub="fleetSub('down')"
         clickable
         :active="statusFilter === 'DOWN'"
         @select="toggleStatusFilter('DOWN')"
@@ -79,7 +83,7 @@
         label="No status"
         :value="kpiStats.noStatus"
         tone="unknown"
-        sub="Passive, paused or not probed yet"
+        :sub="fleetSub('noStatus') || 'Passive, paused or not probed yet'"
         clickable
         :active="statusFilter === 'NO_STATUS'"
         @select="toggleStatusFilter('NO_STATUS')"
@@ -89,33 +93,13 @@
         :value="kpiStats.meanUptime"
         :unit="kpiStats.meanUptime === null ? '' : '%'"
         :tone="kpiStats.meanUptime === null ? 'unknown' : uptimeTone(kpiStats.meanUptimeRaw)"
-        :sub="kpiStats.uptimeCount ? `${kpiStats.uptimeCount} monitored · target ${DEFAULT_SLA_TARGET}%` : 'No monitored targets'"
+        :sub="fleetSub('meanUptime') || (kpiStats.uptimeCount ? `${kpiStats.uptimeCount} monitored · target ${DEFAULT_SLA_TARGET}%` : 'No monitored targets')"
       />
     </div>
 
-    <!-- Search, filters and sort (kept in the URL) -->
-    <div class="filter-bar" role="search">
-      <input
-        v-model="searchQuery"
-        type="search"
-        class="form-input filter-search"
-        placeholder="Search hostname, IP or location"
-        aria-label="Search endpoints"
-      />
-      <label class="filter-field">
-        <span>Type</span>
-        <select v-model="typeFilter" class="form-select">
-          <option value="">All types</option>
-          <option v-for="t in deviceTypeOptions" :key="t" :value="t">{{ t }}</option>
-        </select>
-      </label>
-      <label class="filter-field">
-        <span>Location</span>
-        <select v-model="locationFilter" class="form-select">
-          <option value="">All locations</option>
-          <option v-for="l in locationOptions" :key="l" :value="l">{{ l }}</option>
-        </select>
-      </label>
+    <!-- Shared endpoint filter (site, location, tags, type, search; kept in the URL and carried
+         to the other pages) plus this page's sort. The status tiles above filter on top of it. -->
+    <FilterBar :state="filterState">
       <label class="filter-field">
         <span>Sort by</span>
         <select :value="sortKey" class="form-select" @change="applySortOption($event.target.value)">
@@ -125,8 +109,13 @@
       <span class="filter-count text-muted tnum" aria-live="polite">
         {{ filteredEndpoints.length === endpoints.length ? `${endpoints.length} endpoints` : `${filteredEndpoints.length} of ${endpoints.length} endpoints` }}
       </span>
-      <button v-if="hasActiveFilters" type="button" class="btn-text clear-filters" @click="clearFilters">Clear filters</button>
-    </div>
+      <button
+        v-if="statusFilter !== 'ALL' && !filterState.isActive.value"
+        type="button"
+        class="btn-text clear-filters"
+        @click="clearFilters"
+      >Clear filters</button>
+    </FilterBar>
 
     <!-- Endpoints Content -->
     <div>
@@ -142,7 +131,7 @@
       <div v-else-if="!loading && endpoints.length === 0 && !error" class="empty-state">
         <p class="empty-title">No endpoints configured</p>
         <p class="empty-sub">Add your first monitored endpoint to begin uptime tracking.</p>
-        <button v-if="isAdmin" class="btn-primary" @click="openAddDialog">
+        <button v-if="isAdmin" class="btn-primary" @click="openAddDialog()">
           + Add Endpoint
         </button>
       </div>
@@ -231,7 +220,14 @@
                     />
                   </label>
                 </td>
-                <td class="font-bold">{{ ep.hostname }}</td>
+                <td>
+                  <span class="font-bold">{{ ep.hostname }}</span>
+                  <!-- Where it is and its tags, small, only when set. -->
+                  <span v-if="placeLabel(ep) || (ep.tags && ep.tags.length)" class="place-line">
+                    {{ placeLabel(ep) }}<template v-if="placeLabel(ep) && ep.tags && ep.tags.length"> · </template>
+                    <span v-for="t in ep.tags || []" :key="t" class="place-tag">{{ t }}</span>
+                  </span>
+                </td>
                 <td class="font-mono tnum">{{ ep.ip_address }}</td>
                 <td><span class="device-tag">{{ ep.device_type }}</span></td>
                 <td>
@@ -293,6 +289,64 @@
             <button class="btn-secondary btn-small" @click="selectedIds = []">
               Clear
             </button>
+            <!-- Everything the filter matches, not just what was ticked on screen. -->
+            <button
+              v-if="filteredEndpoints.length > selectedIds.length"
+              class="btn-text btn-small"
+              @click="selectedIds = filteredEndpoints.map((ep) => ep.id)"
+            >
+              Select all {{ filteredEndpoints.length }} {{ hasActiveFilters ? 'matching' : '' }}
+            </button>
+          </div>
+          <!-- Bulk assign (admin): shown only while something is selected. -->
+          <div v-if="isAdmin" class="bulk-row">
+            <template v-if="!bulkAction">
+              <button class="btn-secondary btn-small" @click="startBulk('site')">Set site</button>
+              <button class="btn-secondary btn-small" @click="startBulk('location')">Set location</button>
+              <button class="btn-secondary btn-small" @click="startBulk('add_tags')">Add tag</button>
+              <button class="btn-secondary btn-small" @click="startBulk('remove_tags')">Remove tag</button>
+              <button class="btn-secondary btn-small" @click="startBulk('snmp_credential_id')">Set SNMP</button>
+            </template>
+            <form v-else class="bulk-form" @submit.prevent="applyBulk">
+              <label class="bulk-label" :for="`bulk-${bulkAction}`">{{ BULK_LABELS[bulkAction] }}</label>
+              <!-- SNMP credential set for all of them (v3.3.6); "None" turns SNMP off. -->
+              <select
+                v-if="bulkAction === 'snmp_credential_id'"
+                :id="`bulk-${bulkAction}`"
+                v-model="bulkValue"
+                class="form-input bulk-input"
+              >
+                <option value="">None (SNMP off)</option>
+                <option v-for="c in snmpSets" :key="c.id" :value="c.id">{{ c.name }}</option>
+              </select>
+              <TagInput
+                v-else-if="bulkAction === 'add_tags' || bulkAction === 'remove_tags'"
+                v-model="bulkTags"
+                :suggestions="labelSuggestions.tags.value.map((t) => t.value)"
+                compact
+                :aria-label="BULK_LABELS[bulkAction]"
+              />
+              <input
+                v-else
+                :id="`bulk-${bulkAction}`"
+                v-model="bulkValue"
+                class="form-input bulk-input"
+                :list="`bulk-list-${bulkAction}`"
+                :placeholder="bulkAction === 'site' ? 'e.g. Abuja (empty clears it)' : 'e.g. Building A (empty clears it)'"
+                autocomplete="off"
+              />
+              <datalist :id="`bulk-list-${bulkAction}`">
+                <option
+                  v-for="o in (bulkAction === 'site' ? labelSuggestions.sites.value : labelSuggestions.allLocations.value)"
+                  :key="o.value"
+                  :value="o.value"
+                />
+              </datalist>
+              <button type="submit" class="btn-primary btn-small" :disabled="bulkSaving">
+                {{ bulkSaving ? 'Applying...' : `Apply to ${selectedIds.length}` }}
+              </button>
+              <button type="button" class="btn-secondary btn-small" @click="bulkAction = null">Cancel</button>
+            </form>
           </div>
         </div>
       </transition>
@@ -333,12 +387,45 @@
               </option>
             </select>
           </div>
+          <!-- Site, location and tags: all optional, all with autocomplete from values in use.
+               Locations offered are the ones already used in the chosen site. -->
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="ep-site">Site (optional)</label>
+              <input
+                id="ep-site"
+                class="form-input"
+                v-model="form.site"
+                list="ep-site-list"
+                placeholder="e.g. Abuja"
+                autocomplete="off"
+              />
+              <datalist id="ep-site-list">
+                <option v-for="o in labelSuggestions.sites.value" :key="o.value" :value="o.value" />
+              </datalist>
+            </div>
+            <div class="form-group">
+              <label for="ep-location">Location (optional)</label>
+              <input
+                id="ep-location"
+                class="form-input"
+                v-model="form.location"
+                list="ep-location-list"
+                placeholder="e.g. Building A"
+                autocomplete="off"
+              />
+              <datalist id="ep-location-list">
+                <option v-for="o in formLocations" :key="o.value" :value="o.value" />
+              </datalist>
+            </div>
+          </div>
           <div class="form-group">
-            <label>Location (optional)</label>
-            <input 
-              class="form-input" 
-              v-model="form.location" 
-              placeholder="e.g. Datacenter rack A5" 
+            <label>Tags (optional)</label>
+            <TagInput
+              v-model="form.tags"
+              :suggestions="labelSuggestions.tags.value.map((t) => t.value)"
+              placeholder="e.g. mpls router (Enter or comma to add)"
+              aria-label="Tags"
             />
           </div>
           <div class="form-group">
@@ -349,6 +436,14 @@
               rows="3" 
               placeholder="Additional endpoint metadata"
             ></textarea>
+          </div>
+          <!-- SNMP (v3.3.6): picking a credential set turns SNMP on for this endpoint. -->
+          <div class="form-group">
+            <label for="ep-snmp">SNMP credentials (optional)</label>
+            <select id="ep-snmp" class="form-select" v-model="form.snmp_credential_id">
+              <option value="">None (no SNMP)</option>
+              <option v-for="c in snmpSets" :key="c.id" :value="c.id">{{ c.name }}</option>
+            </select>
           </div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="displayDialog = false">Cancel</button>
@@ -401,7 +496,9 @@ import {
   updateEndpoint, 
   deleteEndpoint, 
   refreshEndpointBaseline,
-  exportBatchTelemetry
+  exportBatchTelemetry,
+  bulkUpdateEndpoints,
+  getSnmpCredentials,
 } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
 import EndpointCard from '../components/EndpointCard.vue'
@@ -412,6 +509,10 @@ import { useSSE } from '../composables/useSSE.js'
 import KpiTile from '../components/ui/KpiTile.vue'
 import Sparkline from '../components/ui/Sparkline.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import TagInput from '../components/ui/TagInput.vue'
+import { useEndpointFilter, filterQueryFrom } from '../composables/useEndpointFilter.js'
+import { useLabelSuggestions, refreshSuggestions } from '../composables/useLabelSuggestions.js'
 import { endpointStateBucket, isMonitored, meanUptime, uptimeValue } from '../utils/endpointState.js'
 import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 
@@ -488,9 +589,9 @@ async function handleRunDiagnostics(ep) {
 const STATUS_FILTERS = ['ALL', 'UP', 'UNSTABLE', 'DOWN', 'NO_STATUS']
 const viewMode = ref(route.query.view === 'table' ? 'table' : 'grid')
 const statusFilter = ref(STATUS_FILTERS.includes(route.query.status) ? route.query.status : 'ALL')
-const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const typeFilter = ref(typeof route.query.type === 'string' ? route.query.type : '')
-const locationFilter = ref(typeof route.query.location === 'string' ? route.query.location : '')
+// Site, location, tags, type and search: the shared filter, matched on the server.
+const filterState = useEndpointFilter()
+const labelSuggestions = useLabelSuggestions()
 
 // Sorting for table view
 // Each option sorts the worst case first: most severe state, highest latency or loss, lowest
@@ -513,14 +614,13 @@ function applySortOption(value) {
   sortAsc.value = option ? option.asc : true
 }
 
-watch([viewMode, statusFilter, searchQuery, typeFilter, locationFilter, sortKey, sortAsc], () => {
+watch([viewMode, statusFilter, sortKey, sortAsc], () => {
   const defaultAsc = SORT_OPTIONS.find((o) => o.value === sortKey.value)?.asc ?? true
   const query = {
+    // The filter bar owns its own keys; keep them as they are.
+    ...filterQueryFrom(route.query),
     view: viewMode.value === 'table' ? 'table' : undefined,
     status: statusFilter.value === 'ALL' ? undefined : statusFilter.value,
-    q: searchQuery.value.trim() || undefined,
-    type: typeFilter.value || undefined,
-    location: locationFilter.value || undefined,
     sort: sortKey.value === 'severity' ? undefined : sortKey.value,
     dir: sortAsc.value === defaultAsc ? undefined : (sortAsc.value ? 'asc' : 'desc'),
   }
@@ -544,21 +644,36 @@ const form = ref({
   hostname: '',
   ip_address: '',
   device_type: 'Router',
+  site: '',
   location: '',
+  tags: [],
   description: '',
   monitoring_enabled: true
 })
 
-const kpiStats = computed(() => {
+// Locations offered in the form: those used within the typed site, or all of them.
+const formLocations = ref([])
+watch(
+  () => [displayDialog.value, form.value.site],
+  async ([open, site]) => {
+    if (open) formLocations.value = await labelSuggestions.loadLocationsFor((site || '').trim())
+  }
+)
+
+// The endpoints the shared filter matches (all of them while there is no filter). The tiles
+// count these; the status tiles then narrow the list further.
+const scopedEndpoints = computed(() => endpoints.value.filter((ep) => filterState.matches(ep)))
+
+function statsFor(list) {
   const counts = { UP: 0, UNSTABLE: 0, DOWN: 0, NO_STATUS: 0 }
-  endpoints.value.forEach((ep) => {
+  list.forEach((ep) => {
     counts[endpointStateBucket(ep)]++
   })
   // Mean 24h uptime of actively monitored endpoints only; passive or paused ones have no uptime.
-  const mean = meanUptime(endpoints.value)
-  const uptimeCount = endpoints.value.filter((ep) => uptimeValue(ep) !== null).length
+  const mean = meanUptime(list)
+  const uptimeCount = list.filter((ep) => uptimeValue(ep) !== null).length
   return {
-    total: endpoints.value.length,
+    total: list.length,
     up: counts.UP,
     unstable: counts.UNSTABLE,
     down: counts.DOWN,
@@ -567,7 +682,27 @@ const kpiStats = computed(() => {
     meanUptime: mean === null ? null : mean.toFixed(2),
     uptimeCount,
   }
-})
+}
+
+const kpiStats = computed(() => statsFor(scopedEndpoints.value))
+const fleetStats = computed(() => statsFor(endpoints.value))
+
+// While a filter is on, each tile's small line gives the same figure for the whole fleet
+// (build plan 4.3, item 7), so "2 down" can be read against "5 down in all sites".
+function fleetSub(key) {
+  if (!filterState.isActive.value) return null
+  if (key === 'meanUptime') {
+    const v = fleetStats.value.meanUptime
+    return v === null ? 'No monitored targets in all sites' : `${v}% across all sites`
+  }
+  const n = fleetStats.value[key]
+  return key === 'total' ? `of ${n} in all sites` : `${n} in all sites`
+}
+
+// "Abuja · Building A", or whichever of the two is set.
+function placeLabel(ep) {
+  return [ep.site, ep.location].filter(Boolean).join(' · ')
+}
 
 const STATUS_FILTER_LABELS = { ALL: 'All', UP: 'Up', UNSTABLE: 'Unstable', DOWN: 'Down', NO_STATUS: 'No status' }
 const statusFilterLabel = computed(() => STATUS_FILTER_LABELS[statusFilter.value] || statusFilter.value)
@@ -576,45 +711,94 @@ function toggleStatusFilter(bucket) {
   statusFilter.value = statusFilter.value === bucket ? 'ALL' : bucket
 }
 
-const deviceTypeOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.device_type).filter(Boolean))].sort())
-const locationOptions = computed(() => [...new Set(endpoints.value.map((ep) => ep.location).filter(Boolean))].sort())
-
-const hasActiveFilters = computed(() =>
-  statusFilter.value !== 'ALL' || !!searchQuery.value.trim() || !!typeFilter.value || !!locationFilter.value
-)
+const hasActiveFilters = computed(() => statusFilter.value !== 'ALL' || filterState.isActive.value)
 
 const activeFilterSummary = computed(() => {
   const parts = []
   if (statusFilter.value !== 'ALL') parts.push(`status ${statusFilterLabel.value}`)
-  if (searchQuery.value.trim()) parts.push(`"${searchQuery.value.trim()}"`)
-  if (typeFilter.value) parts.push(`type ${typeFilter.value}`)
-  if (locationFilter.value) parts.push(`location ${locationFilter.value}`)
+  if (filterState.isActive.value && filterState.matchDescription.value) parts.push(filterState.matchDescription.value)
   return parts.length ? `Filtered by ${parts.join(', ')}.` : ''
 })
 
 function clearFilters() {
   statusFilter.value = 'ALL'
-  searchQuery.value = ''
-  typeFilter.value = ''
-  locationFilter.value = ''
+  filterState.clearFilter()
 }
 
-const filteredEndpoints = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  return endpoints.value.filter((ep) => {
-    if (statusFilter.value !== 'ALL' && endpointStateBucket(ep) !== statusFilter.value) return false
-    if (typeFilter.value && ep.device_type !== typeFilter.value) return false
-    if (locationFilter.value && ep.location !== locationFilter.value) return false
-    if (q) {
-      const haystack = [ep.hostname, String(ep.ip_address || ''), ep.location, ep.description]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-      if (!haystack.includes(q)) return false
-    }
-    return true
-  })
-})
+const filteredEndpoints = computed(() =>
+  scopedEndpoints.value.filter(
+    (ep) => statusFilter.value === 'ALL' || endpointStateBucket(ep) === statusFilter.value
+  )
+)
+
+// --- Bulk assign (build plan 4.4) --------------------------------------------------------------
+const BULK_LABELS = {
+  site: 'Site',
+  location: 'Location',
+  add_tags: 'Tags to add',
+  remove_tags: 'Tags to remove',
+  snmp_credential_id: 'SNMP credentials',
+}
+const bulkAction = ref(null)
+const bulkValue = ref('')
+const bulkTags = ref([])
+const bulkSaving = ref(false)
+
+// SNMP credential sets (v3.3.6) for the bulk "Set SNMP" and the endpoint form; admin only.
+const snmpSets = ref([])
+async function loadSnmpSets() {
+  if (!isAdmin.value) return
+  try {
+    const res = await getSnmpCredentials()
+    snmpSets.value = res.data?.data || []
+  } catch {
+    snmpSets.value = []
+  }
+}
+
+function startBulk(action) {
+  bulkAction.value = action
+  bulkValue.value = ''
+  bulkTags.value = []
+  if (action === 'snmp_credential_id') loadSnmpSets()
+}
+
+async function applyBulk() {
+  const action = bulkAction.value
+  const body = { endpoint_ids: [...selectedIds.value] }
+  if (action === 'site' || action === 'location') {
+    body[action] = bulkValue.value.trim()
+  } else if (action === 'snmp_credential_id') {
+    body.snmp_credential_id = bulkValue.value || null
+  } else {
+    if (!bulkTags.value.length) return
+    body[action] = [...bulkTags.value]
+  }
+  bulkSaving.value = true
+  try {
+    const res = await bulkUpdateEndpoints(body)
+    const changed = res.data?.data?.changed ?? 0
+    toast.add({
+      severity: 'success',
+      summary: 'Endpoints updated',
+      detail: `${changed} of ${body.endpoint_ids.length} endpoint${body.endpoint_ids.length === 1 ? '' : 's'} changed.`,
+      life: 3500,
+    })
+    bulkAction.value = null
+    refreshSuggestions()
+    await fetchEndpoints()
+    filterState.refreshMatch()
+  } catch (err) {
+    toast.add({
+      severity: 'error',
+      summary: 'Bulk update failed',
+      detail: err.response?.data?.detail || 'Failed to update the selected endpoints.',
+      life: 5000,
+    })
+  } finally {
+    bulkSaving.value = false
+  }
+}
 
 // Down first, then unstable, up, and endpoints without status (passive, paused, not probed).
 const SEVERITY_RANK = { DOWN: 0, UNSTABLE: 1, UP: 2, NO_STATUS: 3 }
@@ -788,16 +972,20 @@ const lastRefreshedLabel = computed(() => {
   return lastRefreshed.value.toLocaleTimeString()
 })
 
-const openAddDialog = () => {
+const openAddDialog = (prefill = {}) => {
   isEditing.value = false
   form.value = {
-    hostname: '',
-    ip_address: '',
+    hostname: prefill.hostname || '',
+    ip_address: prefill.ip || '',
     device_type: 'Router',
+    site: '',
     location: '',
+    tags: [],
     description: '',
-    monitoring_enabled: true
+    monitoring_enabled: true,
+    snmp_credential_id: '',
   }
+  loadSnmpSets()
   displayDialog.value = true
 }
 
@@ -808,10 +996,14 @@ const openEditDialog = (endpoint) => {
     hostname: endpoint.hostname,
     ip_address: endpoint.ip_address,
     device_type: endpoint.device_type,
+    site: endpoint.site || '',
     location: endpoint.location || '',
+    tags: [...(endpoint.tags || [])],
     description: endpoint.description || '',
-    monitoring_enabled: endpoint.monitoring_enabled
+    monitoring_enabled: endpoint.monitoring_enabled,
+    snmp_credential_id: endpoint.snmp_credential_id || '',
   }
+  loadSnmpSets()
   displayDialog.value = true
 }
 
@@ -822,15 +1014,20 @@ const saveEndpoint = async () => {
       await updateEndpoint(targetEndpointId.value, {
         hostname: form.value.hostname,
         device_type: form.value.device_type,
+        site: form.value.site,
         location: form.value.location,
+        tags: form.value.tags,
         description: form.value.description,
-        monitoring_enabled: form.value.monitoring_enabled
+        monitoring_enabled: form.value.monitoring_enabled,
+        snmp_credential_id: form.value.snmp_credential_id || null,
       })
     } else {
-      await createEndpoint(form.value)
+      await createEndpoint({ ...form.value, snmp_credential_id: form.value.snmp_credential_id || null })
     }
     displayDialog.value = false
+    refreshSuggestions()
     await fetchEndpoints()
+    filterState.refreshMatch()
   } catch (err) {
     alert(err.response?.data?.detail || 'Failed to save endpoint.')
   } finally {
@@ -903,6 +1100,13 @@ onMounted(async () => {
   loadUserFromStorage()
   await fetchEndpoints()
   initSSE()
+  // "Add as endpoint" from an SNMP neighbour (v3.3.6) arrives as ?add=1&ip=&hostname=: open the
+  // form filled in, then drop those parameters so a reload does not open it again.
+  if (route.query.add === '1' && isAdmin.value) {
+    openAddDialog({ ip: route.query.ip, hostname: route.query.hostname })
+    const { add, ip, hostname, ...rest } = route.query
+    router.replace({ query: rest })
+  }
 })
 
 onUnmounted(() => {
@@ -992,21 +1196,7 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-/* ── Filter bar ── */
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.75rem;
-  margin: 1rem 0;
-}
-
-.filter-search {
-  flex: 1 1 16rem;
-  min-height: var(--control-height);
-  max-width: 24rem;
-}
-
+/* ── Filter bar extras (the bar itself: components/ui/FilterBar.vue) ── */
 .filter-field {
   display: flex;
   flex-direction: column;
@@ -1030,6 +1220,54 @@ onUnmounted(() => {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   text-decoration: underline;
+}
+
+/* ── Site · location and tags under the hostname ── */
+.place-line {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.place-tag {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.12);
+  color: var(--text-secondary);
+}
+
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ── Bulk assign in the selection banner ── */
+.bulk-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bulk-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.bulk-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.bulk-input {
+  min-width: 14rem;
 }
 
 /* ── KPI Strip ── */
@@ -1190,8 +1428,11 @@ onUnmounted(() => {
   padding: 12px 24px;
   z-index: 150;
   display: flex;
+  /* Two rows for admins: the selection, then the bulk-assign actions under it. */
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  max-width: calc(100vw - 32px);
 }
 
 .banner-content {

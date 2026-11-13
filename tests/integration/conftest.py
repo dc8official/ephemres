@@ -17,9 +17,12 @@ _SEEDED_TABLES = (
     "endpoint_probe_samples",
     "flow_minute_rollups",
     "flow_interface_minute_rollups",
+    # SNMP counters have no foreign key to endpoints, so CASCADE doesn't reach them.
+    "snmp_interface_minute_rollups",
     "endpoint_events",
     "monitoring_service_events",
     "endpoints",
+    "snmp_credentials",
 )
 
 
@@ -54,6 +57,34 @@ async def _create_and_migrate(admin_dsn: str, db_name: str) -> str:
         else:
             os.environ["DATABASE_URL"] = previous
     return db_dsn
+
+
+async def reset_interface_traffic(conn) -> None:
+    """Empty the interface minute tables and endpoints of a private test database. DELETE, not
+    TRUNCATE, for the minute tables: the hourly aggregates log deletes (and inserts) as changes
+    to pick up at their next refresh, but never see a TRUNCATE, so stale hours would survive it."""
+    await conn.execute("DELETE FROM flow_interface_minute_rollups")
+    await conn.execute("DELETE FROM snmp_interface_minute_rollups")
+    await conn.execute("TRUNCATE endpoints CASCADE")
+
+
+async def settle_interface_hourly(conn) -> None:
+    """Make the hourly interface aggregates of a private test database match its minute tables.
+
+    The aggregates' refresh policy starts on its own soon after the migration and moves the
+    watermark; rows seeded below it afterwards are hidden from the real-time part until the next
+    refresh, so a test reading past days passed or failed with the scheduler's timing. One refresh
+    over everything after seeding settles it. The policy's own run refuses a concurrent refresh,
+    hence the retries."""
+    for view in ("flow_interface_hourly_rollups", "snmp_interface_hourly_rollups"):
+        for attempt in range(30):
+            try:
+                await conn.execute(f"CALL refresh_continuous_aggregate('{view}', NULL, NULL)")
+                break
+            except asyncpg.exceptions.LockNotAvailableError:
+                if attempt == 29:
+                    raise
+                await asyncio.sleep(1)
 
 
 async def _drop(admin_dsn: str, db_name: str) -> None:
@@ -114,7 +145,7 @@ def api_client(timescale_dsn, monkeypatch):
     from app.core.asgi import FastAPI, TestClient
     from app.core.orm import AsyncSession, async_sessionmaker, create_async_engine
     from app.database import get_db
-    from app.routers import bandwidth, endpoints, reports
+    from app.routers import bandwidth, endpoints, reports, snmp
     from app.routers.auth import get_current_user, require_admin
 
     engine_url = timescale_dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -141,6 +172,7 @@ def api_client(timescale_dsn, monkeypatch):
     app.include_router(bandwidth.router, prefix="/api/v1")
     app.include_router(endpoints.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(snmp.router, prefix="/api/v1")
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_user
     app.dependency_overrides[require_admin] = override_user

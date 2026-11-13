@@ -176,15 +176,27 @@ def test_leader_steps_down_and_stops_listening_when_its_lock_connection_dies():
         async def fake_listen(channel):
             await asyncio.sleep(3600)
 
+        async def fake_traffic_loop():
+            await asyncio.sleep(3600)
+
+        async def fake_link_loop():
+            await asyncio.sleep(3600)
+
+        # The leader runs two broker listeners and, since v3.3.6, the once-a-minute traffic
+        # alert check and the SNMP link-event check; all four must stop on step-down or an old
+        # leader keeps sending.
         with patch.object(dispatcher_mod, "async_engine") as engine, \
              patch.object(dispatcher_mod, "LOCK_CHECK_SECONDS", 0.01), \
-             patch.object(dispatcher, "_listen_broker", side_effect=fake_listen):
+             patch.object(dispatcher, "_listen_broker", side_effect=fake_listen), \
+             patch.object(dispatcher, "_traffic_alert_loop", side_effect=fake_traffic_loop), \
+             patch.object(dispatcher, "_link_event_loop", side_effect=fake_link_loop):
             engine.dialect.name = "postgresql"
             engine.connect = AsyncMock(side_effect=[leader_conn, next_conn])
             await dispatcher.start()
             assert dispatcher._is_leader is True
             first_listeners = list(dispatcher._listener_tasks)
-            assert len(first_listeners) == 2
+            assert len(first_listeners) == 4
+            assert {"alert_traffic_check", "alert_link_events"} <= {t.get_name() for t in first_listeners}
 
             leader_conn.execute.side_effect = asyncpg.InterfaceError("connection is closed")
             await asyncio.sleep(0.1)
@@ -193,7 +205,7 @@ def test_leader_steps_down_and_stops_listening_when_its_lock_connection_dies():
             leader_conn.close.assert_awaited()
             # It competes for the lock again and leads with new listeners.
             assert dispatcher._is_leader is True and dispatcher._lock_conn is next_conn
-            assert len(dispatcher._listener_tasks) == 2
+            assert len(dispatcher._listener_tasks) == 4
             assert not set(first_listeners) & set(dispatcher._listener_tasks)
             await dispatcher.stop()
             assert dispatcher._is_leader is False

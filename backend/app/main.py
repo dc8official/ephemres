@@ -25,6 +25,7 @@ from app.routers import (
     events,
     reports,
     settings as settings_router,
+    snmp,
     topology,
     users,
 )
@@ -245,6 +246,7 @@ app.include_router(endpoints.router, prefix="/api/v1")
 app.include_router(events.router, prefix="/api/v1")
 app.include_router(reports.router, prefix="/api/v1")
 app.include_router(settings_router.router, prefix="/api/v1")
+app.include_router(snmp.router, prefix="/api/v1")
 app.include_router(topology.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(telemetry_router)

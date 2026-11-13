@@ -97,17 +97,19 @@ def test_overview_counts_last_five_minutes(api_client, run_sql):
     _seed(run_sql)
     ov = _data(api_client.get("/api/v1/bandwidth/overview"))
 
-    # Ingress = rows whose destination is a known endpoint, egress = rows whose source is.
-    # CHARACTERIZATION: the A->B row (3 MB) counts in both, so ingress + egress exceed the total.
-    assert ov["total_ingress_bps"] == pytest.approx(15_003_000 * 8 / 300)
-    assert ov["total_egress_bps"] == pytest.approx(9_000_000 * 8 / 300)
-    assert ov["total_ingress_pps"] == pytest.approx(12_050 / 300, abs=0.01)
-    assert ov["total_egress_pps"] == pytest.approx(8_000 / 300, abs=0.01)
+    # CHANGED IN v3.3.6 PHASE 5 (review P3): directions follow the Traffic zones rule
+    # (internal = monitored or private). Ingress was "towards a monitored endpoint", so the A->B
+    # row counted in both ingress and egress; it is now internal, on its own.
+    assert ov["total_ingress_bps"] == pytest.approx(12_003_000 * 8 / 300)
+    assert ov["total_egress_bps"] == pytest.approx(6_000_000 * 8 / 300)
+    assert ov["total_internal_bps"] == pytest.approx(3_000_000 * 8 / 300)
+    assert ov["total_ingress_pps"] == pytest.approx(9_050 / 300, abs=0.01)
+    assert ov["total_egress_pps"] == pytest.approx(5_000 / 300, abs=0.01)
     assert ov["avg_packet_size"] == 22_203_000 // 18_050
     assert ov["total_flows_count"] == 95
     assert ov["active_exporters_count"] == 1
     assert ov["anomaly_flows_count"] == 50  # SYN-only scanner row
-    # CHANGED IN v3.4 PHASE 1: transit (no monitored endpoint on either side) is its own figure.
+    # Transit: neither end internal (8.8.8.8 -> 1.1.1.1).
     assert ov["total_transit_bps"] == pytest.approx(1_200_000 * 8 / 300)
     assert ov["total_transit_pps"] == pytest.approx(1_000 / 300, abs=0.01)
     assert ov["window_seconds"] == 300
@@ -131,9 +133,11 @@ def test_fleet_series_reports_transit_separately(api_client, run_sql):
     by_ts = {datetime.datetime.fromisoformat(p["timestamp"]): p for p in points}
     assert set(by_ts) == {m1, m2}
 
+    # CHANGED IN v3.3.6 PHASE 5 (review P3): the zones rule, with internal traffic on its own.
     p1 = by_ts[m1]
-    assert p1["ingress_bps"] == pytest.approx(15_003_000 * 8 / 60)
-    assert p1["egress_bps"] == pytest.approx(9_000_000 * 8 / 60)
+    assert p1["ingress_bps"] == pytest.approx(12_003_000 * 8 / 60)
+    assert p1["egress_bps"] == pytest.approx(6_000_000 * 8 / 60)
+    assert p1["internal_bps"] == pytest.approx(3_000_000 * 8 / 60)
     assert p1["flows_per_sec"] == pytest.approx(75 / 60, abs=0.01)
     assert p1["transit_bps"] == 0
 
@@ -147,9 +151,10 @@ def test_fleet_series_reports_transit_separately(api_client, run_sql):
 
 def test_hourly_window_includes_fresh_data(api_client, run_sql):
     _seed(run_sql)
-    # CHANGED IN v3.4 PHASE 2 (migration 0014): flow_hourly_rollups uses real-time aggregation,
+    # CHANGED IN v3.4 PHASE 2 (migration 0014): the hourly tier uses real-time aggregation,
     # so minutes the refresh policy has not materialized yet still reach the 24h window.
-    # Before, this list was empty until the next hourly refresh.
+    # Before, this list was empty until the next hourly refresh. Since v3.3.6 phase 5 the fleet
+    # series reads flow_conversation_hourly_rollups (addresses, for the zones rule).
     series = _data(api_client.get("/api/v1/bandwidth/traffic-series", params={"window": "24h"}))
     assert (series["bucket_seconds"], series["directional"]) == (3600, True)
     points = series["points"]
@@ -159,8 +164,9 @@ def test_hourly_window_includes_fresh_data(api_client, run_sql):
         return sum(p[key] for p in points) * 3600 / 8
 
     # bps is rounded to 2 decimals per point, so allow a few bytes of drift.
-    assert total("ingress_bps") == pytest.approx(15_003_000, abs=10)
-    assert total("egress_bps") == pytest.approx(9_000_000, abs=10)
+    assert total("ingress_bps") == pytest.approx(12_003_000, abs=10)
+    assert total("egress_bps") == pytest.approx(6_000_000, abs=10)
+    assert total("internal_bps") == pytest.approx(3_000_000, abs=10)
     assert total("transit_bps") == pytest.approx(1_200_000, abs=10)
 
 
@@ -345,7 +351,10 @@ def test_conversations_counts_cover_every_match(api_client, run_sql):
     _seed(run_sql)
     page = _conversations(api_client, limit=2)
     # Counts are over all five conversations, not the two returned.
-    assert page["counts"] == {"all": 5, "anomalies": 1, "qos": 1, "bulk": 3}
+    # CHANGED IN v3.3.6 PHASE 5 (review C2): Bulk also needs a steady flow (80% of the window,
+    # 1 Mb/s on average). Each conversation here lasts one minute of the hour, so none is bulk;
+    # test_traffic_counts_and_names.py covers the rule.
+    assert page["counts"] == {"all": 5, "anomalies": 1, "qos": 1, "bulk": 0}
     assert page["total"] == 5
     assert [c["total_bytes"] for c in page["items"]] == [12_000_000, 6_000_000]
     assert page["items"][0]["dst_hostname"] == "app-a"
@@ -369,10 +378,13 @@ def test_conversations_server_filters(api_client, run_sql):
     anomalies = _conversations(api_client, quick="anomalies")
     assert [(c["src_ip"], c["anomaly_hint"]) for c in anomalies["items"]] == [(SCANNER_IP, "SYN_ONLY")]
 
-    # Bulk = average packet >= 1100 B: both 443 flows (1333 and 1200 B) and the transit DNS
-    # flow (1200 B); the A->B database flow averages 1000 B.
+    # CHANGED IN v3.3.6 PHASE 5 (review C2): large packets alone (both 443 flows at 1333 and
+    # 1200 B, the transit DNS flow at 1200 B) no longer make a conversation bulk; one minute of
+    # the hour is not a steady flow. They are "Download" when they also carry 10+ packets a flow.
     bulk = _conversations(api_client, quick="bulk")
-    assert sorted(c["avg_packet_size"] for c in bulk["items"]) == [1200, 1200, 1333]
+    assert bulk["items"] == []
+    profiles = {c["avg_packet_size"]: c["traffic_profile"] for c in _conversations(api_client)["items"]}
+    assert profiles[1333] == "Download"
 
     by_flows = _conversations(api_client, sort="flows", limit=1)
     assert by_flows["items"][0]["flow_count"] == 50

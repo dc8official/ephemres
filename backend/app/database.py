@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # engine's and flowd's share of PostgreSQL's connections. Other processes use database.pool_size
 # + database.max_overflow (20 by default).
 API_DB_POOL_ENV = "EPHEMRES_API_DB_POOL"
+# ephemres-snmpd (v3.3.6) only writes short rows between SNMP requests, so it gets a small pool of
+# its own instead of the 20 the engine and flowd hold. It names itself in EPHEMRES_PROCESS before
+# importing this module (monitoring/snmp/daemon.py); the API's connection budget counts it.
+PROCESS_ENV = "EPHEMRES_PROCESS"
+SNMPD_DB_POOL = 5
 
 
 def _is_api_process() -> bool:
@@ -58,6 +63,8 @@ def _pool_sizes() -> tuple[int, int]:
     api_pool = _pool_sizes_for_api(os.environ.get(API_DB_POOL_ENV, "").strip())
     if _is_api_process() and api_pool is not None:
         return api_pool
+    if os.environ.get(PROCESS_ENV) == "snmpd":
+        return SNMPD_DB_POOL, 0
     return settings.database.pool_size, settings.database.max_overflow
 
 
@@ -204,6 +211,7 @@ def connection_budget(
     other_pool: int,
     api_listeners: int = 1,
     leader_listeners: int = 0,
+    snmpd_pool: int = 0,
 ) -> tuple[int, int]:
     """(connections Ephemres may open at its peak, connections PostgreSQL lets it open).
 
@@ -211,8 +219,11 @@ def connection_budget(
     one worker that sends alerts `leader_listeners` more. The engine and flowd each hold their
     pool plus one (the engine measured 17 to 21 against a pool of 20). `reserved` is what only
     superusers may use (superuser_reserved_connections, plus reserved_connections on
-    PostgreSQL 16 and later)."""
+    PostgreSQL 16 and later). ephemres-snmpd (v3.3.6) holds `snmpd_pool` plus one, like the
+    others but with its own small pool."""
     need = api_workers * (api_pool + api_listeners) + leader_listeners + 2 * (other_pool + 1)
+    if snmpd_pool:
+        need += snmpd_pool + 1
     return need, max_connections - reserved
 
 
@@ -255,12 +266,13 @@ async def check_connection_budget(api_listeners: int = 1, leader_listeners: int 
     other_pool = settings.database.pool_size + settings.database.max_overflow
     need, available = connection_budget(
         max_conn, su_reserved + reserved, workers, _POOL_SIZE + _MAX_OVERFLOW, other_pool,
-        api_listeners=api_listeners, leader_listeners=leader_listeners,
+        api_listeners=api_listeners, leader_listeners=leader_listeners, snmpd_pool=SNMPD_DB_POOL,
     )
     if need > available:
         logger.warning(
             "Database connection budget exceeded: %d API worker(s) x (%d + %d for live events), "
-            "%d more on the worker that sends alerts, and the engine and flowd at %d + 1 each can "
+            "%d more on the worker that sends alerts, the engine and flowd at %d + 1 each, and snmpd at "
+            f"{SNMPD_DB_POOL} + 1 can "
             "open %d connections, but PostgreSQL allows %d (max_connections %d, %d reserved). "
             "Raise max_connections or lower the pools; see docs/troubleshooting.md.",
             workers, _POOL_SIZE + _MAX_OVERFLOW, api_listeners, leader_listeners, other_pool,

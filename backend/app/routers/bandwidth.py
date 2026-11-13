@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+from dataclasses import dataclass
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 from uuid import UUID
 
-from app.core.asgi import APIRouter, Depends, HTTPException, Query, status
+from app.core.asgi import APIRouter, Depends, HTTPException, Query, Request, status
 from app.core.orm import case, func, or_, select, text
 from app.core.orm import AsyncSession
 
@@ -26,7 +27,6 @@ from app.config import settings
 from app.database import get_db
 from app.models.endpoint import Endpoint
 from app.models.flow_rollup import (
-    FlowConversationHourlyRollup,
     FlowDailyRollup,
     FlowHourlyRollup,
     FlowInterfaceMinuteRollup,
@@ -35,6 +35,7 @@ from app.models.flow_rollup import (
 from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse
 from app.schemas.bandwidth import (
+    AnomalySummaryResponse,
     ApplicationDistributionItem,
     ApplicationDistributionResponse,
     BandwidthOverview,
@@ -46,35 +47,36 @@ from app.schemas.bandwidth import (
     InterfaceTelemetryResponse,
     MapExporterRequest,
     QoSDistributionItem,
-    TopConversationItem,
     TopTalkerItem,
     TopTalkersResponse,
     TrafficSeriesPoint,
     TrafficSeriesResponse,
     TrafficZoneItem,
     UnmatchedExporterItem,
+    DownSpan,
+    UsualBand,
+    WanLinkAlertItem,
+    WanLinkSeriesItem,
     WanLinkItem,
-    derive_traffic_profile,
-    format_dscp_label,
-    format_tcp_flags,
+    WanLinkNowItem,
+    WanLinksResponse,
 )
 from app.schemas.endpoints import InterfaceConfig
 from app.services import conversations as conversation_queries
-from app.services import wan_edge
+from app.services import interface_table, interface_traffic, snmp_inventory, wan_edge, wan_links
 from app.services.driver_manager import driver_manager
+from app.services.endpoint_filter import EndpointFilter, filter_from_request, traffic_scope
+from app.services.endpoint_filter import conditions as endpoint_filter_conditions
 from app.services.flow_metrics import (
     PROTOCOL_MAP,
     TRAFFIC_ZONES,
     bits_per_second,
-    classify_zone,
     configured_speed_mbps,
     dscp_breakdown,
-    dscp_from_tos,
     interface_alias,
     interface_role,
-    is_internal_address,
     percentile_with_idle,
-    tcp_anomaly,
+    service_label,
     utilization_pct,
 )
 
@@ -127,24 +129,6 @@ async def get_flow_store() -> Optional[Any]:
 
 async def get_flow_redis() -> Optional[Any]:
     return await _init_flow_store_pool()
-
-
-PORT_LABEL_MAP = {
-    22: "SSH",
-    53: "DNS",
-    80: "HTTP",
-    123: "NTP",
-    161: "SNMP",
-    443: "HTTPS",
-    8080: "HTTP-Alt",
-    8443: "HTTPS-Alt",
-    3306: "MySQL",
-    5432: "PostgreSQL",
-    6379: "Redis",
-    9200: "Elasticsearch",
-    2055: "NetFlow",
-    4739: "IPFIX",
-}
 
 
 WINDOWS = {
@@ -232,68 +216,88 @@ def _require_window_covered(delta: datetime.timedelta, kept: datetime.timedelta,
         )
 
 
+async def _traffic_filter(request: Request) -> EndpointFilter:
+    """The shared filter (site, location, tag, type, q) from the query string."""
+    return filter_from_request(request)
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """What a Traffic page request covers (build plan 7.5 step 2).
+
+    `routers`: None for every router plus flows from unregistered sources, else only what these
+    routers reported (empty: nothing matched). `device`: the one device picked, when it is in
+    the filter; the views that belong to one router (its interfaces, its interface chart) use it.
+    """
+    routers: Optional[List[UUID]]
+    device: Optional[UUID]
+
+
+def _as_uuid(value: Any) -> Optional[UUID]:
+    """A query value, or None for anything else (route functions called directly in tests get
+    the Query marker for a parameter they leave out)."""
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str) and value:
+        return UUID(value)
+    return None
+
+
+async def _scope(
+    db: AsyncSession, endpoint_filter: Any, device_id: Any = None, exporter_id: Any = None
+) -> _Scope:
+    """The filter plus an optional device, resolved by endpoint_filter.traffic_scope. `exporter_id`
+    is the old name of `device_id` and is still accepted, so saved links keep working."""
+    picked = _as_uuid(device_id) or _as_uuid(exporter_id)
+    routers = await traffic_scope(db, endpoint_filter if isinstance(endpoint_filter, EndpointFilter) else None, picked)
+    return _Scope(routers=routers, device=picked if routers and routers == [picked] else None)
+
+
 @router.get("/overview", response_model=APIResponse)
 async def get_bandwidth_overview(
     exporter_id: Optional[UUID] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Throughput, packet rates and TCP anomalies over the last five complete minutes.
 
-    Fleet-wide by default, or for one exporter with `exporter_id`.
-    - Ingress: flows towards a monitored endpoint; egress: flows from one. A flow between two
-      monitored endpoints counts in both.
-    - Transit: flows with no monitored endpoint on either side, reported separately.
+    Every router by default; the shared filter and `device_id` narrow it to the routers in
+    scope (see _scope).
+    - Ingress (inbound): external to internal; egress (outbound): internal to external;
+      internal: both ends internal; transit: neither. Internal means a monitored endpoint or a
+      private address, the Traffic zones rule. Each conversation counts once, however many
+      routers reported it.
     - avg_packet_size: total bytes / total packets.
     - Anomalies: SYN-only (half-open) and RST-without-FIN flows.
-    - WAN: in/out over interfaces an admin marked as WAN, which counts each packet once at the
-      network edge (the totals above count it once per exporter it crossed).
+    - WAN: in/out over interfaces an admin marked as WAN.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     window_end = now.replace(second=0, microsecond=0)
     window_start = window_end - datetime.timedelta(seconds=OVERVIEW_WINDOW_SECONDS)
-    window_filters = [FlowMinuteRollup.bucket >= window_start, FlowMinuteRollup.bucket < window_end]
-    if exporter_id is not None:
-        window_filters.append(FlowMinuteRollup.exporter_id == exporter_id)
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    where_sql, where_params = conversation_queries.build_filters(window_start, exporter_ids=scope.routers)
+    where_sql += " AND bucket < :window_end"
+    where_params["window_end"] = window_end
 
-    to_endpoint = FlowMinuteRollup.dst_endpoint_id.is_not(None)
-    from_endpoint = FlowMinuteRollup.src_endpoint_id.is_not(None)
-    unattributed = FlowMinuteRollup.src_endpoint_id.is_(None) & FlowMinuteRollup.dst_endpoint_id.is_(None)
+    rows = await conversation_queries.direction_totals(db, where_sql, where_params)
+    side = {f"{d}_{unit}": 0 for d in conversation_queries.DIRECTIONS for unit in ("bytes", "packets")}
+    side["flows"] = 0
+    side.update({k: int(v or 0) for k, v in (rows[0] if rows else {}).items()})
+    total_bytes = sum(side[f"{d}_bytes"] for d in conversation_queries.DIRECTIONS)
+    total_packets = sum(side[f"{d}_packets"] for d in conversation_queries.DIRECTIONS)
+    total_flows = side["flows"]
 
-    stmt = select(
-        func.coalesce(func.sum(FlowMinuteRollup.bytes), 0).label("total_bytes"),
-        _sum_where(to_endpoint, FlowMinuteRollup.bytes).label("ingress_bytes"),
-        _sum_where(from_endpoint, FlowMinuteRollup.bytes).label("egress_bytes"),
-        _sum_where(unattributed, FlowMinuteRollup.bytes).label("transit_bytes"),
-        func.coalesce(func.sum(FlowMinuteRollup.packets), 0).label("total_packets"),
-        _sum_where(to_endpoint, FlowMinuteRollup.packets).label("ingress_packets"),
-        _sum_where(from_endpoint, FlowMinuteRollup.packets).label("egress_packets"),
-        _sum_where(unattributed, FlowMinuteRollup.packets).label("transit_packets"),
-        func.coalesce(func.sum(FlowMinuteRollup.flow_count), 0).label("total_flows"),
-        func.count(
-            func.distinct(
-                case(
-                    (FlowMinuteRollup.exporter_id != SENTINEL_UUID, FlowMinuteRollup.exporter_id),
-                    else_=None,
-                )
-            )
-        ).label("active_exporters"),
-    ).where(*window_filters)
-
-    res = await db.execute(stmt)
-    row = res.one_or_none()
-    (
-        total_bytes,
-        ingress_bytes,
-        egress_bytes,
-        transit_bytes,
-        total_packets,
-        ingress_packets,
-        egress_packets,
-        transit_packets,
-        total_flows,
-        active_exporters,
-    ) = (int(v or 0) for v in (row if row else (0,) * 10))
+    # Routers that sent flows in the window (the sentinel is flowd's "unknown exporter").
+    exporters_filters = [FlowMinuteRollup.bucket >= window_start, FlowMinuteRollup.bucket < window_end]
+    if scope.routers is not None:
+        exporters_filters.append(FlowMinuteRollup.exporter_id.in_(scope.routers))
+    active_exporters = int((await db.execute(
+        select(func.count(func.distinct(case(
+            (FlowMinuteRollup.exporter_id != SENTINEL_UUID, FlowMinuteRollup.exporter_id), else_=None,
+        )))).where(*exporters_filters)
+    )).scalar() or 0)
 
     seconds = float(OVERVIEW_WINDOW_SECONDS)
     avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
@@ -304,7 +308,7 @@ async def get_bandwidth_overview(
     anomaly_flows_count = 0
     anomaly_conversations_count = 0
     try:
-        where_sql, where_params = conversation_queries.build_filters(window_start, exporter_id=exporter_id)
+        where_sql, where_params = conversation_queries.build_filters(window_start, exporter_ids=scope.routers)
         where_sql += " AND bucket < :window_end"
         summary = await conversation_queries.anomaly_summary(db, where_sql, {**where_params, "window_end": window_end})
         anomaly_flows_count = summary["flows"]
@@ -312,7 +316,7 @@ async def get_bandwidth_overview(
     except Exception as exc:
         logger.debug("Failed to calculate anomaly flow count: %s", exc)
 
-    wan = await _wan_overview(db, exporter_id, window_start, window_end, seconds)
+    wan = await _wan_overview(db, scope.routers, window_start, window_end, seconds)
 
     # Fetch unmatched count from FastStore
     unmatched_count = 0
@@ -331,34 +335,163 @@ async def get_bandwidth_overview(
 
     return APIResponse.success(
         data=BandwidthOverview(
-            total_ingress_bps=round(bits_per_second(ingress_bytes, seconds), 2),
-            total_egress_bps=round(bits_per_second(egress_bytes, seconds), 2),
-            total_transit_bps=round(bits_per_second(transit_bytes, seconds), 2),
+            total_ingress_bps=round(bits_per_second(side["ingress_bytes"], seconds), 2),
+            total_egress_bps=round(bits_per_second(side["egress_bytes"], seconds), 2),
+            total_internal_bps=round(bits_per_second(side["internal_bytes"], seconds), 2),
+            total_transit_bps=round(bits_per_second(side["transit_bytes"], seconds), 2),
             active_exporters_count=active_exporters,
             unmatched_exporters_count=unmatched_count,
             total_flows_count=total_flows,
-            total_ingress_pps=round(ingress_packets / seconds, 2),
-            total_egress_pps=round(egress_packets / seconds, 2),
-            total_transit_pps=round(transit_packets / seconds, 2),
+            total_ingress_pps=round(side["ingress_packets"] / seconds, 2),
+            total_egress_pps=round(side["egress_packets"] / seconds, 2),
+            total_internal_pps=round(side["internal_packets"] / seconds, 2),
+            total_transit_pps=round(side["transit_packets"] / seconds, 2),
             avg_packet_size=avg_packet_size,
             anomaly_flows_count=anomaly_flows_count,
             anomaly_conversations_count=anomaly_conversations_count,
             window_seconds=OVERVIEW_WINDOW_SECONDS,
-            exporter_id=exporter_id,
+            exporter_id=scope.device,
             **wan,
         )
     )
 
 
+def _band(band: Any) -> Optional[UsualBand]:
+    if band is None:
+        return None
+    return UsualBand(low_bps=round(band.low_bps, 2), high_bps=round(band.high_bps, 2), samples=band.samples)
+
+
+def _round(value: Optional[float], digits: int = 2) -> Optional[float]:
+    return round(value, digits) if value is not None else None
+
+
+def _rates(values: List[Optional[float]]) -> List[Optional[float]]:
+    # Whole bits/s: the charts need no more, and a 30-day chart has 720 points per column.
+    return [round(v) if v is not None else None for v in values]
+
+
+def _series_item(s: Any) -> WanLinkSeriesItem:
+    return WanLinkSeriesItem(
+        bucket_seconds=s.bucket_seconds,
+        times=s.times,
+        in_bps=_rates(s.in_bps),
+        out_bps=_rates(s.out_bps),
+        peak_in_bps=_rates(s.peak_in_bps),
+        peak_out_bps=_rates(s.peak_out_bps),
+        usual_in_low=_rates(s.usual_in_low),
+        usual_in_high=_rates(s.usual_in_high),
+        usual_out_low=_rates(s.usual_out_low),
+        usual_out_high=_rates(s.usual_out_high),
+        down_spans=[DownSpan(start=a, end=b) for a, b in s.down_spans],
+        window_peak_bps=round(s.window_peak_bps),
+        window_peak_percentage=_round(s.window_peak_pct, 1),
+    )
+
+
+@router.get("/wan-links", response_model=APIResponse)
+async def get_wan_links(
+    window: Optional[str] = Query(default=None),
+    series: bool = Query(default=False),
+    exporter_id: Optional[UUID] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Traffic page's "Now" area (build plan 7.5 step 4): every WAN link of the routers in
+    scope over the last five complete minutes, against its speed, its usual range for this hour
+    of the week and today's busiest minute, with what SNMP says of the port and any open traffic
+    alert. Grouped by site (none last), busiest first within a site. Scope as on every other
+    read here: the shared filter plus `device_id` (or its old name `exporter_id`).
+
+    With `series=1` and a `window` (step 5), each link also carries its chart over the window
+    (minutes up to 6h, hours beyond): in, out, each hour's busiest minute, the usual range per
+    bucket and the spans SNMP saw the port down, for every link in one request."""
+    delta = _get_window_delta(window) if series and window else None
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    now = await wan_links.wan_links_now(db, scope.routers, window=delta)
+    items = []
+    for r in now.links:
+        w = r.link
+        items.append(WanLinkNowItem(
+            exporter_id=w.exporter_id,
+            exporter_hostname=w.exporter_hostname,
+            site=w.site,
+            interface_idx=w.interface_idx,
+            name=w.name,
+            speed_mbps=w.speed_mbps,
+            speed_source=w.speed_source,
+            snmp_speed_mbps=w.snmp_speed_mbps,
+            in_bps=round(r.in_bps, 2),
+            out_bps=round(r.out_bps, 2),
+            utilization_percentage=_round(r.utilization_pct),
+            traffic_source="snmp" if r.from_snmp else "flow",
+            usual_in=_band(r.usual_in),
+            usual_out=_band(r.usual_out),
+            usual_grouping=r.usual.grouping,
+            usual_days=r.usual.days,
+            above_usual_in_pct=_round(r.above_usual_in_pct, 1),
+            above_usual_out_pct=_round(r.above_usual_out_pct, 1),
+            today_peak_in_bps=_round(r.peak_in_bps),
+            today_peak_in_hour=r.peak_in_hour,
+            today_peak_out_bps=_round(r.peak_out_bps),
+            today_peak_out_hour=r.peak_out_hour,
+            link_state=r.link_state,
+            down_since=r.down_since,
+            snmp_last_ok_at=r.snmp_last_ok_at,
+            alerts=[
+                WanLinkAlertItem(kind=a.kind, direction=a.direction, since=a.since, peak_pct=_round(a.peak_pct, 1))
+                for a in r.alerts
+            ],
+            series=_series_item(r.series) if r.series is not None else None,
+        ))
+    return APIResponse.success(data=WanLinksResponse(
+        window_start=now.window_start,
+        window_end=now.window_end,
+        day_start=now.day_start,
+        timezone=now.tz_name,
+        links=items,
+        window=window if delta is not None else None,
+    ))
+
+
+@router.get("/anomalies", response_model=APIResponse)
+async def get_anomaly_summary(
+    window: str = Query(default="1h"),
+    exporter_id: Optional[UUID] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Suspicious conversations over the picked window, for the Security tiles. Until v3.3.6 they
+    came from the overview's five minutes while the table under them followed the picker
+    (review P1); now both cover the same window and scope."""
+    delta = _get_window_delta(window)
+    _require_window_covered(delta, _CONVERSATION_ROLLUP_RETENTION, "Conversations")
+    start_time = datetime.datetime.now(datetime.timezone.utc) - delta
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    where_sql, where_params = conversation_queries.build_filters(start_time, exporter_ids=scope.routers)
+    summary = await conversation_queries.anomaly_summary(db, where_sql, where_params)
+    return APIResponse.success(data=AnomalySummaryResponse(
+        window=window,
+        **{k: summary[k] for k in (
+            "conversations", "flows", "all_flows", "syn_conversations", "syn_flows",
+            "rst_conversations", "rst_flows",
+        )},
+    ))
+
+
 async def _wan_overview(
     db: AsyncSession,
-    exporter_id: Optional[UUID],
+    routers: Optional[List[UUID]],
     window_start: datetime.datetime,
     window_end: datetime.datetime,
     seconds: float,
 ) -> Dict[str, Any]:
     """WAN-edge fields of the overview: totals and one row per WAN link, busiest first."""
-    interfaces = await wan_edge.list_wan_interfaces(db, exporter_id)
+    interfaces = await wan_edge.list_wan_interfaces(db, exporter_ids=routers)
     totals = await wan_edge.wan_link_totals(db, interfaces, window_start, window_end)
     zero = {"in_bytes": 0, "out_bytes": 0, "in_packets": 0, "out_packets": 0}
     stats = [(w, totals.get((w.exporter_id, w.interface_idx), zero)) for w in interfaces]
@@ -406,6 +539,8 @@ async def get_traffic_series(
     endpoint_id: Optional[UUID] = Query(default=None),
     interface_idx: Optional[int] = Query(default=None),
     wan_only: bool = Query(default=False),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -416,35 +551,57 @@ async def get_traffic_series(
     With `wan_only` (fleet or exporter scope, no single interface), returns in/out summed over
     WAN-role interfaces as ingress/egress; when none are marked it falls back to the normal
     series and reports `wan_only: false`.
+    Without `wan_only` ("All flows"), points carry the four directions of the Traffic zones
+    rule, each conversation counted once (see _direction_point), over the routers in scope.
+    One picked device (`device_id`, or its old name `exporter_id`) keeps its interface totals.
     """
     delta = _get_window_delta(window)
     now = datetime.datetime.now(datetime.timezone.utc)
     start_time = now - delta
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
 
     if wan_only and not endpoint_id and interface_idx is None:
-        wan_interfaces = await wan_edge.list_wan_interfaces(db, exporter_id)
+        wan_interfaces = await wan_edge.list_wan_interfaces(db, exporter_ids=scope.routers)
         if wan_interfaces:
             predicate, params = wan_edge.interface_filter_sql(wan_interfaces)
             return await _interface_series(db, window, delta, start_time, predicate, params, wan_only=True)
 
-    # Exporter scope (optionally one interface): interface rollups.
-    if exporter_id and not endpoint_id:
-        params: Dict[str, Any] = {"exporter_id": str(exporter_id)}
+    # One device (optionally one interface): interface rollups.
+    if scope.device and not endpoint_id:
+        params: Dict[str, Any] = {"exporter_id": str(scope.device)}
         predicate = "exporter_id = CAST(:exporter_id AS uuid)"
         if interface_idx is not None:
             predicate += " AND interface_idx = :interface_idx"
             params["interface_idx"] = interface_idx
         return await _interface_series(db, window, delta, start_time, predicate, params)
 
-    # Standard endpoint or fleet-wide flow rollup query
+    # The routers in scope up to 30d: the four directions of the zones rule, each conversation
+    # counted once (conversations.direction_totals). 1h and 6h read minutes, longer windows the
+    # hourly conversation tier, so every point is one bucket long.
+    if endpoint_id is None and delta <= WINDOWS["30d"]:
+        bucket_seconds = 60.0 if delta <= WINDOWS["6h"] else 3600.0
+        where_sql, params = conversation_queries.build_filters(start_time, exporter_ids=scope.routers)
+        rows = await conversation_queries.direction_totals(
+            db, where_sql, params, tier="minute" if bucket_seconds == 60.0 else "hour", by_bucket=True,
+        )
+        return APIResponse.success(
+            data=TrafficSeriesResponse(
+                window=window,
+                points=[_direction_point(row, bucket_seconds) for row in rows],
+                bucket_seconds=int(bucket_seconds),
+                directional=True,
+            )
+        )
+
+    # One endpoint's traffic, or the fleet over 1y (daily totals, no direction)
     if endpoint_id:
         _require_window_covered(delta, _ENDPOINT_SERIES_RETENTION, "One endpoint's hourly totals")
     model, bucket_seconds = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
     directional = hasattr(model, "src_endpoint_id")
 
     filters = [model.bucket >= start_time]
-    if exporter_id:
-        filters.append(model.exporter_id == exporter_id)
+    if scope.routers is not None:
+        filters.append(model.exporter_id.in_(scope.routers))
     if endpoint_id and directional:
         filters.append(
             (model.src_endpoint_id == endpoint_id)
@@ -520,6 +677,23 @@ async def get_traffic_series(
     )
 
 
+def _direction_point(row: Dict[str, Any], bucket_seconds: float) -> TrafficSeriesPoint:
+    def bps(side: str) -> float:
+        return round(bits_per_second(int(row[f"{side}_bytes"] or 0), bucket_seconds), 2)
+
+    def pps(side: str) -> float:
+        return round(int(row[f"{side}_packets"] or 0) / bucket_seconds, 2)
+
+    return TrafficSeriesPoint(
+        timestamp=row["bucket"].astimezone(datetime.timezone.utc).isoformat(),
+        ingress_bps=bps("ingress"), egress_bps=bps("egress"),
+        internal_bps=bps("internal"), transit_bps=bps("transit"),
+        ingress_pps=pps("ingress"), egress_pps=pps("egress"),
+        internal_pps=pps("internal"), transit_pps=pps("transit"),
+        flows_per_sec=round(int(row["flows"] or 0) / bucket_seconds, 2),
+    )
+
+
 async def _interface_series(
     db: AsyncSession,
     window: str,
@@ -534,18 +708,18 @@ async def _interface_series(
     Windows up to 6h use the minute table; longer ones use flow_interface_hourly_rollups, which
     is kept 365 days (the minute table keeps 7) and keeps a 7-day chart at 168 points, not 10,080.
     """
-    if delta > datetime.timedelta(hours=6):
-        source, bucket_seconds = "flow_interface_hourly_rollups", 3600
-    else:
-        source, bucket_seconds = "flow_interface_minute_rollups", 60
+    hourly = delta > datetime.timedelta(hours=6)
+    bucket_seconds = 3600 if hourly else 60
+    # SNMP counters where the interface has them, flows otherwise (v3.3.6, services/interface_traffic).
+    source = interface_traffic.source_for(hourly, "{t}.bucket >= :start")
     res = await db.execute(
         text(f"""
             SELECT bucket,
                    COALESCE(SUM(in_bytes), 0) AS in_bytes, COALESCE(SUM(out_bytes), 0) AS out_bytes,
                    COALESCE(SUM(in_packets), 0) AS in_packets, COALESCE(SUM(out_packets), 0) AS out_packets,
                    COALESCE(SUM(flow_count), 0) AS flow_count
-            FROM {source}
-            WHERE bucket >= :start AND {predicate}
+            FROM {source} t
+            WHERE {predicate}
             GROUP BY bucket
             ORDER BY bucket
         """),
@@ -577,19 +751,25 @@ async def get_top_talkers(
     limit: int = Query(default=25, ge=1, le=200),
     endpoint_id: Optional[UUID] = Query(default=None),
     exporter_id: Optional[UUID] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Top addresses by total volume, plus the largest conversations (first page of
     GET /bandwidth/conversations, kept for existing clients).
 
-    Each address's ingress (as destination) and egress (as source) come from one aggregation,
-    so neither side is cut off by a separate per-direction limit.
+    Each address's ingress (received, as destination) and egress (sent, as source) come from
+    one aggregation, so neither side is cut off by a separate per-direction limit. `sites`:
+    the endpoint's site, or the sites of the routers that saw the address.
     """
     delta = _get_window_delta(window)
     _require_window_covered(delta, _CONVERSATION_ROLLUP_RETENTION, "Conversations")
     start_time = datetime.datetime.now(datetime.timezone.utc) - delta
-    where_sql, params = conversation_queries.build_filters(start_time, exporter_id, endpoint_id)
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    where_sql, params = conversation_queries.build_filters(
+        start_time, endpoint_id=endpoint_id, exporter_ids=scope.routers
+    )
     counted_once, params = conversation_queries.counted_once_cte(where_sql, params)
 
     talkers_res = await db.execute(
@@ -622,11 +802,26 @@ async def get_top_talkers(
     )
     talker_rows = [dict(r) for r in talkers_res.mappings()]
 
-    ep_ids = [r["endpoint_id"] for r in talker_rows if r["endpoint_id"]]
+    # Where each talker is (review O5): an endpoint's own site, else the sites of the routers
+    # that saw it (a user's PC or an Internet address is no endpoint).
+    seen_by = await conversation_queries.address_exporters(
+        db, where_sql, dict(params), [str(r["ip"]) for r in talker_rows]
+    )
+    ep_ids = {r["endpoint_id"] for r in talker_rows if r["endpoint_id"]}
+    ep_ids |= {e for exporters in seen_by.values() for e in exporters}
     hostnames: Dict[Any, str] = {}
+    sites: Dict[Any, Optional[str]] = {}
     if ep_ids:
-        h_res = await db.execute(select(Endpoint.id, Endpoint.hostname).where(Endpoint.id.in_(ep_ids)))
-        hostnames = {e_id: h_name for e_id, h_name in h_res.all()}
+        h_res = await db.execute(select(Endpoint.id, Endpoint.hostname, Endpoint.site).where(Endpoint.id.in_(ep_ids)))
+        for e_id, h_name, site in h_res.all():
+            hostnames[e_id], sites[e_id] = h_name, site
+
+    def talker_sites(row: Dict[str, Any]) -> List[str]:
+        own = sites.get(row["endpoint_id"]) if row["endpoint_id"] else None
+        if own:
+            return [own]
+        exporters = seen_by.get(str(row["ip"]).split("/")[0], [])
+        return sorted({sites[e] for e in exporters if sites.get(e)})
 
     top_endpoints = []
     for r in talker_rows:
@@ -643,11 +838,12 @@ async def get_top_talkers(
                 flow_count=int(r["flow_count"] or 0),
                 total_packets=total_packets,
                 avg_packet_size=int(total_bytes // total_packets) if total_packets > 0 else 0,
+                sites=talker_sites(r),
             )
         )
 
     page = await conversation_queries.query_conversations(
-        db, start_time, exporter_id=exporter_id, endpoint_id=endpoint_id, limit=limit
+        db, start_time, endpoint_id=endpoint_id, limit=limit, exporter_ids=scope.routers
     )
     return APIResponse.success(
         data=TopTalkersResponse(top_endpoints=top_endpoints, top_conversations=page["items"])
@@ -666,6 +862,8 @@ async def get_conversations(
     sort: str = Query(default="bytes"),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -673,7 +871,8 @@ async def get_conversations(
 
     Filters: `ip` (either side), `port` (service port), `dscp`, plus `quick` = all | anomalies |
     qos | bulk. `counts` gives the size of each quick filter over every conversation matching
-    the other filters, not just the returned page. `sort` = bytes | flows | packets.
+    the other filters, not just the returned page. `sort` = bytes | flows | packets. The shared
+    filter and `device_id` keep the conversations the routers in scope saw.
     """
     if quick not in conversation_queries.QUICK_FILTERS:
         raise HTTPException(status_code=400, detail=f"quick must be one of {', '.join(conversation_queries.QUICK_FILTERS)}.")
@@ -690,10 +889,11 @@ async def get_conversations(
     delta = _get_window_delta(window)
     _require_window_covered(delta, _CONVERSATION_ROLLUP_RETENTION, "Conversations")
     start_time = datetime.datetime.now(datetime.timezone.utc) - delta
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
     page = await conversation_queries.query_conversations(
         db,
         start_time,
-        exporter_id=exporter_id,
+        exporter_ids=scope.routers,
         endpoint_id=endpoint_id,
         ip=clean_ip,
         port=port,
@@ -715,157 +915,65 @@ async def get_conversations(
     )
 
 
-def _rollup_window_filters(
-    model: Any,
-    start_time: datetime.datetime,
-    exporter_id: Optional[UUID],
-    endpoint_id: Optional[UUID],
-) -> List[Any]:
-    filters = [model.bucket >= start_time]
-    if exporter_id is not None:
-        filters.append(model.exporter_id == exporter_id)
-    if endpoint_id is not None and hasattr(model, "src_endpoint_id"):
-        filters.append(
-            or_(
-                model.src_endpoint_id == endpoint_id,
-                model.dst_endpoint_id == endpoint_id,
-            )
-        )
-    return filters
-
-
-# (table, column) -> exists; schema only changes through migrations, which restart the API.
-# The cache is per worker, so rebuilding a continuous aggregate also needs an API restart.
-_TABLE_COLUMN_CACHE: Dict[Tuple[str, str], bool] = {}
-
-
-async def _db_table_has_column(db: AsyncSession, table: str, column: str) -> bool:
-    """True if `column` exists on `table` (or continuous-aggregate view) in the live database."""
-    key = (table, column)
-    if key not in _TABLE_COLUMN_CACHE:
-        res = await db.execute(
-            text(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_schema = current_schema() "
-                "AND table_name = :table AND column_name = :column LIMIT 1"
-            ),
-            {"table": table, "column": column},
-        )
-        _TABLE_COLUMN_CACHE[key] = res.scalar() is not None
-    return _TABLE_COLUMN_CACHE[key]
-
-
 @router.get("/applications", response_model=APIResponse)
 async def get_applications_breakdown(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
     endpoint_id: Optional[UUID] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns protocol and service port volume distribution, QoS/DSCP class breakdown,
+    """Services, QoS classes and traffic zones over the window.
 
-    and directional Traffic Zone breakdown.
+    - Services: the top 15 (protocol, service port) by bytes, named by flow_metrics.service_label,
+      plus "Other"; shares are of all traffic in the window.
+    - QoS: bytes, packets and flows per DSCP class (RFC 2474 / 3246).
+    - Zones: East-West (both ends internal), North-South Egress (internal to external),
+      North-South Ingress (external to internal), External / Transit (neither). Internal means
+      a monitored endpoint or a private address (flow_metrics.is_internal_address).
 
-    Analytics Pipeline:
-    1. Service Port Breakdown: Top 15 (protocol, dst_port) combinations mapped to standard service names.
-    2. QoS Class Compliance (RFC 2474 / 3246): 6-bit DSCP codepoint extraction from the ToS/Traffic Class
-       byte, grouping byte volume, packet counts, and flow counts across CS0-CS7, AF11-AF41, and EF.
-    3. Directional Traffic Zones:
-       - East-West (Internal): Lateral communication between two monitored/RFC 1918 private endpoints.
-       - North-South Ingress: External internet sources sending traffic to internal cluster endpoints.
-       - North-South Egress: Internal cluster endpoints sending traffic to external destinations.
-       - External / Transit: Monitored router transit flows between unmanaged external peers.
+    All three count each conversation once, however many routers reported it, and read the
+    same rows as Conversations (conversations.traffic_breakdown), so their totals agree. Those
+    rows are kept 90 days: a 1y window gets its last 90 days, and `window_start` says so.
     """
     delta = _get_window_delta(window)
     if endpoint_id:
         _require_window_covered(delta, _ENDPOINT_SERIES_RETENTION, "One endpoint's hourly totals")
     now = datetime.datetime.now(datetime.timezone.utc)
-    start_time = now - delta
+    start_time = max(now - delta, now - _CONVERSATION_ROLLUP_RETENTION)
 
-    model, _ = _select_rollup_model_and_bucket_seconds(window, endpoint_id)
-    app_filters = _rollup_window_filters(model, start_time, exporter_id, endpoint_id)
-    # One endpoint's traffic counts each conversation once per bucket (see _counted_once).
-    counted_once = endpoint_id is not None and hasattr(model, "src_endpoint_id")
-    source, app_from = model, None
-    if counted_once:
-        app_from = _counted_once(model, app_filters)
-        source, app_filters = app_from.c, []
-
-    # 1. Top 15 (protocol, dst_port) Application Services
-    stmt = (
-        select(
-            source.protocol,
-            source.dst_port,
-            func.sum(source.bytes).label("total_bytes"),
-        )
-        .where(*app_filters)
-        .group_by(source.protocol, source.dst_port)
-        .order_by(func.sum(source.bytes).desc())
-        .limit(15)
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    where_sql, params = conversation_queries.build_filters(
+        start_time, endpoint_id=endpoint_id, exporter_ids=scope.routers
     )
+    params["end"] = now
+    breakdown = await conversation_queries.traffic_breakdown(db, where_sql, params)
+    overall_bytes = breakdown["total_bytes"]
 
-    res = await db.execute(_select_from(stmt, app_from))
-    rows = res.all()
+    def share(part: int) -> float:
+        return round(part / overall_bytes * 100.0, 2) if overall_bytes > 0 else 0.0
 
-    # Shares are of all traffic in the window, not of the top 15; the rest becomes "Other".
-    total_res = await db.execute(_select_from(select(func.coalesce(func.sum(source.bytes), 0)).where(*app_filters), app_from))
-    overall_bytes = int(total_res.scalar() or 0)
-
-    apps: List[ApplicationDistributionItem] = []
-    for proto_id, port, byte_sum in rows:
-        b_val = int(byte_sum or 0)
-        p_name = PROTOCOL_MAP.get(proto_id, f"P-{proto_id}")
-        label = PORT_LABEL_MAP.get(port, f"{p_name}/{port}")
-        pct = (b_val / overall_bytes * 100.0) if overall_bytes > 0 else 0.0
-        apps.append(
-            ApplicationDistributionItem(
-                protocol_name=p_name,
-                port=int(port),
-                service_label=label,
-                total_bytes=b_val,
-                percentage=round(pct, 2),
-            )
+    apps: List[ApplicationDistributionItem] = [
+        ApplicationDistributionItem(
+            protocol_name=PROTOCOL_MAP.get(proto_id, f"P-{proto_id}"),
+            port=port,
+            service_label=service_label(proto_id, port),
+            total_bytes=b_val,
+            percentage=share(b_val),
         )
+        for proto_id, port, b_val in breakdown["applications"][:15]
+    ]
     other_bytes = overall_bytes - sum(a.total_bytes for a in apps)
     if other_bytes > 0:
         apps.append(
             ApplicationDistributionItem(
-                protocol_name="Other",
-                port=0,
-                service_label="Other",
-                total_bytes=other_bytes,
-                percentage=round(other_bytes / overall_bytes * 100.0, 2),
-                is_other=True,
+                protocol_name="Other", port=0, service_label="Other",
+                total_bytes=other_bytes, percentage=share(other_bytes), is_other=True,
             )
         )
 
-    # 2. QoS / DSCP Breakdown
-    # On TimescaleDB the hourly/daily tiers are continuous aggregates that migration 0013 could
-    # not extend with `tos`; fall back to the hourly conversation tier (90-day retention) for ToS
-    # data. The response reports the tier and start actually used, since a 1y window then only
-    # gets 90 days of QoS data next to 365 days of application data.
-    qos_model = model
-    qos_start = start_time
-    if model is not FlowMinuteRollup and not await _db_table_has_column(db, model.__tablename__, "tos"):
-        qos_model = FlowConversationHourlyRollup
-        qos_start = max(start_time, now - _CONVERSATION_ROLLUP_RETENTION)
-    qos_filters = _rollup_window_filters(qos_model, qos_start, exporter_id, endpoint_id)
-    qos_source, qos_from = qos_model, None
-    if counted_once:
-        qos_from = _counted_once(qos_model, qos_filters, with_tos=True)
-        qos_source, qos_filters = qos_from.c, []
-    qos_stmt = (
-        select(
-            qos_source.tos,
-            func.coalesce(func.sum(qos_source.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(qos_source.packets), 0).label("total_packets"),
-            func.coalesce(func.sum(qos_source.flow_count), 0).label("flow_count"),
-        )
-        .where(*qos_filters)
-        .group_by(qos_source.tos)
-    )
-    qos_res = await db.execute(_select_from(qos_stmt, qos_from))
     qos_classes: List[QoSDistributionItem] = [
         QoSDistributionItem(
             dscp=item["dscp"],
@@ -875,81 +983,31 @@ async def get_applications_breakdown(
             flow_count=item["flow_count"],
             percentage=round(item["percentage"], 2),
         )
-        for item in dscp_breakdown(qos_res.all())
+        for item in dscp_breakdown(breakdown["qos"])
     ]
 
-    # 3. Traffic Zone Breakdown (East-West, North-South, External)
-    zone_sums = {zone: {"bytes": 0, "flows": 0} for zone in TRAFFIC_ZONES}
-
-    # Zones need addresses: above the minute table they come from the hourly conversation tier,
-    # so the same rule applies at every window. A 1y window gets its last 90 days; the response
-    # says so, like QoS.
-    zone_start = start_time
-    zone_source, zone_filters, zone_from = source, app_filters, app_from
-    if not hasattr(model, "src_ip"):
-        zone_model = FlowConversationHourlyRollup
-        zone_start = max(start_time, now - _CONVERSATION_ROLLUP_RETENTION)
-        zone_source, zone_from = zone_model, None
-        zone_filters = _rollup_window_filters(zone_model, zone_start, exporter_id, endpoint_id)
-        if counted_once:
-            zone_from = _counted_once(zone_model, zone_filters)
-            zone_source, zone_filters = zone_from.c, []
-    zone_stmt = (
-        select(
-            zone_source.src_ip,
-            zone_source.dst_ip,
-            zone_source.src_endpoint_id,
-            zone_source.dst_endpoint_id,
-            func.sum(zone_source.bytes).label("total_bytes"),
-            func.sum(zone_source.flow_count).label("flow_count"),
+    zone_bytes = sum(z["bytes"] for z in breakdown["zones"].values())
+    traffic_zones = [
+        TrafficZoneItem(
+            zone=name,
+            total_bytes=breakdown["zones"][name]["bytes"],
+            flow_count=breakdown["zones"][name]["flows"],
+            percentage=round(breakdown["zones"][name]["bytes"] / zone_bytes * 100.0, 2) if zone_bytes else 0.0,
         )
-        .where(*zone_filters)
-        .group_by(
-            zone_source.src_ip,
-            zone_source.dst_ip,
-            zone_source.src_endpoint_id,
-            zone_source.dst_endpoint_id,
-        )
-    )
-    zone_res = await db.execute(_select_from(zone_stmt, zone_from))
-    for z_row in zone_res.all():
-        if len(z_row) < 5:
-            continue
-        s_ip = str(z_row[0])
-        d_ip = str(z_row[1])
-        s_ep = z_row[2]
-        d_ep = z_row[3]
-        z_b = int(z_row[4] or 0)
-        z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
-
-        z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
-        zone_sums[z_key]["bytes"] += z_b
-        zone_sums[z_key]["flows"] += z_f
-
-    total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
-    traffic_zones: List[TrafficZoneItem] = []
-    for z_name in TRAFFIC_ZONES:
-        data = zone_sums[z_name]
-        pct = (data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0
-        traffic_zones.append(
-            TrafficZoneItem(
-                zone=z_name,
-                total_bytes=data["bytes"],
-                flow_count=data["flows"],
-                percentage=round(pct, 2),
-            )
-        )
+        for name in TRAFFIC_ZONES
+    ]
 
     return APIResponse.success(
         data=ApplicationDistributionResponse(
             applications=apps,
             qos_classes=qos_classes,
-            qos_source=qos_model.__tablename__,
-            qos_window_start=qos_start,
+            qos_source=conversation_queries.tier_table(where_sql, params),
+            qos_window_start=start_time,
             traffic_zones=traffic_zones,
             total_bytes=overall_bytes,
             zones_resolution="ip",
-            zones_window_start=zone_start,
+            zones_window_start=start_time,
+            window_start=start_time,
         )
     )
 
@@ -997,13 +1055,36 @@ async def _unmatched_flow_rate(store_client: Any, ip: str) -> Optional[float]:
         return None
 
 
+# Roles that mark an endpoint as a flow exporter (enrol sets FLOW_EXPORTER).
+FLOW_EXPORTER_ROLES = ("FLOW_EXPORTER", "HYBRID_GATEWAY")
+
+
+def _text_or_none(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value else None
+
+
+async def _snmp_device_ids(db: AsyncSession) -> List[str]:
+    """Endpoints ephemres-snmpd keeps poll state for (migration 0026)."""
+    try:
+        res = await db.execute(text("SELECT endpoint_id FROM snmp_device_state"))
+        return [str(r[0]) for r in res.all()]
+    except Exception:
+        # A database before migration 0026 has no SNMP.
+        return []
+
+
 @router.get("/exporters", response_model=APIResponse)
 async def list_flow_exporters(
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Lists configured flow exporters and detected unmatched exporter candidates.
+    """The Traffic page's devices, and flow sources not yet registered.
+
+    Devices are routers that export flows or are polled over SNMP (an SNMP-only router has
+    traffic too: its WAN links' counters). With the shared filter, only the devices it matches,
+    so the picker offers what the page can show. Sorted by site (none last), then name.
+    Unregistered sources are not filtered: they have no site or tags yet.
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     since_24h = now_utc - datetime.timedelta(hours=24)
@@ -1020,18 +1101,30 @@ async def list_flow_exporters(
         .distinct()
     )
 
+    filter_conditions = (
+        endpoint_filter_conditions(endpoint_filter) if isinstance(endpoint_filter, EndpointFilter) else []
+    )
+    # Polled over SNMP: a credential set now, or poll state from ephemres-snmpd (its counters
+    # stay behind the WAN charts after a credential is removed).
+    snmp_ids = await _snmp_device_ids(db)
     stmt = select(Endpoint).where(
         Endpoint.deleted_at.is_(None),
         Endpoint.endpoint_status != "DELETED",
         or_(
-            Endpoint.device_role.in_(["FLOW_EXPORTER", "HYBRID_GATEWAY"]),
+            Endpoint.device_role.in_(FLOW_EXPORTER_ROLES),
             func.cardinality(Endpoint.flow_exporter_ips) > 0,
             Endpoint.id.in_(recent_exporters_sub),
             Endpoint.id.in_(recent_if_exporters_sub),
+            Endpoint.snmp_credential_id.is_not(None),
+            Endpoint.id.in_(snmp_ids),
         ),
+        *filter_conditions,
     ).order_by(Endpoint.hostname.asc())
     res = await db.execute(stmt)
-    endpoints = res.scalars().all()
+    endpoints = sorted(
+        res.scalars().all(),
+        key=lambda ep: (getattr(ep, "site", None) is None, str(getattr(ep, "site", "") or "").lower(), ep.hostname.lower()),
+    )
 
     # Exporter health: newest flow minute in the last 24 h and the rate over the last five
     # complete minutes.
@@ -1063,6 +1156,9 @@ async def list_flow_exporters(
         exp_ips = [str(ip) for ip in (ep.flow_exporter_ips or [])]
         aliases = ep.flow_interface_aliases or {}
         last_bucket, recent_flows = health.get(str(ep.id), (None, 0))
+        sends_flows = bool(
+            getattr(ep, "device_role", None) in FLOW_EXPORTER_ROLES or exp_ips or str(ep.id) in health
+        )
         exporters.append(
             FlowExporterItem(
                 id=ep.id,
@@ -1073,6 +1169,9 @@ async def list_flow_exporters(
                 device_role=getattr(ep, "device_role", "ACTIVE_HOST"),
                 last_flow_time=last_bucket.astimezone(datetime.timezone.utc).isoformat() if last_bucket else None,
                 flows_per_sec=round(recent_flows / OVERVIEW_WINDOW_SECONDS, 2),
+                site=_text_or_none(getattr(ep, "site", None)),
+                snmp_polled=getattr(ep, "snmp_credential_id", None) is not None or str(ep.id) in snmp_ids,
+                sends_flows=sends_flows,
             )
         )
 
@@ -1275,161 +1374,90 @@ async def map_unmatched_exporter(
 
 @router.get("/interfaces", response_model=APIResponse)
 async def get_interfaces_telemetry(
-    exporter_id: UUID = Query(...),
+    exporter_id: Optional[UUID] = Query(default=None),
     window: str = Query(default="1h"),
+    device_id: Optional[UUID] = Query(default=None),
+    endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Returns interface-level telemetry metrics for an exporter node.
-    Calculates ingress/egress bps and link utilization.
-    """
+    """Interfaces with their traffic now (last five complete minutes) and over the window (average,
+    P95, busiest minute) and their status: of one device (`device_id`, or its old name
+    `exporter_id`), or across every router the shared filter picks (build plan 7.5 step 6).
+
+    Status comes from SNMP for a polled router (up / down / shut down, with the time it was down
+    in the window), else from whether flows showed traffic. One device: by index; across devices:
+    WAN links first, then the busiest; shut-down ports last (services/interface_table)."""
     delta = _get_window_delta(window)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    start_time = now - delta
+    picked = _as_uuid(device_id) or _as_uuid(exporter_id)
+    scope = await _scope(db, endpoint_filter, device_id, exporter_id)
+    routers = scope.routers
+    if picked is not None and routers is None:
+        routers = [picked]
 
-    # Get endpoint for alias & speed mappings
-    ep_stmt = select(Endpoint).where(
-        Endpoint.id == exporter_id,
-        Endpoint.deleted_at.is_(None),
-    )
-    ep_res = await db.execute(ep_stmt)
-    endpoint = ep_res.scalar_one_or_none()
-    aliases = getattr(endpoint, "flow_interface_aliases", {}) or {}
-
-    # Up to 7 days the minute table answers directly; 30 days needs the hourly rollup (the minute
-    # table is kept 7 days). p95 is over minutes, or over hourly averages for the hourly tier.
-    hourly = delta > datetime.timedelta(days=7)
-    if hourly:
-        source, slot_seconds = "flow_interface_hourly_rollups", 3600
-        peak_in_col, peak_out_col = "peak_in_minute_bytes", "peak_out_minute_bytes"
-    else:
-        source, slot_seconds = "flow_interface_minute_rollups", 60
-        peak_in_col, peak_out_col = "in_bytes", "out_bytes"
-    params = {"exporter_id": str(exporter_id), "start": start_time}
-
-    first_res = await db.execute(
-        text(f"SELECT MIN(bucket) FROM {source} WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start"),
-        params,
-    )
-    first_bucket = first_res.scalar()
-    coverage_start = max(start_time, first_bucket) if first_bucket else start_time
-    covered_seconds = max(60.0, (now - coverage_start).total_seconds())
-    total_slots = int(-(-covered_seconds // slot_seconds))
-
-    res = await db.execute(
-        text(f"""
-            SELECT interface_idx,
-                   SUM(in_bytes) AS in_bytes, SUM(out_bytes) AS out_bytes,
-                   SUM(in_packets) AS in_packets, SUM(out_packets) AS out_packets,
-                   SUM(flow_count) AS flow_count,
-                   MAX({peak_in_col}) AS peak_in, MAX({peak_out_col}) AS peak_out,
-                   array_agg(in_bytes ORDER BY in_bytes) AS in_slots,
-                   array_agg(out_bytes ORDER BY out_bytes) AS out_slots
-            FROM {source}
-            WHERE exporter_id = CAST(:exporter_id AS uuid) AND bucket >= :start
-            GROUP BY interface_idx
-            ORDER BY interface_idx
-        """),
-        params,
-    )
-    rows = res.all()
-
-    # Active interfaces from FastStore if available
-    active_store_indices: set[int] = set()
-    active_redis_indices = active_store_indices
+    # Interfaces flowd saw lately on each router, before they reach the rollups (FastStore).
+    active: Dict[str, set] = {}
     store_client = await get_flow_store()
-    if store_client:
-        try:
-            members = await store_client.smembers(f"flow:exporter:{exporter_id}:interfaces")
-            for m in members:
-                try:
-                    active_store_indices.add(int(m))
-                except ValueError:
-                    pass
-        except Exception as e:
-            logger.debug("Failed to read active interfaces from FastStore: %s", e)
+    if store_client and routers:
+        for router_id in routers:
+            try:
+                members = await store_client.smembers(f"flow:exporter:{router_id}:interfaces")
+                active[str(router_id)] = {int(m) for m in members if str(m).lstrip("-").isdigit()}
+            except Exception as e:
+                logger.debug("Failed to read active interfaces from FastStore: %s", e)
 
-    zero_stats = {
-        "in_bytes": 0, "out_bytes": 0, "in_packets": 0, "out_packets": 0, "flow_count": 0,
-        "peak_in": 0, "peak_out": 0, "in_slots": [], "out_slots": [],
-    }
-    all_if_indices: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        all_if_indices[int(row[0])] = {
-            "in_bytes": int(row[1] or 0),
-            "out_bytes": int(row[2] or 0),
-            "in_packets": int(row[3] or 0),
-            "out_packets": int(row[4] or 0),
-            "flow_count": int(row[5] or 0),
-            "peak_in": int(row[6] or 0),
-            "peak_out": int(row[7] or 0),
-            "in_slots": list(row[8] or []),
-            "out_slots": list(row[9] or []),
-        }
-
-    # Include any interfaces configured in aliases even if 0 traffic recorded
-    for k_str in aliases:
-        try:
-            all_if_indices.setdefault(int(k_str), dict(zero_stats))
-        except ValueError:
-            pass
-
-    interfaces: List[InterfaceTelemetryItem] = []
-    for if_idx in sorted(all_if_indices.keys()):
-        stats = all_if_indices[if_idx]
-        in_b = stats["in_bytes"]
-        out_b = stats["out_bytes"]
-        in_bps = bits_per_second(in_b, covered_seconds)
-        out_bps = bits_per_second(out_b, covered_seconds)
-        in_p95 = bits_per_second(percentile_with_idle(stats["in_slots"], total_slots), slot_seconds)
-        out_p95 = bits_per_second(percentile_with_idle(stats["out_slots"], total_slots), slot_seconds)
-        in_peak = bits_per_second(stats["peak_in"], 60.0)
-        out_peak = bits_per_second(stats["peak_out"], 60.0)
-
-        alias_data = aliases.get(str(if_idx))
-        name, speed_mbps = interface_alias(alias_data, f"Interface {if_idx}")
-        speed_mbps = max(1, speed_mbps)
-        speed_configured = configured_speed_mbps(alias_data) is not None
-
-        def _util(bps_in: float, bps_out: float) -> Optional[float]:
-            return round(utilization_pct(max(bps_in, bps_out), speed_mbps), 2) if speed_configured else None
-
-        is_active = (if_idx in active_store_indices) or (stats["flow_count"] > 0) or ((in_b + out_b) > 0)
-
-        interfaces.append(
-            InterfaceTelemetryItem(
-                interface_idx=if_idx,
-                name=name,
-                speed_mbps=speed_mbps,
-                speed_configured=speed_configured,
-                role=interface_role(alias_data),
-                in_bytes=in_b,
-                out_bytes=out_b,
-                in_bps=round(in_bps, 2),
-                out_bps=round(out_bps, 2),
-                in_packets=stats["in_packets"],
-                out_packets=stats["out_packets"],
-                flow_count=stats["flow_count"],
-                utilization_percentage=_util(in_bps, out_bps),
-                is_active=is_active,
-                in_p95_bps=round(in_p95, 2),
-                out_p95_bps=round(out_p95, 2),
-                in_peak_bps=round(in_peak, 2),
-                out_peak_bps=round(out_peak, 2),
-                p95_utilization_percentage=_util(in_p95, out_p95),
-                peak_utilization_percentage=_util(in_peak, out_peak),
-            )
-        )
+    table = await interface_table.interface_table(
+        db, routers, delta, active_indices=active, single_device=picked is not None,
+    )
+    items = []
+    for r in table.rows:
+        alias_data = r.alias_data
+        items.append(InterfaceTelemetryItem(
+            **r.source_info,
+            traffic_source=r.traffic_source,
+            exporter_id=r.exporter_id,
+            exporter_hostname=r.exporter_hostname,
+            site=r.site,
+            interface_idx=r.interface_idx,
+            name=r.name,
+            speed_mbps=r.speed_mbps,
+            speed_configured=r.speed_configured,
+            role=r.role,
+            alert=alias_data.get("alert") if isinstance(alias_data, dict) and isinstance(alias_data.get("alert"), dict) else None,
+            in_bytes=r.in_bytes,
+            out_bytes=r.out_bytes,
+            in_bps=round(r.in_bps, 2),
+            out_bps=round(r.out_bps, 2),
+            in_packets=r.in_packets,
+            out_packets=r.out_packets,
+            flow_count=r.flow_count,
+            utilization_percentage=r.utilization_percentage,
+            is_active=r.is_active,
+            in_p95_bps=round(r.in_p95_bps, 2),
+            out_p95_bps=round(r.out_p95_bps, 2),
+            in_peak_bps=round(r.in_peak_bps, 2),
+            out_peak_bps=round(r.out_peak_bps, 2),
+            p95_utilization_percentage=r.p95_utilization_percentage,
+            peak_utilization_percentage=r.peak_utilization_percentage,
+            now_in_bps=round(r.now_in_bps, 2),
+            now_out_bps=round(r.now_out_bps, 2),
+            status=r.status,
+            admin_status=r.admin_status,
+            down_spans=[DownSpan(start=a, end=b) for a, b in r.down_spans],
+            down_seconds=r.down_seconds,
+        ))
 
     return APIResponse.success(
         data=InterfaceTelemetryResponse(
-            exporter_id=exporter_id,
+            exporter_id=picked if picked is not None and scope.routers != [] else None,
             window=window,
-            interfaces=interfaces,
-            covered_seconds=int(covered_seconds),
-            p95_resolution_seconds=slot_seconds,
-            source=source,
+            interfaces=items,
+            devices=len({i.exporter_id for i in items}),
+            covered_seconds=int(table.covered_seconds),
+            p95_resolution_seconds=table.slot_seconds,
+            # The tier, named as before v3.3.6 (clients may read it). SNMP minutes are mixed in per
+            # interface where present; each interface's traffic_source says so.
+            source="flow_interface_hourly_rollups" if table.hourly else "flow_interface_minute_rollups",
         )
     )
 
@@ -1465,7 +1493,13 @@ async def update_endpoint_interfaces(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid interface index '{idx_str}'. Must be an integer string.",
             )
-        aliases[idx_str] = config.model_dump()
+        # No name typed: the key is left out (v3.3.6), so the device's SNMP name shows instead;
+        # a stored null would read as the text "None". Other fields keep their documented shape
+        # (speed_mbps null when unset).
+        entry = config.model_dump()
+        if not entry.get("name"):
+            entry.pop("name", None)
+        aliases[idx_str] = entry
 
     endpoint.flow_interface_aliases = aliases
     await db.commit()

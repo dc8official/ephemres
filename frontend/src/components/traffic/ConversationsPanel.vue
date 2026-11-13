@@ -37,6 +37,8 @@
           <tr>
             <th>Source</th>
             <th>Destination</th>
+            <th>Site</th>
+            <th v-if="showSeen">First / last seen</th>
             <th>Protocol</th>
             <th>Service port</th>
             <th>Profile &amp; avg packet</th>
@@ -55,6 +57,18 @@
               <button type="button" class="ip-link font-mono tnum" :title="`Show conversations of ${c.dst_ip}`" @click="setIp(c.dst_ip)">{{ stripMask(c.dst_ip) }}</button>
               <span v-if="c.dst_hostname" class="text-muted text-xs block">{{ c.dst_hostname }}</span>
             </td>
+            <!-- Where it was seen (review C1): the sites of the routers that reported it, the
+                 routers themselves on hover. On Security the router and, when it has only one,
+                 its WAN link are spelled out (review S1). -->
+            <td>
+              <span :title="routersTitle(c)">{{ siteText(c) }}</span>
+              <span v-if="!showSeen && c.routers?.length" class="sr-only">, {{ routersTitle(c) }}</span>
+              <span v-if="showSeen && c.routers?.length" class="text-muted text-xs block">{{ routerLine(c) }}</span>
+            </td>
+            <td v-if="showSeen" class="nowrap">
+              <span class="tnum block" :title="seenTitle">{{ when(c.first_seen) }}</span>
+              <span class="tnum text-muted text-xs block">to {{ when(c.last_seen) }}</span>
+            </td>
             <td><span class="status-pill status-unknown">{{ c.protocol }}</span></td>
             <td>
               <button
@@ -63,16 +77,18 @@
                 :class="portTone(c.dst_port)"
                 :title="`Show conversations on port ${c.dst_port}`"
                 @click="setPort(c.dst_port)"
-              >{{ formatPortLabel(c.dst_port) }}</button>
+              >{{ formatPortLabel(c.dst_port, c.service_name) }}</button>
             </td>
             <td>
               <span class="tag" :class="profileTone(c.traffic_profile)">{{ c.traffic_profile }}</span>
-              <span class="text-xs text-muted tnum font-mono block">{{ c.avg_packet_size }} B/pkt · {{ c.packets_per_flow }} pkts/flow</span>
+              <span class="text-xs text-muted tnum font-mono block">{{ c.avg_packet_size }} B/pkt · {{ formatNumber(Math.round(c.packets_per_flow)) }} pkts/flow</span>
             </td>
             <td>
               <div class="tag-group">
+                <!-- Flags only where they explain something: every normal TCP row read
+                     "FIN SYN PSH ACK" (review C4). -->
                 <span
-                  v-if="c.protocol === 'TCP' && c.tcp_flags_labels.length"
+                  v-if="c.protocol === 'TCP' && c.anomaly_hint && c.tcp_flags_labels.length"
                   class="tag tone-neutral font-mono"
                   :title="`TCP flags 0x${(c.tcp_flags || 0).toString(16).padStart(2, '0')}`"
                 >{{ c.tcp_flags_labels.join(' ') }}</span>
@@ -92,7 +108,7 @@
             <td class="text-right tnum text-muted">{{ formatNumber(c.flow_count) }}</td>
           </tr>
           <tr v-if="!loading && items.length === 0">
-            <td colspan="8" class="text-center text-muted empty-row">
+            <td :colspan="showSeen ? 10 : 9" class="text-center text-muted empty-row">
               {{ loadError || (counts.all === 0 && !activeChips.length ? `No conversations in the last ${window}.` : 'No conversations match these filters.') }}
             </td>
           </tr>
@@ -125,7 +141,8 @@ import SegmentedControl from '../ui/SegmentedControl.vue'
 // them and the panel can clear them. `quick` presets the triage filter (e.g. 'anomalies').
 const props = defineProps({
   window: { type: String, required: true },
-  exporterId: { type: String, default: null },
+  // The Traffic page scope: the shared filter plus an optional device (api.trafficScopeParams).
+  scope: { type: [Object, String], default: null },
   endpointId: { type: String, default: null },
   ip: { type: String, default: null },
   port: { type: Number, default: null },
@@ -136,6 +153,11 @@ const props = defineProps({
   title: { type: String, default: 'Conversations' },
   hint: { type: String, default: '' },
   pageSize: { type: Number, default: 25 },
+  // Security's table: a first / last seen column, and the router (with its WAN link when it
+  // has one) under the site (review S1).
+  showSeen: { type: Boolean, default: false },
+  // Server timezone name: times are shown in it, like the rest of the page.
+  timezone: { type: String, default: '' },
   refreshKey: { type: Number, default: 0 },
 })
 const emit = defineEmits(['update:ip', 'update:port', 'update:dscp', 'update:dscpLabel'])
@@ -156,7 +178,7 @@ const quickOptions = computed(() => [
   { value: 'all', label: `All (${formatNumber(counts.value.all)})` },
   { value: 'anomalies', label: `Anomalies (${formatNumber(counts.value.anomalies)})` },
   { value: 'qos', label: `QoS tagged (${formatNumber(counts.value.qos)})` },
-  { value: 'bulk', label: `Bulk (${formatNumber(counts.value.bulk)})` },
+  { value: 'bulk', label: `Bulk (${formatNumber(counts.value.bulk)})`, title: 'Large transfers in full-size packets: seen for at least 30 minutes at 5 Mb/s or more (backups, replication)' },
 ])
 const sortOptions = [
   { value: 'bytes', label: 'Volume' },
@@ -170,7 +192,9 @@ const activeChips = computed(() => {
   const chips = []
   if (props.ip) chips.push({ key: 'ip', label: 'Address', value: stripMask(props.ip), clear: () => emit('update:ip', null) })
   if (props.port !== null && props.port !== undefined) {
-    chips.push({ key: 'port', label: 'Port', value: formatPortLabel(props.port), clear: () => emit('update:port', null) })
+    // The name comes with the rows; until they load the chip shows the number.
+    const name = items.value.find((c) => c.dst_port === Number(props.port))?.service_name
+    chips.push({ key: 'port', label: 'Port', value: formatPortLabel(props.port, name), clear: () => emit('update:port', null) })
   }
   if (props.dscp !== null && props.dscp !== undefined) {
     chips.push({
@@ -183,6 +207,41 @@ const activeChips = computed(() => {
   return chips
 })
 
+// One name per site; a router with no site stands for itself.
+function siteText(c) {
+  const names = [...new Set((c.routers || []).map((r) => r.site || r.hostname || 'Unknown router'))]
+  return names.length ? names.join(', ') : '—'
+}
+
+function routerName(r) {
+  return r.hostname || 'an unregistered router'
+}
+
+// "Seen by abj-rtr1 (Abuja) via Glo MPLS, hq-rtr1 (Lagos HQ)". The bytes are counted once.
+function routersTitle(c) {
+  const parts = (c.routers || []).map((r) =>
+    `${routerName(r)}${r.site ? ` (${r.site})` : ''}${r.wan_link ? ` via ${r.wan_link}` : ''}`)
+  return parts.length ? `Seen by ${parts.join(', ')}` : ''
+}
+
+function routerLine(c) {
+  return (c.routers || []).map((r) => `${routerName(r)}${r.wan_link ? ` · ${r.wan_link}` : ''}`).join(', ')
+}
+
+// Windows over 2 hours read the hourly tier: within an hour, when it started and stopped is
+// not kept.
+const seenTitle = computed(() => (props.window === '1h' ? 'To the minute' : 'To the hour: the first hour it was seen in, and the end of the last'))
+
+function when(iso) {
+  if (!iso) return '—'
+  const opts = { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }
+  try {
+    return new Intl.DateTimeFormat(undefined, { ...opts, timeZone: props.timezone || undefined }).format(new Date(iso))
+  } catch {
+    return new Intl.DateTimeFormat(undefined, opts).format(new Date(iso))
+  }
+}
+
 function stripMask(ip) {
   return String(ip || '').split('/')[0]
 }
@@ -192,7 +251,7 @@ async function load() {
   loading.value = true
   try {
     const res = await getConversations(props.window, {
-      exporterId: props.exporterId,
+      scope: props.scope,
       endpointId: props.endpointId,
       ip: props.ip ? stripMask(props.ip) : null,
       port: props.port,
@@ -238,7 +297,7 @@ watch(
 
 // Any filter change returns to the first page.
 watch(
-  () => [props.window, props.exporterId, props.endpointId, props.ip, props.port, props.dscp, quick.value, sort.value, props.refreshKey],
+  () => [props.window, JSON.stringify(props.scope), props.endpointId, props.ip, props.port, props.dscp, quick.value, sort.value, props.refreshKey],
   () => {
     offset.value = 0
     load()
@@ -442,6 +501,7 @@ button.tag {
   gap: 0.5rem;
 }
 
+.nowrap { white-space: nowrap; }
 .text-center { text-align: center; }
 .text-right { text-align: right; }
 .font-bold { font-weight: 600; }

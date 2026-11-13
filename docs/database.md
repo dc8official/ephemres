@@ -34,7 +34,9 @@ Stores network monitoring targets, IP addresses, operational flags, and multi-IP
 * `ip_address` (`INET`, Unique, Not Null)
 * `device_type` (`VARCHAR(100)`, Not Null: `ROUTER`, `SWITCH`, `SERVER`, `GATEWAY`, `ENDPOINT`, etc.)
 * `device_role` (`VARCHAR(30)`, Default: `'ACTIVE_HOST'`, Not Null) — Monitoring/flow role, enforced by check constraint `ck_endpoints_device_role`: `ACTIVE_HOST` (ICMP-monitored host), `FLOW_EXPORTER` (passive flow exporter, not pinged), `HYBRID_GATEWAY` (monitored and exporting flows), `L2_SWITCH`. Cross-version restores map legacy names (`STANDARD`, `ROOT_GATEWAY`, `AGGREGATION`, `EDGE_ROUTER`, `CORE_SWITCH`, `ACCESS`, …) onto these four.
-* `location` (`VARCHAR(255)`, Nullable)
+* `site` (`VARCHAR(255)`, Nullable; Migration `0023`) — Site, e.g. "Abuja". Free text, matched ignoring case (index on `lower(site)`).
+* `location` (`VARCHAR(255)`, Nullable) — Location within the site, e.g. "Building A" (index on `lower(location)` from `0023`). Before v3.3.6 the only place field, so older installs keep their free text here.
+* `tags` (`TEXT[]`, Default: `'{}'`, Not Null; Migration `0023`) — Lower-case labels, at most 20, without commas, quotes, backslashes or braces (so the array's text form survives a backup). GIN index `ix_endpoints_tags` serves "has any of these tags" (`&&`). The shared filter (`services/endpoint_filter.py`) reads all three.
 * `description` (`TEXT`, Nullable)
 * `monitoring_enabled` (`BOOLEAN`, Default: `true`, Not Null)
 * `endpoint_status` (`VARCHAR(20)`, Default: `'ACTIVE'`, Not Null)
@@ -152,6 +154,89 @@ Audit log of all outbound dispatch attempts.
 * `response_message` (`TEXT`, Nullable) — Truncated response body or error detail.
 * `delivered_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null, Indexed) — Dispatch time (UTC). Delivery latency is not stored.
 
+### `endpoint_baseline_routes` — current and normal path (Migration `0024`, v3.3.6)
+One row per endpoint (`endpoint_id` primary key). `hops` / `total_hops` / `updated_at` keep their columns and now mean the **current** path and when it was last traced; `services/route_paths.py` owns all of them.
+* `current_since` (`TIMESTAMPTZ`, Not Null) — When the current path was confirmed.
+* `normal_hops` (`JSONB`), `normal_since` (`TIMESTAMPTZ`), `normal_pinned` (`BOOLEAN`, Default `false`) — The normal path. It becomes the current path after 24 hours as current unless pinned. Backfilled from the current path on upgrade and on restore of an older backup.
+* `pending_hops` (`JSONB`), `pending_at` (`TIMESTAMPTZ`) — A different path seen once, waiting for a second trace at least 2 minutes later.
+* `recent_changes` (`TIMESTAMPTZ[]`), `flapping_since`, `last_logged_at` (`TIMESTAMPTZ`) — Changes in the last hour (4 or more: flapping) and the 15-minute log limit. Transient: not restored.
+
+### `endpoint_route_changes` (Migration `0024`)
+The route-change log: `id` (`UUID`), `endpoint_id` (FK `endpoints.id` `ON DELETE CASCADE`), `changed_at` (`TIMESTAMPTZ`), `kind` (`path_changed`, `back_to_normal`, `became_normal`, `made_normal`, `pinned`, `unpinned`, `flapping`), `trigger` (`added`, `manual`, `scheduled`, `recovery`, `route_hint`, `transit`, `ttl`, `confirm`), `from_hops` / `to_hops` (`JSONB`), `first_diff_hop` (`INTEGER`), `detail` (`TEXT`). Index on `(endpoint_id, changed_at DESC)`. Pruned after 90 days; backed up and restored.
+
+### SNMP poller tables (Migration `0026`, v3.3.6)
+Written by ephemres-snmpd (`monitoring/snmp/poller.py`), read by `/snmp` and `services/snmp_inventory.py`.
+- **`snmp_credentials`.** Shared credential sets. Backed up and restored, with secrets
+  re-encrypted like alert channels; a set whose secrets cannot be decrypted is restored empty.
+  - `id` (`UUID`), `name` (`VARCHAR(64)`, unique).
+  - `version` (`'2c'` / `'3'`), `username`, `auth_protocol`, `priv_protocol`, `priv_same` (one
+    password for both), `context`.
+  - `port` (1–65535), `timeout_ms` (500–10000), `retries` (0–3).
+  - `secrets` (`TEXT`, ENC:v1: JSON of `community` / `auth_password` / `priv_password`).
+  - `created_at`, `updated_at`.
+- **`endpoints.snmp_credential_id`** (`UUID`, FK `ON DELETE SET NULL`, indexed). The set an
+  endpoint is polled with; NULL means no SNMP. Backed up.
+- **`snmp_device_state`.** One row per polled endpoint. Transient: re-learned after a restore.
+  - `status` (`pending`, `ok`, `partial`, `no_reply`, `auth_failed`, `error`), `last_error`.
+  - `last_poll_at`, `last_ok_at`, `last_probe_at`, `probe_requested_at`, `last_reboot_at`,
+    `inventory_at`.
+  - The clocks used to spot a reboot (`sys_uptime`, `engine_boots`, `if_table_last_change`).
+  - `profile` (`JSONB`, the device profile from `monitoring/snmp/profile.py`).
+- **`snmp_interfaces`.** The device's interfaces, primary key `(endpoint_id, if_index)`.
+  Transient. Typed names and speeds in `flow_interface_aliases` win over these.
+  - `if_name`, `if_descr`, `if_alias`, `if_type`, `speed_mbps`, `mac`.
+  - `admin_status`, `oper_status`, `last_change`, `hc_counters`.
+- **`snmp_interface_events`.** `id`, `endpoint_id`, `if_index`, `if_name`, `at`, `kind` (`up`,
+  `down`, `added`, `removed`, `renumbered`, `reboot`), `detail`. Indexed on
+  `(endpoint_id, at DESC)`; kept 90 days. Transient.
+
+### `snmp_interface_minute_rollups` and `snmp_interface_hourly_rollups` (Migration `0027`, v3.3.6)
+Interface traffic from SNMP counters, written by ephemres-snmpd and read together with the flow
+interface tables through `services/interface_traffic.py` (an SNMP row wins for its minute).
+- **`snmp_interface_minute_rollups`.** TimescaleDB hypertable with 1-day chunks, kept 7 days,
+  no foreign keys (like the flow tables). Backed up and restored as a hypertable.
+  - Primary key `(bucket, exporter_id, interface_idx)`: `bucket` (`TIMESTAMPTZ`), `exporter_id`
+    (the polled endpoint), `interface_idx` (its ifIndex).
+  - `in_bytes`, `out_bytes`, `in_packets`, `out_packets`, `in_errors`, `out_errors`,
+    `in_discards`, `out_discards` (`BIGINT`).
+  - Rows exist only for minutes with something in them.
+  - Built from counter deltas, which are dropped across a reset (`ifCounterDiscontinuityTime`,
+    64-bit counter going back, reboot), after a gap of more than three poll intervals, or
+    above 1.5 x the link speed.
+  - A delta is shared across the minutes it spans.
+- **`snmp_interface_hourly_rollups`.** Real-time continuous aggregate (a plain view without
+  TimescaleDB). Kept 365 days, refreshed hourly over the last 6 days.
+  - The same sums per hour, plus `peak_in_minute_bytes`, `peak_out_minute_bytes` and
+    `minutes_with_data`.
+- **`snmp_device_state.counters`** (`JSONB`). Each interface's last reading `[wall time, sysUpTime,
+  discontinuity, 64-bit, values]`, so a restart of snmpd carries on with deltas.
+
+### `snmp_neighbours` and step 3 columns (Migration `0028`, v3.3.6)
+- **`snmp_neighbours`.** LLDP / LLDP-V2 / CDP neighbours per polled endpoint. Transient:
+  re-read with each inventory, and rows not reported again are deleted.
+  - `endpoint_id` (FK cascade), `nkey` (identifies a neighbour across reads; unique with the
+    endpoint), `protocol`.
+  - `local_if_index`, `local_port`.
+  - `remote_name`, `remote_chassis`, `remote_port`, `remote_port_desc`, `remote_platform`,
+    `remote_addresses` (`TEXT[]`).
+  - `matched_endpoint_id` (FK `SET NULL`, indexed) and `matched_by` (`address`, `mac`, `name`).
+  - `first_seen`, `last_seen`.
+  - The map (`services/topology.py`) places endpoints from the matched pairs.
+- **`snmp_device_state.addresses`** (`TEXT[]`) and **`sys_name`.** The device's IPv4
+  addresses (ipAddrTable) and sysName, used for matching and by the transit re-trace.
+- **`snmp_interface_events.handled_at`.** Set when the alert leader has acted on an up/down
+  event (alert, re-trace). Claimed with `FOR UPDATE SKIP LOCKED`; partial index on unhandled
+  up/down events.
+
+### `traffic_alert_state` (Migration `0025`, v3.3.6)
+Whether a traffic alert is open on a WAN link (`services/traffic_alerts.py`), so a change of alert-dispatcher leader neither repeats nor loses one.
+* `exporter_id` (`UUID`, FK `endpoints.id` `ON DELETE CASCADE`), `interface_idx` (`INTEGER`), `kind` (`VARCHAR(12)`, `CHECK`: `high_in`, `high_out`, `silent`) — Primary key together.
+* `active` (`BOOLEAN`, Default `false`), `since` (`TIMESTAMPTZ`) — Open, and the first minute of the spell.
+* `peak_pct` (`REAL`) — Highest utilisation in the spell, for the back-to-normal message.
+* `updated_at` (`TIMESTAMPTZ`, Default `now()`).
+* Not backed up. A restore merges and leaves the running system's rows as they are.
+* The settings are `app_settings` keys (`traffic_alerts_enabled`, `traffic_alert_threshold_pct`, `traffic_alert_minutes`); a link's own rule is the `alert` entry in its `endpoints.flow_interface_aliases` value.
+
 ### `users` — session columns (Migration `0022`, v3.3.6)
 Each account's own session rules (`services/session_policy.py`). The other `users` columns are unchanged.
 * `session_idle_minutes` (`INTEGER`, Default: 30, Not Null, `CHECK 15–240`) — Minutes without interaction before the account's sessions end. The API allows 15, 30 or 60 for `ADMIN` and 30, 60, 120 or 240 for `VIEWER`. The upgrade sets admins to 30 and viewers to the old `session_timeout` setting (else `[security] session_timeout_minutes`, else 120), fitted down to a viewer choice. A restore of an older backup gives each account its role's default (admin 30, viewer 120).
@@ -207,19 +292,20 @@ So the daily tier cannot split traffic into ingress/egress (it knows no endpoint
 
 The window picked in the UI decides the table. The UI only offers windows the tables cover: up to 30 days on the Traffic page and up to 7 days on an endpoint's Bandwidth & Flow tab. The API also accepts `1y`; see the note below the tables.
 
-**Traffic page** (`/bandwidth`):
+**Traffic page** (`/bandwidth`, v3.3.6). "Interface tables" means the SNMP-else-flow pair read through `services/interface_traffic.py`: `snmp_interface_*` where an interface has a row for that bucket, `flow_interface_*` otherwise. "Counted once" means the conversation tiers below, each conversation once per bucket at the largest report among the routers in scope.
 
-| View | 1h, 6h | 24h, 7d | 30d |
-| :--- | :--- | :--- | :--- |
-| Overview figures (rates, flows, exporters) | Last 5 minutes of `flow_minute_rollups`, whatever the window | same | same |
-| Network edge (WAN) figures | Last 5 minutes of `flow_interface_minute_rollups` | same | same |
-| Fleet traffic chart | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_hourly_rollups` |
-| Fleet traffic chart, WAN only | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` | `flow_interface_hourly_rollups` |
-| Applications (protocol/port) | `flow_minute_rollups` | `flow_hourly_rollups` | `flow_hourly_rollups` |
-| QoS classes | `flow_minute_rollups` | `flow_conversation_hourly_rollups` | `flow_conversation_hourly_rollups` |
-| Traffic zones | `flow_minute_rollups` | `flow_conversation_hourly_rollups` | `flow_conversation_hourly_rollups` |
-| Conversations, top talkers, security (anomalies) | `flow_minute_rollups` (6h: as 24h) | `flow_conversation_hourly_rollups` for whole hours, `flow_minute_rollups` for the partial first hour | same |
-| Interfaces (average, p95, busiest minute) | `flow_interface_minute_rollups` | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (p95 over hourly averages) |
+| View | 1h | 6h | 24h, 7d | 30d |
+| :--- | :--- | :--- | :--- | :--- |
+| Now: each WAN link's rates, status line | Last 5 minutes of the interface minute tables, whatever the window | same | same | same |
+| Now: usual range and today's peak | Interface hourly tables, the 28 days before this hour (busiest minute: `peak_*_minute_bytes`) | same | same | same |
+| Now: link state; down times in charts and Interfaces | `snmp_device_state`, `snmp_interfaces`, `snmp_interface_events` | same | same | same |
+| Per-link charts | Interface minute tables | Interface minute tables | Interface hourly tables (with each hour's busiest minute) | same |
+| Combined chart, WAN edge | Interface minute tables | Interface minute tables | Interface hourly tables | same |
+| Combined chart, All flows (four directions) | `flow_minute_rollups`, counted once | same | `flow_conversation_hourly_rollups`, counted once | same |
+| Applications, QoS classes, traffic zones, top talkers, conversations, security tiles and table | `flow_minute_rollups`, counted once | `flow_conversation_hourly_rollups` for whole hours, `flow_minute_rollups` for the partial first hour, counted once | same | same |
+| Interfaces (now, average, p95, busiest minute) | Interface minute tables | Interface minute tables | Interface minute tables | Interface hourly tables (p95 over hourly averages) |
+
+The overview's own figures (five minutes: directions, flows, packet size, anomalies) read the last 5 minutes of `flow_minute_rollups`, counted once. Conversation rows name the routers that saw them and their first and last seen time from the same tiers (to the hour beyond 2 hours); nothing new is stored for this. Phase 5 of v3.3.6 (the Traffic page) added no migration: the busiest minute per hour was already in the hourly interface aggregates (0016, 0027).
 
 **Endpoint detail, Bandwidth & Flow tab:**
 
@@ -238,7 +324,7 @@ The window picked in the UI decides the table. The UI only offers windows the ta
 | Routers, interfaces, network edge (WAN) | `flow_interface_minute_rollups` | `flow_interface_hourly_rollups` (an hour straddling the start or end counts whole) |
 | Top conversations, QoS, anomalies, traffic zones | Over 2 hours: `flow_conversation_hourly_rollups` (an hour straddling the start or end counts whole) | same: covers 90 days, so a longer custom range shows only its last 90 days |
 
-Per-endpoint views, conversations and top talkers count each conversation once per bucket when several routers export it (the largest report). Fleet totals and charts add the routers' reports up; mark the routers' internet-facing interfaces as WAN (interface settings on the Traffic page or the router's endpoint page) for totals counted once at the network edge.
+Per-endpoint views and, since v3.3.6, every Traffic page figure built from conversations (and the PDF's) count each conversation once per bucket when several routers export it (the largest report). Interface figures are per interface, so they are not merged; the WAN links' totals count each packet once at the network edge.
 
 **API-only `1y` window:** only what the tables cover is answered. The fleet chart and applications read `flow_daily_rollups` (a full year), and interface views read `flow_interface_hourly_rollups` (a full year). QoS and zones in that response cover the last 90 days and say so (`qos_window_start`, `zones_window_start`). Top talkers, conversations and one endpoint's chart or applications answer `400` naming the longest window, because their tables keep 90 and 30 days.
 

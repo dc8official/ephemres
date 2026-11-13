@@ -198,6 +198,20 @@ export function getEndpointFlowPaths(id) {
   return api.get(`/endpoints/${id}/flow-paths`)
 }
 
+// Normal and current route, pending / flapping state and the route-change log (v3.3.6).
+export function getEndpointRoute(id) {
+  return api.get(`/endpoints/${id}/route`)
+}
+
+// Admin: the current path becomes the normal one now; pinned keeps it until unpinned.
+export function setNormalPath(id, pinned = false) {
+  return api.post(`/endpoints/${id}/route/normal`, { pinned })
+}
+
+export function unpinNormalPath(id) {
+  return api.delete(`/endpoints/${id}/route/pin`)
+}
+
 export function refreshEndpointBaseline(id) {
   return api.post(`/endpoints/${id}/refresh-baseline`)
 }
@@ -231,12 +245,15 @@ export function getAvailabilityReport(id, startDate, endDate) {
   })
 }
 
-export function exportBatchTelemetry(endpointIds, startTime, endTime, columns = null) {
+// With `filter`, the server exports the listed endpoints the filter matches (or all it matches
+// when the list is empty).
+export function exportBatchTelemetry(endpointIds, startTime, endTime, columns = null, filter = null) {
   const payload = {
     endpoint_ids: endpointIds,
     start_time: startTime,
     end_time: endTime,
   }
+  if (filter) payload.filter = filter
   if (columns && columns.length > 0) {
     payload.columns = columns
   }
@@ -265,6 +282,29 @@ export function login(username, password) {
 
 export function logout() {
   return api.post('/auth/logout')
+}
+
+// --- Site, location, tags and the shared filter (v3.3.6) ----------------------------------
+// `filter` is { site: [], location: [], tag: [], type: [], q } (composables/useEndpointFilter.js);
+// list values go as repeated query keys.
+
+export function matchEndpoints(filter) {
+  return api.get('/endpoints/match', { params: filter })
+}
+
+// Sites, locations (within `site` when given), tags and device types in use, with counts.
+export function getEndpointSuggestions(site = null) {
+  return api.get('/endpoints/suggestions', { params: { site: site || undefined } })
+}
+
+// { endpoint_ids?, filter?, site?, location?, add_tags?, remove_tags? }
+export function bulkUpdateEndpoints(body) {
+  return api.post('/endpoints/bulk-update', body)
+}
+
+// { field: 'site' | 'location' | 'tag', from_value, to_value, site? }
+export function renameEndpointLabel(body) {
+  return api.post('/endpoints/rename', body)
 }
 
 export function createEndpoint(data) {
@@ -328,11 +368,13 @@ export function deleteUser(userId) {
   return api.delete(`/users/${userId}`)
 }
 
-export function getFleetSummary(startDate, endDate) {
+// With `filter` (the shared endpoint filter), only the endpoints it matches.
+export function getFleetSummary(startDate, endDate, filter = null) {
   return api.get('/reports/fleet-summary', {
     params: {
       start_date: startDate,
       end_date: endDate,
+      ...(filter || {}),
     },
   })
 }
@@ -378,15 +420,41 @@ export function getAlertHistory(page = 1, pageSize = 50) {
   })
 }
 
-export function getBandwidthOverview(exporterId = null) {
+// What a Traffic page request covers (build plan 7.5 step 2): the shared filter (site,
+// location, tag, type, q) plus an optional single device. A plain id is one device, as callers
+// that passed an exporter id did before. Empty values are left out.
+export function trafficScopeParams(scope) {
+  if (!scope) return {}
+  if (typeof scope === 'string') return { device_id: scope }
   const params = {}
-  if (exporterId) params.exporter_id = exporterId
-  return api.get('/bandwidth/overview', { params })
+  for (const key of ['device_id', 'site', 'location', 'tag', 'type', 'q']) {
+    const value = scope[key]
+    if (value === null || value === undefined || value === '') continue
+    if (Array.isArray(value) && value.length === 0) continue
+    params[key] = value
+  }
+  return params
 }
 
-export function getTrafficSeries(window = '1h', exporterId = null, endpointId = null, interfaceIdx = null, wanOnly = false) {
-  const params = { window }
-  if (exporterId) params.exporter_id = exporterId
+export function getBandwidthOverview(scope = null) {
+  return api.get('/bandwidth/overview', { params: trafficScopeParams(scope) })
+}
+
+// The "Now" area (build plan 7.5 step 4): each WAN link in scope over the last five minutes;
+// with a window, each link's chart over it too (step 5).
+export function getWanLinks(scope = null, window = null) {
+  const params = trafficScopeParams(scope)
+  if (window) Object.assign(params, { window, series: 1 })
+  return api.get('/bandwidth/wan-links', { params })
+}
+
+// Suspicious conversations over the picked window, for the Security tiles.
+export function getAnomalySummary(window = '1h', scope = null) {
+  return api.get('/bandwidth/anomalies', { params: { window, ...trafficScopeParams(scope) } })
+}
+
+export function getTrafficSeries(window = '1h', scope = null, endpointId = null, interfaceIdx = null, wanOnly = false) {
+  const params = { window, ...trafficScopeParams(scope) }
   if (endpointId) params.endpoint_id = endpointId
   if (interfaceIdx !== null && interfaceIdx !== undefined) params.interface_idx = interfaceIdx
   // WAN-interface totals; the server falls back to all flows when no interface is marked WAN.
@@ -394,18 +462,18 @@ export function getTrafficSeries(window = '1h', exporterId = null, endpointId = 
   return api.get('/bandwidth/traffic-series', { params })
 }
 
-export function getTopTalkers(window = '1h', limit = 25, endpointId = null, exporterId = null) {
-  const params = { window, limit }
+export function getTopTalkers(window = '1h', limit = 25, endpointId = null, scope = null) {
+  const params = { window, limit, ...trafficScopeParams(scope) }
   if (endpointId) params.endpoint_id = endpointId
-  if (exporterId) params.exporter_id = exporterId
   return api.get('/bandwidth/top-talkers', { params })
 }
 
-// Server-filtered, paged conversations. `filters`: exporterId, endpointId, ip, port, dscp,
-// quick ('all' | 'anomalies' | 'qos' | 'bulk'), sort ('bytes' | 'flows' | 'packets'), limit, offset.
+// Server-filtered, paged conversations. `filters`: scope (see trafficScopeParams), endpointId,
+// ip, port, dscp, quick ('all' | 'anomalies' | 'qos' | 'bulk'), sort ('bytes' | 'flows' |
+// 'packets'), limit, offset.
 export function getConversations(window = '1h', filters = {}) {
-  const params = { window }
-  const map = { exporterId: 'exporter_id', endpointId: 'endpoint_id', ip: 'ip', port: 'port', dscp: 'dscp', quick: 'quick', sort: 'sort', limit: 'limit', offset: 'offset' }
+  const params = { window, ...trafficScopeParams(filters.scope) }
+  const map = { endpointId: 'endpoint_id', ip: 'ip', port: 'port', dscp: 'dscp', quick: 'quick', sort: 'sort', limit: 'limit', offset: 'offset' }
   for (const [key, name] of Object.entries(map)) {
     const value = filters[key]
     if (value !== null && value !== undefined && value !== '') params[name] = value
@@ -413,15 +481,16 @@ export function getConversations(window = '1h', filters = {}) {
   return api.get('/bandwidth/conversations', { params })
 }
 
-export function getApplicationDistribution(window = '1h', exporterId = null, endpointId = null) {
-  const params = { window }
-  if (exporterId) params.exporter_id = exporterId
+export function getApplicationDistribution(window = '1h', scope = null, endpointId = null) {
+  const params = { window, ...trafficScopeParams(scope) }
   if (endpointId) params.endpoint_id = endpointId
   return api.get('/bandwidth/applications', { params })
 }
 
-export function getFlowExporters() {
-  return api.get('/bandwidth/exporters')
+// Devices with traffic (flow exporters and SNMP-polled routers), narrowed by the shared filter,
+// plus flow sources not yet registered.
+export function getFlowExporters(filter = null) {
+  return api.get('/bandwidth/exporters', { params: trafficScopeParams(filter) })
 }
 
 export function enrollFlowExporter(data) {
@@ -432,8 +501,14 @@ export function mapFlowExporter(ip, endpointId) {
   return api.post(`/bandwidth/exporters/${encodeURIComponent(ip)}/map`, { endpoint_id: endpointId })
 }
 
-export function getInterfaceTelemetry(exporterId, window = '1h') {
-  return api.get('/bandwidth/interfaces', { params: { exporter_id: exporterId, window } })
+// The Interfaces table (build plan 7.5 step 6): one device's (a device id), or every router the
+// shared filter picks.
+export function getInterfaces(scope = null, window = '1h') {
+  return api.get('/bandwidth/interfaces', { params: { window, ...trafficScopeParams(scope) } })
+}
+
+export function getInterfaceTelemetry(deviceId, window = '1h') {
+  return api.get('/bandwidth/interfaces', { params: { device_id: deviceId, window } })
 }
 
 export function updateEndpointInterfaces(endpointId, data) {
@@ -456,3 +531,36 @@ export function updateOrganizationSettings(data) {
   return api.patch('/settings/organization', data)
 }
 
+
+// --- SNMP poller (v3.3.6 build plan 8.3) --------------------------------------------------------
+// Credential sets are shared and assigned to endpoints; secrets are write-only (the API says
+// whether each is set, never its value).
+export function getSnmpCredentials() {
+  return api.get('/snmp/credentials')
+}
+
+export function createSnmpCredentials(data) {
+  return api.post('/snmp/credentials', data)
+}
+
+export function updateSnmpCredentials(id, data) {
+  return api.patch(`/snmp/credentials/${id}`, data)
+}
+
+export function deleteSnmpCredentials(id) {
+  return api.delete(`/snmp/credentials/${id}`)
+}
+
+// Surveys one address with a stored set ({address, credential_id}) or an unsaved one
+// ({address, credential: {...}}). Takes a few seconds: the device is read twice.
+export function testSnmpCredentials(data) {
+  return api.post('/snmp/test', data, { timeout: 60000 })
+}
+
+export function getEndpointSnmp(id) {
+  return api.get(`/snmp/endpoints/${id}`)
+}
+
+export function requestSnmpProbe(id) {
+  return api.post(`/snmp/endpoints/${id}/probe`)
+}

@@ -54,10 +54,27 @@ class Endpoint(Base):
         nullable=False,
     )
 
-    # Physical data center, rack, or geographical location
+    # Site the endpoint belongs to, e.g. "Abuja" (migration 0023). Free text with autocomplete,
+    # matched case-insensitively by the shared filter (services/endpoint_filter.py).
+    site: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    # Where within the site, e.g. "Building A". Before v3.3.6 the only place field, so older
+    # installs have their whole free-text location here.
     location: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True,
+    )
+
+    # Any number of lower-case labels, e.g. ["mpls router"] (migration 0023). The filter matches
+    # an endpoint carrying any of the chosen tags.
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        default=list,
+        server_default="{}",
+        nullable=False,
     )
 
     # Freeform operator description or asset notes
@@ -143,6 +160,14 @@ class Endpoint(Base):
         default="ACTIVE_HOST",
         server_default="ACTIVE_HOST",
         nullable=False,
+    )
+
+    # SNMP credential set this endpoint is polled with by ephemres-snmpd (migration 0026,
+    # v3.3.6); NULL means no SNMP. Deleting the set turns SNMP off rather than failing.
+    snmp_credential_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("snmp_credentials.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     # Manual parent node override for topological hierarchy and RCA suppression

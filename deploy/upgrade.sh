@@ -147,7 +147,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
        systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd 2>/dev/null; then
         echo -e "${GREEN}[INFO] Pausing background services to release database connection slots...${NC}"
-        systemctl stop ephemres-engine ephemres-api ephemres-flowd netmon-engine netmon-api netmon-flowd 2>/dev/null || true
+        systemctl stop ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd netmon-engine netmon-api netmon-flowd 2>/dev/null || true
     fi
 
     mkdir -p "${BACKUP_DIR}"
@@ -323,7 +323,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
        systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd; then
         echo -e "${GREEN}[INFO] Stopping ephemres-engine, ephemres-api, and ephemres-flowd systemd services...${NC}"
-        systemctl stop ephemres-engine ephemres-api ephemres-flowd netmon-engine netmon-api netmon-flowd || true
+        systemctl stop ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd netmon-engine netmon-api netmon-flowd || true
     else
         echo -e "${YELLOW}[INFO] Platform systemd services are not active. Skipping stop.${NC}"
     fi
@@ -789,7 +789,7 @@ migrate_legacy_services() {
 echo -e "\n${BLUE}--- Step 7/7: Refreshing Systemd Units, Enabling Auto-Start & Starting Services ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
     # Refresh systemd unit files if available in deploy/
-    for svc in ephemres-api ephemres-engine ephemres-flowd; do
+    for svc in ephemres-api ephemres-engine ephemres-flowd ephemres-snmpd; do
         if [[ -f "${INSTALL_DIR}/deploy/${svc}.service" ]]; then
             cp "${INSTALL_DIR}/deploy/${svc}.service" /etc/systemd/system/
         elif [[ -f "${PROJECT_ROOT}/deploy/${svc}.service" ]]; then
@@ -848,6 +848,13 @@ EOF
         upgrade_failed "systemctl could not start ephemres-api / ephemres-engine."
     fi
     systemctl restart nginx || true
+
+    # SNMP poller (v3.3.6): always running, idle until SNMP is switched on in Settings. New and
+    # not needed by the rest, so a failure to start is reported but does not fail the upgrade.
+    systemctl enable ephemres-snmpd || true
+    if ! systemctl restart ephemres-snmpd || { sleep 3; ! systemctl is-active --quiet ephemres-snmpd; }; then
+        echo -e "${YELLOW}[WARN] ephemres-snmpd did not start; SNMP polling is unavailable until it does (journalctl -u ephemres-snmpd).${NC}"
+    fi
 
     # Network Flow Telemetry Ingestion
     FLOW_ENABLED=false

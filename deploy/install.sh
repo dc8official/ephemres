@@ -497,7 +497,7 @@ fi
 # ============================================================
 print_header "Step 15: Installing systemd services"
 
-for service in ephemres-engine ephemres-api ephemres-flowd; do
+for service in ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd; do
     src="$INSTALL_DIR/deploy/${service}.service"
     dst="/etc/systemd/system/${service}.service"
     if [ ! -f "$dst" ] || ! diff -q "$src" "$dst" > /dev/null 2>&1; then
@@ -510,6 +510,8 @@ done
 run "Reloading systemd daemon" systemctl daemon-reload
 run "Enabling ephemres-engine" systemctl enable ephemres-engine
 run "Enabling ephemres-api" systemctl enable ephemres-api
+# Always on: it polls nothing until SNMP is switched on in Settings (v3.3.6).
+run "Enabling ephemres-snmpd" systemctl enable ephemres-snmpd
 
 FLOW_ENABLED=false
 if grep -A 5 "\[flow\]" "$CONFIG_FILE" 2>/dev/null | grep -q "enabled = true"; then
@@ -601,6 +603,7 @@ print_header "Step 18: Starting services"
 
 run "Starting ephemres-api" systemctl start ephemres-api
 run "Starting ephemres-engine" systemctl start ephemres-engine
+run "Starting ephemres-snmpd" systemctl start ephemres-snmpd
 
 if [ "$FLOW_ENABLED" = true ]; then
     run "Starting ephemres-flowd" systemctl start ephemres-flowd

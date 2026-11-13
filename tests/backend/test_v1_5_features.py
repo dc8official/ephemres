@@ -33,6 +33,11 @@ class TestV15BackendCore(unittest.TestCase):
         }
         endpoint_id = uuid4()
         mock_db = AsyncMock()
+        # No stored path yet (route_paths.record_trace reads it first): the trace becomes the
+        # current and normal path, then the Layer 2 flag is written.
+        no_row = MagicMock()
+        no_row.fetchone.return_value = None
+        mock_db.execute.return_value = no_row
 
         res = self.loop.run_until_complete(
             refresh_baseline_route(endpoint_id, "192.168.1.50", db=mock_db)
@@ -41,7 +46,9 @@ class TestV15BackendCore(unittest.TestCase):
         self.assertEqual(res["total_hops"], 1)
         self.assertTrue(res["is_l2_segment"])
         self.assertEqual(len(res["hops"]), 1)
-        self.assertEqual(mock_db.execute.call_count, 2)
+        self.assertEqual(res["path_outcome"], "first")
+        # Read the stored path, insert the first one, update the Layer 2 flag.
+        self.assertEqual(mock_db.execute.call_count, 3)
 
     @patch("app.services.rca_engine.run_throttled_traceroute")
     def test_differential_rca_layer2_failure(self, mock_trace: MagicMock) -> None:
@@ -144,7 +151,7 @@ class TestV15BackendCore(unittest.TestCase):
         )
 
         self.assertEqual(mock_db.execute.call_count, 1)
-        mock_refresh.assert_called_once_with(endpoint_id, "10.0.0.50", db=mock_db)
+        mock_refresh.assert_called_once_with(endpoint_id, "10.0.0.50", db=mock_db, trigger="recovery")
 
     def test_generate_unified_topology_tree_merging_and_rca(self) -> None:
         ep1_id = uuid4()

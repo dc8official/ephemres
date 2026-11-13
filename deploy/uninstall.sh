@@ -124,10 +124,10 @@ fi
 
 # 2. Stop and Disable Systemd Services
 echo -e "\n${BLUE}--- Step 2/4: Stopping & Removing Systemd Services ---${NC}"
-systemctl stop ephemres-api ephemres-engine ephemres-flowd netmon-api netmon-engine netmon-flowd 2>/dev/null || true
-systemctl disable ephemres-api ephemres-engine ephemres-flowd netmon-api netmon-engine netmon-flowd 2>/dev/null || true
+systemctl stop ephemres-api ephemres-engine ephemres-flowd ephemres-snmpd netmon-api netmon-engine netmon-flowd 2>/dev/null || true
+systemctl disable ephemres-api ephemres-engine ephemres-flowd ephemres-snmpd netmon-api netmon-engine netmon-flowd 2>/dev/null || true
 
-rm -f /etc/systemd/system/ephemres-api.service /etc/systemd/system/ephemres-engine.service /etc/systemd/system/ephemres-flowd.service
+rm -f /etc/systemd/system/ephemres-api.service /etc/systemd/system/ephemres-engine.service /etc/systemd/system/ephemres-flowd.service /etc/systemd/system/ephemres-snmpd.service
 rm -f /etc/systemd/system/netmon-api.service /etc/systemd/system/netmon-engine.service /etc/systemd/system/netmon-flowd.service
 rm -f /etc/sudoers.d/ephemres /etc/sudoers.d/netmon
 rm -f /etc/sysctl.d/90-ephemres.conf

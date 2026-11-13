@@ -9,15 +9,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from app.core.orm import and_, desc, func, or_, select, text
+from app.core.orm import or_, select, text
 from app.core.orm import AsyncSession
 
 from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
-from app.models.flow_rollup import FlowConversationHourlyRollup, FlowHourlyRollup, FlowMinuteRollup
 from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
-from app.repositories.endpoint_repo import EndpointRepository
 from app.services import conversations as conversation_queries
 from app.services.flow_metrics import (
     ROLE_WAN,
@@ -26,12 +24,11 @@ from app.services.flow_metrics import (
     ZONE_NORTH_SOUTH_EGRESS,
     ZONE_NORTH_SOUTH_INGRESS,
     bits_per_second,
-    classify_zone,
     configured_speed_mbps,
     dscp_breakdown,
     interface_alias,
     interface_role,
-    is_internal_address,
+    service_name,
     utilization_pct,
 )
 from app.services.uptime_calculator import (
@@ -116,24 +113,13 @@ def format_speed(mbps: int) -> str:
 
 
 def format_port_label(port: int, proto: int) -> str:
+    """"443 / HTTPS", "443 / QUIC (HTTP/3)", or "1434 / TCP": the names the Traffic page uses
+    (flow_metrics.service_name)."""
     p = int(port or 0)
+    name = service_name(proto, p)
+    if name:
+        return f"{p} / {name}"
     proto_name = "TCP" if proto == 6 else ("UDP" if proto == 17 else f"Proto {proto}")
-    if p == 443:
-        return "443 / HTTPS"
-    if p == 80:
-        return "80 / HTTP"
-    if p == 53:
-        return "53 / DNS"
-    if p == 22:
-        return "22 / SSH"
-    if p == 123:
-        return "123 / NTP"
-    if p == 161:
-        return "161 / SNMP"
-    if p == 2049:
-        return "2049 / NFS"
-    if p in (2055, 4739):
-        return f"{p} / Flow"
     return f"{p} / {proto_name}"
 
 
@@ -429,25 +415,26 @@ async def _interface_totals(
     """
     if not exporter_ids:
         return []
-    if start_dt >= datetime.now(timezone.utc) - _INTERFACE_MINUTE_RETENTION:
-        source, peak_in, peak_out, start = (
-            "flow_interface_minute_rollups", "in_bytes", "out_bytes", "bucket >= :start"
-        )
+    hourly = start_dt < datetime.now(timezone.utc) - _INTERFACE_MINUTE_RETENTION
+    if not hourly:
+        peak_in, peak_out, start = "in_bytes", "out_bytes", "{t}.bucket >= :start"
     else:
-        source, peak_in, peak_out, start = (
-            "flow_interface_hourly_rollups", "peak_in_minute_bytes", "peak_out_minute_bytes",
-            "bucket > CAST(:start AS timestamptz) - INTERVAL '1 hour'",
+        peak_in, peak_out, start = (
+            "peak_in_minute_bytes", "peak_out_minute_bytes",
+            "{t}.bucket > CAST(:start AS timestamptz) - INTERVAL '1 hour'",
         )
     # One bind parameter per exporter: list parameters are not passed through as arrays.
     params: Dict[str, Any] = {f"exporter{i}": str(e) for i, e in enumerate(exporter_ids)}
     exporters = ", ".join(f"CAST(:{name} AS uuid)" for name in params)
+    # SNMP counters where the interface has them, flows otherwise (v3.3.6).
+    from app.services import interface_traffic
+    source = interface_traffic.source_for(hourly, f"{{t}}.exporter_id IN ({exporters}) AND {start} AND {{t}}.bucket <= :end")
     res = await db.execute(
         text(f"""
             SELECT exporter_id, interface_idx,
                    SUM(in_bytes) AS tot_in_bytes, SUM(out_bytes) AS tot_out_bytes,
                    MAX({peak_in}) AS max_in_bytes, MAX({peak_out}) AS max_out_bytes
-            FROM {source}
-            WHERE exporter_id IN ({exporters}) AND {start} AND bucket <= :end
+            FROM {source} t
             GROUP BY exporter_id, interface_idx
             ORDER BY exporter_id, interface_idx
         """),
@@ -495,6 +482,10 @@ async def compile_bandwidth_report_data(
     res = await db.execute(stmt)
     routers = res.scalars().all()
     router_map = {r.id: r for r in routers}
+    # Interface names and speeds as shown elsewhere: manual, else SNMP's (v3.3.6).
+    from app.services import snmp_inventory
+    router_aliases = await snmp_inventory.merged_for(
+        db, {r.id: getattr(r, "flow_interface_aliases", {}) or {} for r in routers})
 
     # 1. Interface Metrics Query
     raw_interfaces = await _interface_totals(db, exporter_ids, start_dt, end_dt)
@@ -518,7 +509,7 @@ async def compile_bandwidth_report_data(
         avg_in_bps = bits_per_second(in_bytes, total_window_sec)
         avg_out_bps = bits_per_second(out_bytes, total_window_sec)
 
-        aliases = getattr(router, "flow_interface_aliases", {}) or {}
+        aliases = router_aliases.get(str(exp_id), {})
         alias_entry = aliases.get(str(if_idx), {})
         if_name, speed_mbps = interface_alias(alias_entry, "(no alias)")
         speed_configured = configured_speed_mbps(alias_entry) is not None
@@ -563,101 +554,64 @@ async def compile_bandwidth_report_data(
             "formatted_peak_bps": format_bps(stats["peak_bps"]),
         })
 
-    # Conversations, QoS and zones need addresses or ToS. Over a long range they read the hourly
-    # conversation tier (kept 90 days), where an hour straddling the start or end counts whole.
-    long_range = end_dt - start_dt > conversation_queries.HOURLY_TIER_MIN_SPAN
-    conv_model = FlowConversationHourlyRollup if long_range else FlowMinuteRollup
-    conv_start = start_dt.replace(minute=0, second=0, microsecond=0) if long_range else start_dt
+    # Conversations, QoS and zones read the same rows as the Traffic page
+    # (conversations.traffic_breakdown): each conversation counted once, however many of the
+    # selected routers reported it. Over a long range they read the hourly conversation tier
+    # (kept 90 days), where an hour straddling the end counts whole.
+    conv_where, conv_params = "FALSE", {"start": start_dt, "end": end_dt}
+    if exporter_ids:
+        exporter_params = {f"exp{i}": str(e) for i, e in enumerate(exporter_ids)}
+        conv_where = (
+            f"{conversation_queries.START_CLAUSE} AND bucket <= :end AND exporter_id IN "
+            f"({', '.join(f'CAST(:{k} AS uuid)' for k in exporter_params)})"
+        )
+        conv_params.update(exporter_params)
+    breakdown = {"applications": [], "qos": [], "zones": {}, "total_bytes": 0}
+    raw_convs: List[Dict[str, Any]] = []
+    seen_by: Dict[tuple, list] = {}
+    try:
+        breakdown = await conversation_queries.traffic_breakdown(db, conv_where, dict(conv_params))
+        page = await conversation_queries.top_conversation_rows(db, conv_where, dict(conv_params), limit=10)
+        raw_convs = page
+        seen_by = await conversation_queries.conversation_exporters(
+            db, conv_where, dict(conv_params),
+            [(c["src_ip"], c["dst_ip"], c["protocol"], c["dst_port"]) for c in raw_convs],
+        )
+    except Exception as exc:
+        logger.debug("Failed or skipped the conversation breakdown in report compiler: %s", exc)
 
-    # 2. Top Forensic Conversations
-    conv_stmt = (
-        select(
-            conv_model.src_ip,
-            conv_model.dst_ip,
-            conv_model.dst_port,
-            conv_model.protocol,
-            conv_model.exporter_id,
-            func.sum(conv_model.bytes).label("total_bytes"),
-        )
-        .where(
-            conv_model.exporter_id.in_(exporter_ids),
-            conv_model.bucket >= conv_start,
-            conv_model.bucket <= end_dt,
-        )
-        .group_by(
-            conv_model.src_ip,
-            conv_model.dst_ip,
-            conv_model.dst_port,
-            conv_model.protocol,
-            conv_model.exporter_id,
-        )
-        .order_by(desc("total_bytes"))
-        .limit(10)
-    )
-    conv_res = await db.execute(conv_stmt)
-    raw_convs = conv_res.all()
-
-    # Each conversation's share of all traffic the selected routers saw in the window (not of
-    # the top ten, which would overstate every share when there are many conversations).
-    total_res = await db.execute(
-        select(func.coalesce(func.sum(conv_model.bytes), 0)).where(
-            conv_model.exporter_id.in_(exporter_ids),
-            conv_model.bucket >= conv_start,
-            conv_model.bucket <= end_dt,
-        )
-    )
-    total_transit_bytes = int(total_res.scalar() or 0) or sum(int(c[5] or 0) for c in raw_convs) or 1
+    # 2. Top conversations. Each one's share is of all traffic the selected routers saw in
+    # the window (not of the top ten, which would overstate every share).
+    total_transit_bytes = breakdown["total_bytes"] or sum(int(c["total_bytes"] or 0) for c in raw_convs) or 1
     conversation_rows = []
-    for src_ip, dst_ip, port, proto, exp_id, b in raw_convs:
-        c_bytes = int(b or 0)
-        pct = (c_bytes / total_transit_bytes) * 100.0
-        r_name = router_map.get(exp_id).hostname if exp_id in router_map else "Unknown"
-
+    for c in raw_convs:
+        c_bytes = int(c["total_bytes"] or 0)
+        key = (str(c["src_ip"]).split("/")[0], str(c["dst_ip"]).split("/")[0], int(c["protocol"]), int(c["dst_port"]))
+        names = sorted(router_map[e].hostname for e in seen_by.get(key, []) if e in router_map)
         conversation_rows.append({
-            "src_display": src_ip or "Unknown",
-            "dst_display": dst_ip or "Unknown",
-            "port_label": format_port_label(port, proto),
-            "router_name": r_name,
+            "src_display": str(c["src_ip"]).split("/")[0] or "Unknown",
+            "dst_display": str(c["dst_ip"]).split("/")[0] or "Unknown",
+            "port_label": format_port_label(c["dst_port"], c["protocol"]),
+            # Every selected router that saw it; the bytes are counted once.
+            "router_name": ", ".join(names) or "Unknown",
             "formatted_bytes": format_bytes(c_bytes),
-            "pct_of_transit": pct,
+            "pct_of_transit": (c_bytes / total_transit_bytes) * 100.0,
         })
 
-    # 3. Fleet-Wide DSCP QoS Distribution (RFC 2474 / RFC 3246)
-    # Extracts the 6-bit DiffServ Codepoint (DSCP) from the 8-bit IPv4 ToS / IPv6 Traffic Class
-    # byte via: dscp = (tos & 0xFF) >> 2. Aggregates byte volume, packet volume, and flow counts
-    # across standard QoS traffic classes (Best Effort CS0, Assured Forwarding AF*, Voice EF).
-    qos_stmt = (
-        select(
-            conv_model.tos,
-            func.coalesce(func.sum(conv_model.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(conv_model.packets), 0).label("total_packets"),
-            func.coalesce(func.sum(conv_model.flow_count), 0).label("flow_count"),
-        )
-        .where(
-            conv_model.exporter_id.in_(exporter_ids),
-            conv_model.bucket >= conv_start,
-            conv_model.bucket <= end_dt,
-        )
-        .group_by(conv_model.tos)
-    )
+    # 3. DSCP QoS distribution (RFC 2474 / RFC 3246): dscp = (tos & 0xFF) >> 2.
     qos_rows = []
-    try:
-        qos_res = await db.execute(qos_stmt)
-        raw_qos = qos_res.all() if qos_res else []
-        for item in dscp_breakdown(raw_qos):
-            qos_rows.append({
-                "dscp": item["dscp"],
-                "dscp_label": item["dscp_label"],
-                "total_bytes": item["total_bytes"],
-                "formatted_bytes": format_bytes(item["total_bytes"]),
-                "total_packets": item["total_packets"],
-                "formatted_packets": f"{item['total_packets']:,}",
-                "flow_count": item["flow_count"],
-                "formatted_flows": f"{item['flow_count']:,}",
-                "percentage": item["percentage"],
-            })
-    except Exception as exc:
-        logger.debug("Failed or skipped QoS rollup in report compiler: %s", exc)
+    for item in dscp_breakdown(breakdown["qos"]):
+        qos_rows.append({
+            "dscp": item["dscp"],
+            "dscp_label": item["dscp_label"],
+            "total_bytes": item["total_bytes"],
+            "formatted_bytes": format_bytes(item["total_bytes"]),
+            "total_packets": item["total_packets"],
+            "formatted_packets": f"{item['total_packets']:,}",
+            "flow_count": item["flow_count"],
+            "formatted_flows": f"{item['flow_count']:,}",
+            "percentage": item["percentage"],
+        })
 
     # 4. Security Anomaly Telemetry (RFC 793 TCP Control Bits Analysis)
     # Same per-conversation rule as the dashboard: a conversation is a SYN scan / probe when the
@@ -698,83 +652,28 @@ async def compile_bandwidth_report_data(
         "has_anomalies": total_anomaly_count > 0,
     }
 
-    # 5. Traffic Zone Breakdown (East-West vs North-South Perimeter)
-    # Categorizes flows into perimeter boundary crossings versus internal lateral movement:
-    # - East-West: Both source and destination reside within private subnets (RFC 1918) or managed endpoints.
-    # - North-South Ingress: External internet sources entering internal monitored infrastructure.
-    # - North-South Egress: Internal monitored endpoints communicating out to public internet destinations.
-    # - External / Transit: Multi-hop traffic between external peers traversing edge routers.
-    zone_stmt = (
-        select(
-            conv_model.src_ip,
-            conv_model.dst_ip,
-            conv_model.src_endpoint_id,
-            conv_model.dst_endpoint_id,
-            func.coalesce(func.sum(conv_model.bytes), 0).label("total_bytes"),
-            func.coalesce(func.sum(conv_model.flow_count), 0).label("flow_count"),
-        )
-        .where(
-            conv_model.exporter_id.in_(exporter_ids),
-            conv_model.bucket >= conv_start,
-            conv_model.bucket <= end_dt,
-        )
-        .group_by(
-            conv_model.src_ip,
-            conv_model.dst_ip,
-            conv_model.src_endpoint_id,
-            conv_model.dst_endpoint_id,
-        )
-    )
-    zone_sums = {
-        ZONE_EAST_WEST: {"desc": "Internal Mesh / Host-to-Host", "bytes": 0, "flows": 0},
-        ZONE_NORTH_SOUTH_EGRESS: {"desc": "Internal to External Transit", "bytes": 0, "flows": 0},
-        ZONE_NORTH_SOUTH_INGRESS: {"desc": "External to Internal Transit", "bytes": 0, "flows": 0},
-        ZONE_EXTERNAL_TRANSIT: {"desc": "Perimeter Cross-Link / Transit", "bytes": 0, "flows": 0},
+    # 5. Traffic zones, by the Traffic page's rule (flow_metrics.zone_sql): internal means a
+    # monitored endpoint or a private address.
+    zone_desc = {
+        ZONE_EAST_WEST: "Internal Mesh / Host-to-Host",
+        ZONE_NORTH_SOUTH_EGRESS: "Internal to External Transit",
+        ZONE_NORTH_SOUTH_INGRESS: "External to Internal Transit",
+        ZONE_EXTERNAL_TRANSIT: "Perimeter Cross-Link / Transit",
     }
-
-    zone_rows = []
-    try:
-        zone_res = await db.execute(zone_stmt)
-        raw_zones = zone_res.all() if zone_res else []
-        total_zone_bytes = 0
-        for z_row in raw_zones:
-            if len(z_row) < 5:
-                continue
-            s_ip = str(z_row[0] or "")
-            d_ip = str(z_row[1] or "")
-            s_ep = z_row[2]
-            d_ep = z_row[3]
-            z_b = int(z_row[4] or 0)
-            z_f = int(z_row[5] or 0) if len(z_row) > 5 else 0
-
-            z_key = classify_zone(is_internal_address(s_ip, s_ep), is_internal_address(d_ip, d_ep))
-            zone_sums[z_key]["bytes"] += z_b
-            zone_sums[z_key]["flows"] += z_f
-            total_zone_bytes += z_b
-
-        for z_name, z_data in zone_sums.items():
-            pct = (z_data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0
-            zone_rows.append({
-                "zone": z_name,
-                "description": z_data["desc"],
-                "total_bytes": z_data["bytes"],
-                "formatted_bytes": format_bytes(z_data["bytes"]),
-                "flow_count": z_data["flows"],
-                "formatted_flows": f"{z_data['flows']:,}",
-                "percentage": pct,
-            })
-    except Exception as exc:
-        logger.debug("Failed or skipped Zone rollup in report compiler: %s", exc)
-        for z_name, z_data in zone_sums.items():
-            zone_rows.append({
-                "zone": z_name,
-                "description": z_data["desc"],
-                "total_bytes": 0,
-                "formatted_bytes": "0 B",
-                "flow_count": 0,
-                "formatted_flows": "0",
-                "percentage": 0.0,
-            })
+    zone_sums = {name: breakdown["zones"].get(name, {"bytes": 0, "flows": 0}) for name in zone_desc}
+    total_zone_bytes = sum(z["bytes"] for z in zone_sums.values())
+    zone_rows = [
+        {
+            "zone": z_name,
+            "description": zone_desc[z_name],
+            "total_bytes": z_data["bytes"],
+            "formatted_bytes": format_bytes(z_data["bytes"]),
+            "flow_count": z_data["flows"],
+            "formatted_flows": f"{z_data['flows']:,}",
+            "percentage": (z_data["bytes"] / total_zone_bytes * 100.0) if total_zone_bytes > 0 else 0.0,
+        }
+        for z_name, z_data in zone_sums.items()
+    ]
 
     wan_edge = {
         "interfaces_count": wan["count"],

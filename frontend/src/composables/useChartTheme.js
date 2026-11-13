@@ -61,6 +61,7 @@ export function useChartTheme() {
         flows: readToken('--series-flows', '#8b5cf6'),
         rtt: readToken('--series-rtt', '#f59e0b'),
         transit: readToken('--series-transit', '#64748b'),
+        internal: readToken('--series-internal', '#8b5cf6'),
       },
       palette: [1, 2, 3, 4, 5, 6, 7, 8].map((i) => readToken(`--series-${i}`)),
     }

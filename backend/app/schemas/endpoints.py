@@ -14,14 +14,29 @@ from app.core.schema import BaseModel, ConfigDict, Field, field_serializer, fiel
 from app.schemas.bandwidth import normalize_interface_aliases
 
 
+class InterfaceAlertConfig(BaseModel):
+    """A WAN link's traffic alert rule (v3.3.6 build plan 7.4). "default" follows Settings →
+    Alerts; "custom" uses its own threshold and minutes; "off" opts the link out."""
+
+    mode: Literal["default", "custom", "off"] = "default"
+    threshold_pct: Optional[int] = Field(default=None, ge=50, le=99)
+    minutes: Optional[int] = Field(default=None, ge=5, le=60)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class InterfaceConfig(BaseModel):
     """Network router interface configuration attributes."""
 
-    name: str = Field(..., max_length=64, pattern=r"^[a-zA-Z0-9_\-\./ :]{1,64}$", description="Interface name label")
+    # Optional since v3.3.6: left out, the interface shows the name SNMP reports (services/
+    # snmp_inventory), or "Interface N" without SNMP. A name typed here always wins.
+    name: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9_\-\./ :]{1,64}$", description="Interface name label")
     # None leaves the speed unset: utilization is then not shown rather than measured against a guess.
     speed_mbps: Optional[int] = Field(default=None, gt=0, le=10000000, description="Interface link capacity speed in Mbps")
     # "wan": link to the outside (internet or provider uplink); fleet totals count only these.
     role: Literal["wan", "lan"] = Field(default="lan", description="Interface role")
+    # Traffic alert rule for a WAN link with a speed; left out means "default".
+    alert: Optional[InterfaceAlertConfig] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -70,6 +85,7 @@ class EndpointDetail(EndpointSummary):
     flow_exporter_ips: list[str] = []
     flow_interface_aliases: dict[str, InterfaceConfig] = Field(default_factory=dict)
     manual_parent_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
     created_by: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime

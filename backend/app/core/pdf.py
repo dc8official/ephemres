@@ -283,6 +283,8 @@ class _ParsedReportDocument:
     generated_at_label: str = ""
     scope_title: str = ""
     scope_desc: str = ""
+    # The shared endpoint filter the report was made with (v3.3.6), printed under the title.
+    scope_filter: str = ""
     scope_badge: str = ""
     lang: str = "en"
     logo_bytes: Optional[bytes] = None
@@ -465,6 +467,8 @@ class _ReportHTMLParser(HTMLParser):
         if self._in_scope:
             if "scope-title" in classes:
                 self.doc.scope_title = self._flush_text()
+            elif "scope-filter" in classes:
+                self.doc.scope_filter = self._flush_text()
             elif "scope-desc" in classes:
                 self.doc.scope_desc = self._flush_text()
             elif "scope-badge" in classes:
@@ -1319,15 +1323,21 @@ class _Typesetter:
         badge = _run(d.scope_badge, FONT_BOLD, 7.5, 11.0, _SUBTLE, None, _LABEL_TRACKING) if d.scope_badge else None
         title_w = inner - (badge.width() + 12.0 if badge else 0.0)
         title = _run(d.scope_title, FONT_BOLD, 8.5, 11.0, _INK, title_w, _LABEL_TRACKING, upper=True)
+        # The filter line is in ink, not muted: it says which endpoints the numbers cover.
+        filt = _run(d.scope_filter, FONT_REGULAR, 7.5, 10.0, _INK, inner) if d.scope_filter else None
         desc = _run(d.scope_desc, FONT_REGULAR, 7.5, 10.0, _MUTED, inner) if d.scope_desc else None
-        h = 2 * pad_y + title.height + (2.0 + desc.height if desc else 0.0)
+        h = 2 * pad_y + title.height + (2.0 + filt.height if filt else 0.0) + (2.0 + desc.height if desc else 0.0)
         top = self.y
         self._artifact([_rect(_MARGIN_X, top - h, _CONTENT_W, h, _FILL_ALT, _HAIR)])
         self._tag_run(_StructElem("P", self.root), title, _MARGIN_X + pad_x, top - pad_y)
         if badge:
             self._tag_run(_StructElem("P", self.root), badge, _MARGIN_X + pad_x, top - pad_y, inner, "right")
+        line_top = top - pad_y - title.height - 2.0
+        if filt:
+            self._tag_run(_StructElem("P", self.root), filt, _MARGIN_X + pad_x, line_top)
+            line_top -= filt.height + 2.0
         if desc:
-            self._tag_run(_StructElem("P", self.root), desc, _MARGIN_X + pad_x, top - pad_y - title.height - 2.0)
+            self._tag_run(_StructElem("P", self.root), desc, _MARGIN_X + pad_x, line_top)
         self.y = top - h - 12.0
 
     def _kpi_strip(self) -> None:
@@ -1936,13 +1946,27 @@ class NativePdfReader:
 
     def _stream(self, obj_id: int) -> bytes:
         body = self._objects.get(obj_id, b"")
-        m_stream = re.search(rb"stream\r?\n(.*?)\r?\nendstream", body, re.DOTALL)
-        if not m_stream:
+        m_start = re.search(rb">>\s*stream\r?\n", body)
+        if not m_start:
             return b""
-        data = m_stream.group(1)
+        # Take exactly /Length bytes, as real readers do. Encrypted and compressed data is
+        # arbitrary binary, so 1 stream in 256 ends in a 0x0D byte; matching up to
+        # "\r?\nendstream" took that byte for the end-of-line marker and cut it off, and
+        # zlib then failed on the truncated data. Indirect lengths ("/Length 9 0 R") are never
+        # written here, so only those fall back to the delimiter match.
+        stream_dict = body[: m_start.start()]
+        m_len = re.search(rb"/Length\s+(\d+)(?!\d)(?!\s+\d+\s+R)", stream_dict)
+        if m_len:
+            data = body[m_start.end(): m_start.end() + int(m_len.group(1))]
+        else:
+            m_stream = re.search(rb"stream\r?\n(.*?)\r?\nendstream", body, re.DOTALL)
+            if not m_stream:
+                return b""
+            data = m_stream.group(1)
         if self._enc_key is not None:
             data = _encrypt_pdf_object_bytes(self._enc_key, obj_id, 0, data)
-        if b"/FlateDecode" in body:
+        # Look for the filter in the dictionary only: the binary data could hold those bytes.
+        if b"/FlateDecode" in stream_dict:
             data = zlib.decompress(data)
         return data
 
@@ -1967,7 +1991,7 @@ class NativePdfReader:
     def pages(self) -> List[_NativePdfPage]:
         if self._pages_cache is not None:
             return self._pages_cache
-        key = self._ensure_key()
+        self._ensure_key()
         extracted_pages: List[_NativePdfPage] = []
         for obj_id, obj_body in sorted(self._objects.items()):
             if b"/Type /Page" in obj_body and b"/Contents" in obj_body:
@@ -1975,16 +1999,10 @@ class NativePdfReader:
                 if not m_c:
                     continue
                 c_id = int(m_c.group(1))
-                c_body = self._objects.get(c_id, b"")
-                m_stream = re.search(rb"stream\r?\n(.*?)\r?\nendstream", c_body, re.DOTALL)
-                if not m_stream:
+                if b"stream" not in self._objects.get(c_id, b""):
                     continue
-                stream_bytes = m_stream.group(1)
-                if key is not None:
-                    stream_bytes = _encrypt_pdf_object_bytes(key, c_id, 0, stream_bytes)
-                if b"/FlateDecode" in c_body:
-                    stream_bytes = zlib.decompress(stream_bytes)
-                content_str = stream_bytes.decode("latin-1", errors="replace")
+                # The same /Length-based read as the fonts' /ToUnicode streams (see _stream).
+                content_str = self._stream(c_id).decode("latin-1", errors="replace")
                 to_unicode = self._font_maps(obj_body)
                 text_fragments: List[str] = []
                 current_font = ""

@@ -31,6 +31,24 @@ class RuntimeSettings:
     flow_sampling_multiplier: int
     flow_netflow_port: int
     flow_ipfix_port: int
+    # Route discovery (v3.3.6 build plan 6.2): how many traceroutes may run at once (traces
+    # through the same router still take turns, services/baseline_route), and how often each
+    # endpoint is re-traced by the rolling schedule.
+    discovery_parallel: int = 2
+    rediscovery_hours: int = 24
+    # Traffic alerts on WAN links (build plan 7.4): off until switched on; the default rule a
+    # link uses unless its own alias entry overrides it or opts out.
+    traffic_alerts_enabled: bool = False
+    traffic_alert_threshold_pct: int = 80
+    traffic_alert_minutes: int = 15
+    # SNMP poller (build plan 8.3): ephemres-snmpd does nothing until this is on, then polls
+    # each endpoint that has a credential set every snmp_poll_seconds.
+    snmp_enabled: bool = False
+    snmp_poll_seconds: int = 60
+
+
+# The poll intervals offered (seconds). Anything else stored falls back to the default.
+SNMP_POLL_CHOICES = (30, 60, 120, 300)
 
 
 def config_defaults() -> RuntimeSettings:
@@ -43,6 +61,13 @@ def config_defaults() -> RuntimeSettings:
         flow_sampling_multiplier=int(getattr(flow_cfg, "sampling_multiplier", 1)),
         flow_netflow_port=int(getattr(flow_cfg, "netflow_port", 2055)),
         flow_ipfix_port=int(getattr(flow_cfg, "ipfix_port", 4739)),
+        discovery_parallel=2,
+        rediscovery_hours=24,
+        traffic_alerts_enabled=False,
+        traffic_alert_threshold_pct=80,
+        traffic_alert_minutes=15,
+        snmp_enabled=False,
+        snmp_poll_seconds=60,
     )
 
 
@@ -69,6 +94,22 @@ def resolve(kv: Mapping[str, str]) -> RuntimeSettings:
         flow_sampling_multiplier=_int_in_range(kv.get("flow_sampling_multiplier"), d.flow_sampling_multiplier, 1),
         flow_netflow_port=_int_in_range(kv.get("flow_netflow_port"), d.flow_netflow_port, 1, 65535),
         flow_ipfix_port=_int_in_range(kv.get("flow_ipfix_port"), d.flow_ipfix_port, 1, 65535),
+        discovery_parallel=_int_in_range(kv.get("discovery_parallel"), d.discovery_parallel, 1, 8),
+        rediscovery_hours=_int_in_range(kv.get("rediscovery_hours"), d.rediscovery_hours, 1, 168),
+        traffic_alerts_enabled=(
+            d.traffic_alerts_enabled if kv.get("traffic_alerts_enabled") is None
+            else kv["traffic_alerts_enabled"].strip().lower() in TRUE_VALUES
+        ),
+        traffic_alert_threshold_pct=_int_in_range(kv.get("traffic_alert_threshold_pct"), d.traffic_alert_threshold_pct, 50, 99),
+        traffic_alert_minutes=_int_in_range(kv.get("traffic_alert_minutes"), d.traffic_alert_minutes, 5, 60),
+        snmp_enabled=(
+            d.snmp_enabled if kv.get("snmp_enabled") is None
+            else kv["snmp_enabled"].strip().lower() in TRUE_VALUES
+        ),
+        snmp_poll_seconds=(
+            poll if (poll := _int_in_range(kv.get("snmp_poll_seconds"), d.snmp_poll_seconds, 1)) in SNMP_POLL_CHOICES
+            else d.snmp_poll_seconds
+        ),
     )
 
 

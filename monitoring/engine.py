@@ -30,6 +30,7 @@ from monitoring.ping import run_ping_cycle
 from monitoring.probe_samples import record_probe_sample
 from monitoring.registry import endpoint_registry, MonitoredEndpoint
 from monitoring.state_machine import EndpointState, StateMachine
+from monitoring.ttl_watch import ttl_watch
 
 from app.logging_config import setup_logging
 from app.config import settings
@@ -160,6 +161,35 @@ def _cycle_store(state_machine: StateMachine) -> CycleStore:
     return _store
 
 
+def _watch_reply_ttl(endpoint_id: UUID, result: Any) -> None:
+    """Publishes a ROUTE_HINT (reason "ttl") once the endpoint's reply TTL has changed and held
+    for a few cycles (monitoring/ttl_watch.py): its route likely changed, so the API's leader
+    worker re-traces it. Never lets a broker problem disturb the monitoring cycle."""
+    try:
+        change = ttl_watch.observe(str(endpoint_id), getattr(result, "reply_ttl", None))
+        if change is None:
+            return
+        old_ttl, new_ttl = change
+        logger.info("Reply TTL of %s changed %d -> %d; asking for a re-trace.", endpoint_id, old_ttl, new_ttl)
+        broker = driver_manager.get_event_broker()
+        if broker is not None:
+            safe_create_task(
+                broker.publish(
+                    "ROUTE_HINT",
+                    {
+                        "event_type": "ROUTE_HINT",
+                        "endpoint_id": str(endpoint_id),
+                        "reason": "ttl",
+                        "old_ttl": old_ttl,
+                        "new_ttl": new_ttl,
+                    },
+                ),
+                "broker_ttl_route_hint",
+            )
+    except Exception as exc:
+        logger.debug("Reply TTL watch failed for %s: %s", endpoint_id, exc)
+
+
 def _maybe_trace_incident(endpoint_id: UUID, ip_address: str, result: Any, new_state: EndpointState) -> None:
     """Start a traceroute towards an endpoint whose cycle lost probes, to show where the path breaks.
 
@@ -283,6 +313,7 @@ async def monitor_endpoint(
             )
             # sampled_at (probes started) stamps the probe sample; the end time stamps the event.
             store.add(backlog, ProbeCycle(sampled_at, datetime.now(timezone.utc), result))
+            _watch_reply_ttl(endpoint_id, result)
 
             # None while the database is unavailable: the cycle stays in the backlog for later.
             new_state = await store.write(

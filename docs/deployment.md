@@ -163,15 +163,22 @@ route_ecmp_share = 0.2
 
 > [!NOTE]
 > **Performance Mode Toggling**:
-> **Performance Mode** (switching between Standard PostgreSQL Mode and FastStore in-memory event routing) is managed live from the **Admin Settings UI $\rightarrow$ Performance & Telemetry** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
+> **Performance Mode** (switching between Standard PostgreSQL Mode and FastStore in-memory event routing) is managed live from the **Admin Settings UI $\rightarrow$ Data collection** tab (`PATCH /api/v1/settings`), which instantly synchronizes across all worker processes via PostgreSQL `LISTEN`/`NOTIFY`.
 
 ---
 
 ## 6. Service Management & Logging
 
+**ephemres-snmpd (v3.3.6)** is installed, enabled and started by `install.sh` and `upgrade.sh`, and
+stays running: it polls nothing until SNMP is switched on in Settings, so the web UI needs no
+sudo rule for it. If it fails to start during an upgrade, the upgrade warns and carries on (the
+other services do not depend on it). It runs as `ephemres` with no capabilities and a database
+pool of 5, which the API's startup connection-budget check counts. `ephemres-api.service` now sets
+`PYTHONPATH=/opt/ephemres/backend:/opt/ephemres`, which the SNMP Test button needs.
+
 ```bash
 # Check service status across all daemons
-sudo systemctl status ephemres-api ephemres-engine ephemres-flowd nginx
+sudo systemctl status ephemres-api ephemres-engine ephemres-flowd ephemres-snmpd nginx
 
 # Live stream API server logs
 sudo journalctl -u ephemres-api -f
@@ -181,6 +188,9 @@ sudo journalctl -u ephemres-engine -f
 
 # Live stream flow collector logs
 sudo journalctl -u ephemres-flowd -f
+
+# Live stream SNMP poller logs (v3.3.6)
+sudo journalctl -u ephemres-snmpd -f
 
 # View rotating log files
 tail -f /var/log/ephemres/ephemres-api.log
@@ -217,6 +227,7 @@ Ephemres dispatches outbound incident notifications directly to external endpoin
 | **Slack Webhooks** | TCP 443 (HTTPS) | Block Kit notifications (`hooks.slack.com`) |
 | **Corporate SMTP Relays** | TCP 587 (STARTTLS), TCP 465 (SMTPS), or TCP 25 | Outbound alert emails to corporate exchange / cloud mail gateways |
 | **External NTP Servers** | UDP 123 | Continuous system clock synchronization |
+| **Polled devices (SNMP, v3.3.6)** | UDP 161 to each device, replies back | ephemres-snmpd polling and the Settings **Test** button. Devices must allow the server's address (ACLs, Meraki MX allow list, Sophos device access); see `docs/snmp-guide.md` |
 
 ---
 

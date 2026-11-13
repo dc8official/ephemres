@@ -226,7 +226,8 @@ async def test_a_normal_start_logs_the_pool_each_worker_uses(monkeypatch, caplog
     monkeypatch.delenv(database.API_DB_POOL_ENV, raising=False)
     with caplog.at_level("INFO", logger="app.database"):
         await database.check_connection_budget(**LISTENERS)
-    assert "up to 94 of 197 connections (this worker's pool: 20)." in caplog.text
+    # 94 before v3.3.6, plus ephemres-snmpd's own pool of 5 and one more connection.
+    assert "up to 100 of 197 connections (this worker's pool: 20)." in caplog.text
     assert "is set but not used" not in caplog.text
 
 
@@ -252,7 +253,7 @@ async def test_the_budget_check_warns_when_the_pools_do_not_fit(monkeypatch, cap
         await database.check_connection_budget(**LISTENERS)
     assert "connection budget exceeded" in caplog.text
     assert "2 API worker(s) x (20 + 5 for live events), 2 more on the worker that sends alerts" in caplog.text
-    assert "can open 94 connections, but PostgreSQL allows 57" in caplog.text
+    assert "can open 100 connections, but PostgreSQL allows 57" in caplog.text  # 94 + snmpd (5 + 1)
 
 
 def test_the_api_unit_sets_workers_and_pool_in_one_place():
@@ -260,3 +261,16 @@ def test_the_api_unit_sets_workers_and_pool_in_one_place():
     assert "Environment=EPHEMRES_API_WORKERS=2" in unit
     assert "Environment=EPHEMRES_API_DB_POOL=10" in unit
     assert "--workers ${EPHEMRES_API_WORKERS}" in unit
+
+
+def test_snmpd_gets_its_own_small_pool_and_is_counted(monkeypatch):
+    """ephemres-snmpd (v3.3.6) names itself before importing app.database and gets a pool of
+    SNMPD_DB_POOL, not the engine's 20; the budget adds it with one spare."""
+    from app import database
+
+    monkeypatch.setenv(database.PROCESS_ENV, "snmpd")
+    monkeypatch.setattr(database.sys, "argv", ["/opt/ephemres/monitoring/snmp/daemon.py"])
+    assert database._pool_sizes() == (database.SNMPD_DB_POOL, 0)
+    without, _ = database.connection_budget(100, 3, 2, 10, 20)
+    with_snmpd, _ = database.connection_budget(100, 3, 2, 10, 20, snmpd_pool=database.SNMPD_DB_POOL)
+    assert with_snmpd - without == database.SNMPD_DB_POOL + 1

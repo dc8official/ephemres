@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import ctypes
-import ctypes.util
 import hashlib
 import hmac
 import logging
@@ -12,6 +11,7 @@ from typing import Optional
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from app.config import settings
+from app.core.libcrypto import libcrypto
 
 logger = logging.getLogger("ephemres.crypto")
 
@@ -28,65 +28,9 @@ GCM_IV_LEN = 12
 GCM_TAG_LEN = 16
 
 
-def _load_libcrypto() -> ctypes.CDLL:
-    for candidate in ("libcrypto.so.3", "libcrypto.so.1.1", ctypes.util.find_library("crypto") or "libcrypto.so"):
-        if not candidate:
-            continue
-        try:
-            lib = ctypes.CDLL(candidate)
-            break
-        except OSError:
-            continue
-    else:
-        raise RuntimeError("Could not load OpenSSL libcrypto shared library.")
-
-    lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
-    lib.EVP_CIPHER_CTX_new.argtypes = []
-
-    lib.EVP_CIPHER_CTX_free.restype = None
-    lib.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
-
-    lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
-    lib.EVP_aes_256_gcm.argtypes = []
-
-    lib.EVP_CipherInit_ex.restype = ctypes.c_int
-    lib.EVP_CipherInit_ex.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_int,
-    ]
-
-    lib.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
-    lib.EVP_CIPHER_CTX_ctrl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p,
-    ]
-
-    lib.EVP_CipherUpdate.restype = ctypes.c_int
-    lib.EVP_CipherUpdate.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_char_p,
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.c_char_p,
-        ctypes.c_int,
-    ]
-
-    lib.EVP_CipherFinal_ex.restype = ctypes.c_int
-    lib.EVP_CipherFinal_ex.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_char_p,
-        ctypes.POINTER(ctypes.c_int),
-    ]
-
-    return lib
-
-
-_libcrypto = _load_libcrypto()
+# The binding itself lives in core/libcrypto.py (no config import) so the standalone SNMP
+# survey can share it (v3.3.6).
+_libcrypto = libcrypto
 
 
 # ---------------------------------------------------------------------------

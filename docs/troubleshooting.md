@@ -108,7 +108,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   Do not `setcap` the Python interpreter: the venv `python3` resolves to the system-wide interpreter, so the capability would apply to every Python process on the host.
 
 ### B. User Account Temporarily Locked Out (HTTP 403)
-* **Cause**: Repeated failed logins for one username from one client IP (5 by default; set **Lockout Threshold** under **Admin Settings → Security & Discovery**) trigger a 15-minute lockout scoped to that `IP:username` pair. The failure counter resets after 30 minutes without further failures.
+* **Cause**: Repeated failed logins for one username from one client IP (5 by default; set **Lockout Threshold** under **Admin Settings → Users & access → Sign-in protection**) trigger a 15-minute lockout scoped to that `IP:username` pair. The failure counter resets after 30 minutes without further failures.
 * **Fix**:
   - Wait 15 minutes for the lockout to expire, or log in from a different client IP. Lockouts are shared by all API workers and survive service restarts; to lift one early: `sudo -u postgres psql -d netmon -c "DELETE FROM auth_login_failures WHERE lock_key LIKE '%:admin'"`.
   - HTTP 429 instead of 403 comes from the Nginx sign-in rate limit (10 a minute per address): wait a minute.
@@ -124,7 +124,7 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
   # Or run without arguments and press Enter at the prompt to auto-generate a random password
   sudo /opt/ephemres/deploy/reset-admin-password.sh
   ```
-  The `admin` account must change the password at the next login. To reset any other user, sign in as an administrator and use **Admin Settings → User Governance → Reset Password**.
+  The `admin` account must change the password at the next login. To reset any other user, sign in as an administrator and use **Admin Settings → Users & access → Reset Password**.
 
 ### D. TimescaleDB Chunk Compression Verification
 * **Check Compression Status**:

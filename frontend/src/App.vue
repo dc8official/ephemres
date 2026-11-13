@@ -25,9 +25,12 @@
           :class="{ open: navOpen }"
           aria-label="Main Navigation"
         >
-          <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
-          <RouterLink to="/topology" class="nav-link">Topology Map</RouterLink>
-          <RouterLink to="/reports" class="nav-link">Reports & SLA</RouterLink>
+          <!-- These three carry the endpoint filter (site, location, tags, type, search) from
+               the current page, so a filtered view stays filtered as you move around (build plan
+               4.3, option B). Traffic and Settings don't take the filter. -->
+          <RouterLink :to="{ path: '/', query: carriedFilter }" class="nav-link">Dashboard</RouterLink>
+          <RouterLink :to="{ path: '/topology', query: carriedFilter }" class="nav-link">Topology Map</RouterLink>
+          <RouterLink :to="{ path: '/reports', query: carriedFilter }" class="nav-link">Reports & SLA</RouterLink>
           <RouterLink to="/bandwidth" class="nav-link">Traffic</RouterLink>
           <RouterLink to="/settings" class="nav-link" v-if="isAdmin">Admin Settings</RouterLink>
         </nav>
@@ -136,6 +139,7 @@ import { logout, changePassword, getVersion } from './services/api.js'
 import { currentUser, isAdmin, mustChangePassword, loadUserFromStorage, setUserState, clearUserState } from './services/auth.js'
 import { useSSE } from './composables/useSSE.js'
 import { startActivityTracker } from './composables/useActivityTracker.js'
+import { filterQueryFrom } from './composables/useEndpointFilter.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -165,6 +169,8 @@ function onDocumentClick(event) {
   if (!toggle && navEl.value && !navEl.value.contains(event.target)) navOpen.value = false
 }
 const showNav = computed(() => !noNavRoutes.includes(route.path))
+// The current page's endpoint filter, for the header links.
+const carriedFilter = computed(() => filterQueryFrom(route.query))
 
 // Accounts that must change their password see only this dialog. The API enforces it too: every
 // other call answers 403 until the password is changed.
@@ -438,6 +444,7 @@ button { cursor: pointer; border: none; background: none; }
   --series-flows: #8b5cf6;
   --series-rtt: #f59e0b;
   --series-transit: #64748b;
+  --series-internal: #8b5cf6;
   --series-1: #3b82f6;
   --series-2: #10b981;
   --series-3: #f59e0b;

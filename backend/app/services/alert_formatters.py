@@ -29,6 +29,24 @@ def _sanitize_header(value: str) -> str:
     return re.sub(r"[\r\n]+", " ", str(value)).strip()
 
 
+# Severities that mean "all clear" (green) besides UP / RECOVERED: traffic back to normal and
+# traffic seen again (v3.3.6 traffic alerts). TRAFFIC_HIGH and TRAFFIC_SILENT stay amber.
+_GOOD_SEVERITIES = ("RECOVERED", "UP", "TRAFFIC_NORMAL", "TRAFFIC_RESUMED", "LINK_UP")
+
+
+def _headline(details: Optional[Dict[str, Any]], endpoint_name: Any, sev_upper: str) -> str:
+    """The alert's one-line title. Traffic alerts carry their own ("abj-rtr WAN1: inbound
+    traffic above 80% for 15 min"); state changes keep "<endpoint> is <STATE>"."""
+    summary = (details or {}).get("summary")
+    return str(summary) if summary else f"{endpoint_name} is {sev_upper}"
+
+
+def _alert_facts(details: Optional[Dict[str, Any]]) -> list:
+    """Extra (label, value) lines a traffic alert carries ("Link", "Direction", "Peak", ...):
+    the detail keys written as labels, i.e. starting with a capital letter."""
+    return [(k, str(v)) for k, v in (details or {}).items() if v is not None and k[:1].isupper()]
+
+
 def build_polyglot_payload(
     endpoint_name: str,
     ip_address: str,
@@ -51,7 +69,7 @@ def build_polyglot_payload(
         card_style = "attention"
         theme_color = "#ef4444"
         status_emoji = "🚨"
-    elif sev_upper in ("RECOVERED", "UP"):
+    elif sev_upper in _GOOD_SEVERITIES:
         card_style = "good"
         theme_color = "#22c55e"
         status_emoji = "✅"
@@ -60,7 +78,7 @@ def build_polyglot_payload(
         theme_color = "#f59e0b"
         status_emoji = "⚠️"
 
-    title_text = f"{status_emoji} Ephemres Alert: {endpoint_name} is {sev_upper}"
+    title_text = f"{status_emoji} Ephemres Alert: {_headline(det, endpoint_name, sev_upper)}"
     plain_text = f"{status_emoji} [Ephemres Alert] {endpoint_name} ({ip_address}) - {sev_upper} | Event: {event_type} | Time: {ts_str}"
 
     adaptive_card = {
@@ -104,7 +122,7 @@ def build_polyglot_payload(
     if det:
         extra_facts = []
         for k, v in det.items():
-            if v is not None and k not in ("endpoint_id", "id"):
+            if v is not None and k not in ("endpoint_id", "id", "summary"):
                 extra_facts.append({"title": f"{k}:", "value": str(v)})
         if extra_facts:
             adaptive_card["body"].append({
@@ -116,7 +134,7 @@ def build_polyglot_payload(
     safe_ip = html.escape(str(ip_address))
     safe_event = html.escape(str(event_type))
     safe_sev = html.escape(str(sev_upper))
-    safe_title = f"{status_emoji} Ephemres Alert: {safe_name} is {safe_sev}"
+    safe_title = f"{status_emoji} Ephemres Alert: {html.escape(_headline(det, endpoint_name, sev_upper))}"
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; border-left: 4px solid {theme_color}; padding: 12px 16px; background-color: #1e1e24; color: #f4f4f5; border-radius: 4px;">
@@ -171,7 +189,7 @@ def build_discord_payload(
     if sev_upper in ("DOWN", "CRITICAL"):
         color = 15158332  # Red
         emoji = "🚨"
-    elif sev_upper in ("RECOVERED", "UP"):
+    elif sev_upper in _GOOD_SEVERITIES:
         color = 3066993   # Green
         emoji = "✅"
     else:
@@ -193,13 +211,19 @@ def build_discord_payload(
             fields.append({"name": "Packet Loss", "value": f"{details['packet_loss_pct']}%", "inline": True})
         if details.get("root_cause"):
             fields.append({"name": "Root Cause", "value": str(details["root_cause"]), "inline": False})
+        for label, value in _alert_facts(details):
+            fields.append({"name": label, "value": value, "inline": True})
 
     return {
-        "content": f"{emoji} **Ephemres Alert:** `{endpoint_name}` transitioned to **{sev_upper}**",
+        "content": (
+            f"{emoji} **Ephemres Alert:** {_headline(details, endpoint_name, sev_upper)}"
+            if (details or {}).get("summary")
+            else f"{emoji} **Ephemres Alert:** `{endpoint_name}` transitioned to **{sev_upper}**"
+        ),
         "allowed_mentions": {"parse": []},
         "embeds": [
             {
-                "title": f"{emoji} {endpoint_name} is {sev_upper}",
+                "title": f"{emoji} {_headline(details, endpoint_name, sev_upper)}",
                 "description": f"Operational State Transition detected by Ephemres Monitoring Engine.",
                 "url": url,
                 "color": color,
@@ -226,7 +250,8 @@ def build_slack_payload(
     url = portal_url or "http://localhost:8000"
     sev_upper = severity.upper()
 
-    emoji = "🚨" if sev_upper in ("DOWN", "CRITICAL") else ("✅" if sev_upper in ("RECOVERED", "UP") else "⚠️")
+    emoji = "🚨" if sev_upper in ("DOWN", "CRITICAL") else ("✅" if sev_upper in _GOOD_SEVERITIES else "⚠️")
+    safe_headline = _escape_slack_mrkdwn(_headline(details, endpoint_name, sev_upper))
 
     safe_name = _escape_slack_mrkdwn(endpoint_name)
     safe_ip = _escape_slack_mrkdwn(ip_address)
@@ -238,7 +263,7 @@ def build_slack_payload(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"{emoji} Ephemres Alert: {safe_name} is {safe_sev}",
+                "text": f"{emoji} Ephemres Alert: {safe_headline}",
                 "emoji": True,
             },
         },
@@ -251,6 +276,13 @@ def build_slack_payload(
                 {"type": "mrkdwn", "text": f"*Event Type:*\n{safe_event}"},
             ],
         },
+        *([{
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*{_escape_slack_mrkdwn(k)}:*\n{_escape_slack_mrkdwn(v)}"}
+                for k, v in _alert_facts(details)[:10]
+            ],
+        }] if _alert_facts(details) else []),
         {
             "type": "context",
             "elements": [
@@ -276,7 +308,7 @@ def build_slack_payload(
         })
 
     return {
-        "text": f"{emoji} Ephemres Alert: {safe_name} is {safe_sev}",
+        "text": f"{emoji} Ephemres Alert: {safe_headline}",
         "blocks": blocks,
     }
 
@@ -302,9 +334,14 @@ def build_email_mime(
 
     clean_to = _sanitize_header(to_email)
     clean_from = _sanitize_header(from_email)
-    clean_subject = _sanitize_header(f"[{sev_upper}] Ephemres Alert: {endpoint_name} ({ip_address})")
+    headline = _headline(details, endpoint_name, sev_upper)
+    clean_subject = _sanitize_header(
+        f"[{sev_upper}] Ephemres Alert: {headline}" if (details or {}).get("summary")
+        else f"[{sev_upper}] Ephemres Alert: {endpoint_name} ({ip_address})"
+    )
+    facts = _alert_facts(details)
 
-    theme_color = "#ef4444" if sev_upper in ("DOWN", "CRITICAL") else ("#22c55e" if sev_upper in ("RECOVERED", "UP") else "#f59e0b")
+    theme_color = "#ef4444" if sev_upper in ("DOWN", "CRITICAL") else ("#22c55e" if sev_upper in _GOOD_SEVERITIES else "#f59e0b")
 
     safe_name = html.escape(str(endpoint_name))
     safe_ip = html.escape(str(ip_address))
@@ -319,7 +356,7 @@ IP Address: {ip_address}
 Severity:   {sev_upper}
 Event:      {event_type}
 Timestamp:  {ts_str}
-
+{"".join(f"{k + ':':<12}{v}" + chr(10) for k, v in facts)}
 Console:    {url}
 --------------------------------------------
 Sent by Ephemres Enterprise Platform v3.3.5
@@ -332,7 +369,7 @@ Sent by Ephemres Enterprise Platform v3.3.5
 <body style="font-family: Arial, sans-serif; background-color: #0f0f12; color: #f4f4f5; margin: 0; padding: 24px;">
   <div style="max-width: 600px; margin: 0 auto; background-color: #18181b; border: 1px solid #27272a; border-radius: 8px; overflow: hidden;">
     <div style="background-color: {theme_color}; color: #ffffff; padding: 16px 20px;">
-      <h2 style="margin: 0; font-size: 18px;">Ephemres Alert: {safe_name} is {safe_sev}</h2>
+      <h2 style="margin: 0; font-size: 18px;">Ephemres Alert: {html.escape(headline)}</h2>
     </div>
     <div style="padding: 20px;">
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
@@ -341,6 +378,7 @@ Sent by Ephemres Enterprise Platform v3.3.5
         <tr><td style="padding: 6px 0; color: #a1a1aa;">Severity:</td><td style="font-weight: bold; color: {theme_color};">{safe_sev}</td></tr>
         <tr><td style="padding: 6px 0; color: #a1a1aa;">Event:</td><td>{safe_event}</td></tr>
         <tr><td style="padding: 6px 0; color: #a1a1aa;">Timestamp:</td><td>{ts_str}</td></tr>
+        {"".join(f'<tr><td style="padding: 6px 0; color: #a1a1aa;">{html.escape(k)}:</td><td>{html.escape(v)}</td></tr>' for k, v in facts)}
       </table>
       <div style="text-align: center; margin-top: 24px;">
         <a href="{url}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">Open in Ephemres Console</a>

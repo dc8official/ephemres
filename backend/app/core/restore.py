@@ -106,6 +106,8 @@ HYPERTABLE_NAMES = {
     "flow_hourly_rollups",
     "flow_daily_rollups",
     "flow_interface_minute_rollups",
+    # Migration 0027 (v3.3.6): interface traffic from SNMP counters.
+    "snmp_interface_minute_rollups",
     "monitoring_service_events",
 }
 
@@ -115,6 +117,8 @@ CONFIG_TABLE_ORDER = [
     "app_settings",
     "system_settings",
     "endpoint_groups",
+    # Migration 0026 (v3.3.6): SNMP credential sets, before the endpoints that point at them.
+    "snmp_credentials",
     "endpoints",
     "alert_channels",
     "alert_rules",
@@ -125,6 +129,7 @@ CONFIG_TABLE_ORDER = [
     "endpoint_rca_incidents",
     "flow_path_observations",
     "flow_route_changes",
+    "endpoint_route_changes",
     "user_sessions",
 ]
 
@@ -317,6 +322,9 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "hostname": "varchar",
             "device_type": "varchar",
             "location": "varchar",
+            # Migration 0023 (v3.3.6); older backups have neither, and both are optional.
+            "site": "varchar",
+            "tags": "_text",
             "description": "text",
             "monitoring_enabled": "bool",
             "endpoint_status": "varchar",
@@ -328,17 +336,43 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "is_l2_segment": "bool",
             "flow_exporter_ips": "_inet",
             "flow_interface_aliases": "jsonb",
+            # Migration 0026 (v3.3.6): the endpoint's SNMP credential set; cleared below when
+            # the set did not come back.
+            "snmp_credential_id": "uuid",
             "device_role": "varchar",
             "created_by": "uuid",
             "created_at": "timestamptz",
             "updated_at": "timestamptz",
             "deleted_at": "timestamptz",
         },
+        # Migration 0026 (v3.3.6): shared SNMP credential sets; `secrets` is ENC:v1: JSON.
+        "snmp_credentials": {
+            "id": "uuid",
+            "name": "varchar",
+            "version": "varchar",
+            "username": "varchar",
+            "auth_protocol": "varchar",
+            "priv_protocol": "varchar",
+            "priv_same": "bool",
+            "context": "varchar",
+            "port": "int4",
+            "timeout_ms": "int4",
+            "retries": "int4",
+            "secrets": "text",
+            "created_at": "timestamptz",
+            "updated_at": "timestamptz",
+        },
         "endpoint_baseline_routes": {
             "endpoint_id": "uuid",
             "updated_at": "timestamptz",
             "total_hops": "int4",
             "hops": "jsonb",
+            # Migration 0024 (v3.3.6). The hold-down state (pending, recent changes, flapping) is
+            # transient and not restored; an older backup's rows get normal = current below.
+            "current_since": "timestamptz",
+            "normal_hops": "jsonb",
+            "normal_since": "timestamptz",
+            "normal_pinned": "bool",
         },
         "endpoint_diagnostic_traces": {
             "id": "uuid",
@@ -383,6 +417,18 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "old_next_hop": "inet",
             "new_out_if": "int4",
             "new_next_hop": "inet",
+        },
+        # Migration 0024 (v3.3.6): normal / current route changes per endpoint.
+        "endpoint_route_changes": {
+            "id": "uuid",
+            "endpoint_id": "uuid",
+            "changed_at": "timestamptz",
+            "kind": "varchar",
+            "trigger": "varchar",
+            "from_hops": "jsonb",
+            "to_hops": "jsonb",
+            "first_diff_hop": "int4",
+            "detail": "text",
         },
         "alert_channels": {
             "id": "uuid",
@@ -487,6 +533,20 @@ def _get_default_v332_schema() -> Dict[str, Dict[str, str]]:
             "in_packets": "int8",
             "out_packets": "int8",
             "flow_count": "int4",
+        },
+        # Migration 0027 (v3.3.6): same shape plus errors and discards, from SNMP counters.
+        "snmp_interface_minute_rollups": {
+            "bucket": "timestamptz",
+            "exporter_id": "uuid",
+            "interface_idx": "int4",
+            "in_bytes": "int8",
+            "out_bytes": "int8",
+            "in_packets": "int8",
+            "out_packets": "int8",
+            "in_errors": "int8",
+            "out_errors": "int8",
+            "in_discards": "int8",
+            "out_discards": "int8",
         },
     }
 
@@ -971,6 +1031,10 @@ def scan_backup_metadata_and_configs(
                                 and "received" in data_cols
                             ):
                                 parent = "endpoint_probe_samples"
+                            elif "in_errors" in data_cols or "in_discards" in data_cols:
+                                # Before the flow interface test: the SNMP table has the same
+                                # columns plus these (migration 0027).
+                                parent = "snmp_interface_minute_rollups"
                             elif (
                                 "interface_idx" in data_cols
                                 or ("in_bytes" in data_cols and "out_bytes" in data_cols)
@@ -1326,6 +1390,42 @@ async def reconcile_and_restore_database(
             await _execute_sql(conn, sql, *vals)
         summary["tables_restored"].append("endpoint_groups")
 
+    # 4b. Restore SNMP credential sets (migration 0026). Their secrets are encrypted with the
+    # backup server's key like alert channels', so they are re-encrypted the same way; a set
+    # whose secrets cannot be read is still restored (its endpoints keep pointing at it) but
+    # with empty secrets, so it fails visibly in the SNMP status until an admin re-enters them.
+    valid_snmp_credential_ids: Set[str] = set()
+    if "snmp_credentials" in config_data and "snmp_credentials" in target_schema:
+        cols, rows = config_data["snmp_credentials"]
+        target_cols = target_schema["snmp_credentials"]
+        usable = [c for c in cols if c in target_cols]
+        col_names = ", ".join(f'"{c}"' for c in usable)
+        placeholders = ", ".join(f"${i+1}" for i in range(len(usable)))
+        update_cols = [c for c in usable if c not in ("id", "created_at")]
+        set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
+        for row in rows:
+            row = dict(row)
+            raw = str(row.get("secrets") or "")
+            new_secrets, is_valid = re_encrypt_alert_channel_config(raw, old_secret_key)
+            if not is_valid:
+                new_secrets = ""
+                summary["snmp_credentials_cleared"] = summary.get("snmp_credentials_cleared", 0) + 1
+                logger.warning("[restore] SNMP credential set '%s': secrets could not be decrypted; re-enter them in Settings.", row.get("name"))
+            elif new_secrets != raw:
+                summary["channels_re_encrypted"] += 1
+            row["secrets"] = new_secrets
+            vals = [_prepare_column_val(row.get(c), target_cols.get(c, "varchar")) for c in usable]
+            # Names are unique: a set with the same name but another id (made on the target
+            # before the restore) is replaced by the backup's, which its endpoints point at.
+            await _execute_sql(conn, 'DELETE FROM "snmp_credentials" WHERE "name" = $1 AND "id" <> $2;',
+                               _prepare_column_val(row.get("name"), "varchar"), _prepare_column_val(row.get("id"), "uuid"))
+            sql = (f'INSERT INTO "snmp_credentials" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("id") DO UPDATE SET {set_clause};'
+                   if set_clause else
+                   f'INSERT INTO "snmp_credentials" ({col_names}) VALUES ({placeholders}) ON CONFLICT ("id") DO NOTHING;')
+            await _execute_sql(conn, sql, *vals)
+            valid_snmp_credential_ids.add(str(row.get("id")))
+        summary["tables_restored"].append("snmp_credentials")
+
     # 5. Restore endpoints (Two-pass for self-referential manual_parent_id FK safety)
     if "endpoints" in config_data and "endpoints" in target_schema:
         cols, rows = config_data["endpoints"]
@@ -1348,6 +1448,11 @@ async def reconcile_and_restore_database(
 
             if "device_role" in usable:
                 row["device_role"] = _normalize_device_role(row.get("device_role"))
+
+            if "snmp_credential_id" in usable and row.get("snmp_credential_id") \
+                    and str(row["snmp_credential_id"]) not in valid_snmp_credential_ids:
+                row = dict(row)
+                row["snmp_credential_id"] = None
 
             parent_id = row.get("manual_parent_id")
             if "manual_parent_id" in usable and parent_id and str(parent_id) not in valid_endpoint_ids:
@@ -1411,7 +1516,7 @@ async def reconcile_and_restore_database(
         summary["tables_restored"].append("alert_channels")
 
     # 7. Restore remaining non-hypertable config tables (skipping ephemeral user_sessions)
-    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents", "flow_path_observations", "flow_route_changes"]:
+    for t in ["alert_rules", "alert_delivery_logs", "audit_logs", "endpoint_baseline_routes", "endpoint_diagnostic_traces", "endpoint_rca_incidents", "flow_path_observations", "flow_route_changes", "endpoint_route_changes"]:
         if t in config_data and t in target_schema:
             cols, rows = config_data[t]
             target_cols = target_schema[t]
@@ -1443,6 +1548,15 @@ async def reconcile_and_restore_database(
                 await _execute_batch(conn, sql, batch)
                 batch.clear()
             summary["tables_restored"].append(t)
+
+    # A backup from before v3.3.6 has no normal path: every restored path starts as both
+    # current and normal (as migration 0024 did for the live data).
+    if "endpoint_baseline_routes" in target_schema and "normal_hops" in target_schema["endpoint_baseline_routes"]:
+        await _execute_sql(
+            conn,
+            "UPDATE endpoint_baseline_routes SET normal_hops = hops, normal_since = COALESCE(normal_since, updated_at) "
+            "WHERE normal_hops IS NULL;",
+        )
 
     # 8. Stream Hypertables in Batches of 1,000 (Pass 2)
     if not skip_telemetry:

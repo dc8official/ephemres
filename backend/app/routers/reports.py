@@ -13,7 +13,7 @@ from math import ceil
 from typing import Any, List, Optional, Union
 from uuid import UUID
 
-from app.core.asgi import APIRouter, Depends, HTTPException, Query
+from app.core.asgi import APIRouter, Depends, HTTPException, Query, Request
 from app.core.asgi import StreamingResponse
 from app.core.schema import BaseModel, ConfigDict, Field
 from app.core.orm import and_, or_, select, text
@@ -37,6 +37,14 @@ from app.schemas import (
     UptimeReport,
 )
 from app.core.pdf import render_pdf_async
+from app.services.endpoint_filter import (
+    EndpointFilter,
+    conditions as filter_conditions,
+    filter_from_body,
+    filter_from_request,
+    or_empty,
+    resolve_scope,
+)
 from app.services.report_compiler import (
     _merge_intervals,
     _overlap_seconds,
@@ -107,20 +115,34 @@ def _validate_date_range(
         )
 
 
+def _text_or_none(value: Any) -> Optional[str]:
+    """A text column's value, or None for anything else (rows built by older code or tests)."""
+    return value if isinstance(value, str) else None
+
+
+async def _report_filter(request: Request) -> EndpointFilter:
+    return filter_from_request(request)
+
+
 @router.get("/fleet-summary", response_model=APIResponse)
 async def get_fleet_summary(
     start_date: str = Query(...),
     end_date: str = Query(...),
+    endpoint_filter: EndpointFilter = Depends(_report_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Per-endpoint uptime, incidents and downtime over the window, and the fleet SLA. With the
+    shared filter (?site=&location=&tag=&type=&q=) only the matching endpoints, picked by their
+    site, location and tags as assigned now."""
+    endpoint_filter = or_empty(endpoint_filter)
     start_dt = parse_datetime_param(start_date, is_end=False)
     end_dt = parse_datetime_param(end_date, is_end=True)
     _validate_date_range(start_dt, end_dt)
 
     stmt = (
         select(Endpoint)
-        .where(Endpoint.endpoint_status != "DELETED")
+        .where(*filter_conditions(endpoint_filter))
         .order_by(Endpoint.hostname.asc())
     )
     res = await db.execute(stmt)
@@ -318,6 +340,10 @@ async def get_fleet_summary(
                 downtime_seconds=downtime_seconds,
                 total_seconds=total_seconds,
                 device_role=role,
+                site=_text_or_none(getattr(ep, "site", None)),
+                location=_text_or_none(getattr(ep, "location", None)),
+                tags=[t for t in (getattr(ep, "tags", None) or []) if isinstance(t, str)]
+                if isinstance(getattr(ep, "tags", None), (list, tuple)) else [],
             )
         )
 
@@ -352,6 +378,8 @@ async def get_fleet_summary(
         total_incident_count=total_incident_count,
         total_downtime_seconds=total_downtime_seconds,
         endpoints=endpoint_summaries,
+        filter=None if endpoint_filter.is_empty() else endpoint_filter.as_dict(),
+        filter_description=None if endpoint_filter.is_empty() else endpoint_filter.describe(),
     )
     return APIResponse.success(data=fleet_summary)
 
@@ -549,7 +577,9 @@ async def get_endpoint_events(
 # Batch Telemetry Export Streaming API
 # ---------------------------------------------------------------------------
 class BatchExportRequest(BaseModel):
-    endpoint_ids: List[UUID]
+    # A hand-picked list, the shared filter, or both (the picked endpoints the filter matches).
+    endpoint_ids: List[UUID] = []
+    filter: Optional[dict] = None
     start_time: datetime
     end_time: datetime
     columns: Optional[List[str]] = None
@@ -763,7 +793,10 @@ async def csv_generator(
 
 class PdfReportRequest(BaseModel):
     template_type: str = Field(..., description="'availability', 'bandwidth', or 'master'")
-    endpoint_ids: List[UUID] = Field(..., min_length=1, description="List of target endpoints or flow exporters")
+    # A hand-picked list, the shared filter, or both (the picked endpoints the filter matches).
+    # The PDF prints the filter, and says site and location are as assigned when it was made.
+    endpoint_ids: List[UUID] = Field(default=[], description="List of target endpoints or flow exporters")
+    filter: Optional[dict] = Field(default=None, description="Shared endpoint filter: site, location, tag, type, q")
     start_date: str = Field(..., description="ISO 8601 start timestamp")
     end_date: str = Field(..., description="ISO 8601 end timestamp")
     include_rca: bool = Field(default=True, description="Whether to include Root Cause Analysis in incident ledgers")
@@ -802,17 +835,29 @@ async def generate_pdf_report(
     end_dt = parse_datetime_param(request.end_date, is_end=True)
     _validate_date_range(start_dt, end_dt)
 
+    endpoint_filter = filter_from_body(request.filter)
+    endpoint_ids = await resolve_scope(db, endpoint_filter, request.endpoint_ids)
+    if not endpoint_ids:
+        raise HTTPException(status_code=400, detail="No endpoints in the report: choose some, or widen the filter.")
+    # Printed under the scope title: which filter chose the endpoints, and that it used their
+    # site, location and tags as assigned at generation, not during the report period.
+    scope_filter = None
+    if endpoint_filter is not None and not endpoint_filter.is_empty():
+        scope_filter = endpoint_filter.describe()
+        if request.endpoint_ids:
+            scope_filter += f" ({len(endpoint_ids)} selected)"
+
     org = await get_organization_branding(db)
     now_utc = datetime.now(timezone.utc)
     generated_at_str = now_utc.strftime("%Y-%m-%d %H:%M")
     period_label = format_period(start_dt.astimezone(timezone.utc), end_dt.astimezone(timezone.utc))
 
-    default_scope = f"{len(request.endpoint_ids)} Infrastructure Targets"
+    default_scope = f"{len(endpoint_ids)} Infrastructure Targets"
     scope_title = request.scope_title or default_scope
 
     if ttype == "availability":
         data = await compile_availability_report_data(
-            db, request.endpoint_ids, start_dt, end_dt, include_rca=request.include_rca
+            db, endpoint_ids, start_dt, end_dt, include_rca=request.include_rca
         )
         report_title = "Device Availability & Uptime Performance Report"
         template_name = "template_a_availability.html"
@@ -826,6 +871,7 @@ async def generate_pdf_report(
             "generated_at": generated_at_str,
             "theme_accent": theme_accent,
             "scope_title": scope_title,
+            "scope_filter": scope_filter,
             "endpoints": data["endpoints"],
             "incidents": data["incidents"],
             "incidents_total": data.get("incidents_total", len(data["incidents"])),
@@ -833,7 +879,7 @@ async def generate_pdf_report(
         }
     elif ttype == "bandwidth":
         data = await compile_bandwidth_report_data(
-            db, request.endpoint_ids, start_dt, end_dt
+            db, endpoint_ids, start_dt, end_dt
         )
         report_title = "Network Bandwidth & Flow Telemetry Report"
         template_name = "template_b_bandwidth.html"
@@ -847,6 +893,7 @@ async def generate_pdf_report(
             "generated_at": generated_at_str,
             "theme_accent": theme_accent,
             "scope_title": scope_title,
+            "scope_filter": scope_filter,
             "exporters": data["exporters"],
             "active_exporters": data.get("active_exporters", len(data["exporters"])),
             "interfaces": data["interfaces"],
@@ -859,7 +906,7 @@ async def generate_pdf_report(
         }
     else:  # master
         data = await compile_master_report_data(
-            db, request.endpoint_ids, start_dt, end_dt, include_rca=request.include_rca
+            db, endpoint_ids, start_dt, end_dt, include_rca=request.include_rca
         )
         report_title = "Comprehensive Master Operational Audit Dossier"
         template_name = "template_c_master.html"
@@ -873,6 +920,7 @@ async def generate_pdf_report(
             "generated_at": generated_at_str,
             "theme_accent": theme_accent,
             "scope_title": scope_title,
+            "scope_filter": scope_filter,
             "endpoints": data["endpoints"],
             "incidents": data["incidents"],
             "incidents_total": data.get("incidents_total", len(data["incidents"])),
@@ -906,7 +954,7 @@ async def generate_pdf_report(
     logger.info(
         "Successfully compiled %s PDF report for %d targets (SHA256: %s, size: %d bytes)",
         ttype,
-        len(request.endpoint_ids),
+        len(endpoint_ids),
         sha256_hash,
         len(pdf_bytes),
     )
@@ -932,14 +980,21 @@ async def batch_export_telemetry(
 ):
     # Any authenticated user may export: telemetry export is read-only. The SSE variant of the
     # auth check releases its database connection at once, since the stream can run for minutes.
+    # The filter is resolved here, on a short-lived connection, before the stream starts.
+    endpoint_filter = filter_from_body(request.filter)
+    if endpoint_filter is not None and not endpoint_filter.is_empty():
+        async with AsyncSessionLocal() as db:
+            endpoint_ids = await resolve_scope(db, endpoint_filter, request.endpoint_ids)
+    else:
+        endpoint_ids = list(request.endpoint_ids)
     logger.info(
         "Starting batch telemetry CSV streaming export for %d endpoints (user: %s)",
-        len(request.endpoint_ids),
+        len(endpoint_ids),
         current_user.get("username"),
     )
 
     generator = csv_generator(
-        request.endpoint_ids,
+        endpoint_ids,
         request.start_time,
         request.end_time,
         request.columns,

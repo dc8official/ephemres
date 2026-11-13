@@ -26,6 +26,8 @@ Environment=EPHEMRES_API_DB_POOL=10
 EnvironmentFile=/etc/ephemres/ephemres.env
 EnvironmentFile=-/opt/ephemres/.env
 EnvironmentFile=-/opt/ephemres/backend/.env
+# /opt/ephemres too (v3.3.6): the SNMP Test button runs the survey from monitoring/snmp.
+Environment=PYTHONPATH=/opt/ephemres/backend:/opt/ephemres
 ExecStart=/opt/ephemres/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers ${EPHEMRES_API_WORKERS}
 Restart=always
 RestartSec=5

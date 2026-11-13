@@ -48,17 +48,23 @@ def talker_row(ip, endpoint_id, ingress, egress, flows, packets=0):
     }
 
 
-def top_talkers_results(talkers, hostnames, conversations, conversation_hostnames):
-    """Result sequence for GET /bandwidth/top-talkers, in query order: talkers, endpoint
-    hostnames (only when a talker has an endpoint), conversation counts, conversation page,
-    conversation hostnames (only when the page is non-empty)."""
+def top_talkers_results(talkers, hostnames, conversations, conversation_hostnames, seen_by=()):
+    """Result sequence for GET /bandwidth/top-talkers, in query order: talkers, the routers
+    that saw each talker (`seen_by`: (ip, exporter_id) pairs), endpoint names and sites (only
+    when a talker or router is an endpoint), conversation counts, conversation page,
+    conversation hostnames and the routers that reported each conversation (only when the page
+    is non-empty; none here, which ends that lookup). `hostnames` holds (id, name) or
+    (id, name, site)."""
     results = [mapping_result(talkers)]
-    if any(t["endpoint_id"] for t in talkers):
+    if talkers:
+        results.append(mapping_result([{"ip": ip, "exporter_id": e} for ip, e in seen_by]))
+    if any(t["endpoint_id"] for t in talkers) or seen_by:
         host = MagicMock()
-        host.all.return_value = hostnames
+        host.all.return_value = [tuple(h) + (None,) * (3 - len(h)) for h in hostnames]
         results.append(host)
     results.append(mapping_result([{"all_count": len(conversations), "anomalies": 0, "qos": 0, "bulk": 0}]))
     results.append(mapping_result(conversations))
     if conversations:
         results.append(mapping_result([{"ip": ip, "hostname": h} for ip, h in conversation_hostnames]))
+        results.append(mapping_result([]))
     return results

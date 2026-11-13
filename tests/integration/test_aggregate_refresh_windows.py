@@ -15,6 +15,7 @@ SOURCE = {
     "flow_conversation_hourly_rollups": "flow_minute_rollups",
     "flow_interface_hourly_rollups": "flow_interface_minute_rollups",
     "node_historical_baselines_cagg": "endpoint_events",
+    "snmp_interface_hourly_rollups": "snmp_interface_minute_rollups",  # 0027, v3.3.6
 }
 EXPECTED_START = {
     "endpoint_probe_hourly": "29 days",
@@ -23,6 +24,7 @@ EXPECTED_START = {
     "flow_conversation_hourly_rollups": "31 days",
     "flow_interface_hourly_rollups": "6 days",
     "node_historical_baselines_cagg": "28 days",
+    "snmp_interface_hourly_rollups": "6 days",  # its source is kept 7 days, like the flow one
 }
 
 

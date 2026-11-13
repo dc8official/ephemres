@@ -24,6 +24,10 @@ class MonitoredEndpoint:
     hostname: str
     device_type: str = "SERVER"
     location: Optional[str] = None
+    # Site and tags (v3.3.6) ride along for alert text and future per-site rules; the engine
+    # makes no decision on them.
+    site: Optional[str] = None
+    tags: tuple = ()
     endpoint_status: str = "ACTIVE"
     monitoring_enabled: bool = True
     allow_incident_trace: bool = True
@@ -92,6 +96,8 @@ class EndpointRegistry:
         hostname = str(_get_val(ep_data, "hostname", ip_addr))
         device_type = str(_get_val(ep_data, "device_type", "SERVER"))
         location = _get_val(ep_data, "location")
+        site = _get_val(ep_data, "site")
+        tags = tuple(_get_val(ep_data, "tags", None) or ())
         endpoint_status = str(_get_val(ep_data, "endpoint_status", "ACTIVE")).upper()
         monitoring_enabled = bool(_get_val(ep_data, "monitoring_enabled", True))
         allow_incident_trace = bool(_get_val(ep_data, "allow_incident_trace", True))
@@ -113,6 +119,8 @@ class EndpointRegistry:
             hostname=hostname,
             device_type=device_type,
             location=location,
+            site=site,
+            tags=tags,
             endpoint_status=endpoint_status,
             monitoring_enabled=monitoring_enabled,
             allow_incident_trace=allow_incident_trace,

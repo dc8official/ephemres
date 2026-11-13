@@ -80,6 +80,10 @@ class TopologyGraphManager:
         # (source, target) -> {"flow_status", "flow_detail"[, "inferred_ip"]}: traceroute links
         # checked against the next hops exporters report in flows (refresh_flow_status).
         self._edge_flow: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Edges placed by LLDP/CDP neighbours (v3.3.6 build plan 8.3): (parent, child) -> protocol
+        # label, and child -> parent for root-cause analysis.
+        self._l2_edges: Dict[Tuple[str, str], str] = {}
+        self._l2_parent: Dict[str, str] = {}
 
         self._cached_graph: Dict[str, Any] = {"nodes": [], "edges": []}
         self._cached_graph_json: str = json.dumps({"nodes": [], "edges": []})
@@ -170,13 +174,25 @@ class TopologyGraphManager:
                 monitored_by_ip[ip] = ep_id
 
             # 2. Fetch baseline routes
-            baseline_query = text("SELECT endpoint_id, total_hops, hops FROM endpoint_baseline_routes")
+            # hops is the CURRENT path; normal_hops (v3.3.6) is drawn faded where it differs.
+            baseline_query = text(
+                "SELECT endpoint_id, total_hops, hops, normal_hops, current_since FROM endpoint_baseline_routes"
+            )
             bl_result = await _safe_execute(db, baseline_query)
             bl_rows = bl_result.fetchall()
 
             baseline_routes: Dict[str, List[Dict[str, Any]]] = {}
+            normal_routes: Dict[str, Tuple[List[Dict[str, Any]], Any]] = {}
             for row in bl_rows:
                 ep_id = str(getattr(row, "endpoint_id", ""))
+                normal_raw = getattr(row, "normal_hops", None)
+                if isinstance(normal_raw, str):
+                    try:
+                        normal_raw = json.loads(normal_raw)
+                    except Exception:
+                        normal_raw = None
+                if isinstance(normal_raw, list):
+                    normal_routes[ep_id] = (normal_raw, getattr(row, "current_since", None))
                 hops_raw = getattr(row, "hops", None)
                 if hops_raw is None or not isinstance(hops_raw, list):
                     t_data = getattr(row, "trace_data", None)
@@ -352,6 +368,12 @@ class TopologyGraphManager:
                         transit_children[previous_node_id] = set()
                     transit_children[previous_node_id].add(ep_id)
 
+            # 4a. Neighbours (v3.3.6 build plan 8.3, decided with Kenneth): endpoints traceroute
+            # cannot place (hung straight off the root) get their parent from the LLDP/CDP links
+            # between monitored devices. Manual parents and traceroute paths are untouched.
+            adjacency = await self._load_neighbour_adjacency(db, monitored_by_id)
+            l2_edges = self.place_by_neighbours(edges, transit_children, monitored_by_id, root_node_id, adjacency)
+
             # 4b. Synthetic Subnet Clustering for Direct 1-Hop / L2 Devices
             # Endpoints connecting directly to root with no intermediate hops are grouped by subnet
             direct_root_eps = [
@@ -396,10 +418,18 @@ class TopologyGraphManager:
             # 5. RCA Status Propagation - Inferred Down
             self._propagate_inferred_down(nodes, transit_children)
 
+            # 5b. Normal path overlay (v3.3.6 build plan 6.4): an endpoint whose current path is
+            # not its normal one gets an "alternate path since" marker, and the part of the
+            # normal path not in use is added as faded nodes and dashed edges. They take no part
+            # in inferred-down above, which follows the paths in use.
+            normal_edges = self._normal_path_overlay(
+                nodes, edges, baseline_routes, normal_routes, monitored_by_ip, monitored_by_id, root_node_id
+            )
+
             # 6. Compute DAG Topological Longest-Path Levels
             adj: Dict[str, List[str]] = {nid: [] for nid in nodes}
             in_degrees: Dict[str, int] = {nid: 0 for nid in nodes}
-            for src, tgt in edges:
+            for src, tgt in list(edges) + list(normal_edges):
                 if src in adj and tgt in in_degrees:
                     adj[src].append(tgt)
                     in_degrees[tgt] += 1
@@ -426,6 +456,7 @@ class TopologyGraphManager:
 
             self._nodes = nodes
             self._edges = edges
+            self._normal_edges = normal_edges
             self._transit_children = transit_children
             self._monitored_by_id = monitored_by_id
             self._monitored_by_ip = monitored_by_ip
@@ -433,6 +464,8 @@ class TopologyGraphManager:
             self._baseline_routes = baseline_routes
             self._failed_hop_ips = failed_hop_ips
             self._failed_endpoint_ids = failed_endpoint_ids
+            self._l2_edges = l2_edges
+            self._l2_parent = {child: parent for (parent, child) in l2_edges}
 
             self._apply_inferred_nodes()
             self._cached_graph = {
@@ -657,7 +690,158 @@ class TopologyGraphManager:
 
 
     def _edges_payload(self, edges: Set[Tuple[str, str]]) -> List[Dict[str, Any]]:
-        return [{"source": src, "target": tgt, **self._edge_flow.get((src, tgt), {})} for src, tgt in edges]
+        l2 = getattr(self, "_l2_edges", {})
+        payload = [
+            {"source": src, "target": tgt, **self._edge_flow.get((src, tgt), {}),
+             # Placed by LLDP/CDP (v3.3.6): the map draws and labels these differently.
+             **({"via": l2[(src, tgt)]} if (src, tgt) in l2 else {})}
+            for src, tgt in edges
+        ]
+        # Normal-path links not in use (full_rebuild 5b): drawn dashed and faded by the map.
+        payload += [
+            {"source": src, "target": tgt, "normal_only": True}
+            for src, tgt in getattr(self, "_normal_edges", set())
+            if (src, tgt) not in edges
+        ]
+        return payload
+
+    @staticmethod
+    async def _load_neighbour_adjacency(db: AsyncSession, monitored_by_id: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+        """Undirected LLDP/CDP links between monitored endpoints: endpoint -> {neighbour: label}.
+        Either side reporting the other is enough (a switch may report its uplink, and not the
+        other way round)."""
+        res = await _safe_execute(db, text("""
+            SELECT endpoint_id, matched_endpoint_id, protocol FROM snmp_neighbours
+            WHERE matched_endpoint_id IS NOT NULL
+        """))
+        adjacency: Dict[str, Dict[str, str]] = defaultdict(dict)
+        for a, b, protocol in res.fetchall():
+            a, b = str(a), str(b)
+            if a == b or a not in monitored_by_id or b not in monitored_by_id:
+                continue
+            label = "CDP" if protocol == "cdp" else "LLDP"
+            adjacency[a].setdefault(b, label)
+            adjacency[b].setdefault(a, label)
+        return dict(adjacency)
+
+    @staticmethod
+    def place_by_neighbours(
+        edges: Set[Tuple[str, str]],
+        transit_children: Dict[str, Set[str]],
+        monitored_by_id: Dict[str, Any],
+        root_node_id: str,
+        adjacency: Dict[str, Dict[str, str]],
+    ) -> Dict[Tuple[str, str], str]:
+        """Gives endpoints hung straight off the root a parent from their LLDP/CDP links, and
+        returns those edges with their protocol.
+
+        Walks outward from endpoints that are already placed (by traceroute or by hand): each
+        unplaced endpoint reached takes the neighbour it was reached through as its parent, so an
+        access switch lands under its core switch, nearest the placed part of the network first.
+        A group of linked endpoints with nothing placed among them keeps one of them under the
+        root (a router or firewall if there is one, else the best connected) and hangs the
+        others from it. A tree by construction: each endpoint gets at most one parent, from an
+        endpoint already reached."""
+        unplaced = {ep for ep in monitored_by_id if (root_node_id, ep) in edges}
+        if not adjacency or not unplaced:
+            return {}
+        parents: Dict[str, Tuple[str, str]] = {}
+
+        def walk(start: List[str], reached: Set[str]) -> None:
+            frontier = list(start)
+            while frontier:
+                nxt = []
+                for u in frontier:
+                    for v in sorted(adjacency.get(u, {})):
+                        if v in unplaced and v not in reached:
+                            reached.add(v)
+                            parents[v] = (u, adjacency[u][v])
+                            nxt.append(v)
+                frontier = nxt
+
+        reached: Set[str] = set()
+        anchors = sorted(ep for ep in adjacency if ep not in unplaced)
+        reached.update(anchors)
+        walk(anchors, reached)
+
+        def rank(ep: str) -> Tuple[int, int, str]:
+            kind = str((monitored_by_id.get(ep) or {}).get("device_type") or "").lower()
+            return (0 if kind in ("router", "firewall") else 1, -len(adjacency.get(ep, {})), ep)
+
+        for ep in sorted((e for e in unplaced if e in adjacency and e not in reached), key=rank):
+            if ep in reached:
+                continue
+            reached.add(ep)  # stays under the root: the top of its own group
+            walk([ep], reached)
+
+        placed: Dict[Tuple[str, str], str] = {}
+        for child, (parent, label) in parents.items():
+            edges.discard((root_node_id, child))
+            transit_children.get(root_node_id, set()).discard(child)
+            edges.add((parent, child))
+            transit_children.setdefault(parent, set()).add(child)
+            placed[(parent, child)] = label
+        return placed
+
+    def l2_parent_chain(self, endpoint_id: str) -> List[str]:
+        """The endpoint's LLDP/CDP parents, nearest first (for root-cause analysis)."""
+        chain: List[str] = []
+        current = self._l2_parent.get(str(endpoint_id))
+        while current and current not in chain:
+            chain.append(current)
+            current = self._l2_parent.get(current)
+        return chain
+
+    def l2_children(self, endpoint_id: str) -> List[str]:
+        return sorted(child for child, parent in self._l2_parent.items() if parent == str(endpoint_id))
+
+    @staticmethod
+    def _normal_path_overlay(
+        nodes: Dict[str, Dict[str, Any]],
+        edges: Set[Tuple[str, str]],
+        current_routes: Dict[str, List[Dict[str, Any]]],
+        normal_routes: Dict[str, Tuple[List[Dict[str, Any]], Any]],
+        monitored_by_ip: Dict[str, str],
+        monitored_by_id: Dict[str, Any],
+        root_node_id: str,
+    ) -> Set[Tuple[str, str]]:
+        """Marks endpoints off their normal path and returns the normal-path edges not in use,
+        adding faded transit nodes for routers only the normal path has."""
+        from app.services.route_paths import describe_path, first_difference, same_path
+
+        extra: Set[Tuple[str, str]] = set()
+        for ep_id, (normal, since) in normal_routes.items():
+            current = current_routes.get(ep_id)
+            if ep_id not in nodes or not normal or current is None or same_path(current, normal):
+                continue
+            node = nodes[ep_id]
+            node["alternate_since"] = since.isoformat() if hasattr(since, "isoformat") else since
+            node["normal_via"] = describe_path(normal, first_difference(normal, current))
+            previous = root_node_id
+            for hop in normal:
+                ip = hop.get("ip")
+                if not ip:
+                    continue  # an unanswered hop: join across it
+                node_id = monitored_by_ip.get(ip) or f"transit:{ip}"
+                if node_id not in nodes:
+                    nodes[node_id] = {
+                        "id": node_id,
+                        "label": f"Transit ({ip})",
+                        "type": "transit",
+                        "node_type": "transit",
+                        "state": "UP",
+                        "status": "UP",
+                        "ip_address": ip,
+                        "device_type": "TRANSIT_ROUTER",
+                        "endpoint_id": None,
+                        "normal_only": True,
+                    }
+                if previous != node_id and (previous, node_id) not in edges:
+                    extra.add((previous, node_id))
+                previous = node_id
+            if previous != ep_id and (previous, ep_id) not in edges:
+                extra.add((previous, ep_id))
+        return extra
 
     def _apply_inferred_nodes(self) -> None:
         inferred = {

@@ -80,6 +80,10 @@ class FleetEndpointSummary(BaseModel):
     downtime_seconds: int
     total_seconds: int
     device_role: Optional[str] = "ACTIVE_HOST"
+    # As assigned now, not during the report window (v3.3.6 build plan 4.3).
+    site: Optional[str] = None
+    location: Optional[str] = None
+    tags: list[str] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -91,6 +95,9 @@ class FleetSummaryResponse(BaseModel):
     total_incident_count: int
     total_downtime_seconds: int
     endpoints: list[FleetEndpointSummary]
+    # The shared filter the summary was limited to, and a one-line description of it.
+    filter: Optional[dict] = None
+    filter_description: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

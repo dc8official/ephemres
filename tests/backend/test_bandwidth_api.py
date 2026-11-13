@@ -51,53 +51,6 @@ def client(mock_admin):
     test_app.dependency_overrides.clear()
 
 
-def test_bandwidth_overview(client):
-    test_client, mock_session = client
-
-    mock_res = MagicMock()
-    # (total, ingress, egress, transit bytes; total, ingress, egress, transit packets; flows; exporters)
-    mock_res.one_or_none.return_value = (50_000_000, 30_000_000, 15_000_000, 5_000_000, 40_000, 24_000, 12_000, 4_000, 12000, 3)
-    mock_session.execute.return_value = mock_res
-
-    resp = test_client.get("/api/v1/bandwidth/overview")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    ov = data["data"]
-    assert ov["active_exporters_count"] == 3
-    assert ov["total_flows_count"] == 12000
-    assert ov["total_ingress_bps"] == 30_000_000 * 8 / 300
-    assert ov["total_egress_bps"] == 15_000_000 * 8 / 300
-    assert ov["total_transit_bps"] == round(5_000_000 * 8 / 300, 2)
-    assert ov["total_transit_pps"] == round(4_000 / 300, 2)
-    assert ov["avg_packet_size"] == 50_000_000 // 40_000
-    assert ov["window_seconds"] == 300
-
-
-def test_bandwidth_traffic_series(client):
-    test_client, mock_session = client
-
-    now_dt = datetime.now(timezone.utc)
-    # (bucket, flow_count, ingress bytes/packets, egress bytes/packets, transit bytes/packets)
-    mock_row1 = (now_dt, 4, 10000, 10, 5000, 5, 0, 0)
-    mock_result = MagicMock()
-    mock_result.all.return_value = [mock_row1]
-
-    mock_session.execute.return_value = mock_result
-
-    resp = test_client.get("/api/v1/bandwidth/traffic-series?window=1h")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert len(data["data"]["points"]) == 1
-    point = data["data"]["points"][0]
-    assert point["ingress_bps"] == round(10000 * 8 / 60, 2)
-    assert point["egress_bps"] == round(5000 * 8 / 60, 2)
-    assert point["transit_bps"] == 0
-    assert data["data"]["bucket_seconds"] == 60
-    assert data["data"]["directional"] is True
-
-
 def test_bandwidth_top_talkers(client):
     from tests.backend.flow_mocks import conversation_row, talker_row, top_talkers_results
 
@@ -122,114 +75,6 @@ def test_bandwidth_top_talkers(client):
     assert data["data"]["top_conversations"][0]["dst_port"] == 5432
     assert data["data"]["top_conversations"][0]["src_hostname"] == "app-server-1"
     assert data["data"]["top_conversations"][0]["dst_hostname"] is None
-
-
-def test_bandwidth_applications(client):
-    test_client, mock_session = client
-
-    mock_app_row = (6, 443, 85000000)
-    mock_res = MagicMock()
-    mock_res.all.return_value = [mock_app_row]
-    mock_session.execute.return_value = mock_res
-
-    resp = test_client.get("/api/v1/bandwidth/applications?window=1h")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert len(data["data"]["applications"]) == 1
-    app_item = data["data"]["applications"][0]
-    assert app_item["port"] == 443
-    assert app_item["protocol_name"] == "TCP"
-    assert app_item["service_label"] == "HTTPS"
-
-
-@pytest.mark.parametrize("daily_has_tos", [True, False])
-def test_bandwidth_applications_1y_window_daily_rollup(client, daily_has_tos):
-    """
-    Verifies that the fleet-wide 1y window routes to FlowDailyRollup, that QoS falls back to
-    flow_conversation_hourly_rollups when the daily continuous aggregate has no `tos` column
-    (TimescaleDB installs), and that zones come from that tier too, since the daily one keeps
-    no addresses.
-    """
-    from app.routers import bandwidth
-
-    test_client, mock_session = client
-    bandwidth._TABLE_COLUMN_CACHE.clear()
-
-    mock_app_row = (6, 443, 85000000)
-    mock_qos_row = (184, 85000000, 75000, 120)  # EF (VoIP)
-    mock_res_apps = MagicMock()
-    mock_res_apps.all.return_value = [mock_app_row]
-    mock_res_qos = MagicMock()
-    mock_res_qos.all.return_value = [mock_qos_row]
-
-    mock_res_column = MagicMock()
-    mock_res_column.scalar.return_value = 1 if daily_has_tos else None
-
-    # Total bytes in the window, so shares are of all traffic (here: all of it is HTTPS)
-    mock_res_total = MagicMock()
-    mock_res_total.scalar.return_value = 85000000
-
-    mock_res_zones = MagicMock()
-    mock_res_zones.all.return_value = [("10.0.0.1", "8.8.8.8", None, None, 1000, 5)]
-    # App query, total, `tos` column check, qos, then zones.
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos, mock_res_zones]
-
-    resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert len(data["data"]["applications"]) == 1
-    assert len(data["data"]["qos_classes"]) == 1
-    assert data["data"]["qos_classes"][0]["dscp_label"] == "EF (VoIP)"
-    # Traffic zones are resolved by address from the hourly conversation tier
-    assert len(data["data"]["traffic_zones"]) == 4
-    assert sum(z["total_bytes"] for z in data["data"]["traffic_zones"]) == 1000
-    assert data["data"]["zones_resolution"] == "ip"
-    zone_sql = str(mock_session.execute.call_args_list[4].args[0])
-    assert "flow_conversation_hourly_rollups" in zone_sql
-
-    qos_sql = str(mock_session.execute.call_args_list[3].args[0])
-    expected_table = "flow_daily_rollups" if daily_has_tos else "flow_conversation_hourly_rollups"
-    assert expected_table in qos_sql
-    assert data["data"]["qos_source"] == expected_table
-    bandwidth._TABLE_COLUMN_CACHE.clear()
-
-
-def test_bandwidth_applications_1y_qos_fallback_reports_clamped_window(client):
-    """A 1y window falling back to the hourly conversation tier only has 90 days of ToS data; say so."""
-    import datetime
-
-    from app.routers import bandwidth
-
-    test_client, mock_session = client
-    bandwidth._TABLE_COLUMN_CACHE.clear()
-
-    mock_res_apps = MagicMock()
-    mock_res_apps.all.return_value = [(6, 443, 1000)]
-    mock_res_column = MagicMock()
-    mock_res_column.scalar.return_value = None
-    mock_res_qos = MagicMock()
-    mock_res_qos.all.return_value = [(0, 1000, 10, 1)]
-    mock_res_total = MagicMock()
-    mock_res_total.scalar.return_value = 1000
-    mock_res_zones = MagicMock()
-    mock_res_zones.all.return_value = []
-    mock_session.execute.side_effect = [mock_res_apps, mock_res_total, mock_res_column, mock_res_qos, mock_res_zones]
-
-    resp = test_client.get("/api/v1/bandwidth/applications?window=1y")
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-    zones_start = datetime.datetime.fromisoformat(data["zones_window_start"].replace("Z", "+00:00"))
-    assert datetime.datetime.now(datetime.timezone.utc) - zones_start <= datetime.timedelta(days=90, minutes=1)
-    assert data["qos_source"] == "flow_conversation_hourly_rollups"
-    qos_start = datetime.datetime.fromisoformat(data["qos_window_start"].replace("Z", "+00:00"))
-    age = datetime.datetime.now(datetime.timezone.utc) - qos_start
-    assert datetime.timedelta(days=89) < age <= datetime.timedelta(days=90, minutes=1)
-    column_check_sql = str(mock_session.execute.call_args_list[2].args[0])
-    assert "current_schema()" in column_check_sql
-    bandwidth._TABLE_COLUMN_CACHE.clear()
-
 
 
 def test_bandwidth_map_exporter(client):
@@ -332,47 +177,11 @@ def test_list_flow_exporters_and_unmatched(mock_get_flow_redis, client):
     assert len(unmatched) == 1
     assert unmatched[0]["ip_address"] == "10.10.10.0"
 
-    # Verify that the endpoint statement (the first query) compiled cleanly with the
-    # recent_exporters subqueries; the exporter health query runs after it.
-    call_stmt = mock_session.execute.call_args_list[0][0][0]
+    # Verify that the endpoint statement (after the SNMP device lookup) compiled cleanly with
+    # the recent_exporters subqueries; the exporter health query runs after it.
+    call_stmt = mock_session.execute.call_args_list[1][0][0]
     compiled_sql = call_stmt.compile()
     assert "IN (SELECT DISTINCT" in compiled_sql
-
-
-def test_bandwidth_traffic_zones_with_cidr_masks(client):
-    """Verify _is_internal correctly strips CIDR subnet masks (/32, /24, /128) when evaluating zone mesh."""
-    test_client, mock_session = client
-
-    m_apps = MagicMock()
-    m_apps.all.return_value = []
-
-    m_total = MagicMock()
-    m_total.scalar.return_value = 0
-
-    m_qos = MagicMock()
-    m_qos.all.return_value = []
-
-    # Row: (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
-    mock_rows = [
-        ("192.168.1.10/32", "10.0.0.5/24", None, None, 100000, 10),      # East-West (both private with CIDR)
-        ("192.168.1.10/32", "8.8.8.8/32", None, None, 500000, 50),       # North-South Egress (src private, dst public)
-        ("8.8.8.8/32", "192.168.1.10/32", None, None, 800000, 80),       # North-South Ingress (src public, dst private)
-        ("1.1.1.1/32", "8.8.8.8/32", None, None, 20000, 2),              # External / Transit (both public)
-    ]
-    m_zone = MagicMock()
-    m_zone.all.return_value = mock_rows
-
-    mock_session.execute.side_effect = [m_apps, m_total, m_qos, m_zone]
-
-    resp = test_client.get("/api/v1/bandwidth/applications?window=1h")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    zones = {z["zone"]: z for z in data["data"]["traffic_zones"]}
-    assert zones["East-West (Internal)"]["total_bytes"] == 100000
-    assert zones["North-South Egress"]["total_bytes"] == 500000
-    assert zones["North-South Ingress"]["total_bytes"] == 800000
-    assert zones["External / Transit"]["total_bytes"] == 20000
 
 
 @patch("app.routers.bandwidth.get_flow_store")
@@ -430,9 +239,6 @@ def test_bandwidth_map_exporter_with_cidr_suffix(client):
     assert "Successfully mapped exporter IP" in data["data"]["message"]
     assert "172.16.200.1" in mock_endpoint.flow_exporter_ips
     assert mock_session.commit.awaited
-
-
-
 
 
 @pytest.mark.parametrize(

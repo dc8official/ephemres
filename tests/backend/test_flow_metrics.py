@@ -278,3 +278,31 @@ def test_configured_speed_mbps(alias, expected):
 )
 def test_interface_role(alias, expected):
     assert fm.interface_role(alias) == expected
+
+
+@pytest.mark.parametrize(
+    "protocol,port,label",
+    [
+        (6, 443, "HTTPS"),
+        # UDP 443 is QUIC; Applications used to list "HTTPS" twice (v3.3.6 review P5).
+        (17, 443, "QUIC (HTTP/3)"),
+        (6, 1433, "MS SQL"),
+        (17, 8801, "Zoom"),
+        (6, 873, "rsync"),
+        (6, 23, "Telnet"),
+        (17, 514, "Syslog"),
+        (6, 1434, "TCP/1434"),
+        (47, 0, "GRE/0"),
+        (99, 7, "PROTO-99/7"),
+    ],
+)
+def test_service_label(protocol, port, label):
+    assert fm.service_label(protocol, port) == label
+
+
+def test_pdf_port_label_uses_the_same_names():
+    from app.services.report_compiler import format_port_label
+
+    assert format_port_label(443, 17) == "443 / QUIC (HTTP/3)"
+    assert format_port_label(1433, 6) == "1433 / MS SQL"
+    assert format_port_label(1434, 6) == "1434 / TCP"

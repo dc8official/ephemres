@@ -36,8 +36,50 @@ logger = logging.getLogger(__name__)
 
 get_net_if_addrs: Optional[Any] = None
 
-# Concurrency semaphore for traceroute execution (max 3 concurrent, 500ms pacing)
-trace_semaphore = asyncio.Semaphore(3)
+# How many traceroutes run at once (follows the "parallel route traces" setting since v3.3.6)
+class _TraceLimiter:
+    """How many traceroutes run at once: the "parallel route traces" setting (v3.3.6, default
+    2) plus RESERVED slots, so route discovery can never take every slot from the incident and
+    root-cause traces that answer an outage. The capacity is read on every entry, so a changed
+    setting applies to the next trace. Used as `async with trace_semaphore:`."""
+
+    RESERVED = 2
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._cond: Optional[asyncio.Condition] = None
+
+    @property
+    def capacity(self) -> int:
+        from app.services.runtime_settings import get_runtime_settings
+
+        return int(get_runtime_settings().discovery_parallel) + self.RESERVED
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def _condition(self) -> asyncio.Condition:
+        # Made on first use, inside the running loop (tests run many loops in one process).
+        if self._cond is None:
+            self._cond = asyncio.Condition()
+        return self._cond
+
+    async def __aenter__(self) -> "_TraceLimiter":
+        cond = self._condition()
+        async with cond:
+            await cond.wait_for(lambda: self._active < self.capacity)
+            self._active += 1
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        cond = self._condition()
+        async with cond:
+            self._active -= 1
+            cond.notify_all()
+
+
+trace_semaphore = _TraceLimiter()
 
 # Async Queue for sequential topology discovery
 discovery_queue: asyncio.Queue[tuple[UUID, str]] = asyncio.Queue()
@@ -444,7 +486,7 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
     """
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # 1. Layer-2 Subnet Auto-Bypass (admin toggle: Settings -> Security & Discovery)
+    # 1. Layer-2 Subnet Auto-Bypass (admin toggle: Settings -> Discovery & topology)
     from app.services.runtime_settings import get_runtime_settings
 
     if get_runtime_settings().l2_auto_bypass and is_local_subnet_destination(target_ip):
@@ -584,7 +626,8 @@ async def run_traceroute(target_ip: str) -> Dict[str, Any]:
 
 async def run_throttled_traceroute(target_ip: str) -> Dict[str, Any]:
     """
-    Executes run_traceroute under the concurrency semaphore (max 3 concurrent) with 500ms pacing.
+    Executes run_traceroute under the trace limit (parallel route traces + 2, _TraceLimiter)
+    with 500ms pacing.
     """
     async with trace_semaphore:
         result = await run_traceroute(target_ip)

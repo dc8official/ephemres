@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, List, Optional, Sequence, Tuple
 from uuid import UUID
 
-from app.core.orm import case, func, or_, select, update as sa_update
+from app.core.orm import case, func, or_, select, text, update as sa_update
 from app.core.orm import AsyncSession
 
 from app.models.diagnostic_trace import EndpointDiagnosticTrace
@@ -12,6 +12,7 @@ from app.models.endpoint import Endpoint
 from app.models.endpoint_event import EndpointEvent
 from app.models.rca_incident import EndpointRCAIncident
 from app.repositories.base import BaseRepository
+from app.services.endpoint_filter import EndpointFilter, MAX_TAGS_PER_ENDPOINT, conditions as filter_conditions
 
 
 def _uptime_seconds_expr(
@@ -63,12 +64,13 @@ class EndpointRepository(BaseRepository[Endpoint]):
         return result.scalar_one_or_none()
 
     @staticmethod
-    def _list_filters(status: Optional[str]) -> list[Any]:
-        """Filters shared by list_with_stats and count_listed: hide deleted rows, apply `status`.
+    def _list_filters(status: Optional[str], endpoint_filter: Optional[EndpointFilter] = None) -> list[Any]:
+        """Filters shared by list_with_stats and count_listed: hide deleted rows, apply the shared
+        endpoint filter (services/endpoint_filter.py) and `status`.
 
         ACTIVE / DISABLED match endpoint_status; MONITORED / UNMONITORED match monitoring_enabled.
         """
-        filters: list[Any] = [Endpoint.endpoint_status != "DELETED"]
+        filters: list[Any] = filter_conditions(endpoint_filter or EndpointFilter())
         if status == "MONITORED":
             filters.append(Endpoint.monitoring_enabled == True)  # noqa: E712
         elif status == "UNMONITORED":
@@ -77,9 +79,11 @@ class EndpointRepository(BaseRepository[Endpoint]):
             filters.append(Endpoint.endpoint_status == status)
         return filters
 
-    async def count_listed(self, status: Optional[str] = None) -> int:
+    async def count_listed(
+        self, status: Optional[str] = None, endpoint_filter: Optional[EndpointFilter] = None
+    ) -> int:
         """Total endpoints matching the list filters, ignoring pagination."""
-        stmt = select(func.count(Endpoint.id)).where(*self._list_filters(status))
+        stmt = select(func.count(Endpoint.id)).where(*self._list_filters(status, endpoint_filter))
         result = await self.session.execute(stmt)
         return int(result.scalar() or 0)
 
@@ -91,6 +95,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
         page: Optional[int] = None,
         page_size: Optional[int] = None,
         gaps: Optional[List[Tuple[datetime, datetime]]] = None,
+        endpoint_filter: Optional[EndpointFilter] = None,
     ) -> Sequence[dict[str, Any]]:
         """
         List all active endpoints joined with latest operational state and 24h UP event counts.
@@ -170,7 +175,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
             .outerjoin(
                 up_counts_sub, Endpoint.id == up_counts_sub.c.endpoint_id
             )
-            .where(*self._list_filters(status))
+            .where(*self._list_filters(status, endpoint_filter))
             .order_by(Endpoint.hostname.asc())
         )
 
@@ -189,7 +194,9 @@ class EndpointRepository(BaseRepository[Endpoint]):
                 "hostname": ep.hostname,
                 "ip_address": str(ep.ip_address),
                 "device_type": ep.device_type,
+                "site": getattr(ep, "site", None),
                 "location": ep.location,
+                "tags": list(getattr(ep, "tags", None) or []),
                 "description": ep.description,
                 "endpoint_status": ep.endpoint_status,
                 "monitoring_enabled": ep.monitoring_enabled,
@@ -202,6 +209,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
                 "flow_exporter_ips": [str(ip) for ip in (ep.flow_exporter_ips or [])],
                 "flow_interface_aliases": getattr(ep, "flow_interface_aliases", {}) or {},
                 "manual_parent_id": ep.manual_parent_id,
+                "snmp_credential_id": getattr(ep, "snmp_credential_id", None),
                 "created_by": ep.created_by,
                 "created_at": ep.created_at,
                 "updated_at": ep.updated_at,
@@ -307,7 +315,9 @@ class EndpointRepository(BaseRepository[Endpoint]):
             "hostname": ep.hostname,
             "ip_address": str(ep.ip_address),
             "device_type": ep.device_type,
+            "site": getattr(ep, "site", None),
             "location": ep.location,
+            "tags": list(getattr(ep, "tags", None) or []),
             "description": ep.description,
             "endpoint_status": ep.endpoint_status,
             "monitoring_enabled": ep.monitoring_enabled,
@@ -320,6 +330,7 @@ class EndpointRepository(BaseRepository[Endpoint]):
             "flow_exporter_ips": [str(ip) for ip in (ep.flow_exporter_ips or [])],
             "flow_interface_aliases": getattr(ep, "flow_interface_aliases", {}) or {},
             "manual_parent_id": ep.manual_parent_id,
+            "snmp_credential_id": getattr(ep, "snmp_credential_id", None),
             "created_by": ep.created_by,
             "created_at": ep.created_at,
             "updated_at": ep.updated_at,
@@ -331,6 +342,167 @@ class EndpointRepository(BaseRepository[Endpoint]):
             "uptime_seconds": int(row.uptime_seconds),
             "up_events_count": int(row.up_events_count),
         }
+
+    # --- site, location and tags (v3.3.6) -------------------------------------------------
+
+    async def canonical_label(self, column: str, value: Optional[str]) -> Optional[str]:
+        """The spelling already in use for `value` in `column` ("site" or "location"), or the
+        value itself. Typing "abuja" where "Abuja" exists stores "Abuja", so case alone never
+        splits one site into two. The spelling most endpoints already use wins."""
+        if value is None or column not in ("site", "location"):
+            return value
+        res = await self.session.execute(
+            text(f"""
+                SELECT mode() WITHIN GROUP (ORDER BY {column}) FROM endpoints
+                WHERE lower({column}) = lower(CAST(:v AS text)) AND endpoint_status != 'DELETED'
+            """),
+            {"v": value},
+        )
+        existing = res.scalar()
+        return existing or value
+
+    async def label_suggestions(self, site: Optional[str] = None) -> dict[str, list[dict[str, Any]]]:
+        """Values in use, with how many endpoints carry each, for autocomplete and the filter bar:
+        sites, locations (only those within `site` when given), tags and device types. One
+        spelling per value (the most common), as matching ignores case."""
+        site_clause = "AND lower(site) = lower(CAST(:site AS text))" if site else ""
+        params = {"site": site} if site else {}
+
+        async def grouped(column: str, extra: str = "") -> list[dict[str, Any]]:
+            res = await self.session.execute(
+                text(f"""
+                    SELECT mode() WITHIN GROUP (ORDER BY {column}) AS value, COUNT(*) AS n
+                    FROM endpoints
+                    WHERE endpoint_status != 'DELETED' AND {column} IS NOT NULL AND {column} <> '' {extra}
+                    GROUP BY lower({column})
+                    ORDER BY lower(mode() WITHIN GROUP (ORDER BY {column}))
+                """),
+                params if extra else {},
+            )
+            return [{"value": r[0], "count": int(r[1])} for r in res.fetchall()]
+
+        tags_res = await self.session.execute(
+            text("""
+                SELECT t AS value, COUNT(*) AS n
+                FROM endpoints, unnest(tags) AS t
+                WHERE endpoint_status != 'DELETED'
+                GROUP BY t ORDER BY t
+            """)
+        )
+        return {
+            "sites": await grouped("site"),
+            "locations": await grouped("location", site_clause),
+            "tags": [{"value": r[0], "count": int(r[1])} for r in tags_res.fetchall()],
+            "device_types": await grouped("device_type"),
+        }
+
+    async def bulk_assign(
+        self,
+        endpoint_ids: Sequence[UUID],
+        changes: dict[str, Any],
+    ) -> int:
+        """Applies `changes` to the given endpoints: "site" / "location" (a value, or None to
+        clear), "add_tags" / "remove_tags" (normalised lists), "snmp_credential_id" (a set's
+        id, or None for SNMP off; the caller checks the set exists). Returns how many endpoints
+        changed. Raises ValueError when adding tags would take an endpoint past the limit, before
+        anything is written."""
+        # text() parameters: a tuple goes to PostgreSQL as an array, a list as JSON
+        # (core/orm.prepare_bind_param), so arrays are passed as tuples here.
+        ids = tuple(endpoint_ids)
+        if not ids:
+            return 0
+        set_parts = []
+        params: dict[str, Any] = {"ids": ids}
+        for column in ("site", "location"):
+            if column in changes:
+                set_parts.append(f"{column} = CAST(:{column} AS varchar)")
+                params[column] = changes[column]
+        if "snmp_credential_id" in changes:
+            set_parts.append("snmp_credential_id = CAST(:snmp_credential_id AS uuid)")
+            cred = changes["snmp_credential_id"]
+            params["snmp_credential_id"] = str(cred) if cred else None
+
+        add = list(changes.get("add_tags") or [])
+        remove = set(changes.get("remove_tags") or [])
+        new_tags: dict[str, list[str]] = {}
+        if add or remove:
+            res = await self.session.execute(
+                text("SELECT id, tags FROM endpoints WHERE id = ANY(CAST(:ids AS uuid[])) AND endpoint_status != 'DELETED'"),
+                {"ids": ids},
+            )
+            for row_id, tags in res.fetchall():
+                current = list(tags or [])
+                updated = [t for t in current if t not in remove]
+                updated += [t for t in add if t not in updated and t not in remove]
+                if len(updated) > MAX_TAGS_PER_ENDPOINT:
+                    raise ValueError(f"An endpoint can have at most {MAX_TAGS_PER_ENDPOINT} tags.")
+                if updated != current:
+                    new_tags[str(row_id)] = updated
+
+        touched: set[str] = set()
+        if set_parts:
+            res = await self.session.execute(
+                text(f"""
+                    UPDATE endpoints SET {", ".join(set_parts)}, updated_at = NOW()
+                    WHERE id = ANY(CAST(:ids AS uuid[])) AND endpoint_status != 'DELETED'
+                    RETURNING id
+                """),
+                params,
+            )
+            touched.update(str(r[0]) for r in res.fetchall())
+        # Per endpoint: fleets are small, and each keeps its own tag order.
+        for row_id, tags in new_tags.items():
+            await self.session.execute(
+                text("UPDATE endpoints SET tags = CAST(:tags AS text[]), updated_at = NOW() WHERE id = CAST(:id AS uuid)"),
+                {"tags": tuple(tags), "id": row_id},
+            )
+            touched.add(row_id)
+        return len(touched)
+
+    async def rename_label(
+        self, field: str, old: str, new: Optional[str], within_site: Optional[str] = None
+    ) -> int:
+        """Renames a site, location or tag on every endpoint carrying it (case-insensitive match),
+        which also merges two spellings into one. `new` None removes it. A location can be
+        renamed within one site only. Returns how many endpoints changed."""
+        if field in ("site", "location"):
+            site_clause = ""
+            params: dict[str, Any] = {"old": old, "new": new}
+            if field == "location" and within_site:
+                site_clause = "AND lower(site) = lower(CAST(:site AS text))"
+                params["site"] = within_site
+            res = await self.session.execute(
+                text(f"""
+                    UPDATE endpoints SET {field} = CAST(:new AS varchar), updated_at = NOW()
+                    WHERE lower({field}) = lower(CAST(:old AS text)) AND endpoint_status != 'DELETED'
+                      {site_clause}
+                    RETURNING id
+                """),
+                params,
+            )
+            return len(res.fetchall())
+
+        # Tags: replace in place, keeping order, without duplicating a tag the endpoint has.
+        res = await self.session.execute(
+            text("""
+                SELECT id, tags FROM endpoints
+                WHERE CAST(:old AS text) = ANY(tags) AND endpoint_status != 'DELETED'
+            """),
+            {"old": old},
+        )
+        changed = 0
+        for row_id, tags in res.fetchall():
+            updated: list[str] = []
+            for t in tags or []:
+                t = (new if t == old else t)
+                if t and t not in updated:
+                    updated.append(t)
+            await self.session.execute(
+                text("UPDATE endpoints SET tags = CAST(:tags AS text[]), updated_at = NOW() WHERE id = CAST(:id AS uuid)"),
+                {"tags": tuple(updated), "id": row_id},
+            )
+            changed += 1
+        return changed
 
     async def create_endpoint(self, **data: Any) -> Endpoint:
         """Create a new endpoint entity."""

@@ -50,8 +50,8 @@ Connects to the real-time Server-Sent Events (SSE) telemetry stream.
   - `STATE_TRANSITION`: Emitted on endpoint state changes (`UP`, `UP-UNSTABLE`, `DOWN-UNSTABLE`, `DOWN`).
   - `NODE_STATE_CHANGE`: Emitted for real-time topology canvas node recoloring.
   - `RCA_INCIDENT`: Emitted on root-cause analysis triggers and resolutions.
-  - `ROUTE_HINT`: Emitted when NetFlow route augmentation (`PathTracker` in `ephemres-flowd`) sees a sustained dominant path change for a monitored endpoint; the leader API worker also uses it to queue a targeted traceroute.
-  - `TOPOLOGY_UPDATED`: Emitted when the topology map should be reloaded, with a `reason`: `ROUTE_DISCOVERED` (an endpoint's baseline route was recorded, with its `endpoint_id`), `MANUAL_REBUILD`, `FLEET_DISCOVERY_STARTED` (with `enqueued_count`) or `FLEET_DISCOVERY_COMPLETED`. It does not go through the event broker, so only browsers connected to the API worker that did the work receive it; the others see the change the next time the map is loaded.
+  - `ROUTE_HINT`: Emitted when NetFlow route augmentation (`PathTracker` in `ephemres-flowd`) sees a sustained dominant path change for a monitored endpoint, or (v3.3.6, `reason: "ttl"`) when the engine sees an endpoint's reply TTL change and hold for 3 cycles; the leader API worker also uses it to queue a targeted traceroute.
+  - `TOPOLOGY_UPDATED`: Emitted when the topology map should be reloaded, with a `reason`: `ROUTE_DISCOVERED` (an endpoint's path was redrawn, with its `endpoint_id`), `ENDPOINT_ROUTE_CHANGED`, `NORMAL_PATH_SET`, `NORMAL_PATH_PROMOTED`, `MANUAL_REBUILD`, `FLEET_DISCOVERY_STARTED` (with `enqueued_count`) or `FLEET_DISCOVERY_COMPLETED`. Since v3.3.6 route changes go through the event broker (on the `NODE_STATE_CHANGE` channel), so every API worker rebuilds its map and tells its own browsers; `ROUTE_DISCOVERED` and `MANUAL_REBUILD` still reach only the worker that did the work.
   - `: heartbeat\n\n`: Emitted every 15 seconds if idle to prevent proxy timeouts.
 
 ---
@@ -91,6 +91,8 @@ Lists monitored endpoints with their current state, 24-hour uptime, and latest R
 - **Query Params:**
   - `status` (string, optional, case-insensitive): `ACTIVE` / `DISABLED` filter on `endpoint_status`; `MONITORED` / `UNMONITORED` filter on `monitoring_enabled`. Any other value returns `400`.
   - `page` (int ≥ 1, optional) and `page_size` (int 1–500, optional): SQL-level pagination. Supplying either enables it (`page_size` defaults to 50, `page` to 1); omitting both returns every endpoint.
+  - The shared endpoint filter (v3.3.6): `site`, `location`, `tag`, `type` (each repeatable: `?tag=mpls&tag=core`) and `q` (search). Any value within a field matches; all fields must match. Site, location and type match ignoring case; `q` searches hostname, IP, site, location, description and tags. A tag with a comma, quote, backslash or brace answers `400`.
+- Each endpoint also carries `site` (string or null), `location` and `tags` (list of lower-case strings).
 - **Response Envelope:**
   ```json
   {
@@ -166,17 +168,44 @@ Where exporting routers forwarded the endpoint's traffic, from flows (requires t
 - `next_hop_reported`: `false` when none of the paths carries a next hop.
 
 ### `POST /endpoints/{id}/refresh-baseline`
-Re-runs baseline route discovery for the endpoint (requires `Admin` role).
+Traces the route to the endpoint now (requires `Admin` role). A path different from the current one counts at once (an admin asked), without the second confirming trace other triggers need.
+
+### Routes: current, normal and the change log (v3.3.6)
+Each endpoint keeps a **current path** (what root-cause analysis compares a failure with) and a **normal path**. Every trace updates only the current path; a different path counts once two traces at least 2 minutes apart agree. A current path held 24 hours becomes normal unless the normal path is pinned. Traces start when an endpoint is added, by hand, after a recovery, on the rolling schedule, from flow data and reply-TTL hints, and when a monitored device other endpoints route through goes down or comes back.
+
+#### `GET /endpoints/{id}/route`
+`data` is `null` before the first trace, else: `current_hops`, `current_since`, `last_traced_at`, `normal_hops`, `normal_since`, `normal_pinned`, `on_normal_path`, `first_diff_hop`, `pending_hops` / `pending_since` (a new path waiting for its confirming trace), `flapping_since`, and `changes` (newest first, up to 50): `changed_at`, `kind` (`path_changed`, `back_to_normal`, `became_normal`, `made_normal`, `pinned`, `unpinned`, `flapping`), `trigger` (`added`, `manual`, `scheduled`, `recovery`, `route_hint`, `transit`, `ttl`, `confirm`), `from_hops`, `to_hops`, `first_diff_hop`, `detail`.
+
+#### `POST /endpoints/{id}/route/normal` (admin)
+Body `{ "pinned": false }`: the current path becomes the normal one now; with `true` it also stays normal until unpinned. `404` before the first trace. Logged in the route-change log and audited as `ENDPOINT:SET_NORMAL_PATH`.
+
+#### `DELETE /endpoints/{id}/route/pin` (admin)
+Unpins the normal path; it follows the current one again after 24 hours. `404` when not pinned. Audited as `ENDPOINT:UNPIN_NORMAL_PATH`.
 
 ### `PATCH /endpoints/{id}`
 Updates configuration flags or properties for an endpoint. Synchronizes changes directly with the in-memory `EndpointRegistry` and flow correlator routing table.
-- **Request Body:** Accepts any subset of: `hostname`, `device_type`, `location`, `description`, `monitoring_enabled`, `allow_incident_trace`, `allow_topology_discovery`, `enable_rca`, `enable_scheduled_discovery`, `is_l2_segment`, `flow_exporter_ips` (array of IP strings), `flow_interface_aliases` (object mapping `ifIndex` to a label, e.g. `{"1": "WAN-Fiber"}`), `manual_parent_id` (UUID or `null`), and `endpoint_status` (`ACTIVE` or `DISABLED`).
+- **Request Body:** Accepts any subset of: `hostname`, `device_type`, `location`, `description`, `monitoring_enabled`, `allow_incident_trace`, `allow_topology_discovery`, `enable_rca`, `enable_scheduled_discovery`, `is_l2_segment`, `flow_exporter_ips` (array of IP strings), `flow_interface_aliases` (object mapping `ifIndex` to a label, e.g. `{"1": "WAN-Fiber"}`), `manual_parent_id` (UUID or `null`), and `endpoint_status` (`ACTIVE` or `DISABLED`). `snmp_credential_id` (v3.3.6): an SNMP credential set's id, or `null` to stop SNMP polling (`400` if the set does not exist); also accepted by `POST /endpoints` and returned by `GET /endpoints/{id}`.
 - `ip_address` cannot be changed after creation; delete and re-create the endpoint instead.
 
 ### `DELETE /endpoints/{id}`
 Removes an endpoint from monitoring and deregisters it from the polling engine.
 
 ---
+
+### `GET /endpoints/match`
+The shared filter's matching endpoints (same query params as `GET /endpoints`): `{ "ids": [...], "total": 2, "filter": { "site": [...], "location": [...], "tag": [...], "type": [...], "q": "" }, "description": "Site Abuja · Tags mpls, core" }`. The dashboard and the topology map use it to narrow their own full lists, so every page applies the same server-side rules.
+
+### `GET /endpoints/suggestions`
+Values in use, each with its endpoint count, for autocomplete and the filter bar: `sites`, `locations`, `tags`, `device_types`, each `[{ "value": "Abuja", "count": 3 }]`. One spelling per value (the most common). With `?site=Abuja`, `locations` lists only those within that site.
+
+### `POST /endpoints/bulk-update` (admin)
+Changes many endpoints at once (dashboard bulk assign). Body: which endpoints — `endpoint_ids` (list), `filter` (`{ "site": [...], "location": [...], "tag": [...], "type": [...], "q": "" }`), or both (the listed endpoints the filter matches); an empty filter alone answers `400`. What to change — `site`, `location` (a value, or `""`/`null` to clear; a value in another case takes the spelling in use), `add_tags`, `remove_tags`, `snmp_credential_id` (v3.3.6: a set's id, or `null` for SNMP off). Response: `{ "matched": 5, "changed": 3 }`. Audited as `ENDPOINT:BULK_UPDATE`.
+
+### `POST /endpoints/rename` (admin)
+Renames a value on every endpoint that has it, which also merges two spellings. Body: `field` (`site`, `location` or `tag`), `from_value` (matched ignoring case), `to_value` (empty or null removes it), `site` (location only: rename within that site). Renaming onto an existing value takes that value's spelling. Response: `{ "changed": 2, "to": "Server Room" }`. Audited as `ENDPOINT:RENAME_LABEL`.
+
+### Site, location and tags on create and update
+`POST /endpoints` and `PATCH /endpoints/{id}` accept `site`, `location` and `tags`. Values are trimmed and inner spaces collapsed; a site or location typed in another case is stored in the spelling already in use; tags are lower-cased and deduplicated (at most 20, no commas, quotes, backslashes or braces). On `PATCH`, `""` or `null` clears site or location; a field left out is unchanged.
 
 ## 4. Topology & RCA (`/topology`)
 
@@ -189,7 +218,7 @@ Retrieves the parent-child topology DAG (nodes with state and hop level, plus ed
 Rebuilds the in-memory topology DAG from the database (requires `Admin` role).
 
 ### `POST /topology/discover-all`
-Queues background traceroute discovery for all active endpoints that are currently `UP`, run sequentially with a 500 ms delay between targets (requires `Admin` role).
+Queues background traceroute discovery for all active endpoints that are currently `UP` (requires `Admin` role). They run up to the `discovery_parallel` setting at once, 500 ms apart, with traces through the same router taking turns.
 
 ---
 
@@ -197,7 +226,8 @@ Queues background traceroute discovery for all active endpoints that are current
 
 ### `GET /reports/fleet-summary`
 Fleet-wide SLA and state summary for a time window.
-- **Query Params:** `start_date`, `end_date` (required, ISO 8601).
+- **Query Params:** `start_date`, `end_date` (required, ISO 8601), and optionally the shared endpoint filter (`site`, `location`, `tag`, `type`, `q`, as on `GET /endpoints`), which limits the summary to the matching endpoints by their current assignment.
+- Each endpoint carries `site`, `location` and `tags`; with a filter the response also has `filter` and `filter_description`.
 
 ### `GET /reports/uptime/{endpoint_id}`
 Retrieves SLA uptime availability percentage and state distribution metrics.
@@ -233,6 +263,7 @@ Streams a sanitized CSV containing bulk telemetry data across multiple endpoints
     ]
   }
   ```
+- **Filter (v3.3.6):** `filter` (`{ "site": [...], "location": [...], "tag": [...], "type": [...], "q": "" }`) may replace `endpoint_ids` (all matching endpoints) or narrow it (the listed endpoints the filter matches).
 - **Column Customization Behavior:**
   - If `columns` is omitted or empty, all standard columns are included.
   - Non-negotiable identity columns (`Hostname` and `IP_Address`) are strictly enforced and automatically injected into every CSV stream.
@@ -254,6 +285,7 @@ Compiles and streams an executive-ready, immutable ISO A4 PDF report with air-ga
 - **Parameters:**
   - `template_type` (str, case-insensitive): `"a"` / `"availability"` (Availability & SLA Matrix), `"b"` / `"bandwidth"` (Bandwidth & Interface Capacity), or `"c"` / `"master"` (Combined Master Audit Dossier). Any other value returns `400`.
   - `endpoint_ids` (list[UUID]): List of target endpoint UUIDs to compile into the report.
+  - `filter` (object, optional, v3.3.6): the shared endpoint filter (`site`, `location`, `tag`, `type`, `q`). Alone it selects every matching endpoint; with `endpoint_ids` it keeps the listed ones it matches. The PDF prints it under the scope title ("Filter: Site Abuja · Tag mpls. Sites, locations and tags as assigned on …"). No endpoints left answers `400`.
   - `start_date` (datetime): UTC start boundary.
   - `end_date` (datetime): UTC end boundary.
   - `include_rca` (bool, default `true`): Include root-cause analysis diagnostic summaries in outage incident ledgers.
@@ -364,6 +396,13 @@ Updates runtime parameters (requires `Admin` role).
   - `l2_auto_bypass` (bool, optional): Controls Layer-2 direct ICMP diagnostic bypass.
   - `session_timeout` (int, 1–1440 min): No longer used since v3.3.6, where each account has its own idle timeout (`/users`). Still accepted and stored so older clients and restored backups don't fail; migration `0022` used it once to set existing viewer accounts' timeouts.
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
+  - `discovery_parallel` (int, 1–8, default 2; v3.3.6): Route traceroutes run at once. Traces whose paths share a router take turns. Incident and root-cause traces get 2 slots on top.
+  - `rediscovery_hours` (int, 1–168, default 24; v3.3.6): Each endpoint's route is re-traced on this period, spread out (the UI offers 6, 12 and 24). Replaces the run at midnight.
+  - `traffic_alerts_enabled` (bool, default `false`; v3.3.6): Traffic alerts on WAN links with a speed set (see the user guide). Delivered only to channels whose `severity_filters` name `TRAFFIC_HIGH`, `TRAFFIC_NORMAL`, `TRAFFIC_SILENT` or `TRAFFIC_RESUMED`, as event type `TRAFFIC_ALERT`.
+  - `traffic_alert_threshold_pct` (int, 50–99, default 80; v3.3.6): Default utilisation threshold, inbound or outbound (the UI offers 70–95).
+  - `traffic_alert_minutes` (int, 5–60, default 15; v3.3.6): Minutes above the threshold, every one of them, before a link alerts.
+  - `snmp_enabled` (bool, default `false`; v3.3.6): SNMP polling by ephemres-snmpd of endpoints that have a credential set.
+  - `snmp_poll_seconds` (30, 60, 120 or 300, default 60; v3.3.6): How often each device's status is polled; other values return `422`.
   - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection. Turning it on runs the flow preflight below first (with the ports in the same request, if given) and answers `400` if it fails.
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
   - `flow_ipfix_port` (int, 1–65535, optional): IPFIX UDP listening port (default: 4739).
@@ -423,6 +462,19 @@ Updates corporate organization branding and PDF report headers/footers (requires
 
 ---
 
+### SNMP (`/snmp`, v3.3.6)
+Credential sets for ephemres-snmpd and what it learned per endpoint. Secrets (`community`, `auth_password`, `priv_password`) are write-only: responses carry `has_community`, `has_auth_password`, `has_priv_password` instead. Changes are audited (`SNMP_CREDENTIALS:CREATE` / `UPDATE` / `DELETE`, `SNMP:TEST`) without secrets.
+- `GET /snmp/credentials` (admin): every set with `level` (`v2c`, `noAuthNoPriv`, `authNoPriv`, `authPriv`) and `endpoints` (how many use it).
+- `POST /snmp/credentials` (admin): `name` (unique, 1–64 characters), `version` (`2c` or `3`), `community` (v2c); `username`, `auth_protocol` (`md5`, `sha`, `sha224`, `sha256`, `sha384`, `sha512` or null), `auth_password` (8+), `priv_protocol` (`aes`, `aes128`, `aes192`, `aes256` (net-snmp-style keys), `aes192c`, `aes256c` (Cisco-style keys), `3des`, `des`, or null), `priv_password` (8+) or `priv_same: true` (one password for both), `context` (v3); `port` (161), `timeout_ms` (500–10000, 2000), `retries` (0–3, 1). `422` with a plain reason when a combination is incomplete; `409` on a duplicate name.
+- `PATCH /snmp/credentials/{id}` (admin): any subset; a secret left out or empty keeps the stored one.
+- `DELETE /snmp/credentials/{id}` (admin): `{ "endpoints_turned_off": n }`; those endpoints are no longer polled.
+- `POST /snmp/test` (admin, at most 6 a minute per API worker): `{ "address": "10.20.0.1", "credential_id": "…" }` or `{ "address": "…", "credential": { …fields as in POST… } }` to test before saving. Runs the device survey (a few seconds) and answers `{ ok, error, text, findings, profile, interfaces, system }`.
+- `GET /snmp/endpoints/{id}` (any signed-in user): `{ credential_id, credential_name, state: { status (pending, ok, partial, no_reply, auth_failed, error), last_error, last_poll_at, last_ok_at, last_probe_at, probe_requested_at, last_reboot_at, sys_uptime, inventory_at, profile }, interfaces: [{ if_index, if_name, if_descr, if_alias, if_type, speed_mbps, mac, admin_status, oper_status, last_change, hc_counters }], events: [{ at, kind (up, down, added, removed, renumbered, reboot), if_index, if_name, detail }] }` (the 50 latest events).
+- `GET /snmp/endpoints/{id}` also returns `neighbours` (step 3): `[{ protocol (lldp, lldp-v2, cdp), local_if_index, local_port, remote_name, remote_chassis, remote_port, remote_port_desc, remote_platform, remote_addresses, matched_endpoint_id, matched_by (address, mac, name), matched_hostname, first_seen, last_seen }]`.
+- `GET /topology` edges placed by LLDP/CDP carry `via` (`"LLDP"` or `"CDP"`).
+- Alert channels accept the severities `LINK_DOWN` and `LINK_UP` (event type `LINK_ALERT`, WAN links only); like traffic severities, a channel gets them only when ticked.
+- `POST /snmp/endpoints/{id}/probe` (admin): asks ephemres-snmpd to read the whole device again at its next turn; `400` if the endpoint has no set.
+
 ## 8. User Governance (`/users`)
 
 Manage user accounts and role-based access control (requires `Admin` role).
@@ -467,8 +519,19 @@ Deactivates the account (`is_active = false`) and signs it out everywhere. The a
 
 High-precision passive telemetry endpoints for fleet-wide bandwidth analysis, top talkers, application protocol distribution, exporter health, and conversation drilling.
 
+### Scope: the shared filter and one device (v3.3.6)
+Every `GET /bandwidth/*` read below takes the shared filter (`site`, `location`, `tag`, `type`, `q`, the same query params as `GET /endpoints`) and an optional `device_id`. They pick **routers**: the endpoints the filter matches (the list `GET /endpoints/match` gives), of which only routers have flow or SNMP rows. The figures are what those routers saw.
+- No filter and no device: every router, plus flows from unregistered sources. Any filter leaves unregistered sources out (they have no site or tags).
+- `device_id`: one router. A device outside the filter returns empty results rather than ignoring the filter.
+- `exporter_id` is accepted as a synonym for `device_id` on every read, so older links keep working.
+
+### Counted once (v3.3.6)
+Traffic between two sites crosses two routers and both export it. Conversations, top talkers, applications, QoS, traffic zones, the overview's directions and the "All flows" series count each conversation once per bucket, at the largest report among the routers in scope; the bandwidth PDF does the same. Up to 2 hours they read `flow_minute_rollups`; beyond, `flow_conversation_hourly_rollups` for whole hours and the minute table for the partial first hour, so their totals agree.
+
+**Directions** follow the traffic zones rule: an address is *internal* when it is a monitored endpoint or private (RFC 1918, loopback, link-local, IPv6 ULA). Inbound = outside to inside, outbound = inside to outside, internal = inside to inside, transit = neither end inside.
+
 ### `GET /bandwidth/overview`
-Rates over the last five complete minutes, fleet-wide or for one exporter (`exporter_id` query param). Ingress counts flows towards a monitored endpoint and egress flows from one (a flow between two monitored endpoints counts in both). Traffic with no monitored endpoint on either side is reported as `total_transit_bps` / `total_transit_pps` rather than split into ingress and egress. Also returns packet rates, `avg_packet_size`, `anomaly_conversations_count` and `anomaly_flows_count` (conversations whose OR'd TCP flags are SYN without ACK or RST without FIN, and the flows in them), `window_seconds` and `exporter_id`.
+Rates over the last five complete minutes for the routers in scope. Since v3.3.6 `total_ingress_*`, `total_egress_*`, `total_internal_*` and `total_transit_*` are the four directions of the zones rule (above), each conversation counted once; until then ingress and egress meant "towards / from a monitored endpoint", so users' PCs counted as transit. Also returns packet rates, `avg_packet_size`, `anomaly_conversations_count` and `anomaly_flows_count` (conversations whose OR'd TCP flags are SYN without ACK or RST without FIN, and the flows in them), `window_seconds` and `exporter_id`.
 - **Network edge (WAN):** the totals above add up what every exporter saw, so traffic that crosses two monitored routers counts twice. `wan_in_bps`/`wan_out_bps` and `wan_in_pps`/`wan_out_pps` sum only interfaces an admin marked `role: "wan"` (see `PUT /bandwidth/endpoints/{id}/interfaces`), which counts each packet once as it enters or leaves the network; "in" is traffic arriving from outside. `wan_links` has one row per WAN interface, busiest first: `exporter_id`, `exporter_hostname`, `interface_idx`, `name`, in/out rates, `speed_mbps` and `utilization_percentage` (`null` without a configured speed) and `share_percentage` of all WAN bytes. `wan_interfaces_count` is 0, and the WAN fields are zero, until an interface is marked WAN.
 - **Response:** `200 OK`
   ```json
@@ -495,6 +558,26 @@ Rates over the last five complete minutes, fleet-wide or for one exporter (`expo
   }
   ```
 
+### `GET /bandwidth/wan-links` (v3.3.6)
+Each WAN link in scope now, against its capacity: the Traffic page's headline. One row per interface with the WAN role.
+- **Query Params:** the scope (above); `window` (optional, `1h`–`30d`) and `series` (bool, default `false`) for the per-link charts.
+- **Per link:** `exporter_id`, `exporter_hostname`, `site`, `interface_idx`, `name`;
+  - `speed_mbps`, `speed_source` (`manual`, `snmp` or `default`) and `snmp_speed_mbps` (SNMP's own speed, so a typed 20 Mb/s on a 1 Gb/s port can say so);
+  - `in_bps`, `out_bps` over the last five complete minutes, `utilization_percentage` (the busier direction; `null` without a speed), `traffic_source` (`snmp` or `flow`);
+  - `usual_in`, `usual_out`: the usual range for this hour of the week (`low_bps`, `high_bps`, `samples`), from the last 28 days of hourly averages in the server's timezone; `usual_grouping` (`weekday_weekend` under 21 days of history, else `day_of_week`) and `usual_days`. `null` until the hour has 3 samples;
+  - `above_usual_in_pct`, `above_usual_out_pct`: the percentage over the range's top, only when more than 10% over it;
+  - `today_peak_in_bps` / `today_peak_out_bps` with the hour they were in (`today_peak_in_hour`, `today_peak_out_hour`): the busiest minute since the server's local midnight;
+  - `link_state` from SNMP (`up`, `down`, `shut_down`, `not_answering`; `null` for a router that isn't polled), `down_since`, `snmp_last_ok_at`;
+  - `alerts`: open traffic alerts (`kind` `high` or `silent`, `direction`, `since`, `peak_pct`).
+- **Order:** sites by name (none last); within a site, utilisation descending, links without a speed after by traffic.
+- **With `series=1`:** each link gets `series`, columns over the window (`window` defaults to `1h`): `bucket_seconds` (60 up to 6h, else 3600), `times`, `in_bps`, `out_bps`, `peak_in_bps` / `peak_out_bps` (the busiest minute of each hour), `usual_in_low` / `usual_in_high` / `usual_out_low` / `usual_out_high` per bucket, `down_spans` (`start`, `end`, `null` while still down) from SNMP link events, `window_peak_bps` and `window_peak_percentage`. The bucket still filling is left out; a bucket with no data is `null`.
+- **Response:** `window_start`, `window_end`, `day_start` (local midnight), `timezone` (the server's zone name, e.g. `Africa/Lagos`; the page shows times in it), `links`, `window`.
+
+### `GET /bandwidth/anomalies` (v3.3.6)
+Suspicious conversations over the picked window, for the Security tiles (the overview's anomaly counts cover five minutes).
+- **Query Params:** the scope (above), `window` (`1h`–`30d`; `1y` returns `400`).
+- **Response:** `window`, `conversations`, `flows`, `all_flows` (every flow in the window), and per rule `syn_conversations` / `syn_flows`, `rst_conversations` / `rst_flows`. The rule is the conversations' `anomalies` filter.
+
 ### `GET /bandwidth/traffic-series`
 Returns time-series data points formatted for Chart.js stacked area charts (Ingress vs. Egress).
 - **Query Parameters:**
@@ -503,7 +586,7 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
   - `endpoint_id` (UUID, optional): Filter by source or destination endpoint UUID.
   - `interface_idx` (int, optional, with `exporter_id`): One interface only.
   - `wan_only` (bool, default `false`): Fleet or exporter scope only (ignored with `endpoint_id` or `interface_idx`). Returns in/out summed over WAN-role interfaces as `ingress_*`/`egress_*`, from the interface rollups. The response's `wan_only` says whether it applied: with no WAN interface marked it is `false` and the normal series is returned.
-- Each point also has `transit_bps`/`transit_pps` (flows with no monitored endpoint on either side), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; only the fleet-wide `1y` window (API only, daily tier) keeps no endpoint attribution, so there it is `false` and all traffic is reported as transit. Windows up to 30d keep endpoints (minute or hourly tier).
+- Each point also has `internal_bps`/`internal_pps` and `transit_bps`/`transit_pps` (the zones rule; for the routers in scope each conversation counts once, v3.3.6), packet rates and `flows_per_sec`. The response carries `bucket_seconds` and `directional`; only the fleet-wide `1y` window (API only, daily tier) keeps no endpoint attribution, so there it is `false` and all traffic is reported as transit. Windows up to 30d keep endpoints (minute or hourly tier).
 - With `exporter_id`, windows up to 6h read 1-minute interface rollups and longer windows the hourly interface rollup. The 24h/7d/30d flow aggregates use real-time aggregation, so the newest minutes are included.
 - **Response:** `200 OK`
   ```json
@@ -526,9 +609,13 @@ Returns time-series data points formatted for Chart.js stacked area charts (Ingr
 
 ### `GET /bandwidth/conversations`
 Conversations (source, destination, protocol, service port) over the window, filtered, counted and paged on the server.
-- **Query Parameters:** `window`, `exporter_id`, `endpoint_id` (either side), `ip` (either side), `port` (service port), `dscp` (0–63), `quick` (`all` | `anomalies` | `qos` | `bulk`), `sort` (`bytes` | `flows` | `packets`), `limit` (1–200, default 25), `offset`.
-- `quick`: `anomalies` = the OR of the conversation's TCP flags over the window is SYN without ACK or RST without FIN (the same rule as the overview KPI and the PDF report); `qos` = DSCP > 0; `bulk` = average packet ≥ 1100 bytes.
-- **Response:** `items` (same fields as `top_conversations` below), `counts` (`all`, `anomalies`, `qos`, `bulk` over every conversation matching the other filters), `total` (count for the requested `quick`), `limit`, `offset`, `window`.
+- **Query Parameters:** `window`, the scope (above), `endpoint_id` (either side), `ip` (either side), `port` (service port), `dscp` (0–63), `quick` (`all` | `anomalies` | `qos` | `bulk`), `sort` (`bytes` | `flows` | `packets`), `limit` (1–200, default 25), `offset`.
+- `quick`: `anomalies` = the OR of the conversation's TCP flags over the window is SYN without ACK or RST without FIN (the same rule as the overview KPI and the PDF report); `qos` = DSCP > 0; `bulk` (v3.3.6) = average packet ≥ 1100 bytes, seen for at least 30 minutes, at 5 Mb/s or more over the time it was seen (`traffic_profile` "Bulk Transfer"; large packets without that are "Download").
+- **Response:** `items` (the fields of `top_conversations` below, plus those listed next), `counts` (`all`, `anomalies`, `qos`, `bulk` over every conversation matching the other filters), `total` (count for the requested `quick`), `limit`, `offset`, `window`.
+- **Item fields added in v3.3.6:**
+  - `service_name`: the port's name from the one table the page and the PDF share ("HTTPS", "QUIC (HTTP/3)" for UDP 443); `null` for a port with no name. `packets_per_flow` is a whole number.
+  - `routers`: the routers in scope that reported the conversation, each `exporter_id`, `hostname` (`null` for an exporter that is no endpoint), `site`, and `wan_link`: the router's WAN link name **only when it has exactly one**. Flows are stored per router, not per interface, so with two WAN links the one it arrived on is not known. Sorted by site (none last), then hostname. The bytes are counted once however many routers are listed.
+  - `first_seen`, `last_seen`: the start of the first bucket it was seen in and the end of the last (never later than now). To the minute for windows up to 2 hours, to the hour beyond.
 - **Errors:** `400` for an unknown `quick` or `sort`, or an invalid `ip`.
 
 ### `GET /bandwidth/top-talkers`
@@ -536,7 +623,8 @@ Retrieves the highest-volume addresses and the largest conversations within the 
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
   - `limit` (int, default `25`, range `1`–`200`): Maximum records to return.
-  - `exporter_id`, `endpoint_id` (UUID, optional): Scope to one exporter or to flows involving one endpoint.
+  - The scope (above); `endpoint_id` (UUID, optional): flows involving one endpoint.
+- Each address has `sites` (v3.3.6): an endpoint's own site, else the sites of the routers that saw the address. `ingress_bytes` is what the address received, `egress_bytes` what it sent.
 - **Response:** `200 OK`
   ```json
   {
@@ -570,7 +658,7 @@ Retrieves the highest-volume addresses and the largest conversations within the 
   ```
 
 ### `GET /bandwidth/applications`
-Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). `traffic_zones` are always classified by address (`zones_resolution` is always `ip`): windows up to 6h read `flow_minute_rollups`, longer windows the hourly conversation tier `flow_conversation_hourly_rollups` (90 days). `zones_window_start` gives the start actually used, so a `1y` window reports zones for the last 90 days only.
+Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` row (`is_other: true`) for the rest; `percentage` is the share of all traffic in the window (`total_bytes`). Applications, QoS and zones count each conversation once (above) and come from one pass over the same rows as conversations. `service_label` comes from the shared port-name table. `traffic_zones` are always classified by address (`zones_resolution` is always `ip`): windows up to 2 hours read `flow_minute_rollups`, longer windows the hourly conversation tier `flow_conversation_hourly_rollups` (90 days). `zones_window_start` gives the start actually used, so a `1y` window reports zones for the last 90 days only.
 `qos_source` and `qos_window_start` give the rollup table and start time the QoS (`qos_classes`) breakdown was read from. On TimescaleDB the hourly/daily aggregates have no ToS column, so for `24h`+ windows QoS comes from `flow_conversation_hourly_rollups`, which holds 90 days; a `1y` window then reports QoS for the last 90 days only.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
@@ -608,7 +696,7 @@ Returns the top 15 (protocol, service port) pairs by volume plus an `"Other"` ro
   ```
 
 ### `GET /bandwidth/exporters`
-Lists all configured flow exporters with interface aliases, along with detected unmatched exporter candidates from the FastStore sliding discovery cache.
+Lists all configured flow exporters with interface aliases, along with detected unmatched exporter candidates from the FastStore sliding discovery cache. Since v3.3.6 it takes the shared filter (not `device_id`), lists routers polled over SNMP that export no flows too, and each item has `site`, `snmp_polled` and `sends_flows`; the list is sorted by site (none last), then hostname. Unmatched sources are listed whatever the filter.
 - **Response:** `200 OK`
   ```json
   {
@@ -668,12 +756,20 @@ Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` ro
 - The new endpoint has `device_type = "Router"`, `monitoring_enabled = false` (no ICMP polling), and `flow_exporter_ips = [ip_address]`.
 - **Errors:** `400` for an invalid IP; `409` if an endpoint with the same IP or hostname already exists.
 
+### Interface traffic sources (v3.3.6)
+`GET /bandwidth/interfaces`, `GET /bandwidth/traffic-series` with `exporter_id` or `wan_only`, the WAN totals in `GET /bandwidth/overview`, traffic alerts and the bandwidth PDF read interface traffic per minute from `snmp_interface_minute_rollups` where an interface has a row for that minute, and from `flow_interface_minute_rollups` otherwise. Windows over 7 days do the same per hour with the two hourly aggregates; an hour with any SNMP minute is taken from SNMP. Flow counts always come from flows.
+
 ### `GET /bandwidth/interfaces`
-Per-interface ingress/egress throughput and utilization for one exporter.
-- **Query Params:** `exporter_id` (UUID, required), `window` (default `1h`; same values as the other bandwidth endpoints).
-- Rates average over `covered_seconds`: from the later of the window start and the exporter's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
-- Each interface: average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), and `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`. When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default. `role` is `"wan"` or `"lan"`.
+Per-interface traffic for one router, or (v3.3.6) for every router in scope.
+- **Query Params:** the scope (above), `window` (default `1h`; same values as the other bandwidth endpoints). Without a device, every router in scope; with no filter either, every live endpoint that reported interface traffic in the window, is polled over SNMP or has interfaces typed in. Until v3.3.6 `exporter_id` was required (`422` without it).
+- **Response:** `exporter_id` (the device, `null` across devices), `devices` (how many routers), `window`, `covered_seconds`, `source`, `interfaces`.
+- **Rows:** interfaces with traffic, typed in, or that SNMP sees up; plus ports an admin shut down and ports with an SNMP down event in the window. A port SNMP sees down with none of those is left out.
+- **Order:** one device: by index, shut-down ports last. Across devices: WAN links first by average utilisation (no speed after), then the others by the busier direction's average, shut-down ports last.
+- Rates average over `covered_seconds`: from the later of the window start and the router's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
+- Traffic figures come from the device's SNMP counters for the minutes that have them and from flows otherwise (`services/interface_traffic.py`); `traffic_source` is `snmp` when any minute in the window came from counters, else `flow`. `flow_count` always counts flows. Names and speeds are the typed ones, else the device's from SNMP: each interface also carries `name_source` / `speed_source` (`manual`, `snmp` or `default`), `snmp_name`, `snmp_speed_mbps`, `oper_status` and `admin_status`.
+- **Each interface:** `exporter_id`, `exporter_hostname`, `site`, `interface_idx`, `name`, `role` (`"wan"` or `"lan"`); average `in_bps`/`out_bps`, `in_p95_bps`/`out_p95_bps`, `in_peak_bps`/`out_peak_bps` (busiest minute), `utilization_percentage`, `p95_utilization_percentage`, `peak_utilization_percentage`; `now_in_bps` / `now_out_bps` over the last five complete minutes (the same as `GET /bandwidth/wan-links`). When no link speed is configured (`speed_configured: false`) the utilization fields are `null` and `speed_mbps` reports the 1 Gbps default.
+- **Status (v3.3.6):** `status` is `up`, `down`, `shut_down` (admin down), `not_answering` (the router doesn't reply to SNMP) or `unknown` (another oper status) for a port SNMP knows; `traffic_seen` or `idle` otherwise. `down_spans` (`start`, `end`, `null` while still down) and `down_seconds` give the time it was down within the window.
 
 ### `PUT /bandwidth/endpoints/{id}/interfaces`
 Replaces an exporter's interface names and link speeds (requires `Admin` role).
-- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan"}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000, or omitted/`null` to leave the speed unset (utilization is then not shown); `role` is `"wan"` (a link to the internet or a provider, counted in the overview's WAN totals) or `"lan"` (default). The body replaces the whole map, so send every interface with its current values.
+- **Request Body:** object keyed by SNMP `ifIndex`: `{"1": {"name": "WAN-Fiber", "speed_mbps": 1000, "role": "wan"}}`. `name` is 1–64 characters of letters, digits, spaces and `_-./:`; `speed_mbps` is 1–10,000,000, or omitted/`null` to leave the speed unset (utilization is then not shown); `role` is `"wan"` (a link to the internet or a provider, counted in the overview's WAN totals) or `"lan"` (default). `name` is optional since v3.3.6: left out, it is not stored and the interface shows the device's SNMP name (or "Interface N"). `alert` (optional, v3.3.6) is a WAN link's traffic alert rule: `{"mode": "default"}` (or omitted) follows the settings, `{"mode": "custom", "threshold_pct": 50–99, "minutes": 5–60}` sets its own, `{"mode": "off"}` opts it out; out-of-range values return `422`. `GET /bandwidth/interfaces` returns it per interface as `alert` (`null` when not set). The body replaces the whole map, so send every interface with its current values.

@@ -8,9 +8,10 @@ Gansner crossing-free visualizer and Root Cause Analysis inference engine.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
-from app.core.orm import DateTime, ForeignKey, Integer, func
+from app.core.orm import Boolean, DateTime, ForeignKey, Integer, func
 from app.core.orm import JSONB, UUID as PG_UUID
 from app.core.orm import Mapped, mapped_column
 
@@ -50,3 +51,14 @@ class EndpointBaselineRoute(Base):
         JSONB,
         nullable=False,
     )
+
+    # v3.3.6 (migration 0024): `hops` above is the CURRENT path. The columns below hold the
+    # NORMAL path and the hold-down state; services/route_paths.py owns all of them.
+    current_since: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    normal_hops: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    normal_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    normal_pinned: Mapped[bool] = mapped_column(Boolean, server_default="false", default=False, nullable=False)
+    pending_hops: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    pending_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    flapping_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_logged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

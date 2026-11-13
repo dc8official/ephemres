@@ -32,19 +32,9 @@ export function formatNumber(num) {
   return new Intl.NumberFormat().format(num)
 }
 
-const PORT_LABELS = {
-  443: 'HTTPS',
-  80: 'HTTP',
-  53: 'DNS',
-  22: 'SSH',
-  123: 'NTP',
-  161: 'SNMP',
-  2055: 'NetFlow',
-  4739: 'IPFIX',
-}
-
-export function formatPortLabel(port) {
-  const name = PORT_LABELS[Number(port)]
+/** "1433 / MS SQL", or "1434" when the port has no name. Names come from the API
+ *  (flow_metrics.service_name), the one table the page and the PDF share. */
+export function formatPortLabel(port, name) {
   return name ? `${Number(port)} / ${name}` : `${port}`
 }
 

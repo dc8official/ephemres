@@ -246,6 +246,16 @@
           <EndpointRcaDetail :endpointId="endpointId" :endpoint="endpoint" />
         </div>
 
+        <!-- Route in use and normal route, with the route-change log (v3.3.6) -->
+        <div class="visualizer-container">
+          <EndpointRoutePanel :endpoint-id="String(endpointId)" />
+        </div>
+
+        <!-- SNMP status, interfaces and interface events (v3.3.6); hidden without SNMP -->
+        <div v-if="endpoint && endpoint.snmp_credential_id" class="visualizer-container">
+          <EndpointSnmpPanel :endpoint-id="String(endpointId)" />
+        </div>
+
         <!-- State Timeline Component -->
         <div class="visualizer-container">
           <div class="panel-header">
@@ -432,6 +442,8 @@
                         <span class="iface-tag tnum">if{{ iface.idx }}</span>
                         <span class="iface-name" :title="iface.name">{{ iface.name }}</span>
                         <span v-if="iface.role === 'wan'" class="iface-wan" title="WAN link: counted in edge totals">WAN</span>
+                        <!-- v3.3.6: figures from the device's counters, not flow samples. -->
+                        <span v-if="iface.trafficSource === 'snmp'" class="iface-wan iface-snmp" title="Traffic from the device's SNMP counters (exact)">SNMP</span>
                         <span v-if="iface.speedConfigured && iface.speed_mbps" class="iface-speed tnum text-muted text-xs">({{ formatSpeedLabel(iface.speed_mbps) }})</span>
                         <span v-else class="iface-speed iface-speed-unset text-xs" title="Set the link speed to see utilization">(speed not set)</span>
                       </div>
@@ -604,7 +616,7 @@
           <!-- Conversations through (exporter) or with (participant) this device, server-filtered -->
           <ConversationsPanel
             :window="flowWindow"
-            :exporter-id="flowMode === 'exporter' ? endpointId : null"
+            :scope="flowMode === 'exporter' ? endpointId : null"
             :endpoint-id="flowMode === 'participant' ? endpointId : null"
             v-model:ip="convIp"
             v-model:port="convPort"
@@ -732,11 +744,9 @@
           </p>
 
           <div class="interface-config-list">
-            <div
-              v-for="(iface, i) in editingInterfaces"
-              :key="i"
-              class="interface-config-row"
-            >
+            <!-- Each row, and under a WAN row its traffic alert rule (v3.3.6). -->
+            <div v-for="(iface, i) in editingInterfaces" :key="i" class="iface-row-wrap">
+            <div class="interface-config-row">
               <div class="form-group idx-col">
                 <label v-if="i === 0">ifIndex *</label>
                 <input
@@ -751,12 +761,12 @@
               </div>
 
               <div class="form-group name-col">
-                <label v-if="i === 0">Interface Name / Alias *</label>
+                <label v-if="i === 0">Interface Name / Alias</label>
                 <input
                   type="text"
                   v-model="iface.name"
-                  required
-                  placeholder="e.g. GigabitEthernet0/1 or WAN-Uplink"
+                  :placeholder="iface.snmpName || 'e.g. GigabitEthernet0/1 or WAN-Uplink'"
+                  :title="iface.snmpName ? `Empty: the device's own name (${iface.snmpName}) is shown` : null"
                   class="form-input"
                 />
               </div>
@@ -772,7 +782,7 @@
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
                 <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
-                  <option value="unset">Not set</option>
+                  <option value="unset">{{ iface.snmpSpeed ? `From SNMP: ${formatMbps(iface.snmpSpeed)}` : 'Not set' }}</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -805,6 +815,13 @@
                   ✕
                 </button>
               </div>
+            </div>
+            <InterfaceAlertControl
+              v-if="iface.role === 'wan'"
+              v-model="iface.alert"
+              :has-speed="(iface.preset !== 'unset' && Number(iface.speed_mbps) > 0) || !!iface.snmpSpeed"
+              class="iface-alert-line"
+            />
             </div>
           </div>
 
@@ -839,6 +856,8 @@ import ProbeTrendPanel from '../components/ProbeTrendPanel.vue'
 import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
 import PanelHeader from '../components/ui/PanelHeader.vue'
 import EndpointRcaDetail from '../components/EndpointRcaDetail.vue'
+import EndpointRoutePanel from '../components/EndpointRoutePanel.vue'
+import EndpointSnmpPanel from '../components/EndpointSnmpPanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { Line as LineChart } from 'vue-chartjs'
 import {
@@ -872,7 +891,8 @@ import { formatBps, formatBytes, formatPps } from '../utils/format.js'
 import { summarizeSeries } from '../utils/chartSummary.js'
 import { DEFAULT_SLA_TARGET, uptimeTone, utilizationTone } from '../utils/statusTone.js'
 import { isMonitored } from '../utils/endpointState.js'
-import { aliasesPayload, applyPreset, editRow, rowsFromAliases } from '../utils/interfaceConfig.js'
+import { aliasesPayload, applyPreset, editRow, rowsFromAliases, rowFromTelemetry, formatMbps } from '../utils/interfaceConfig.js'
+import InterfaceAlertControl from '../components/ui/InterfaceAlertControl.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 
@@ -1158,6 +1178,7 @@ const interfaceMeters = computed(() => {
       speed_mbps: item.speed_mbps,
       speedConfigured: item.speed_configured !== false,
       role: item.role,
+      trafficSource: item.traffic_source,
       ingressBps: item.in_bps,
       egressBps: item.out_bps,
       utilization: item.utilization_percentage,
@@ -1196,12 +1217,7 @@ const interfaceMeters = computed(() => {
 
 function openInterfaceModal() {
   const current = interfaceTelemetry.value || []
-  let rows = current.map((item) => editRow(
-    Number(item.interface_idx) || 1,
-    item.name || `GigabitEthernet0/${item.interface_idx}`,
-    item.speed_configured === false ? null : item.speed_mbps,
-    item.role,
-  ))
+  let rows = current.map((item) => rowFromTelemetry(item))
   if (rows.length === 0) {
     rows = rowsFromAliases(endpoint.value?.flow_interface_aliases)
   }
@@ -2587,6 +2603,10 @@ h2 {
   color: var(--text-muted);
 }
 
+.iface-wan.iface-snmp {
+  color: #0ea5e9;
+}
+
 .iface-wan {
   flex-shrink: 0;
   padding: 0 5px;
@@ -2618,6 +2638,16 @@ h2 {
   overflow-y: auto;
   margin-bottom: 12px;
   padding-right: 4px;
+}
+
+.iface-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.iface-alert-line {
+  padding: 0 12px 4px;
 }
 
 .interface-config-row {

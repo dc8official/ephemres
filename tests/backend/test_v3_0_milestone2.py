@@ -278,7 +278,9 @@ class TestMilestone2HighFidelityDiagnostics(unittest.TestCase):
         self.assertTrue(is_local_subnet_destination("127.0.0.2"))
 
     def test_trace_semaphore_bound(self) -> None:
-        self.assertEqual(trace_semaphore._value, 3)
+        # Since v3.3.6: the "parallel route traces" setting (default 2) plus 2 slots kept for
+        # incident and root-cause traces.
+        self.assertEqual(trace_semaphore.capacity, 4)
 
 
 if __name__ == "__main__":

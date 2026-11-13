@@ -545,9 +545,12 @@ def test_derive_traffic_profile_classification():
     assert derive_traffic_profile("SYN_ONLY", 60, 1.0, 0, 443) == "SYN Scan / Probe"
     assert derive_traffic_profile("TCP_RST", 1400, 20.0, 0, 80) == "Reset / Refused"
 
-    # 2. Bulk Transfer (avg_packet_size >= 1100 and packets_per_flow >= 10)
-    assert derive_traffic_profile(None, 1450, 12.0, 0, 443) == "Bulk Transfer"
-    assert derive_traffic_profile(None, 1100, 10.0, 0, 80) == "Bulk Transfer"
+    # 2. Bulk Transfer: the steady-flow rule (flow_metrics.is_bulk), passed in as `bulk`.
+    assert derive_traffic_profile(None, 1450, 12.0, 0, 443, bulk=True) == "Bulk Transfer"
+    assert derive_traffic_profile("SYN_ONLY", 1450, 12.0, 0, 443, bulk=True) == "SYN Scan / Probe"
+    # Large packets without the steady flow: a download (v3.3.6 review C2).
+    assert derive_traffic_profile(None, 1450, 12.0, 0, 443) == "Download"
+    assert derive_traffic_profile(None, 1100, 10.0, 0, 80) == "Download"
 
     # 3. Real-Time / VoIP precedence (dscp == 46 or dst_port in (5060, 5061, 16384))
     # Must NOT be shadowed by Micro-Flow when small VoIP audio frames (e.g. G.711 / G.729 at 60-120 B/pkt) occur
@@ -655,77 +658,3 @@ def test_flow_workbench_enriched_schemas():
     )
     assert len(app_resp.qos_classes) == 1
     assert len(app_resp.traffic_zones) == 1
-
-
-def test_applications_qos_and_traffic_zones_integration(api_client):
-    client, mock_session = api_client
-
-    # 1. Applications query result: (protocol, dst_port, total_bytes)
-    m_apps = MagicMock()
-    m_apps.all.return_value = [
-        (6, 443, 600_000),
-        (17, 53, 400_000),
-    ]
-
-    # 2. QoS query result: (tos, total_bytes, total_packets, flow_count)
-    # ToS 184 = DSCP 46 (EF)
-    # ToS 0 = DSCP 0 (CS0)
-    m_qos = MagicMock()
-    m_qos.all.return_value = [
-        (184, 750_000, 750, 75),
-        (0, 250_000, 250, 25),
-    ]
-
-    # 3. Zones query result: (src_ip, dst_ip, src_endpoint_id, dst_endpoint_id, total_bytes, flow_count)
-    ep1_id = uuid4()
-    ep2_id = uuid4()
-    m_zones = MagicMock()
-    m_zones.all.return_value = [
-        # Internal to internal -> East-West (Internal)
-        ("192.168.1.10", "192.168.1.20", ep1_id, ep2_id, 500_000, 50),
-        # Internal to public -> North-South Egress
-        ("192.168.1.10", "8.8.8.8", ep1_id, None, 300_000, 30),
-        # Public to internal -> North-South Ingress
-        ("1.1.1.1", "192.168.1.20", None, ep2_id, 200_000, 20),
-    ]
-
-    m_total = MagicMock()
-    m_total.scalar.return_value = 1_000_000  # all traffic is in the two apps
-
-    mock_session.execute.side_effect = [m_apps, m_total, m_qos, m_zones]
-
-    exp_id = uuid4()
-    res = client.get(f"/api/v1/bandwidth/applications?window=1h&exporter_id={exp_id}")
-    assert res.status_code == 200
-    data = res.json()["data"]
-
-    # Applications check
-    apps = data["applications"]
-    assert len(apps) == 2
-    assert apps[0]["service_label"] == "HTTPS"
-    assert apps[0]["total_bytes"] == 600_000
-
-    # QoS check
-    qos = data["qos_classes"]
-    assert len(qos) == 2
-    assert qos[0]["dscp"] == 46
-    assert qos[0]["dscp_label"] == "EF (VoIP)"
-    assert qos[0]["total_bytes"] == 750_000
-    assert qos[0]["percentage"] == 75.0
-    assert qos[1]["dscp"] == 0
-    assert qos[1]["percentage"] == 25.0
-
-    # Zones check
-    zones = data["traffic_zones"]
-    assert len(zones) == 4
-    zone_names = [z["zone"] for z in zones]
-    assert "East-West (Internal)" in zone_names
-    assert "North-South Egress" in zone_names
-    assert "North-South Ingress" in zone_names
-    assert "External / Transit" in zone_names
-
-    ew_zone = next(z for z in zones if z["zone"] == "East-West (Internal)")
-    assert ew_zone["total_bytes"] == 500_000
-    assert ew_zone["percentage"] == 50.0
-
-

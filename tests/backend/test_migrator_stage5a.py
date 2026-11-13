@@ -29,17 +29,17 @@ def test_migrator_loads_all_19_revisions():
     versions_dir = find_versions_dir()
     ordered = load_revisions(versions_dir)
 
-    assert len(ordered) == 22
-    expected_chain = [f"{i:04d}" for i in range(1, 23)]
+    assert len(ordered) == 28
+    expected_chain = [f"{i:04d}" for i in range(1, 29)]
     actual_chain = [r.revision for r in ordered]
     assert actual_chain == expected_chain
 
     # Check root and head
     assert ordered[0].down_revision is None
-    assert ordered[-1].revision == "0022"
+    assert ordered[-1].revision == "0028"
 
     # Check continuous singly-linked list integrity
-    for i in range(1, 22):
+    for i in range(1, 28):
         assert ordered[i].down_revision == ordered[i - 1].revision
 
 
@@ -57,8 +57,9 @@ def test_all_19_revisions_upgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 0022 adds 11 upgrade statements to the 72 before it
-    assert total_statements == 83
+    # 0022 adds 11 upgrade statements to the 72 before it, 0023 adds 5, 0024 adds 4, 0025 adds 1,
+    # 0026 adds 7, 0027 adds 4, 0028 adds 6
+    assert total_statements == 110
 
     full_sql = "\n".join(all_statements)
 
@@ -147,6 +148,24 @@ def test_all_19_revisions_upgrade_ddl_compilation():
     assert "ADD COLUMN IF NOT EXISTS last_activity_at" in full_sql
     assert "CREATE TABLE IF NOT EXISTS ended_sessions" in full_sql
 
+    # 0023 site and tags
+    assert "ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'" in full_sql
+    assert "USING GIN (tags)" in full_sql
+
+    # 0024 normal and current paths
+    assert "ADD COLUMN IF NOT EXISTS normal_hops JSONB" in full_sql
+    assert "CREATE TABLE IF NOT EXISTS endpoint_route_changes" in full_sql
+
+    # 0025 traffic alert state
+    assert "CREATE TABLE IF NOT EXISTS traffic_alert_state" in full_sql
+    # 0026 SNMP poller, step 1
+    assert "CREATE TABLE IF NOT EXISTS snmp_credentials" in full_sql
+    assert "ADD COLUMN IF NOT EXISTS snmp_credential_id" in full_sql
+    # 0027 SNMP poller, step 2
+    assert "CREATE TABLE IF NOT EXISTS snmp_interface_minute_rollups" in full_sql
+    # 0028 SNMP poller, step 3
+    assert "CREATE TABLE IF NOT EXISTS snmp_neighbours" in full_sql
+
 
 def test_all_19_revisions_downgrade_ddl_compilation():
     """Execute dry-run DDL compilation for all 21 downgrades and verify generated SQL."""
@@ -162,8 +181,9 @@ def test_all_19_revisions_downgrade_ddl_compilation():
         total_statements += len(stmts)
         all_statements.extend(stmts)
 
-    # 0022 adds 8 downgrade statements to the 59 before it
-    assert total_statements == 67
+    # 0022 adds 8 downgrade statements to the 59 before it, 0023 adds 5, 0024 adds 2, 0025 adds 1,
+    # 0026 adds 6, 0027 adds 3, 0028 adds 5
+    assert total_statements == 89
 
     full_sql = "\n".join(all_statements)
 
@@ -187,13 +207,13 @@ def test_cli_subcommands(capsys):
     # 1. Test heads
     cli_main(["heads"])
     captured = capsys.readouterr()
-    assert "0022 (head)" in captured.out
+    assert "0028 (head)" in captured.out
 
     # 2. Test history
     cli_main(["history"])
     captured = capsys.readouterr()
     assert "0001" in captured.out
-    assert "0022 (head)" in captured.out
+    assert "0028 (head)" in captured.out
 
     # 3. Test upgrade head --sql
     cli_main(["upgrade", "head", "--sql"])

@@ -84,6 +84,14 @@
       </div>
     </div>
 
+    <!-- Shared endpoint filter (v3.3.6): the summary, CSV and PDF cover only what it matches,
+         picked by each endpoint's site, location and tags as assigned now. -->
+    <FilterBar :state="filterState">
+      <span v-if="filterState.isActive.value" class="filter-note text-muted">
+        Reports use each endpoint's current site, location and tags.
+      </span>
+    </FilterBar>
+
     <!-- Error Alert -->
     <div v-if="error" class="alert-error" role="alert">
       {{ error }}
@@ -125,14 +133,6 @@
         <div>
           <h3>Fleet Availability & SLA Performance</h3>
           <p class="table-sub">Individual uptime percentage, outage incident counts, and operational duration</p>
-        </div>
-        <div class="table-search-box">
-          <input 
-            type="text" 
-            v-model="searchQuery" 
-            placeholder="Search by hostname or IP..." 
-            class="search-input"
-          />
         </div>
       </div>
 
@@ -187,6 +187,7 @@
                     {{ row.hostname }}
                   </router-link>
                   <span class="host-ip tnum">{{ row.ip_address }}</span>
+                  <span v-if="row.place" class="host-place">{{ row.place }}</span>
                 </div>
               </td>
               <td>
@@ -535,10 +536,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { DEFAULT_SLA_TARGET, toneVar, uptimeTone } from '../utils/statusTone.js'
 import { useToast } from 'primevue/usetoast'
 import { getFleetSummary, exportBatchTelemetry, generatePdfReport } from '../services/api.js'
+import FilterBar from '../components/ui/FilterBar.vue'
+import { useEndpointFilter, filterParams } from '../composables/useEndpointFilter.js'
 import { isOperatorOrAdmin, loadUserFromStorage } from '../services/auth.js'
 
 const toast = useToast()
@@ -551,7 +554,12 @@ const error = ref(null)
 
 const endpoints = ref([])
 const reportRows = ref([])
-const searchQuery = ref('')
+
+// The shared filter. The server applies it to the summary, and to the CSV and PDF, which print
+// it; the browser only passes it along. Changing it reloads the summary.
+const filterState = useEndpointFilter()
+const activeFilter = computed(() => (filterState.isActive.value ? filterParams(filterState.filter.value) : null))
+watch(() => JSON.stringify(filterState.filter.value), () => loadAllReports())
 
 const filterRange = ref('24h')
 const customStart = ref(new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 16))
@@ -594,7 +602,7 @@ async function loadAllReports() {
   const { start, end } = getQueryRange()
 
   try {
-    const res = await getFleetSummary(start, end)
+    const res = await getFleetSummary(start, end, activeFilter.value)
     const summaryData = res.data?.data || {}
     const epList = summaryData.endpoints || []
     endpoints.value = epList
@@ -604,6 +612,7 @@ async function loadAllReports() {
       hostname: ep.hostname,
       ip_address: ep.ip_address,
       device_type: ep.device_type || 'SERVER',
+      place: [ep.site, ep.location].filter(Boolean).join(' · '),
       operational_state: ep.operational_state || 'UP',
       detailed_state: ep.detailed_state || 'UP',
       monitoring_enabled: ep.monitoring_enabled,
@@ -641,15 +650,8 @@ const totalDowntimeSeconds = computed(() => {
   return reportRows.value.reduce((acc, r) => acc + (r.downtime_seconds || 0), 0)
 })
 
-const filteredReportRows = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q) return reportRows.value
-  return reportRows.value.filter(r => 
-    r.hostname.toLowerCase().includes(q) ||
-    r.ip_address.toLowerCase().includes(q) ||
-    r.device_type.toLowerCase().includes(q)
-  )
-})
+// Search now lives in the filter bar (server-side, with site, location and tags).
+const filteredReportRows = computed(() => reportRows.value)
 
 const sortedReportRows = computed(() => {
   const rows = [...filteredReportRows.value]
@@ -831,7 +833,11 @@ async function triggerExport() {
   }
 
   try {
-    const res = await exportBatchTelemetry(targetIds, start, end, selectedColumns.value)
+    // "All" with a filter: the server picks the endpoints from the filter itself.
+    const useFilterOnly = exportScope.value === 'all' && activeFilter.value
+    const res = await exportBatchTelemetry(
+      useFilterOnly ? [] : targetIds, start, end, selectedColumns.value, activeFilter.value
+    )
     // Save the response as a file: link it from an object URL, click it, then free the URL.
     const blob = new Blob([res.data], { type: 'text/csv' })
     const url = window.URL.createObjectURL(blob)
@@ -956,9 +962,12 @@ async function triggerPdfExport() {
   }
 
   try {
+    // With a filter the PDF prints it; "all" lets the server pick the endpoints from it.
+    const useFilterOnly = pdfScope.value === 'all' && activeFilter.value
     const res = await generatePdfReport({
       template_type: pdfTemplate.value,
-      endpoint_ids: targetIds,
+      endpoint_ids: useFilterOnly ? [] : targetIds,
+      filter: activeFilter.value || undefined,
       start_date: start,
       end_date: end,
       include_rca: pdfIncludeRca.value,
@@ -1242,6 +1251,16 @@ onMounted(() => {
   font-size: 0.75rem;
   color: var(--text-muted);
   font-family: var(--font-mono, monospace);
+}
+
+.host-place {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.filter-note {
+  align-self: center;
+  font-size: var(--text-sm);
 }
 
 .device-pill {

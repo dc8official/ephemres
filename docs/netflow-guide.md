@@ -291,7 +291,7 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
 ## 5. Enabling Flow Telemetry in Ephemres
 
 1. Log in to the Ephemres Web Interface as an **Administrator**.
-2. Open **Settings** -> **Performance & Telemetry**.
+2. Open **Settings** -> **Data collection**.
 3. In the **Network Flow Telemetry Engine (NetFlow & IPFIX)** card:
    - Switch the toggle on. This opens the preflight, which checks that FastStore opens and the flow UDP ports are free (it also reports `rmem_max`). When it passes, click **Activate Flow Telemetry**; the badge then reads **FLOW INGESTION ACTIVE** and the port fields appear. Performance Mode is not needed for flows. **Run Diagnostic Preflight** runs the same check on its own.
    - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match what your exporters send to.

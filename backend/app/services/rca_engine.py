@@ -1,7 +1,9 @@
 """Root-cause analysis when an endpoint goes DOWN, and clean-up when it comes back.
 
-Differential RCA traceroutes to the endpoint now and compares the hops with its baseline route
-(recorded while it was up). The first hop that no longer answers, or answers from a different
+Differential RCA traceroutes to the endpoint now and compares the hops with its baseline route:
+since v3.3.6 the CURRENT path, the one traffic was using just before the failure
+(services/route_paths). When that was not the endpoint's normal path, the summary says so
+("On an alternate path since 14:02 UTC (normal path via 172.16.1.1)."). The first hop that no longer answers, or answers from a different
 address, is reported as the likely failure point, with the hop before it as the last known good
 one. An endpoint on the local segment (no routers in between) is reported as a Layer 2 problem.
 The result is stored in endpoint_rca_incidents, with flow evidence when there is some, and
@@ -68,7 +70,7 @@ async def run_differential_rca(
 
         # 2. Fetch baseline route snapshot
         bl_query = text("""
-            SELECT total_hops, hops
+            SELECT total_hops, hops, normal_hops, current_since
             FROM endpoint_baseline_routes
             WHERE endpoint_id = CAST(:endpoint_id AS uuid)
         """)
@@ -105,6 +107,12 @@ async def run_differential_rca(
                 "No intermediate L3 routers detected. "
                 "Failure isolated to local host, NIC, or local L2 switch port."
             )
+            # Traceroute sees nothing on the same subnet, but LLDP/CDP may know the switches in
+            # between (v3.3.6 build plan 8.3): name the nearest one that is down too.
+            upstream = _l2_upstream_verdict(str(endpoint_id))
+            if upstream:
+                failed_ip, last_known_good_hop_ip, rca_summary = upstream
+                failed_hop_ip = failed_ip or target_ip
         else:
             # Layer 3 Multi-Hop: Compare live failure hops against baseline
             live_hops_by_num = {
@@ -164,6 +172,21 @@ async def run_differential_rca(
                         )
                     else:
                         rca_summary = f"Failure at Hop {failed_hop_number} ({failed_hop_ip})."
+
+        # The comparison above was against the current path. If that was a failover path, say
+        # so: the operator should know the endpoint was already off its normal route.
+        try:
+            from app.services.route_paths import alternate_path_note, as_hops
+
+            note = alternate_path_note(
+                baseline_hops,
+                as_hops(getattr(bl_row, "normal_hops", None)) if bl_row else [],
+                getattr(bl_row, "current_since", None) if bl_row else None,
+            )
+        except Exception:
+            note = None
+        if note:
+            rca_summary = f"{rca_summary} {note}".strip()
 
         # 5. Persist RCA Incident Record
         insert_incident_sql = text("""
@@ -238,6 +261,15 @@ async def run_differential_rca(
                         symptom_endpoint_ids.append(str(val))
         except (Exception, StopIteration, StopAsyncIteration) as exc:
             logger.debug("Could not query symptom endpoints: %s", exc)
+        # Endpoints placed under this one by LLDP/CDP are its symptoms too (v3.3.6).
+        try:
+            from app.services.topology import topology_manager
+
+            for child in topology_manager.l2_children(str(endpoint_id)):
+                if child not in symptom_endpoint_ids:
+                    symptom_endpoint_ids.append(child)
+        except Exception as exc:
+            logger.debug("Could not read LLDP/CDP children: %s", exc)
 
         # Flow evidence, added after the incident is recorded (traceroute stays the verdict):
         # which path real traffic last took and whether it still flowed after probes started
@@ -314,6 +346,61 @@ async def run_differential_rca(
             return result
 
 
+_confirm_tasks: set = set()
+
+
+def _l2_upstream_verdict(endpoint_id: str) -> Optional[tuple]:
+    """(failed IP, last good IP, summary) from the endpoint's LLDP/CDP parents on the map, or
+    None when it has none. The nearest parent that is down is the likely cause; a parent that
+    answers puts the fault at this host, its NIC or its switch port."""
+    try:
+        from app.services.topology import topology_manager
+
+        chain = topology_manager.l2_parent_chain(endpoint_id)
+        nodes = topology_manager._nodes
+    except Exception:
+        return None
+    if not chain:
+        return None
+
+    def label(node_id: str) -> str:
+        node = nodes.get(node_id) or {}
+        return f"{node.get('label') or node_id} ({node.get('ip_address') or '?'})"
+
+    for parent in chain:
+        state = str((nodes.get(parent) or {}).get("state") or "").upper()
+        if state in ("DOWN", "FAILURE_POINT"):
+            return (
+                (nodes.get(parent) or {}).get("ip_address"),
+                None,
+                f"Layer 2 attachment through {label(parent)}, found by LLDP/CDP, which is down too: "
+                f"the failure is most likely at or above {label(parent)}.",
+            )
+    first = chain[0]
+    return (
+        None,
+        (nodes.get(first) or {}).get("ip_address"),
+        f"Layer 2 attachment through {label(first)}, found by LLDP/CDP, which still answers: "
+        "the failure is at this host, its NIC or its switch port.",
+    )
+
+
+def _confirm_later(endpoint_id: UUID, target_ip: str, delay: Optional[float]) -> None:
+    """Second trace after a recovery showed a new path, once the confirmation delay is over."""
+    import asyncio
+
+    async def _run() -> None:
+        await asyncio.sleep(float(delay or 120.0) + 5.0)
+        try:
+            await refresh_baseline_route(endpoint_id, target_ip, trigger="confirm")
+        except Exception as exc:
+            logger.warning("Confirming trace for %s failed: %s", endpoint_id, exc)
+
+    task = asyncio.create_task(_run())
+    _confirm_tasks.add(task)
+    task.add_done_callback(_confirm_tasks.discard)
+
+
 async def handle_endpoint_recovery(
     endpoint_id: UUID,
     target_ip: str,
@@ -338,7 +425,12 @@ async def handle_endpoint_recovery(
             endpoint_id,
             resolved_count,
         )
-        await refresh_baseline_route(endpoint_id, target_ip, db=session)
+        # Trace the route it came back on. A path different from before is only pending until a
+        # second trace confirms it (route_paths); that trace runs here a little later, since the
+        # engine has no discovery queue of its own.
+        traced = await refresh_baseline_route(endpoint_id, target_ip, db=session, trigger="recovery")
+        if traced.get("path_outcome") == "pending":
+            _confirm_later(endpoint_id, target_ip, traced.get("confirm_after"))
 
         # Publish resolution RCA_INCIDENT event
         try:

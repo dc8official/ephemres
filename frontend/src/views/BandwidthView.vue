@@ -4,77 +4,24 @@
     <div class="bandwidth-toolbar">
       <div class="toolbar-left">
         <h1 class="page-title">Traffic Analytics</h1>
+        <!-- The page updates itself once a minute (build plan 7.1); this line says how fresh it is
+             and lets the user hold it still, e.g. while reading a table. -->
         <div class="toolbar-sub-row">
-          <span class="page-sub">
-            v3.3.5 Flow Engine
-            <span class="separator">·</span>
-            NetFlow v5, NetFlow v9 & IPFIX
+          <span class="page-sub update-status" aria-live="polite">
+            <template v-if="paused">Updates paused</template>
+            <template v-else-if="pageHidden">Updates resume when this tab is shown</template>
+            <template v-else>{{ updatedLabel }}</template>
           </span>
+          <button
+            type="button"
+            class="btn-text pause-toggle"
+            :aria-pressed="paused"
+            @click="togglePause"
+          >{{ paused ? 'Resume' : 'Pause' }}</button>
         </div>
       </div>
 
       <div class="toolbar-right">
-        <!-- Scope Switcher (Network Aggregate vs Individual Exporter) -->
-        <div class="scope-selector">
-          <label class="scope-label" for="scope-select">Scope:</label>
-          <div class="scope-input-wrapper">
-            <input
-              v-if="flowExporters.length > 5 || unmatchedExporters.length > 0"
-              v-model="exporterSearchText"
-              type="text"
-              class="scope-search-input"
-              placeholder="Filter devices..."
-              aria-label="Filter flow exporters"
-            />
-            <select
-              id="scope-select"
-              v-model="selectedExporterId"
-              @change="handleScopeChange"
-              class="scope-select"
-            >
-              <option value="">🌐 All Network Traffic (Global Overview)</option>
-              <optgroup
-                v-if="filteredFlowExporters.length > 0"
-                :label="`Configured Flow Exporters (${filteredFlowExporters.length})`"
-              >
-                <option v-for="exp in filteredFlowExporters" :key="exp.id" :value="exp.id">
-                  🟢 {{ exp.hostname }} ({{ exp.primary_ip }})
-                </option>
-              </optgroup>
-              <optgroup
-                v-if="filteredUnmatchedExporters.length > 0"
-                :label="`Discovered Sources (Unregistered - ${filteredUnmatchedExporters.length})`"
-              >
-                <option
-                  v-for="u in filteredUnmatchedExporters"
-                  :key="u.ip_address"
-                  :value="`unmatched:${u.ip_address}`"
-                >
-                  ⚠ {{ u.ip_address }} (Unregistered - {{ formatNumber(u.flow_count || 0) }} flows)
-                </option>
-              </optgroup>
-              <option
-                v-if="filteredFlowExporters.length === 0 && filteredUnmatchedExporters.length === 0 && exporterSearchText"
-                disabled
-                value=""
-              >
-                No matching flow exporters found
-              </option>
-            </select>
-          </div>
-        </div>
-
-        <!-- Auto-Refresh Interval Selector -->
-        <div class="auto-refresh-selector">
-          <label class="refresh-label">Refresh:</label>
-          <select v-model="autoRefreshInterval" @change="handleAutoRefreshChange" class="refresh-select">
-            <option value="0">Off</option>
-            <option value="15">15s</option>
-            <option value="30">30s</option>
-            <option value="60">60s</option>
-          </select>
-        </div>
-
         <TimeRangePicker
           :model-value="selectedWindow"
           :windows="windowOptions"
@@ -93,93 +40,63 @@
       </div>
     </div>
 
-    <!-- Unregistered Exporter Focus Callout -->
-    <div
-      v-if="isUnmatchedScope"
-      class="unmatched-scope-card table-card"
-      role="alert"
-      aria-live="polite"
-    >
-      <div class="unmatched-scope-header">
-        <span class="unmatched-scope-icon">⚠</span>
-        <div class="unmatched-scope-info">
-          <div class="unmatched-scope-badge">DISCOVERED FLOW SOURCE (UNREGISTERED)</div>
-          <h2 class="unmatched-scope-title">
-            Unregistered Device Streaming Flows: <span class="font-mono text-accent">{{ activeUnmatchedIp }}</span>
-          </h2>
-          <p class="unmatched-scope-desc">
-            Ephemres is actively receiving NetFlow/IPFIX UDP packets from <strong>{{ activeUnmatchedIp }}</strong>, but this device is not yet registered in Ephemres' endpoint inventory. Flow packets are currently staged in discovery. To enable per-interface metrics, line-speed utilization, and historical conversation tracking, enroll this source as an endpoint or link it as an alias to an existing router.
-          </p>
-        </div>
-      </div>
-      <div class="unmatched-scope-actions">
+    <!-- Scope (build plan 7.5 step 2): the shared filter picks routers by site, location, tags,
+         type or search, and the device picker narrows to one of them. Every figure below is
+         what the routers in scope saw. Both live in the URL like the other pages' filters. -->
+    <FilterBar :state="filterState" class="traffic-filter-bar">
+      <label class="filter-field">
+        <span>Device</span>
+        <select :value="selectedDeviceId" class="form-select" @change="setDevice($event.target.value)">
+          <option value="">{{ allDevicesLabel }}</option>
+          <optgroup v-for="group in deviceGroups" :key="group.label" :label="group.label">
+            <option v-for="d in group.devices" :key="d.id" :value="d.id">{{ deviceOptionLabel(d) }}</option>
+          </optgroup>
+        </select>
+      </label>
+    </FilterBar>
+
+    <!-- Flow sources not registered yet: one line instead of entries in the picker (review P4).
+         Their flows count under "All devices" only, as they have no site or tags yet. -->
+    <div v-if="unmatchedExporters.length" class="unregistered-notice" role="status">
+      <div class="unregistered-line">
+        <span>{{ unregisteredLabel }}</span>
         <button
-          class="btn-primary"
-          @click="openEnrollModal(activeUnmatchedIp)"
-        >
-          + Enroll {{ activeUnmatchedIp }} as Flow Exporter
-        </button>
-        <button
-          class="btn-secondary"
-          @click="openMappingModal(activeUnmatchedIp)"
-        >
-          Link to Existing Endpoint Alias →
-        </button>
-        <button
+          type="button"
           class="btn-text"
-          @click="selectedExporterId = ''; handleScopeChange()"
-        >
-          Return to All Traffic
-        </button>
+          :aria-expanded="showUnregistered"
+          aria-controls="unregistered-list"
+          @click="showUnregistered = !showUnregistered"
+        >{{ showUnregistered ? 'Hide' : 'Review' }}</button>
       </div>
+      <ul v-if="showUnregistered" id="unregistered-list" class="unregistered-list">
+        <li v-for="u in unmatchedExporters" :key="u.ip_address">
+          <span class="font-mono tnum">{{ u.ip_address }}</span>
+          <span class="text-muted text-xs tnum">{{ unregisteredDetail(u) }}</span>
+          <span v-if="isAdmin" class="unregistered-actions">
+            <button type="button" class="btn-secondary btn-small" @click="openEnrollModal(u.ip_address)">Enroll</button>
+            <button type="button" class="btn-secondary btn-small" @click="openMappingModal(u.ip_address)">Link to an endpoint</button>
+          </span>
+        </li>
+      </ul>
     </div>
 
-    <!-- Unmatched Exporter Discovery Banner (BUG-05 Multi-IP Grid) -->
-    <div
-      v-if="unmatchedExporters.length > 0 && !isUnmatchedScope"
-      class="unmatched-banner"
-      role="alert"
-      aria-live="polite"
+    <!-- Now (build plan 7.5 step 4, review P1/O1/O4): the WAN links against capacity over the
+         last five minutes, then one status line for the flow collection itself. Everything
+         under the "Over the last" heading follows the time window. -->
+    <WanLinksNow
+      :data="wanLinks"
+      :scope-label="scopeLabel"
+      :is-admin="isAdmin"
+      :loading="loading && !wanLinks"
+      @set-speed="openSpeedEditor"
     >
-      <div class="unmatched-header-row">
-        <div class="unmatched-icon">⚠</div>
-        <div class="unmatched-title">
-          Unmatched Flow Exporters: {{ unmatchedExporters.length }} Unknown Router/Switch Stream{{ unmatchedExporters.length > 1 ? 's' : '' }} Detected
-        </div>
-      </div>
-      <div class="unmatched-grid">
-        <div 
-          v-for="u in unmatchedExporters" 
-          :key="u.ip_address"
-          class="unmatched-card"
-        >
-          <div class="unmatched-card-info">
-            <span class="unmatched-ip tnum font-mono">{{ u.ip_address }}</span>
-            <span class="unmatched-sub text-muted" v-if="u.flow_count">
-              {{ formatNumber(u.flow_count) }} flows
-            </span>
-          </div>
-          <div class="unmatched-card-actions">
-            <button
-              class="btn-primary btn-small"
-              @click="openEnrollModal(u.ip_address)"
-              :title="`Enroll ${u.ip_address} as dedicated flow exporter`"
-            >
-              + Enroll Exporter
-            </button>
-            <button
-              class="btn-secondary btn-small"
-              @click="openMappingModal(u.ip_address)"
-              :title="`Link ${u.ip_address} as endpoint alias`"
-            >
-              Link Alias →
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+      <p class="now-status-line text-xs" :class="{ 'is-warn': stoppedRouters.length }" role="status">
+        <span v-for="(part, i) in statusParts" :key="i" :title="part.title || null">{{ part.text }}</span>
+      </p>
+    </WanLinksNow>
 
-    <template v-if="!isUnmatchedScope">
+    <h2 class="window-heading">Over the last {{ windowWords }}</h2>
+
     <SegmentedControl
       class="view-switcher"
       :model-value="activeView"
@@ -190,138 +107,40 @@
 
     <!-- ── Overview ── -->
     <template v-if="activeView === 'overview'">
-    <!-- KPI strip: last five complete minutes for the selected scope -->
-    <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
-    <div class="kpi-grid">
-      <template v-if="hasWan">
-        <KpiTile
-          label="WAN in"
-          :value="formatBps(overview.wan_in_bps)"
-          :marker="theme.series.in"
-          :sub="`${formatPps(overview.wan_in_pps)} · arriving on ${wanLinksLabel}`"
-        />
-        <KpiTile
-          label="WAN out"
-          :value="formatBps(overview.wan_out_bps)"
-          :marker="theme.series.out"
-          :sub="`${formatPps(overview.wan_out_pps)} · leaving on ${wanLinksLabel}`"
-        />
-      </template>
-      <KpiTile
-        label="Ingress"
-        :value="formatBps(overview.total_ingress_bps)"
-        :marker="theme.series.in"
-        :sub="`${formatPps(overview.total_ingress_pps)} · to monitored hosts`"
-      />
-      <KpiTile
-        label="Egress"
-        :value="formatBps(overview.total_egress_bps)"
-        :marker="theme.series.out"
-        :sub="`${formatPps(overview.total_egress_pps)} · from monitored hosts`"
-      />
-      <KpiTile
-        label="Transit"
-        :value="formatBps(overview.total_transit_bps)"
-        :marker="theme.series.transit"
-        :sub="`${formatPps(overview.total_transit_pps)} · no monitored host on either side`"
-      />
-      <KpiTile label="Avg packet size" :value="overview.avg_packet_size || null" unit="B">
-        <template #sub>
-          <span
-            v-if="overview.avg_packet_size"
-            class="badge-packet-profile"
-            :class="getPacketProfileClass(overview.avg_packet_size)"
-          >
-            {{ getPacketProfileLabel(overview.avg_packet_size) }}
-          </span>
-          <span v-else class="text-xs">No packets in this window</span>
-        </template>
-      </KpiTile>
-      <KpiTile
-        label="Flow exporters sending"
-        :value="overview.active_exporters_count"
-        :sub="exporterSummary"
-      />
-      <KpiTile label="Flows" :value="formatNumber(overview.total_flows_count)">
-        <template #sub>
-          <span
-            v-if="overview.anomaly_flows_count"
-            class="badge-anomaly-kpi"
-            title="SYN-only or RST-without-FIN flows in the last 5 minutes"
-          >
-            ⚠ {{ formatNumber(overview.anomaly_flows_count) }} SYN/RST anomalies
-          </span>
-          <span v-else class="text-success text-xs">✓ No SYN/RST anomalies</span>
-        </template>
-      </KpiTile>
-    </div>
-    <p v-if="doubleCountNote" class="kpi-scope-note kpi-footnote">{{ doubleCountNote }}</p>
-
-    <!-- WAN links: traffic at the network edge, one row per WAN-role interface -->
-    <div v-if="hasWan" class="table-card wan-links-card">
-      <div class="section-header">
-        <div>
-          <div class="section-title">WAN links</div>
-          <span class="section-hint">Share of edge traffic per link · last 5 complete minutes</span>
-        </div>
-      </div>
-      <div class="table-responsive">
-        <table class="dense-table" aria-label="WAN links">
-          <thead>
-            <tr>
-              <th>Link</th>
-              <th class="text-right">In</th>
-              <th class="text-right">Out</th>
-              <th style="width: 32%;">Share of WAN traffic</th>
-              <th class="text-right">Utilization</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="link in overview.wan_links" :key="`${link.exporter_id}-${link.interface_idx}`">
-              <td>
-                <span class="font-bold">{{ link.name }}</span>
-                <span class="text-muted text-xs"> · {{ link.exporter_hostname }} #{{ link.interface_idx }}</span>
-              </td>
-              <td class="text-right tnum ingress-text">{{ formatBps(link.in_bps) }}</td>
-              <td class="text-right tnum egress-text">{{ formatBps(link.out_bps) }}</td>
-              <td>
-                <div class="wan-share">
-                  <span class="app-bar-track"><span class="app-bar-fill" :style="{ width: `${Math.min(100, link.share_percentage)}%` }"></span></span>
-                  <span class="app-bar-value tnum">{{ link.share_percentage.toFixed(1) }}%</span>
-                </div>
-              </td>
-              <td class="text-right tnum">
-                <span v-if="link.utilization_percentage == null" class="text-muted text-xs" title="Set the link speed to see utilization">Speed not set</span>
-                <span v-else class="util-text" :class="getUtilClass(link.utilization_percentage)">{{ link.utilization_percentage.toFixed(1) }}%</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Main Section: Stacked Area Traffic Chart -->
+    <!-- Main Section: one chart per WAN link (build plan 7.5 step 5), or every link on one chart -->
     <div class="chart-section table-card">
       <div class="section-header section-header-split">
         <div>
           <div class="section-title">
-            {{ chartTitle }}
+            {{ perLinkCharts ? 'WAN links' : chartTitle }}
           </div>
-          <span class="section-hint">{{ chartHint }}</span>
+          <span class="section-hint">{{ perLinkCharts ? linkChartsHint : chartHint }}</span>
         </div>
         <div class="chart-header-actions">
           <SegmentedControl
-            v-if="showTotalsToggle"
+            v-if="showLayoutToggle"
+            :model-value="chartLayout"
+            :options="layoutOptions"
+            aria-label="Chart layout"
+            size="sm"
+            @update:model-value="setChartLayout"
+          />
+          <SegmentedControl
+            v-if="showTotalsToggle && !perLinkCharts"
             :model-value="chartTotals"
             :options="totalsOptions"
             aria-label="Chart totals"
             size="sm"
             @update:model-value="setChartTotals"
           />
-          <SegmentedControl v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
+          <SegmentedControl v-if="!perLinkCharts" v-model="chartMetricMode" :options="metricOptions" aria-label="Chart metric" size="sm" />
         </div>
       </div>
-      <div class="chart-container">
+      <template v-if="perLinkCharts">
+        <WanLinkCharts v-if="linkSeriesReady" :links="wanLinks.links" :timezone="wanLinks.timezone" />
+        <div v-else class="loading-spinner">Loading link charts...</div>
+      </template>
+      <div v-else class="chart-container">
         <p v-if="seriesPoints.length > 0" class="sr-only">{{ chartSummary }}</p>
         <LineChart
           v-if="seriesPoints.length > 0"
@@ -350,8 +169,9 @@
             <thead>
               <tr>
                 <th>Host</th>
-                <th class="text-right">Ingress</th>
-                <th class="text-right">Egress</th>
+                <th>Site</th>
+                <th class="text-right" title="What the host received">Received</th>
+                <th class="text-right" title="What the host sent">Sent</th>
                 <th class="text-right">Total Bytes</th>
                 <th class="text-right">Flows / Avg packet</th>
               </tr>
@@ -371,6 +191,8 @@
                     <span class="node-ip tnum text-muted" v-if="t.hostname">{{ t.ip_address }}</span>
                   </div>
                 </td>
+                <!-- An endpoint's site, else the sites of the routers that saw the address. -->
+                <td class="text-muted" :title="(t.sites || []).join(', ')">{{ siteLabel(t.sites) }}</td>
                 <td class="text-right tnum ingress-text">{{ formatBytes(t.ingress_bytes) }}</td>
                 <td class="text-right tnum egress-text">{{ formatBytes(t.egress_bytes) }}</td>
                 <td class="text-right tnum font-bold">{{ formatBytes(t.total_bytes) }}</td>
@@ -380,7 +202,7 @@
                 </td>
               </tr>
               <tr v-if="topEndpoints.length === 0">
-                <td colspan="5" class="text-center text-muted">No talker statistics in this window.</td>
+                <td colspan="6" class="text-center text-muted">No talker statistics in this window.</td>
               </tr>
             </tbody>
           </table>
@@ -417,9 +239,9 @@
             <span class="section-hint">{{ zonesHint }}</span>
           </div>
         </div>
-        <div v-if="trafficZones.length > 0" class="breakdown-list">
+        <div v-if="visibleZones.length > 0" class="breakdown-list">
           <div
-            v-for="zone in trafficZones"
+            v-for="zone in visibleZones"
             :key="zone.zone"
             class="breakdown-item"
           >
@@ -444,7 +266,7 @@
 
     <!-- ── Interfaces ── -->
     <template v-else-if="activeView === 'interfaces'">
-      <template v-if="selectedExporterId">
+      <template v-if="selectedDeviceId">
     <!-- Main Section: Stacked Area Traffic Chart -->
     <div class="chart-section table-card">
       <div class="section-header section-header-split">
@@ -481,12 +303,13 @@
       </div>
     </div>
 
-    <!-- Interface Telemetry Grid (ManageEngine NetFlow Analyzer Snapshot Benchmark) -->
-    <div v-if="selectedExporterId && interfaceList.length > 0" class="table-card interfaces-panel">
+    <!-- One device's interfaces (build plan 7.5 step 6: the same table and columns as across
+         devices). Click a row to isolate its traffic in the chart above. -->
+    <div v-if="selectedDeviceId && interfaceList.length > 0" class="table-card interfaces-panel">
       <div class="section-header section-header-split">
         <div>
-          <div class="section-title">Active Router Interfaces & Telemetry</div>
-          <span class="section-hint">{{ interfaceList.length }} Interfaces Detected · Click row to isolate throughput</span>
+          <div class="section-title">Interfaces</div>
+          <span class="section-hint">{{ interfaceList.length }} interfaces · Now: last 5 complete minutes · Click a row to isolate its traffic</span>
         </div>
         <div class="header-actions-row">
           <button
@@ -506,107 +329,40 @@
           </div>
         </div>
       </div>
-      <div class="table-responsive">
-        <table class="dense-table interactive-table" aria-label="Interface Telemetry Table">
-          <thead>
-            <tr>
-              <th style="width: 80px;">Index</th>
-              <th>Interface Name / Alias</th>
-              <th class="text-right">Link Speed</th>
-              <th class="text-right">Ingress Rate</th>
-              <th class="text-right">Egress Rate</th>
-              <th style="width: 300px;" title="Bar: average. Ticks: 95th percentile (|) and busiest minute (▲).">Utilization · avg / p95 / peak</th>
-              <th class="text-center" style="width: 90px;">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in interfaceList"
-              :key="item.interface_idx"
-              :class="{ 'row-selected': selectedInterfaceIdx === item.interface_idx }"
-              @click="toggleInterfaceIsolation(item.interface_idx)"
-              class="cursor-pointer"
-            >
-              <td class="font-mono tnum">#{{ item.interface_idx }}</td>
-              <td class="name-cell">
-                <div class="name-cell-inner">
-                  <span class="font-bold">{{ item.name }}</span>
-                  <span v-if="item.role === 'wan'" class="badge-wan" title="WAN link: counted in edge totals">WAN</span>
-                  <button
-                    v-if="isAdmin"
-                    type="button"
-                    class="btn-row-edit"
-                    @click.stop="openInterfaceModal(item.interface_idx)"
-                    title="Configure this interface"
-                  >
-                    ✎
-                  </button>
-                </div>
-              </td>
-              <td class="text-right tnum text-muted">
-                <span v-if="item.speed_configured !== false">{{ formatSpeed(item.speed_mbps) }}</span>
-                <span v-else class="speed-unset" title="Set the link speed to see utilization">Not set</span>
-              </td>
-              <td class="text-right tnum ingress-text">{{ formatBps(item.in_bps) }}</td>
-              <td class="text-right tnum egress-text">{{ formatBps(item.out_bps) }}</td>
-              <td>
-                <span v-if="item.utilization_percentage == null" class="text-muted text-xs">— set link speed</span>
-                <div v-else class="util-cell">
-                  <div class="util-bar-bg">
-                    <div
-                      class="util-bar-fill"
-                      :class="getUtilClass(item.utilization_percentage)"
-                      :style="{ width: `${Math.min(100, item.utilization_percentage)}%` }"
-                    ></div>
-                    <span
-                      v-if="item.p95_utilization_percentage != null"
-                      class="util-marker util-marker-p95"
-                      :style="{ left: `${Math.min(100, item.p95_utilization_percentage)}%` }"
-                      :title="`95th percentile: ${item.p95_utilization_percentage.toFixed(1)}%`"
-                    ></span>
-                    <span
-                      v-if="item.peak_utilization_percentage != null"
-                      class="util-marker util-marker-peak"
-                      :style="{ left: `${Math.min(100, item.peak_utilization_percentage)}%` }"
-                      :title="`Busiest minute: ${item.peak_utilization_percentage.toFixed(1)}%`"
-                    ></span>
-                  </div>
-                  <span class="util-text tnum" :class="getUtilClass(item.p95_utilization_percentage ?? item.utilization_percentage)">
-                    {{ item.utilization_percentage.toFixed(1) }}<span class="util-sub">
-                      / {{ (item.p95_utilization_percentage ?? 0).toFixed(1) }} / {{ (item.peak_utilization_percentage ?? 0).toFixed(1) }}%</span>
-                  </span>
-                </div>
-              </td>
-              <td class="text-center">
-                <span :class="item.is_active ? 'badge-active' : 'badge-idle'">
-                  {{ item.is_active ? 'Active' : 'Idle' }}
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <InterfacesTable
+        :rows="interfaceList"
+        :is-admin="isAdmin"
+        :selected-idx="selectedInterfaceIdx"
+        :window-label="selectedWindow"
+        :timezone="wanLinks?.timezone || ''"
+        @select="(item) => toggleInterfaceIsolation(item.interface_idx)"
+        @edit="(item) => openInterfaceModal(item.interface_idx)"
+      />
     </div>
 
         <div v-if="interfaceList.length === 0 && !loading" class="table-card empty-view">
-          No interface data for this exporter in the last {{ selectedWindow }}.
+          No interface data for this device in the last {{ selectedWindow }}.
         </div>
       </template>
-      <div v-else class="table-card empty-view">
-        <p class="empty-title">Interfaces belong to one exporter</p>
-        <p class="text-muted">Pick an exporter to see per-interface rates, utilization and peaks.</p>
-        <div class="exporter-picks">
-          <button
-            v-for="exp in flowExporters"
-            :key="exp.id"
-            type="button"
-            class="btn-secondary btn-small"
-            @click="selectedExporterId = exp.id; handleScopeChange()"
-          >
-            {{ exp.hostname }} <span class="text-muted font-mono">{{ exp.primary_ip }}</span>
-          </button>
-          <span v-if="flowExporters.length === 0" class="text-muted">No exporters are configured yet.</span>
+      <!-- Every router in scope (review I1): WAN links first, then the busiest interfaces.
+           A row opens its device with that interface isolated. -->
+      <div v-else class="table-card interfaces-panel">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Interfaces across devices</div>
+            <span class="section-hint">{{ crossDeviceHint }}</span>
+          </div>
         </div>
+        <InterfacesTable
+          :rows="interfaceList"
+          multi-device
+          :is-admin="isAdmin"
+          :window-label="selectedWindow"
+          :timezone="wanLinks?.timezone || ''"
+          :empty-text="filterState.isActive.value ? 'No interfaces on the devices that match the filter.' : 'No interface data yet: routers send it with their flows or over SNMP.'"
+          @select="openDeviceInterface"
+          @edit="(item) => openSpeedEditor(item)"
+        />
       </div>
     </template>
 
@@ -614,7 +370,7 @@
     <ConversationsPanel
       v-else-if="activeView === 'conversations'"
       :window="selectedWindow"
-      :exporter-id="selectedExporterId || null"
+      :scope="scope"
       v-model:ip="selectedIpFilter"
       v-model:port="selectedPortFilter"
       v-model:dscp="selectedDscpFilter"
@@ -624,14 +380,19 @@
 
     <!-- ── QoS ── -->
     <template v-else-if="activeView === 'qos'">
-      <div class="table-card breakdown-panel qos-panel">
-        <div class="section-header">
-          <div>
-            <div class="section-title">DiffServ classes</div>
-            <span class="section-hint">Share of traffic by DSCP marking · Click a class to list its conversations</span>
+      <!-- Nothing marked: one line instead of "Best Effort 100%" and an empty table (Q1). -->
+      <div v-if="!markedQosClasses.length" class="table-card no-chart-data qos-unmarked">
+        Nothing is DSCP-marked on these links in the last {{ selectedWindow }}: all traffic is best effort.
+      </div>
+      <template v-else>
+        <div class="table-card breakdown-panel qos-panel">
+          <div class="section-header">
+            <div>
+              <div class="section-title">DiffServ classes</div>
+              <span class="section-hint">Share of traffic by DSCP marking · Click a class to list its conversations</span>
+            </div>
           </div>
-        </div>
-          <div v-if="qosClasses.length > 0" class="breakdown-list">
+          <div class="breakdown-list">
             <div
               v-for="qos in qosClasses"
               :key="qos.dscp"
@@ -660,43 +421,47 @@
               </div>
             </div>
           </div>
-        <div v-if="!qosClasses.length" class="no-chart-data">No QoS markings recorded in this window.</div>
-      </div>
-      <ConversationsPanel
-        :window="selectedWindow"
-        :exporter-id="selectedExporterId || null"
-        initial-quick="qos"
-        title="QoS-marked conversations"
-        v-model:ip="selectedIpFilter"
-        v-model:port="selectedPortFilter"
-        v-model:dscp="selectedDscpFilter"
-        v-model:dscp-label="selectedDscpLabel"
-        :refresh-key="refreshKey"
-      />
+        </div>
+        <ConversationsPanel
+          :window="selectedWindow"
+          :scope="scope"
+          initial-quick="qos"
+          title="QoS-marked conversations"
+          v-model:ip="selectedIpFilter"
+          v-model:port="selectedPortFilter"
+          v-model:dscp="selectedDscpFilter"
+          v-model:dscp-label="selectedDscpLabel"
+          :refresh-key="refreshKey"
+        />
+      </template>
     </template>
 
     <!-- ── Security ── -->
     <template v-else-if="activeView === 'security'">
-      <p class="kpi-scope-note">Last 5 complete minutes · {{ scopeLabel }}</p>
+      <!-- Same window and scope as the table under them (review P1): until v3.3.6 the tiles
+           counted the last five minutes above a table covering the picked window. -->
+      <p class="kpi-scope-note">Last {{ windowWords }} · {{ scopeLabel }}</p>
       <div class="kpi-grid security-kpis">
         <KpiTile
           label="Suspicious conversations"
-          :value="formatNumber(overview.anomaly_conversations_count)"
-          :tone="overview.anomaly_conversations_count ? 'down' : 'neutral'"
+          :value="anomalies ? formatNumber(anomalies.conversations) : null"
+          :tone="anomalies?.conversations ? 'down' : 'neutral'"
           sub="SYN without ACK, or RST without FIN, over the conversation"
         />
         <KpiTile
           label="Flows in them"
-          :value="formatNumber(overview.anomaly_flows_count)"
-          :tone="overview.anomaly_flows_count ? 'down' : 'neutral'"
-          :sub="`of ${formatNumber(overview.total_flows_count)} flows`"
+          :value="anomalies ? formatNumber(anomalies.flows) : null"
+          :tone="anomalies?.flows ? 'down' : 'neutral'"
+          :sub="anomalies ? `of ${formatNumber(anomalies.all_flows)} flows` : ''"
         />
       </div>
       <ConversationsPanel
         :window="selectedWindow"
-        :exporter-id="selectedExporterId || null"
+        :scope="scope"
         initial-quick="anomalies"
         initial-sort="flows"
+        show-seen
+        :timezone="wanLinks?.timezone || ''"
         title="Suspicious conversations"
         :hint="`Last ${selectedWindow} · SYN-only conversations suggest scans; RST-only ones refused connections. Sorted by flow count.`"
         v-model:ip="selectedIpFilter"
@@ -705,8 +470,6 @@
         v-model:dscp-label="selectedDscpLabel"
         :refresh-key="refreshKey"
       />
-    </template>
-
     </template>
 
     <!-- Mapping Modal for Unmatched Exporter -->
@@ -813,7 +576,7 @@
     <div v-if="showInterfaceModal" class="modal-overlay" @click.self="showInterfaceModal = false">
       <div class="modal-card wide">
         <div class="modal-header">
-          <h3>⚙️ Configure Router Interface Aliases & Speeds</h3>
+          <h3>⚙️ Configure Router Interface Aliases & Speeds<span v-if="editingDeviceName" class="modal-device"> · {{ editingDeviceName }}</span></h3>
           <button class="btn-close" @click="showInterfaceModal = false">✕</button>
         </div>
 
@@ -824,11 +587,9 @@
           </p>
 
           <div class="interface-config-list">
-            <div
-              v-for="(iface, i) in editingInterfaces"
-              :key="i"
-              class="interface-config-row"
-            >
+            <!-- Each row, and under a WAN row its traffic alert rule (v3.3.6). -->
+            <div v-for="(iface, i) in editingInterfaces" :key="i" class="iface-row-wrap">
+            <div class="interface-config-row">
               <div class="form-group idx-col">
                 <label v-if="i === 0">ifIndex *</label>
                 <input
@@ -843,12 +604,12 @@
               </div>
 
               <div class="form-group name-col">
-                <label v-if="i === 0">Interface Name / Alias *</label>
+                <label v-if="i === 0">Interface Name / Alias</label>
                 <input
                   type="text"
                   v-model="iface.name"
-                  required
-                  placeholder="e.g. GigabitEthernet0/1 or WAN-Uplink"
+                  :placeholder="iface.snmpName || 'e.g. GigabitEthernet0/1 or WAN-Uplink'"
+                  :title="iface.snmpName ? `Empty: the device's own name (${iface.snmpName}) is shown` : null"
                   class="form-input"
                 />
               </div>
@@ -863,8 +624,8 @@
 
               <div class="form-group preset-col">
                 <label v-if="i === 0">Speed Preset</label>
-                <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
-                  <option value="unset">Not set</option>
+                <select :id="`iface-preset-${i}`" v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                  <option value="unset">{{ iface.snmpSpeed ? `From SNMP: ${formatMbps(iface.snmpSpeed)}` : 'Not set' }}</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
                   <option :value="1000">1 Gbps (GigEth)</option>
@@ -898,6 +659,13 @@
                 </button>
               </div>
             </div>
+            <InterfaceAlertControl
+              v-if="iface.role === 'wan'"
+              v-model="iface.alert"
+              :has-speed="(iface.preset !== 'unset' && Number(iface.speed_mbps) > 0) || !!iface.snmpSpeed"
+              class="iface-alert-line"
+            />
+            </div>
           </div>
 
           <div class="add-row-action">
@@ -919,7 +687,7 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Line as LineChart } from 'vue-chartjs'
 import {
@@ -935,7 +703,9 @@ import {
   Filler,
 } from 'chart.js'
 import {
+  getAnomalySummary,
   getBandwidthOverview,
+  getWanLinks,
   getTrafficSeries,
   getTopTalkers,
   getApplicationDistribution,
@@ -943,19 +713,25 @@ import {
   enrollFlowExporter,
   mapFlowExporter,
   getInterfaceTelemetry,
+  getInterfaces,
   updateEndpointInterfaces,
   getEndpoints,
 } from '../services/api.js'
 import { isAdmin } from '../services/auth.js'
-import { formatBps, formatBytes, formatNumber, formatPortLabel, formatPps } from '../utils/format.js'
+import { formatBps, formatBytes, formatNumber, formatPps } from '../utils/format.js'
 import { useChartTheme } from '../composables/useChartTheme.js'
 import { summarizeSeries } from '../utils/chartSummary.js'
-import { aliasesPayload, applyPreset, editRow } from '../utils/interfaceConfig.js'
+import { aliasesPayload, applyPreset, editRow, rowFromTelemetry, formatMbps } from '../utils/interfaceConfig.js'
+import InterfaceAlertControl from '../components/ui/InterfaceAlertControl.vue'
 import KpiTile from '../components/ui/KpiTile.vue'
 import SegmentedControl from '../components/ui/SegmentedControl.vue'
 import TimeRangePicker from '../components/ui/TimeRangePicker.vue'
 import ConversationsPanel from '../components/traffic/ConversationsPanel.vue'
-
+import WanLinksNow from '../components/traffic/WanLinksNow.vue'
+import WanLinkCharts from '../components/traffic/WanLinkCharts.vue'
+import InterfacesTable from '../components/traffic/InterfacesTable.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import { useEndpointFilter, filterParams } from '../composables/useEndpointFilter.js'
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -969,72 +745,124 @@ ChartJS.register(
 )
 
 const windowOptions = ['1h', '6h', '24h', '7d', '30d']
-const selectedWindow = ref('1h')
+const route = useRoute()
+const router = useRouter()
+// The time window lives in the URL like the other filters, so it can be bookmarked and survives
+// Back (build plan 7.1). The header's Traffic link carries no query, so the last window is also
+// kept for this browser tab and put back in the URL on return. 1h, the default, stays out.
+const WINDOW_STORAGE_KEY = 'trafficWindow'
+function rememberedWindow() {
+  try {
+    const w = sessionStorage.getItem(WINDOW_STORAGE_KEY)
+    return windowOptions.includes(w) ? w : null
+  } catch {
+    return null
+  }
+}
+const selectedWindow = ref(
+  windowOptions.includes(route.query.window) ? route.query.window : (rememberedWindow() || '1h')
+)
 const loading = ref(false)
 
-// Auto-refresh: reloads every view every N seconds (0 = off), skipping a tick while a load is
-// still running.
-const autoRefreshInterval = ref('0')
-let refreshTimer = null
+// --- Automatic update (build plan 7.1) ------------------------------------------------------
+// The figures are one-minute totals, so refreshing faster than once a minute only redraws the
+// same numbers. ephemres-flowd writes its minute buckets every 10 s, so a minute is complete
+// about 10 s after it ends: update at UPDATE_SECOND past each minute. Nothing runs while the
+// tab is hidden; on return the page updates at once if the data is over a minute old.
+const UPDATE_SECOND = 15
+const paused = ref(false)
+const pageHidden = ref(typeof document !== 'undefined' && document.visibilityState === 'hidden')
+const lastUpdated = ref(null)
+const nowTick = ref(Date.now())
+let updateTimer = null
+let clockTimer = null
 
-function handleAutoRefreshChange() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
-  const secs = parseInt(autoRefreshInterval.value, 10)
-  if (secs > 0) {
-    refreshTimer = setInterval(() => {
-      if (!loading.value) {
-        refreshAll()
-      }
-    }, secs * 1000)
+const updatedLabel = computed(() => {
+  if (!lastUpdated.value) return 'Updating…'
+  const secs = Math.max(0, Math.round((nowTick.value - lastUpdated.value) / 1000))
+  if (secs < 5) return 'Updated just now'
+  if (secs < 60) return `Updated ${secs} s ago`
+  const mins = Math.round(secs / 60)
+  return `Updated ${mins} min ago`
+})
+
+function scheduleNextUpdate() {
+  clearTimeout(updateTimer)
+  const now = new Date()
+  const next = new Date(now)
+  next.setSeconds(UPDATE_SECOND, 0)
+  if (next <= now) next.setMinutes(next.getMinutes() + 1)
+  updateTimer = setTimeout(async () => {
+    if (!paused.value && !pageHidden.value && !loading.value) {
+      await refreshAll()
+    }
+    scheduleNextUpdate()
+  }, next - now)
+}
+
+function togglePause() {
+  paused.value = !paused.value
+  // Resuming after a while: show current figures now rather than at the next tick.
+  if (!paused.value && lastUpdated.value && Date.now() - lastUpdated.value > 60000 && !loading.value) {
+    refreshAll()
   }
 }
 
-const route = useRoute()
-const router = useRouter()
-const selectedExporterId = ref(route.query.exporter_id || '')
+function onVisibilityChange() {
+  pageHidden.value = document.visibilityState === 'hidden'
+  if (!pageHidden.value && !paused.value && !loading.value && (!lastUpdated.value || Date.now() - lastUpdated.value > 60000)) {
+    refreshAll()
+  }
+}
+
+// Scope (build plan 7.5 step 2): the shared filter and one optional device, both in the URL.
+// `exporter_id` was the device's key before v3.3.6; old links still open on that device.
+const filterState = useEndpointFilter()
+const selectedDeviceId = ref(route.query.device_id || route.query.exporter_id || '')
+// The devices the picker offers: routers sending flows or polled over SNMP, in the filter.
 const flowExporters = shallowRef([])
+const scope = computed(() => ({
+  ...filterParams(filterState.filter.value),
+  device_id: selectedDeviceId.value || undefined,
+}))
 const interfaceList = shallowRef([])
 const selectedInterfaceIdx = ref(null)
 
-// Exporter Scope Filtering & Unmatched Detection State
-const exporterSearchText = ref('')
-
-const isUnmatchedScope = computed(() => {
-  return typeof selectedExporterId.value === 'string' && selectedExporterId.value.startsWith('unmatched:')
-})
-
-const activeUnmatchedIp = computed(() => {
-  if (isUnmatchedScope.value) {
-    return selectedExporterId.value.replace('unmatched:', '')
+// Picker groups, one per site in the order the server sorts them (sites A-Z, no site last).
+const deviceGroups = computed(() => {
+  const groups = []
+  for (const d of flowExporters.value) {
+    const label = d.site || 'No site'
+    let group = groups.find((g) => g.label === label)
+    if (!group) groups.push((group = { label, devices: [] }))
+    group.devices.push(d)
   }
-  return ''
+  return groups
 })
 
-const filteredFlowExporters = computed(() => {
-  const all = flowExporters.value
-  if (!exporterSearchText.value.trim()) return all
-  const q = exporterSearchText.value.toLowerCase().trim()
-  return all.filter((exp) => {
-    if (exp.id === selectedExporterId.value) return true
-    return (
-      (exp.hostname && exp.hostname.toLowerCase().includes(q)) ||
-      (exp.primary_ip && exp.primary_ip.toLowerCase().includes(q))
-    )
-  })
+// A router polled over SNMP that sends no flows still has WAN traffic, from its counters.
+function deviceOptionLabel(d) {
+  return d.snmp_polled && !d.sends_flows ? `${d.hostname} (SNMP)` : d.hostname
+}
+
+const allDevicesLabel = computed(() => {
+  if (!filterState.isActive.value) return 'All devices'
+  const n = flowExporters.value.length
+  return n === 1 ? 'The 1 device in the filter' : `All ${n} devices in the filter`
 })
 
-const filteredUnmatchedExporters = computed(() => {
-  const all = unmatchedExporters.value
-  if (!exporterSearchText.value.trim()) return all
-  const q = exporterSearchText.value.toLowerCase().trim()
-  return all.filter((u) => {
-    if (`unmatched:${u.ip_address}` === selectedExporterId.value) return true
-    return u.ip_address && u.ip_address.toLowerCase().includes(q)
-  })
+const showUnregistered = ref(false)
+const unregisteredLabel = computed(() => {
+  const n = unmatchedExporters.value.length
+  return `${n} unregistered source${n === 1 ? '' : 's'} sending flows`
 })
+
+function unregisteredDetail(u) {
+  const parts = []
+  if (u.flows_per_sec !== null && u.flows_per_sec !== undefined) parts.push(`${formatNumber(u.flows_per_sec)} flows/s`)
+  if (u.last_seen) parts.push(`last seen ${new Date(u.last_seen).toLocaleString()}`)
+  return parts.join(' · ')
+}
 
 // Enrollment modal state
 const showEnrollModal = ref(false)
@@ -1088,6 +916,16 @@ const topEndpoints = shallowRef([])
 const applicationStats = shallowRef([])
 const qosClasses = shallowRef([])
 const trafficZones = shallowRef([])
+// Zones with no traffic are hidden: "External / Transit" read 0% on every branch router (O6).
+const visibleZones = computed(() => trafficZones.value.filter((z) => z.total_bytes > 0))
+// DSCP 0 is unmarked (best effort). The tab counts marked classes only, so a network that marks
+// nothing no longer shows "QoS (1)" with nothing to look at (Q1).
+const markedQosClasses = computed(() => qosClasses.value.filter((q) => q.dscp > 0))
+
+function siteLabel(sites) {
+  if (!sites || !sites.length) return '—'
+  return sites.length <= 2 ? sites.join(', ') : `${sites[0]} +${sites.length - 1}`
+}
 
 // Cross-filters shared by the Conversations, QoS and Security views. A talker, application or
 // QoS class sets one; ConversationsPanel shows and clears them. They live in the URL so a
@@ -1105,12 +943,12 @@ const activeView = computed(() => (VIEWS.includes(route.query.view) ? route.quer
 
 const viewOptions = computed(() => [
   { value: 'overview', label: 'Overview' },
-  { value: 'interfaces', label: 'Interfaces', title: selectedExporterId.value ? 'Per-interface rates' : 'Pick an exporter first' },
+  { value: 'interfaces', label: 'Interfaces' },
   { value: 'conversations', label: 'Conversations' },
-  { value: 'qos', label: qosClasses.value.length ? `QoS (${qosClasses.value.length})` : 'QoS' },
+  { value: 'qos', label: markedQosClasses.value.length ? `QoS (${markedQosClasses.value.length})` : 'QoS' },
   {
     value: 'security',
-    label: overview.value.anomaly_conversations_count ? `Security (${overview.value.anomaly_conversations_count})` : 'Security',
+    label: anomalies.value?.conversations ? `Security (${anomalies.value.conversations})` : 'Security',
   },
 ])
 
@@ -1148,49 +986,116 @@ watch([selectedIpFilter, selectedPortFilter, selectedDscpFilter], ([ip, port, ds
 const zonesHint = 'Monitored endpoints and private (RFC 1918) addresses count as internal'
 
 const scopeLabel = computed(() => {
-  if (!selectedExporterId.value) return 'all exporters'
-  const exp = flowExporters.value.find((e) => e.id === selectedExporterId.value)
-  return exp ? exp.hostname : 'selected exporter'
+  if (selectedDeviceId.value) {
+    const exp = flowExporters.value.find((e) => e.id === selectedDeviceId.value)
+    return exp ? exp.hostname : 'selected device'
+  }
+  if (!filterState.isActive.value) return 'all devices'
+  const n = flowExporters.value.length
+  return `${n} device${n === 1 ? '' : 's'} in the filter`
 })
 
-// WAN edge: interfaces an admin marked as WAN. Their totals count each packet once; the
-// ingress/egress/transit totals add up what every exporter saw.
+// WAN edge: interfaces marked as WAN (by an admin or SNMP), which count each packet once.
+// The ingress/egress/transit tiles were removed (review P3): "transit" there meant "no monitored
+// host", so users' PCs made it the biggest number on the page. The four directions of the
+// Traffic zones rule are in the chart's "All flows" mode.
 const hasWan = computed(() => (overview.value.wan_interfaces_count || 0) > 0)
 
-const wanLinksLabel = computed(() => {
-  const n = overview.value.wan_interfaces_count || 0
-  return n === 1 ? '1 WAN link' : `${n} WAN links`
+// The "Now" area's data (GET /bandwidth/wan-links) and the Security tiles' (the picked window).
+const wanLinks = ref(null)
+const anomalies = ref(null)
+
+const WINDOW_WORDS = { '1h': 'hour', '6h': '6 hours', '24h': '24 hours', '7d': '7 days', '30d': '30 days' }
+const windowWords = computed(() => WINDOW_WORDS[selectedWindow.value] || selectedWindow.value)
+
+// Routers that export flows but sent none in the last five minutes (review O4: the status line
+// turns amber). Picker devices that only answer SNMP are not expected to send any.
+const stoppedRouters = computed(() => flowExporters.value.filter((d) => d.sends_flows && !(d.flows_per_sec > 0)))
+
+function shortTime(iso) {
+  return iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : ''
+}
+
+// One quiet line under the links (review O4) for what used to be three tiles: packet size,
+// routers sending, flows. Same five minutes as the links.
+const statusParts = computed(() => {
+  const o = overview.value
+  const parts = []
+  const exporting = flowExporters.value.filter((d) => d.sends_flows).length
+  const sending = Math.max(0, exporting - stoppedRouters.value.length)
+  const routers = { text: `${sending} of ${exporting} router${exporting === 1 ? '' : 's'} sending flows` }
+  if (stoppedRouters.value.length) {
+    routers.text += ` · stopped: ${stoppedRouters.value.map((d) => d.hostname).join(', ')}`
+    routers.title = stoppedRouters.value
+      .map((d) => (d.last_flow_time ? `${d.hostname}: last flows ${shortTime(d.last_flow_time)}` : `${d.hostname}: none in 24 hours`))
+      .join('\n')
+  }
+  parts.push(routers)
+  parts.push({ text: `${formatNumber(o.total_flows_count || 0)} flows` })
+  if (o.avg_packet_size) {
+    parts.push({ text: `avg packet ${o.avg_packet_size} B (${getPacketProfileLabel(o.avg_packet_size).toLowerCase()})` })
+  }
+  const unregistered = unmatchedExporters.value.length
+  if (unregistered && !filterState.isActive.value && !selectedDeviceId.value) parts.push({ text: `${unregistered} unregistered` })
+  return parts
 })
 
-const doubleCountNote = computed(() => {
-  if (selectedExporterId.value || (overview.value.active_exporters_count || 0) < 2) return ''
-  const base = 'Ingress, egress and transit add up every exporter, so traffic that crosses two routers counts twice.'
-  if (hasWan.value) return `${base} WAN in and out count it once.`
-  return isAdmin.value ? `${base} Mark your WAN interfaces (Interfaces view, ✎) to see edge totals counted once.` : base
-})
-
-// Chart totals: WAN edge by default once WAN interfaces exist; "all" keeps the per-exporter sum.
+// Chart totals: WAN edge by default once WAN interfaces exist; "all" is every conversation the
+// routers saw, counted once, split by the Traffic zones rule.
 const chartTotals = ref(route.query.totals === 'all' ? 'all' : 'wan')
 const totalsOptions = [
   { value: 'wan', label: 'WAN edge', title: 'Traffic on WAN-role interfaces, counted once' },
-  { value: 'all', label: 'All flows', title: 'Everything every exporter saw' },
+  { value: 'all', label: 'All flows', title: 'Every conversation the routers saw, counted once: inbound, outbound, internal and transit' },
 ]
 const wantWanSeries = computed(() => chartTotals.value === 'wan' && selectedInterfaceIdx.value === null)
 const showTotalsToggle = computed(() => selectedInterfaceIdx.value === null && (hasWan.value || seriesMeta.value.wanOnly))
+
+// Chart layout (step 5, review O2): one small chart per WAN link by default; "All links
+// together" is the single combined chart with its WAN edge / All flows switch. Kept in the URL.
+const chartLayout = ref(route.query.chart === 'together' ? 'together' : 'links')
+// No titles: SegmentedControl gives a title as the button's name, and the visible label is clearer.
+const layoutOptions = [
+  { value: 'links', label: 'Per link' },
+  { value: 'together', label: 'All links together' },
+]
+const hasLinkRows = computed(() => (wanLinks.value?.links || []).length > 0)
+const showLayoutToggle = computed(() => selectedInterfaceIdx.value === null && hasLinkRows.value)
+const perLinkCharts = computed(() => showLayoutToggle.value && chartLayout.value === 'links')
+// The Now request carries the charts only while they are on screen.
+const wantLinkSeries = computed(() => activeView.value === 'overview' && chartLayout.value === 'links')
+const linkSeriesReady = computed(() => wanLinks.value?.window === selectedWindow.value)
+
+const linkChartsHint = computed(() => {
+  const res = ['1h', '6h'].includes(selectedWindow.value) ? '1-minute' : '1-hour'
+  const peak = res === '1-hour' ? ' · dashed: each hour\'s busiest minute' : ''
+  return `Last ${selectedWindow.value} · ${res} averages${peak} · shaded: usual for that hour · red: link down (SNMP)`
+})
+
+async function fetchWanLinks() {
+  try {
+    const res = await getWanLinks(scope.value, wantLinkSeries.value ? selectedWindow.value : null)
+    wanLinks.value = res.data?.data || null
+  } catch (err) {
+    console.error('Failed to load WAN links:', err)
+  }
+}
+
+function setChartLayout(value) {
+  chartLayout.value = value === 'together' ? 'together' : 'links'
+  replaceQuery({ chart: chartLayout.value === 'together' ? 'together' : undefined })
+  if (wantLinkSeries.value && !linkSeriesReady.value) fetchWanLinks()
+}
+
+// Back on the Overview from another tab: the charts' series weren't fetched there.
+watch(activeView, () => {
+  if (wantLinkSeries.value && !linkSeriesReady.value) fetchWanLinks()
+})
 
 function setChartTotals(value) {
   chartTotals.value = value === 'all' ? 'all' : 'wan'
   replaceQuery({ totals: chartTotals.value === 'all' ? 'all' : undefined })
   fetchTrafficSeriesData()
 }
-
-const exporterSummary = computed(() => {
-  const configured = flowExporters.value.length
-  const unregistered = unmatchedExporters.value.length
-  const parts = [`of ${configured} configured`]
-  if (unregistered) parts.push(`${unregistered} unregistered`)
-  return parts.join(' · ')
-})
 
 function formatSpeed(speedMbps) {
   if (!speedMbps) return 'Not set'
@@ -1205,25 +1110,32 @@ function getUtilClass(util) {
   return 'util-healthy'
 }
 
-function handleScopeChange() {
-  selectedInterfaceIdx.value = null
-  router.push({
-    query: {
-      ...route.query,
-      exporter_id: selectedExporterId.value || undefined,
-    },
-  })
-  refreshData()
+// Picks one device ('' for all in scope). The URL change reloads the page data (watch below).
+function setDevice(id) {
+  replaceQuery({ device_id: id || undefined, exporter_id: undefined })
 }
 
 async function fetchTrafficSeriesData() {
   try {
-    const expId = (!isUnmatchedScope.value && selectedExporterId.value) ? selectedExporterId.value : null
-    const seriesRes = await getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value)
+    const seriesRes = await getTrafficSeries(selectedWindow.value, scope.value, null, selectedInterfaceIdx.value, wantWanSeries.value)
     applySeries(seriesRes.data?.data)
   } catch (err) {
     console.error('Failed to load traffic series for interface isolation:', err)
   }
+}
+
+const crossDeviceHint = computed(() => {
+  const devices = new Set(interfaceList.value.map((i) => i.exporter_id)).size
+  return `${interfaceList.value.length} interfaces on ${devices} device${devices === 1 ? '' : 's'} · Now: last 5 complete minutes · Status from SNMP where a router is polled · Click a row to open its device`
+})
+
+// A row across devices: open its device on the Interfaces tab with that interface isolated in the
+// chart. The device change reloads the page (watch below), which clears any isolation, so the
+// interface is isolated once that reload is done.
+let pendingIsolation = null
+function openDeviceInterface(item) {
+  pendingIsolation = item.interface_idx
+  setDevice(String(item.exporter_id))
 }
 
 async function toggleInterfaceIsolation(ifIdx) {
@@ -1258,16 +1170,13 @@ async function submitExporterEnrollment() {
   try {
     const res = await enrollFlowExporter(enrollForm.value)
     showEnrollModal.value = false
+    // The new device has no site or tags yet: show it on its own.
     if (res.data?.data?.id) {
-      selectedExporterId.value = res.data.data.id
-      router.push({
-        query: {
-          ...route.query,
-          exporter_id: res.data.data.id,
-        },
-      })
+      filterState.clearFilter()
+      setDevice(res.data.data.id)
+    } else {
+      await refreshData()
     }
-    await refreshData()
   } catch (err) {
     enrollError.value = err.response?.data?.detail || 'Failed to enroll flow exporter.'
   } finally {
@@ -1287,21 +1196,41 @@ const showInterfaceModal = ref(false)
 const editingInterfaces = ref([])
 const savingInterfaces = ref(false)
 
-function openInterfaceModal(focusIdx = null) {
-  const current = interfaceList.value || []
-  let rows = current.map((item) => editRow(
-    Number(item.interface_idx) || 1,
-    item.name || `GigabitEthernet0/${item.interface_idx}`,
-    item.speed_configured === false ? null : item.speed_mbps,
-    item.role,
-  ))
+// The router being edited: the picked device from the Interfaces tab, or any router in scope
+// from a "Set speed" in the Now area, without changing the page's scope.
+const editingDeviceId = ref(null)
+const editingDeviceName = ref('')
+
+function openInterfaceModal(focusIdx = null, interfaces = null, deviceId = null, deviceName = '') {
+  const current = interfaces || interfaceList.value || []
+  let rows = current.map((item) => rowFromTelemetry(item))
 
   if (rows.length === 0) {
     rows = [editRow(1, 'GigabitEthernet0/1', null, 'lan')]
   }
 
+  editingDeviceId.value = deviceId || selectedDeviceId.value || null
+  editingDeviceName.value = deviceName
   editingInterfaces.value = rows
   showInterfaceModal.value = true
+  // Put the cursor on the link's speed (a "Set speed" or a row's edit button).
+  if (focusIdx !== null && typeof focusIdx === 'number') {
+    const at = rows.findIndex((r) => Number(r.index) === focusIdx)
+    if (at >= 0) nextTick(() => document.getElementById(`iface-preset-${at}`)?.focus())
+  }
+}
+
+// "Set speed" on a link with none (review O1): the existing editor, for that link's router.
+async function openSpeedEditor(link) {
+  try {
+    const res = link.exporter_id === selectedDeviceId.value
+      ? { data: { data: { interfaces: interfaceList.value } } }
+      : await getInterfaceTelemetry(link.exporter_id, selectedWindow.value)
+    openInterfaceModal(link.interface_idx, res.data?.data?.interfaces || [], link.exporter_id, link.exporter_hostname)
+  } catch (err) {
+    console.error('Failed to load interfaces for the speed editor:', err)
+    alert(err.response?.data?.detail || "Could not load the router's interfaces.")
+  }
 }
 
 function addInterfaceRow() {
@@ -1318,11 +1247,12 @@ function onPresetChange(row) {
 }
 
 async function saveInterfaces() {
-  if (!selectedExporterId.value) return
+  const deviceId = editingDeviceId.value || selectedDeviceId.value
+  if (!deviceId) return
   savingInterfaces.value = true
   try {
     const payload = aliasesPayload(editingInterfaces.value)
-    await updateEndpointInterfaces(selectedExporterId.value, payload)
+    await updateEndpointInterfaces(deviceId, payload)
     showInterfaceModal.value = false
     await refreshData()
   } catch (err) {
@@ -1452,11 +1382,12 @@ const chartData = computed(() => {
     datasets.push(lineDataset(`WAN in (${unit})`, pick(`ingress_${unit}`), series.in))
     datasets.push(lineDataset(`WAN out (${unit})`, pick(`egress_${unit}`), series.out))
   } else if (seriesMeta.value.directional) {
-    datasets.push(lineDataset(`${prefix}Ingress (${unit})`, pick(`ingress_${unit}`), series.in))
-    datasets.push(lineDataset(`${prefix}Egress (${unit})`, pick(`egress_${unit}`), series.out))
-    const transit = pick(`transit_${unit}`)
-    if (transit.some((v) => v)) {
-      datasets.push(lineDataset(`Transit (${unit})`, transit, series.transit, { fill: false }))
+    // The Traffic zones rule: internal = a monitored host or a private address.
+    datasets.push(lineDataset(`${prefix}Inbound (${unit})`, pick(`ingress_${unit}`), series.in))
+    datasets.push(lineDataset(`${prefix}Outbound (${unit})`, pick(`egress_${unit}`), series.out))
+    for (const [key, label, color] of [['internal', 'Internal', series.internal], ['transit', 'Transit', series.transit]]) {
+      const values = pick(`${key}_${unit}`)
+      if (values.some((v) => v)) datasets.push(lineDataset(`${label} (${unit})`, values, color, { fill: false }))
     }
   } else {
     datasets.push(lineDataset(`Total (${unit})`, pick(`transit_${unit}`), series.transit))
@@ -1474,7 +1405,7 @@ const chartSummary = computed(() => {
     : seriesMeta.value.wanOnly
       ? [[`ingress_${unit}`, 'WAN in'], [`egress_${unit}`, 'WAN out']]
       : seriesMeta.value.directional
-      ? [[`ingress_${unit}`, 'Ingress'], [`egress_${unit}`, 'Egress'], [`transit_${unit}`, 'Transit']]
+      ? [[`ingress_${unit}`, 'Inbound'], [`egress_${unit}`, 'Outbound'], [`internal_${unit}`, 'Internal'], [`transit_${unit}`, 'Transit']]
       : [[`transit_${unit}`, 'Total']]
   return [`${chartTitle.value}, last ${selectedWindow.value}.`]
     .concat(keys.map(([key, label]) => summarizeSeries(label, pts.map(({ t, p }) => ({ t, v: p[key] ?? null })), fmt)))
@@ -1527,6 +1458,12 @@ const chartOptions = computed(() => {
 
 function setWindow(w) {
   selectedWindow.value = w
+  replaceQuery({ window: w === '1h' ? undefined : w })
+  try {
+    sessionStorage.setItem(WINDOW_STORAGE_KEY, w)
+  } catch {
+    // storage unavailable: the URL still holds it
+  }
   refreshData()
 }
 
@@ -1535,13 +1472,6 @@ function getPacketProfileLabel(avgBytes) {
   if (b >= 1100) return 'Bulk / Jumbo MTU'
   if (b <= 150) return 'Control / Micro-Flows'
   return 'Mixed / Standard MTU'
-}
-
-function getPacketProfileClass(avgBytes) {
-  const b = Number(avgBytes) || 0
-  if (b >= 1100) return 'profile-bulk'
-  if (b <= 150) return 'profile-micro'
-  return 'profile-mixed'
 }
 
 function getZoneBadgeClass(zone) {
@@ -1593,14 +1523,8 @@ async function submitExporterMapping() {
     const targetId = targetEndpointId.value
     await mapFlowExporter(selectedUnmatchedIp.value, targetId)
     showMappingModal.value = false
-    selectedExporterId.value = targetId
-    router.push({
-      query: {
-        ...route.query,
-        exporter_id: targetId,
-      },
-    })
-    await refreshData()
+    filterState.clearFilter()
+    setDevice(targetId)
   } catch (err) {
     mappingError.value = err.response?.data?.detail || 'Failed to map exporter IP.'
   } finally {
@@ -1617,34 +1541,27 @@ async function refreshAll() {
 async function refreshData() {
   loading.value = true
   try {
-    // An unregistered source has no data of its own yet: load only the inventory for the
-    // enrol / link actions instead of showing fleet-wide numbers under its name.
-    if (isUnmatchedScope.value) {
-      const [expRes, epListRes] = await Promise.all([getFlowExporters(), getEndpoints()])
-      if (expRes.data?.data) {
-        unmatchedExporters.value = expRes.data.data.unmatched || []
-        flowExporters.value = expRes.data.data.exporters || []
-      }
-      if (epListRes.data?.data) {
-        availableEndpoints.value = epListRes.data.data
-      }
-      return
-    }
-
-    const expId = selectedExporterId.value || null
-    const [ovRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
-      getBandwidthOverview(expId),
-      getTrafficSeries(selectedWindow.value, expId, null, selectedInterfaceIdx.value, wantWanSeries.value),
-      getTopTalkers(selectedWindow.value, 10, null, expId),
-      getApplicationDistribution(selectedWindow.value, expId),
-      getFlowExporters(),
+    // The Security tiles' summary is fetched beside the rest; a window the conversation tables
+    // don't cover (1y) gives an error there, shown as empty tiles rather than failing the page.
+    const anomaliesReq = getAnomalySummary(selectedWindow.value, scope.value).catch(() => null)
+    const [ovRes, wanRes, anomaliesRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
+      getBandwidthOverview(scope.value),
+      getWanLinks(scope.value, wantLinkSeries.value ? selectedWindow.value : null),
+      anomaliesReq,
+      getTrafficSeries(selectedWindow.value, scope.value, null, selectedInterfaceIdx.value, wantWanSeries.value),
+      getTopTalkers(selectedWindow.value, 10, null, scope.value),
+      getApplicationDistribution(selectedWindow.value, scope.value),
+      getFlowExporters(filterParams(filterState.filter.value)),
       getEndpoints(),
-      expId ? getInterfaceTelemetry(expId, selectedWindow.value) : Promise.resolve({ data: { data: { interfaces: [] } } }),
+      // One device's interfaces, or every router's in scope (step 6).
+      getInterfaces(scope.value, selectedWindow.value),
     ])
 
     if (ovRes.data?.data) {
       overview.value = ovRes.data.data
     }
+    wanLinks.value = wanRes.data?.data || null
+    anomalies.value = anomaliesRes?.data?.data || null
     applySeries(seriesRes.data?.data)
     if (talkersRes.data?.data) {
       topEndpoints.value = talkersRes.data.data.top_endpoints || []
@@ -1666,6 +1583,7 @@ async function refreshData() {
     } else {
       interfaceList.value = []
     }
+    lastUpdated.value = Date.now()
   } catch (err) {
     console.error('Failed to load bandwidth telemetry data:', err)
   } finally {
@@ -1674,25 +1592,63 @@ async function refreshData() {
 }
 
 watch(
-  () => route.query.exporter_id,
+  () => route.query.device_id || route.query.exporter_id || '',
   (newId) => {
-    if (newId !== selectedExporterId.value) {
-      selectedExporterId.value = newId || ''
+    if (newId !== selectedDeviceId.value) {
+      selectedDeviceId.value = newId
       selectedInterfaceIdx.value = null
+      const isolate = pendingIsolation
+      pendingIsolation = null
+      refreshAll().then(() => {
+        if (isolate !== null && newId) toggleInterfaceIsolation(isolate)
+      })
+    }
+  }
+)
+
+// A new filter: reload everything for the routers it picks. A device the filter no longer
+// covers is let go, so the page doesn't sit empty under a picker that can't show the device.
+watch(
+  () => JSON.stringify(filterState.filter.value),
+  async () => {
+    await refreshAll()
+    if (selectedDeviceId.value && !flowExporters.value.some((d) => d.id === selectedDeviceId.value)) {
+      setDevice('')
+    }
+  }
+)
+
+// Back and forward between windows, or a pasted link, change the URL under the page.
+watch(
+  () => route.query.window,
+  (w) => {
+    const next = windowOptions.includes(w) ? w : '1h'
+    if (next !== selectedWindow.value) {
+      selectedWindow.value = next
       refreshData()
     }
   }
 )
 
 onMounted(() => {
+  // Came back through a link without the window: show the remembered one in the URL too.
+  if (!route.query.window && selectedWindow.value !== '1h') {
+    replaceQuery({ window: selectedWindow.value })
+  }
+  // An old link's exporter_id becomes device_id.
+  if (route.query.exporter_id && !route.query.device_id) {
+    replaceQuery({ device_id: route.query.exporter_id, exporter_id: undefined })
+  }
   refreshData()
+  scheduleNextUpdate()
+  clockTimer = setInterval(() => { nowTick.value = Date.now() }, 5000)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+  clearTimeout(updateTimer)
+  clearInterval(clockTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -1826,37 +1782,37 @@ onUnmounted(() => {
 }
 
 /* Unmatched Discovery Alert */
-.unmatched-banner {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  border-radius: var(--radius, 8px);
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  color: #b45309;
-}
-
-.unmatched-icon {
-  font-size: 20px;
-  flex-shrink: 0;
-}
-
-.unmatched-title {
-  font-size: 0.875rem;
-  font-weight: 700;
-}
 
 /* KPI Metric Strip */
+/* Now area's status line (review O4): quiet, amber when a router stopped sending flows. */
+.now-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  padding: 0.5rem 1rem 0.6rem;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+.now-status-line.is-warn {
+  color: var(--status-text-warn);
+}
+/* Separates the five-minute "Now" from everything that follows the time window (review P1). */
+.window-heading {
+  margin: 0.5rem 0 0.5rem;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.modal-device {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
 .kpi-scope-note {
   margin: 0 0 0.5rem;
   font-size: var(--text-xs);
   color: var(--text-muted);
-}
-
-.speed-unset {
-  color: var(--status-text-warn);
-  font-weight: 600;
 }
 
 .kpi-grid {
@@ -1954,70 +1910,19 @@ onUnmounted(() => {
   font-size: 0.6875rem;
 }
 
-/* Auto-Refresh */
-.auto-refresh-selector {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* Update status (replaces the old refresh-interval menu) */
+.update-status {
+  font-variant-numeric: tabular-nums;
 }
 
-.refresh-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.refresh-select {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  outline: none;
-  cursor: pointer;
+.pause-toggle {
+  margin-left: 8px;
+  font-size: var(--text-sm, 13px);
+  color: var(--text-secondary);
+  text-decoration: underline;
 }
 
 /* Unmatched Exporter Grid (BUG-05) */
-.unmatched-header-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.unmatched-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 8px;
-  width: 100%;
-}
-
-.unmatched-card {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: var(--bg-surface);
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-}
-
-.unmatched-card-info {
-  display: flex;
-  flex-direction: column;
-}
-
-.unmatched-ip {
-  font-weight: 700;
-  font-size: 0.85rem;
-  color: var(--text-primary);
-}
-
-.unmatched-sub {
-  font-size: 0.7rem;
-}
 
 /* Top Conversations Header & Search */
 .section-header-split {
@@ -2053,122 +1958,51 @@ onUnmounted(() => {
 }
 
 /* Scope Selector */
-.scope-selector {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.scope-input-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.scope-search-input {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  width: 110px;
-  outline: none;
-  transition: border-color 0.15s ease, width 0.15s ease;
-}
-
-.scope-search-input:focus {
-  border-color: var(--accent, #3b82f6);
-  width: 150px;
-}
-
-.scope-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.scope-select {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  outline: none;
-  cursor: pointer;
-  max-width: 280px;
-}
 
 /* Unmatched Scope Focused Callout */
-.unmatched-scope-card {
-  padding: 18px 22px;
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  border-radius: var(--radius, 8px);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.unmatched-scope-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-}
-
-.unmatched-scope-icon {
-  font-size: 2rem;
-  line-height: 1;
-  color: #f59e0b;
-}
-
-.unmatched-scope-info {
-  flex: 1;
-}
-
-.unmatched-scope-badge {
-  display: inline-block;
-  font-size: 0.6875rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: rgba(245, 158, 11, 0.2);
-  color: #d97706;
-  margin-bottom: 6px;
-}
-
-.unmatched-scope-title {
-  margin: 0 0 6px 0;
-  font-size: 1.125rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.unmatched-scope-desc {
-  margin: 0;
-  font-size: 0.875rem;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-
-.unmatched-scope-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-left: 48px;
-  flex-wrap: wrap;
-}
-
-.unmatched-card-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
 
 /* Interface Telemetry Panel */
+/* Scope: the shared filter bar with the device picker, and unregistered flow sources. */
+.traffic-filter-bar {
+  margin-bottom: 0.75rem;
+}
+
+.unregistered-notice {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--status-warn-color);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.unregistered-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.unregistered-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.unregistered-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.unregistered-actions {
+  display: flex;
+  gap: 0.375rem;
+}
+
 .interfaces-panel {
   margin-top: 1.5rem;
 }
@@ -2199,164 +2033,10 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.util-cell {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.util-bar-bg {
-  position: relative;
-  flex: 1;
-  height: 6px;
-  background: var(--border-color, rgba(255, 255, 255, 0.1));
-  border-radius: 3px;
-}
-
-.util-marker {
-  position: absolute;
-  top: -3px;
-  width: 2px;
-  height: 12px;
-  transform: translateX(-1px);
-  background: var(--text-secondary);
-}
-
-.util-marker-peak {
-  top: -6px;
-  width: 0;
-  height: 0;
-  background: none;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--status-text-down);
-  transform: translateX(-4px);
-}
-
-.util-sub {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-
-.util-bar-fill {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s ease;
-}
-
-.util-bar-fill.util-healthy {
-  background: #10b981;
-}
-
-.util-bar-fill.util-warning {
-  background: #f59e0b;
-}
-
-.util-bar-fill.util-danger {
-  background: #ef4444;
-}
-
-.util-text {
-  font-size: 0.75rem;
-  font-weight: 700;
-  min-width: 45px;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.util-text.util-healthy {
-  color: #10b981;
-}
-
-.util-text.util-warning {
-  color: #f59e0b;
-}
-
-.util-text.util-danger {
-  color: #ef4444;
-}
-
-.badge-active {
-  display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.badge-wan {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  background: var(--bg-surface-selected);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.wan-links-card {
-  margin-top: 16px;
-}
-
-.wan-links-card td.tnum {
-  white-space: nowrap;
-}
-
-.wan-share {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.kpi-footnote {
-  margin: 0.5rem 0 0;
-}
-
-.badge-idle {
-  display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  background: rgba(156, 163, 175, 0.15);
-  color: #9ca3af;
-  border: 1px solid rgba(156, 163, 175, 0.3);
-}
-
 .header-actions-row {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.name-cell-inner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.btn-row-edit {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: all 0.15s ease;
-}
-
-.btn-row-edit:hover {
-  background: var(--bg-surface-hover);
-  color: var(--accent-primary, #2563eb);
 }
 
 /* Index, name, role, speed and remove fit side by side; the global card is 520px. */
@@ -2372,6 +2052,16 @@ onUnmounted(() => {
   overflow-y: auto;
   margin: 1rem 0;
   padding-right: 4px;
+}
+
+.iface-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.iface-alert-line {
+  padding: 0 12px 4px;
 }
 
 .interface-config-row {
@@ -2393,44 +2083,6 @@ onUnmounted(() => {
 
 .text-accent {
   color: var(--accent-primary, #3b82f6);
-}
-
-.badge-packet-profile {
-  display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.profile-bulk {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.profile-micro {
-  background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.profile-mixed {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.35);
-}
-
-.badge-anomaly-kpi {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
 .chart-header-actions {

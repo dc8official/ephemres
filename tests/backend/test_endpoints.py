@@ -42,7 +42,7 @@ class TestEndpointCreationAsync(unittest.TestCase):
         mock_session_local.assert_called_once()
 
         # Verify refresh_baseline_route was called with new bg_db
-        mock_refresh_route.assert_called_once_with(endpoint_id, ip_address, db=mock_bg_db)
+        mock_refresh_route.assert_called_once_with(endpoint_id, ip_address, db=mock_bg_db, trigger="added")
 
         # Verify bg_db was committed
         mock_bg_db.commit.assert_called_once()
