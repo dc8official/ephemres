@@ -313,7 +313,6 @@ onMounted(() => {
 }
 
 .form-input:focus {
-  outline: none;
   border-color: var(--accent-primary, #2563eb);
   background: var(--bg-surface);
 }

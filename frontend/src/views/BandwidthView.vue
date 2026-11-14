@@ -57,6 +57,8 @@
 
     <!-- Flow sources not registered yet: one line instead of entries in the picker (review P4).
          Their flows count under "All devices" only, as they have no site or tags yet. -->
+    <!-- Failures of page-level actions show here instead of a blocking alert(). -->
+    <div v-if="actionError" class="inline-alert" role="alert">{{ actionError }}</div>
     <div v-if="unmatchedExporters.length" class="unregistered-notice" role="status">
       <div class="unregistered-line">
         <span>{{ unregisteredLabel }}</span>
@@ -168,12 +170,12 @@
           <table class="dense-table interactive-table" aria-label="Top Talkers Table">
             <thead>
               <tr>
-                <th>Host</th>
-                <th>Site</th>
-                <th class="text-right" title="What the host received">Received</th>
-                <th class="text-right" title="What the host sent">Sent</th>
-                <th class="text-right">Total Bytes</th>
-                <th class="text-right">Flows / Avg packet</th>
+                <th scope="col">Host</th>
+                <th scope="col">Site</th>
+                <th scope="col" class="text-right" title="What the host received">Received</th>
+                <th scope="col" class="text-right" title="What the host sent">Sent</th>
+                <th scope="col" class="text-right">Total Bytes</th>
+                <th scope="col" class="text-right">Flows / Avg packet</th>
               </tr>
             </thead>
             <tbody>
@@ -474,9 +476,9 @@
 
     <!-- Mapping Modal for Unmatched Exporter -->
     <div v-if="showMappingModal" class="modal-overlay" @click.self="showMappingModal = false">
-      <div class="modal-card">
+      <div role="dialog" aria-modal="true" aria-labelledby="bw-modal-1-title" class="modal-card">
         <div class="modal-header">
-          <h3>Link Exporter Alias</h3>
+          <h3 id="bw-modal-1-title">Link Exporter Alias</h3>
           <button class="btn-close" @click="showMappingModal = false">✕</button>
         </div>
         <div class="modal-form">
@@ -523,9 +525,9 @@
 
     <!-- Enrollment Modal for Unmatched Exporter -->
     <div v-if="showEnrollModal" class="modal-overlay" @click.self="showEnrollModal = false">
-      <div class="modal-card">
+      <div role="dialog" aria-modal="true" aria-labelledby="bw-modal-2-title" class="modal-card">
         <div class="modal-header">
-          <h3>Enroll Flow Exporter</h3>
+          <h3 id="bw-modal-2-title">Enroll Flow Exporter</h3>
           <button class="btn-close" @click="showEnrollModal = false">✕</button>
         </div>
         <div class="modal-form">
@@ -574,9 +576,9 @@
 
     <!-- Router Interface Configuration Modal (Admin Only) -->
     <div v-if="showInterfaceModal" class="modal-overlay" @click.self="showInterfaceModal = false">
-      <div class="modal-card wide">
+      <div role="dialog" aria-modal="true" aria-labelledby="bw-modal-3-title" class="modal-card wide">
         <div class="modal-header">
-          <h3>⚙️ Configure Router Interface Aliases & Speeds<span v-if="editingDeviceName" class="modal-device"> · {{ editingDeviceName }}</span></h3>
+          <h3 id="bw-modal-3-title">⚙️ Configure Router Interface Aliases & Speeds<span v-if="editingDeviceName" class="modal-device"> · {{ editingDeviceName }}</span></h3>
           <button class="btn-close" @click="showInterfaceModal = false">✕</button>
         </div>
 
@@ -674,6 +676,7 @@
             </button>
           </div>
 
+          <div v-if="interfaceError" class="inline-alert" role="alert">{{ interfaceError }}</div>
           <div class="modal-actions" style="margin-top: 1rem;">
             <button type="button" class="btn-secondary" @click="showInterfaceModal = false">Cancel</button>
             <button type="submit" class="btn-primary" :disabled="savingInterfaces">
@@ -688,6 +691,7 @@
 
 <script setup>
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
+import { useEscapeClose } from '../composables/useEscapeClose.js'
 import { useRoute, useRouter } from 'vue-router'
 import { Line as LineChart } from 'vue-chartjs'
 import {
@@ -1200,6 +1204,10 @@ const mappingError = ref(null)
 const showInterfaceModal = ref(false)
 const editingInterfaces = ref([])
 const savingInterfaces = ref(false)
+// Shown inside the interface modal, next to the Save button that caused it.
+const interfaceError = ref(null)
+// Shown at the top of the page for actions that have no modal open.
+const actionError = ref(null)
 
 // The router being edited: the picked device from the Interfaces tab, or any router in scope
 // from a "Set speed" in the Now area, without changing the page's scope.
@@ -1227,6 +1235,7 @@ function openInterfaceModal(focusIdx = null, interfaces = null, deviceId = null,
 
 // "Set speed" on a link with none (review O1): the existing editor, for that link's router.
 async function openSpeedEditor(link) {
+  actionError.value = null
   try {
     const res = link.exporter_id === selectedDeviceId.value
       ? { data: { data: { interfaces: interfaceList.value } } }
@@ -1234,7 +1243,7 @@ async function openSpeedEditor(link) {
     openInterfaceModal(link.interface_idx, res.data?.data?.interfaces || [], link.exporter_id, link.exporter_hostname)
   } catch (err) {
     console.error('Failed to load interfaces for the speed editor:', err)
-    alert(err.response?.data?.detail || "Could not load the router's interfaces.")
+    actionError.value = err.response?.data?.detail || "Could not load the router's interfaces."
   }
 }
 
@@ -1255,6 +1264,7 @@ async function saveInterfaces() {
   const deviceId = editingDeviceId.value || selectedDeviceId.value
   if (!deviceId) return
   savingInterfaces.value = true
+  interfaceError.value = null
   try {
     const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(deviceId, payload)
@@ -1262,7 +1272,7 @@ async function saveInterfaces() {
     await refreshData()
   } catch (err) {
     console.error('Failed to update interfaces:', err)
-    alert(err.response?.data?.detail || 'Failed to update interfaces.')
+    interfaceError.value = err.response?.data?.detail || 'Failed to update interfaces.'
   } finally {
     savingInterfaces.value = false
   }
@@ -1635,6 +1645,12 @@ watch(
   }
 )
 
+// Escape closes the modal; reopening it starts without the last attempt's message.
+useEscapeClose(showMappingModal, () => { showMappingModal.value = false })
+useEscapeClose(showEnrollModal, () => { showEnrollModal.value = false })
+useEscapeClose(showInterfaceModal, () => { showInterfaceModal.value = false })
+watch(showInterfaceModal, () => { interfaceError.value = null })
+
 onMounted(() => {
   // Came back through a link without the window: show the remembered one in the URL too.
   if (!route.query.window && selectedWindow.value !== '1h') {
@@ -1912,7 +1928,7 @@ onUnmounted(() => {
   display: block;
 }
 .text-xs {
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 }
 
 /* Update status (replaces the old refresh-interval menu) */
@@ -1942,7 +1958,7 @@ onUnmounted(() => {
   align-items: center;
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-weight: 600;
   background: rgba(139, 92, 246, 0.12);
   color: #8b5cf6;

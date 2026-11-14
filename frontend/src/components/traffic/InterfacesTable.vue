@@ -7,7 +7,7 @@
     <table class="dense-table interactive-table" :aria-label="multiDevice ? 'Interfaces of the routers in scope' : 'Interfaces of the device'">
       <thead>
         <tr>
-          <th v-for="col in columns" :key="col.key" :class="col.cls" :style="col.style" :aria-sort="ariaSort(col)">
+          <th scope="col" v-for="col in columns" :key="col.key" :class="col.cls" :style="col.style" :aria-sort="ariaSort(col)">
             <button v-if="col.sort" type="button" class="th-sort" @click="sortBy(col)">
               {{ col.label }}<span class="sort-mark" aria-hidden="true">{{ sortMark(col) }}</span>
             </button>

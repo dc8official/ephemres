@@ -21,9 +21,11 @@ case "${1:-}" in
         -p "127.0.0.1:${PORT}:5432" "$IMAGE" >/dev/null
     fi
     # The image runs a temporary server during first-time init and then restarts it, so wait
-    # for the init-complete log line before trusting a successful query.
+    # for the init-complete log line before trusting a successful query. Not grep -q: it quits at
+    # the first match, and on a long-running container's large log that kills docker logs with
+    # SIGPIPE, which pipefail then reports as "not ready".
     for _ in $(seq 1 60); do
-      if docker logs "$NAME" 2>&1 | grep -q 'PostgreSQL init process complete' \
+      if docker logs "$NAME" 2>&1 | grep 'PostgreSQL init process complete' >/dev/null \
         && docker exec "$NAME" psql -U postgres -c 'SELECT 1' >/dev/null 2>&1; then
         echo "export EPHEMRES_TEST_TIMESCALE_DSN=${DSN}"
         exit 0

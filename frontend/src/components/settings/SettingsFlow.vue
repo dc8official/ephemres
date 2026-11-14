@@ -120,9 +120,9 @@
 
     <!-- Flow Preflight Modal -->
     <div v-if="showPreflightModal" class="modal-overlay" @click.self="showPreflightModal = false">
-      <div class="modal-card">
+      <div role="dialog" aria-modal="true" aria-labelledby="flow-modal-1-title" class="modal-card">
         <div class="modal-header">
-          <h3>⚡ Flow Ingestion Diagnostic Preflight</h3>
+          <h3 id="flow-modal-1-title">⚡ Flow Ingestion Diagnostic Preflight</h3>
           <button class="btn-close" @click="showPreflightModal = false">✕</button>
         </div>
         <div class="modal-form">
@@ -190,6 +190,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { useEscapeClose } from '../../composables/useEscapeClose.js'
 import { useToast } from 'primevue/usetoast'
 import { testFlowPreflight } from '../../services/api.js'
 
@@ -209,6 +210,7 @@ const emit = defineEmits(['change'])
 const toast = useToast()
 
 const showPreflightModal = ref(false)
+useEscapeClose(showPreflightModal, () => { showPreflightModal.value = false })
 const preflightChecking = ref(false)
 const preflightResult = ref(null)
 
@@ -336,7 +338,7 @@ function confirmFlowActivation() {
 }
 
 .engine-badge {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 2px 8px;
@@ -394,7 +396,6 @@ function confirmFlowActivation() {
 
 .setting-input:focus {
   border-color: #0ea5e9;
-  outline: none;
 }
 
 .driver-toggle {

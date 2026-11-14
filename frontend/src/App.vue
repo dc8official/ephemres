@@ -2,6 +2,8 @@
   <div id="app">
     <Toast />
     <ConfirmDialog />
+    <!-- First tab stop: lets keyboard users jump past the nav on every page. -->
+    <a v-if="showNav" href="#main-content" class="skip-link">Skip to content</a>
     <header class="app-header" v-if="showNav">
       <div class="header-inner">
         <div class="brand">
@@ -58,7 +60,7 @@
       {{ liveAnnouncement }}
     </div>
 
-    <main class="app-main">
+    <main id="main-content" class="app-main" tabindex="-1">
       <!-- The API refuses every call until a forced password change is done, so the page
            behind the modal mounts (and loads its data) only afterwards. -->
       <RouterView v-if="!displayPasswordModal" />
@@ -461,6 +463,51 @@ button { cursor: pointer; border: none; background: none; }
   --target-min: 24px;
 }
 
+/* ── Inline result of an action, shown where the action was started ── */
+.inline-alert {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(220, 38, 38, 0.45);
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.inline-alert.is-ok {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: rgba(22, 163, 74, 0.08);
+}
+
+/* ── Skip link: off screen until it takes keyboard focus ── */
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -3rem;
+  z-index: 10000;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-surface, #fff);
+  color: var(--text-primary, #111);
+  border: 1px solid var(--border-color, #ccc);
+}
+.skip-link:focus {
+  top: 0.5rem;
+}
+/* The skip link's target takes focus only from script or the link, so no ring on it. */
+#main-content:focus {
+  outline: none;
+}
+
+/* ── Honour the OS "reduce motion" setting: no animation or transition anywhere ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ── Focus Outlines for Keyboard Accessibility (WCAG 2.1 AA) ── */
 :focus-visible {
   outline: 2px solid #2563EB;
@@ -613,7 +660,7 @@ h1, h2, h3, h4, h5, h6,
 }
 
 .brand-version {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--text-muted);
   background: var(--bg-surface-selected);
@@ -750,7 +797,7 @@ h1, h2, h3, h4, h5, h6,
 }
 
 .role-tag {
-  font-size: 11px;
+  font-size: 12px;
   color: #3B82F6;
   font-weight: 700;
 }
@@ -788,7 +835,7 @@ h1, h2, h3, h4, h5, h6,
   gap: 6px;
   padding: 3px 8px;
   border-radius: var(--radius-sm, 4px);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -940,7 +987,7 @@ h1, h2, h3, h4, h5, h6,
   padding: 0.625rem 0.875rem;
   border-bottom: 1px solid var(--border-color);
   text-transform: uppercase;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   letter-spacing: 0.05em;
   user-select: none;
 }

@@ -306,14 +306,14 @@
             <table class="audit-table">
               <thead>
                 <tr>
-                  <th>Start Time (Local)</th>
-                  <th>End Time (Local)</th>
-                  <th>Duration</th>
-                  <th>Operational State</th>
-                  <th>Detailed State</th>
-                  <th>Health Score</th>
-                  <th>Avg RTT</th>
-                  <th>Cycles</th>
+                  <th scope="col">Start Time (Local)</th>
+                  <th scope="col">End Time (Local)</th>
+                  <th scope="col">Duration</th>
+                  <th scope="col">Operational State</th>
+                  <th scope="col">Detailed State</th>
+                  <th scope="col">Health Score</th>
+                  <th scope="col">Avg RTT</th>
+                  <th scope="col">Cycles</th>
                 </tr>
               </thead>
               <tbody>
@@ -578,13 +578,13 @@
               <table class="dense-table" aria-label="Paths seen in flows">
                 <thead>
                   <tr>
-                    <th>Router</th>
-                    <th>Direction</th>
-                    <th>In</th>
-                    <th>Out</th>
-                    <th>Next hop</th>
-                    <th class="text-right">Volume</th>
-                    <th>Last seen</th>
+                    <th scope="col">Router</th>
+                    <th scope="col">Direction</th>
+                    <th scope="col">In</th>
+                    <th scope="col">Out</th>
+                    <th scope="col">Next hop</th>
+                    <th scope="col" class="text-right">Volume</th>
+                    <th scope="col">Last seen</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -632,9 +632,9 @@
 
     <!-- Admin Endpoint Settings Modal -->
     <div class="modal-overlay" v-if="showSettingsModal" @click.self="showSettingsModal = false">
-      <div class="modal-card wide">
+      <div role="dialog" aria-modal="true" aria-labelledby="ep-modal-1-title" class="modal-card wide">
         <div class="modal-header">
-          <h3>⚙️ Endpoint Governance & Settings</h3>
+          <h3 id="ep-modal-1-title">⚙️ Endpoint Governance & Settings</h3>
           <button class="btn-close" @click="showSettingsModal = false">✕</button>
         </div>
 
@@ -713,6 +713,8 @@
             </div>
           </div>
 
+          <!-- Result of Save or Run Route Discovery, shown by the buttons instead of a blocking alert(). -->
+          <div v-if="settingsNotice" class="inline-alert" :class="{ 'is-ok': settingsNotice.ok }" :role="settingsNotice.ok ? 'status' : 'alert'">{{ settingsNotice.text }}</div>
           <div class="modal-footer-bar">
             <button type="button" class="btn-discovery" @click="triggerDiscovery" :disabled="discovering">
               <span v-if="discovering">Discovering...</span>
@@ -731,9 +733,9 @@
 
     <!-- Interface Configuration Modal -->
     <div class="modal-overlay" v-if="showInterfaceModal" @click.self="showInterfaceModal = false">
-      <div class="modal-card wide">
+      <div role="dialog" aria-modal="true" aria-labelledby="ep-modal-2-title" class="modal-card wide">
         <div class="modal-header">
-          <h3>⚙️ Configure Router Interface Aliases & Speeds</h3>
+          <h3 id="ep-modal-2-title">⚙️ Configure Router Interface Aliases & Speeds</h3>
           <button class="btn-close" @click="showInterfaceModal = false">✕</button>
         </div>
 
@@ -831,6 +833,7 @@
             </button>
           </div>
 
+          <div v-if="interfaceError" class="inline-alert" role="alert">{{ interfaceError }}</div>
           <div class="modal-footer-bar">
             <div class="footer-buttons" style="margin-left: auto;">
               <button type="button" class="btn-secondary" @click="showInterfaceModal = false">Cancel</button>
@@ -847,6 +850,7 @@
 
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import { useEscapeClose } from '../composables/useEscapeClose.js'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries, getEndpointFlowPaths } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
@@ -1026,6 +1030,8 @@ const interfaceTelemetry = shallowRef([])
 const selectedCorrelatedInterfaceIdx = ref(null)
 const showInterfaceModal = ref(false)
 const savingInterfaces = ref(false)
+// Shown inside the interface modal, next to the Save button that caused it.
+const interfaceError = ref(null)
 const editingInterfaces = ref([])
 
 function switchPerspective(persp) {
@@ -1244,6 +1250,7 @@ function onPresetChange(row) {
 async function saveInterfaces() {
   if (!endpoint.value) return
   savingInterfaces.value = true
+  interfaceError.value = null
   try {
     const payload = aliasesPayload(editingInterfaces.value)
     await updateEndpointInterfaces(endpoint.value.id, payload)
@@ -1252,7 +1259,7 @@ async function saveInterfaces() {
     await loadFlowTelemetry()
   } catch (err) {
     console.error('Failed to update interfaces:', err)
-    alert(err.response?.data?.detail || 'Failed to update interfaces.')
+    interfaceError.value = err.response?.data?.detail || 'Failed to update interfaces.'
   } finally {
     savingInterfaces.value = false
   }
@@ -1351,6 +1358,8 @@ const toggleTheme = () => {
 const showSettingsModal = ref(false)
 const savingSettings = ref(false)
 const discovering = ref(false)
+// { ok, text } for the settings modal: a failed save, or how route discovery went.
+const settingsNotice = ref(null)
 const editForm = ref({
   hostname: '',
   ip_address: '',
@@ -1387,14 +1396,14 @@ function openSettingsModal() {
 
 async function saveEndpointSettings() {
   savingSettings.value = true
+  settingsNotice.value = null
   try {
     await updateEndpoint(endpointId, editForm.value)
     showSettingsModal.value = false
     await loadData()
-    alert('Endpoint settings updated successfully.')
   } catch (err) {
     console.error('Failed to update endpoint settings:', err)
-    alert(err.response?.data?.detail || 'Failed to update settings.')
+    settingsNotice.value = { ok: false, text: err.response?.data?.detail || 'Failed to update settings.' }
   } finally {
     savingSettings.value = false
   }
@@ -1402,13 +1411,14 @@ async function saveEndpointSettings() {
 
 async function triggerDiscovery() {
   discovering.value = true
+  settingsNotice.value = null
   try {
     await refreshEndpointBaseline(endpointId)
-    alert('Route discovery executed successfully. Baseline updated.')
+    settingsNotice.value = { ok: true, text: 'Route discovery ran. Baseline updated.' }
     await loadData()
   } catch (err) {
     console.error('Route discovery failed:', err)
-    alert(err.response?.data?.detail || 'Route discovery failed.')
+    settingsNotice.value = { ok: false, text: err.response?.data?.detail || 'Route discovery failed.' }
   } finally {
     discovering.value = false
   }
@@ -1619,6 +1629,12 @@ const handleLogout = async () => {
     router.push('/login')
   }
 }
+
+// Escape closes the modal; reopening it starts without the last attempt's message.
+useEscapeClose(showSettingsModal, () => { showSettingsModal.value = false })
+useEscapeClose(showInterfaceModal, () => { showInterfaceModal.value = false })
+watch(showSettingsModal, () => { settingsNotice.value = null })
+watch(showInterfaceModal, () => { interfaceError.value = null })
 
 onMounted(() => {
   const currentTheme = localStorage.getItem('theme') || 'dark'
@@ -2231,7 +2247,6 @@ h2 {
   font-size: 0.8rem;
   padding: 0.2rem 0.5rem;
   border-radius: 3px;
-  outline: none;
   cursor: pointer;
   transition: border-color 0.15s ease;
 }
@@ -2760,7 +2775,6 @@ h2 {
   font-size: 0.8125rem;
   font-family: var(--font-sans);
   cursor: pointer;
-  outline: none;
   transition: border-color 0.15s;
 }
 

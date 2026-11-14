@@ -15,13 +15,13 @@
         <table class="data-table" aria-label="User Accounts Table">
           <thead>
             <tr>
-              <th>Username</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th>Credential State</th>
-              <th>Session</th>
-              <th>Last Active Sign-in</th>
-              <th class="text-right">Actions</th>
+              <th scope="col">Username</th>
+              <th scope="col">Role</th>
+              <th scope="col">Status</th>
+              <th scope="col">Credential State</th>
+              <th scope="col">Session</th>
+              <th scope="col">Last Active Sign-in</th>
+              <th scope="col" class="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1034,7 +1034,7 @@ onMounted(() => {
 
 .current-tag {
   margin-left: 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1130,7 +1130,6 @@ onMounted(() => {
 
 .inline-select:focus {
   border-color: #0ea5e9;
-  outline: none;
 }
 
 .settings-card {
@@ -1187,7 +1186,7 @@ onMounted(() => {
 }
 
 .role-badge {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 2px 8px;
@@ -1204,7 +1203,7 @@ onMounted(() => {
 }
 
 .status-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
@@ -1323,7 +1322,6 @@ onMounted(() => {
 
 .form-input:focus, .form-select:focus {
   border-color: #0ea5e9;
-  outline: none;
 }
 
 .modal-actions {

@@ -28,7 +28,7 @@
     </p>
 
     <table v-if="data.interfaces.length" class="snmp-table">
-      <thead><tr><th>#</th><th>Interface</th><th>Description</th><th class="num">Speed</th><th>Status</th></tr></thead>
+      <thead><tr><th scope="col">#</th><th scope="col">Interface</th><th scope="col">Description</th><th scope="col" class="num">Speed</th><th scope="col">Status</th></tr></thead>
       <tbody>
         <tr v-for="i in data.interfaces" :key="i.if_index">
           <td class="font-mono tnum">{{ i.if_index }}</td>
@@ -48,7 +48,7 @@
     <template v-if="data.neighbours && data.neighbours.length">
       <h4 class="snmp-sub">Neighbours</h4>
       <table class="snmp-table">
-        <thead><tr><th>Local port</th><th>Neighbour</th><th>Its port</th><th>Address</th><th></th></tr></thead>
+        <thead><tr><th scope="col">Local port</th><th scope="col">Neighbour</th><th scope="col">Its port</th><th scope="col">Address</th><th scope="col"></th></tr></thead>
         <tbody>
           <tr v-for="(n, i) in data.neighbours" :key="i">
             <td>{{ n.local_port || (n.local_if_index ? `if${n.local_if_index}` : '—') }}</td>

@@ -78,7 +78,7 @@
       <p v-if="!status.changes.length" class="route-note">No changes recorded.</p>
       <table v-else class="route-log" aria-label="Route changes">
         <thead>
-          <tr><th>When</th><th>What</th><th>Noticed by</th><th>Details</th></tr>
+          <tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Noticed by</th><th scope="col">Details</th></tr>
         </thead>
         <tbody>
           <tr v-for="(c, i) in status.changes" :key="i">

@@ -140,32 +140,32 @@
         <table class="dense-table" aria-label="Fleet Availability Table">
           <thead>
             <tr>
-              <th @click="toggleSort('hostname')" class="sortable-th">
+              <th scope="col" @click="toggleSort('hostname')" class="sortable-th">
                 Target / Hostname 
                 <span class="sort-icon">{{ sortKey === 'hostname' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th>Device Type</th>
-              <th @click="toggleSort('operational_state')" class="sortable-th">
+              <th scope="col">Device Type</th>
+              <th scope="col" @click="toggleSort('operational_state')" class="sortable-th">
                 Current State
                 <span class="sort-icon">{{ sortKey === 'operational_state' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th @click="toggleSort('uptime_percentage')" class="sortable-th">
+              <th scope="col" @click="toggleSort('uptime_percentage')" class="sortable-th">
                 Uptime SLA (%)
                 <span class="sort-icon">{{ sortKey === 'uptime_percentage' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th @click="toggleSort('incident_count')" class="sortable-th">
+              <th scope="col" @click="toggleSort('incident_count')" class="sortable-th">
                 Incidents
                 <span class="sort-icon">{{ sortKey === 'incident_count' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th @click="toggleSort('uptime_seconds')" class="sortable-th">
+              <th scope="col" @click="toggleSort('uptime_seconds')" class="sortable-th">
                 UP Duration
                 <span class="sort-icon">{{ sortKey === 'uptime_seconds' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th @click="toggleSort('downtime_seconds')" class="sortable-th">
+              <th scope="col" @click="toggleSort('downtime_seconds')" class="sortable-th">
                 DOWN Duration
                 <span class="sort-icon">{{ sortKey === 'downtime_seconds' ? (sortAsc ? '▲' : '▼') : '↕' }}</span>
               </th>
-              <th class="text-right">Action</th>
+              <th scope="col" class="text-right">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -1226,7 +1226,7 @@ onMounted(() => {
 }
 
 .sort-icon {
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   margin-left: 0.25rem;
   opacity: 0.6;
 }
@@ -1264,7 +1264,7 @@ onMounted(() => {
 }
 
 .device-pill {
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-weight: 600;
   padding: 0.15rem 0.4rem;
   background: var(--bg-surface-selected);
@@ -1589,7 +1589,7 @@ onMounted(() => {
 }
 
 .locked-badge {
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-weight: 700;
   padding: 0.125rem 0.375rem;
   border-radius: 3px;
@@ -1657,7 +1657,7 @@ onMounted(() => {
 }
 
 .template-badge {
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1700,7 +1700,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   color: var(--text-muted, #71717a);
   margin-top: 0.25rem;
   padding-top: 0.5rem;

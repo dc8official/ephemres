@@ -70,11 +70,11 @@
             <table class="path-table">
               <thead>
                 <tr>
-                  <th>Router</th>
-                  <th>Direction</th>
-                  <th>Out interface</th>
-                  <th>Next hop</th>
-                  <th>Last traffic</th>
+                  <th scope="col">Router</th>
+                  <th scope="col">Direction</th>
+                  <th scope="col">Out interface</th>
+                  <th scope="col">Next hop</th>
+                  <th scope="col">Last traffic</th>
                 </tr>
               </thead>
               <tbody>
@@ -112,10 +112,10 @@
           <table class="path-table">
             <thead>
               <tr>
-                <th class="col-hop">HOP #</th>
-                <th class="col-baseline">LAST KNOWN ONLINE BASELINE (IP & RTT)</th>
-                <th class="col-failure">FAILURE TRACE SNAPSHOT (IP & RTT)</th>
-                <th class="col-status">DIFFERENTIAL STATUS</th>
+                <th scope="col" class="col-hop">HOP #</th>
+                <th scope="col" class="col-baseline">LAST KNOWN ONLINE BASELINE (IP & RTT)</th>
+                <th scope="col" class="col-failure">FAILURE TRACE SNAPSHOT (IP & RTT)</th>
+                <th scope="col" class="col-status">DIFFERENTIAL STATUS</th>
               </tr>
             </thead>
             <tbody>

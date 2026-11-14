@@ -119,6 +119,8 @@
 
     <!-- Endpoints Content -->
     <div>
+      <!-- Failures of page-level actions (CSV export) show here instead of a blocking alert(). -->
+      <div v-if="actionError" class="inline-alert" role="alert">{{ actionError }}</div>
       <div v-if="error" class="alert-error" role="alert">
         {{ error }}
       </div>
@@ -164,7 +166,7 @@
           <table class="dense-table" aria-label="Monitored Endpoints Table">
             <thead>
               <tr>
-                <th style="width: 44px;">
+                <th scope="col" style="width: 44px;">
                   <label class="select-target">
                     <input
                       type="checkbox"
@@ -174,32 +176,32 @@
                     />
                   </label>
                 </th>
-                <th @click="handleSort('hostname')" class="sortable-th">
+                <th scope="col" @click="handleSort('hostname')" class="sortable-th">
                   Hostname {{ sortKey === 'hostname' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('ip_address')" class="sortable-th">
+                <th scope="col" @click="handleSort('ip_address')" class="sortable-th">
                   IP Address {{ sortKey === 'ip_address' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('device_type')" class="sortable-th">
+                <th scope="col" @click="handleSort('device_type')" class="sortable-th">
                   Device Type {{ sortKey === 'device_type' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('severity')" class="sortable-th" title="Down first, then unstable, up, and endpoints without status">
+                <th scope="col" @click="handleSort('severity')" class="sortable-th" title="Down first, then unstable, up, and endpoints without status">
                   State {{ sortKey === 'severity' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('avg_rtt_ms')" class="sortable-th text-right" title="Mean and 95th percentile RTT over the last 24 hours">
+                <th scope="col" @click="handleSort('avg_rtt_ms')" class="sortable-th text-right" title="Mean and 95th percentile RTT over the last 24 hours">
                   Latency 24h · p95 {{ sortKey === 'avg_rtt_ms' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('loss_pct')" class="sortable-th text-right" title="Share of probes without a reply over the last 24 hours">
+                <th scope="col" @click="handleSort('loss_pct')" class="sortable-th text-right" title="Share of probes without a reply over the last 24 hours">
                   Loss 24h {{ sortKey === 'loss_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th title="Hourly mean RTT over the last 24 hours">RTT trend</th>
-                <th @click="handleSort('uptime_pct')" class="sortable-th text-right">
+                <th scope="col" title="Hourly mean RTT over the last 24 hours">RTT trend</th>
+                <th scope="col" @click="handleSort('uptime_pct')" class="sortable-th text-right">
                   24h Uptime {{ sortKey === 'uptime_pct' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th @click="handleSort('last_seen')" class="sortable-th" title="When the current state began">
+                <th scope="col" @click="handleSort('last_seen')" class="sortable-th" title="When the current state began">
                   In state since {{ sortKey === 'last_seen' ? (sortAsc ? '▲' : '▼') : '' }}
                 </th>
-                <th class="text-right">Actions</th>
+                <th scope="col" class="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -354,9 +356,9 @@
 
     <!-- Add / Edit Endpoint Modal -->
     <div v-if="displayDialog" class="modal-overlay" @click.self="displayDialog = false">
-      <div class="modal-card">
+      <div role="dialog" aria-modal="true" aria-labelledby="dash-modal-1-title" class="modal-card">
         <div class="modal-header">
-          <h3>{{ isEditing ? 'Modify Monitored Endpoint' : 'Register New Monitored Endpoint' }}</h3>
+          <h3 id="dash-modal-1-title">{{ isEditing ? 'Modify Monitored Endpoint' : 'Register New Monitored Endpoint' }}</h3>
           <button class="btn-close" @click="displayDialog = false">✕</button>
         </div>
         <form @submit.prevent="saveEndpoint" class="modal-form">
@@ -445,6 +447,7 @@
               <option v-for="c in snmpSets" :key="c.id" :value="c.id">{{ c.name }}</option>
             </select>
           </div>
+          <div v-if="formError" class="inline-alert" role="alert">{{ formError }}</div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="displayDialog = false">Cancel</button>
             <button type="submit" class="btn-primary" :disabled="formSaving">
@@ -457,14 +460,15 @@
 
     <!-- Delete Confirmation Modal -->
     <div v-if="displayDeleteDialog" class="modal-overlay" @click.self="displayDeleteDialog = false">
-      <div class="modal-card">
+      <div role="dialog" aria-modal="true" aria-labelledby="dash-modal-2-title" class="modal-card">
         <div class="modal-header">
-          <h3>Confirm Deletion</h3>
+          <h3 id="dash-modal-2-title">Confirm Deletion</h3>
           <button class="btn-close" @click="displayDeleteDialog = false">✕</button>
         </div>
         <div class="modal-form text-center">
           <p class="modal-alert-text">Are you sure you want to delete this endpoint?</p>
           <p class="warning-subtext">This action will stop active monitoring and is completely irreversible.</p>
+          <div v-if="deleteError" class="inline-alert" role="alert">{{ deleteError }}</div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="displayDeleteDialog = false">Cancel</button>
             <button type="button" class="btn-danger" :disabled="formSaving" @click="executeDeleteEndpoint">
@@ -487,6 +491,7 @@
 
 <script setup>
 import { ref, reactive, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useEscapeClose } from '../composables/useEscapeClose.js'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import { 
@@ -635,6 +640,11 @@ const exporting = ref(false)
 const displayDialog = ref(false)
 const displayDeleteDialog = ref(false)
 const formSaving = ref(false)
+// Each message shows where its action was started: inside the add/edit dialog,
+// inside the delete dialog, or at the top of the list (CSV export).
+const formError = ref(null)
+const deleteError = ref(null)
+const actionError = ref(null)
 const isEditing = ref(false)
 const targetEndpointId = ref(null)
 
@@ -897,6 +907,7 @@ const toggleEndpointSelect = (id) => {
 const exportSelectedCSV = async () => {
   if (selectedIds.value.length === 0) return
   exporting.value = true
+  actionError.value = null
   try {
     const now = new Date()
     const endTime = now.toISOString()
@@ -914,7 +925,7 @@ const exportSelectedCSV = async () => {
     document.body.removeChild(link)
   } catch (err) {
     console.error('Batch export failed:', err)
-    alert('Failed to export CSV. Check server logs.')
+    actionError.value = 'Failed to export CSV. Check server logs.'
   } finally {
     exporting.value = false
   }
@@ -1029,7 +1040,7 @@ const saveEndpoint = async () => {
     await fetchEndpoints()
     filterState.refreshMatch()
   } catch (err) {
-    alert(err.response?.data?.detail || 'Failed to save endpoint.')
+    formError.value = err.response?.data?.detail || 'Failed to save endpoint.'
   } finally {
     formSaving.value = false
   }
@@ -1047,7 +1058,7 @@ const executeDeleteEndpoint = async () => {
     displayDeleteDialog.value = false
     await fetchEndpoints()
   } catch (err) {
-    alert(err.response?.data?.detail || 'Failed to delete endpoint.')
+    deleteError.value = err.response?.data?.detail || 'Failed to delete endpoint.'
   } finally {
     formSaving.value = false
   }
@@ -1095,6 +1106,12 @@ function initSSE() {
     fetchEndpoints()
   })
 }
+
+// Escape closes the modal; reopening it starts without the last attempt's message.
+useEscapeClose(displayDialog, () => { displayDialog.value = false })
+useEscapeClose(displayDeleteDialog, () => { displayDeleteDialog.value = false })
+watch(displayDialog, () => { formError.value = null })
+watch(displayDeleteDialog, () => { deleteError.value = null })
 
 onMounted(async () => {
   loadUserFromStorage()
@@ -1349,7 +1366,7 @@ onUnmounted(() => {
 }
 
 .tab-badge {
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg-surface-selected);
   border: 1px solid var(--border-color);
   padding: 1px 6px;
@@ -1376,7 +1393,7 @@ onUnmounted(() => {
 }
 
 .device-tag {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   background: var(--bg-surface-selected);
   border: 1px solid var(--border-color);

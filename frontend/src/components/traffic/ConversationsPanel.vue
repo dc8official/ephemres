@@ -35,16 +35,16 @@
       <table class="dense-table" :aria-label="title" :aria-busy="loading">
         <thead>
           <tr>
-            <th>Source</th>
-            <th>Destination</th>
-            <th>Site</th>
-            <th v-if="showSeen">First / last seen</th>
-            <th>Protocol</th>
-            <th>Service port</th>
-            <th>Profile &amp; avg packet</th>
-            <th>Flags &amp; QoS</th>
-            <th class="text-right">Volume</th>
-            <th class="text-right">Flows</th>
+            <th scope="col">Source</th>
+            <th scope="col">Destination</th>
+            <th scope="col">Site</th>
+            <th scope="col" v-if="showSeen">First / last seen</th>
+            <th scope="col">Protocol</th>
+            <th scope="col">Service port</th>
+            <th scope="col">Profile &amp; avg packet</th>
+            <th scope="col">Flags &amp; QoS</th>
+            <th scope="col" class="text-right">Volume</th>
+            <th scope="col" class="text-right">Flows</th>
           </tr>
         </thead>
         <tbody>

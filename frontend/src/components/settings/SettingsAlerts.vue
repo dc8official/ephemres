@@ -79,12 +79,12 @@
         <table class="data-table" aria-label="Alert Channels Table">
           <thead>
             <tr>
-              <th>Channel Name</th>
-              <th>Provider</th>
-              <th>Endpoint Scope</th>
-              <th>Severities</th>
-              <th>Status</th>
-              <th class="text-right">Actions</th>
+              <th scope="col">Channel Name</th>
+              <th scope="col">Provider</th>
+              <th scope="col">Endpoint Scope</th>
+              <th scope="col">Severities</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -142,11 +142,14 @@
                     <i class="pi" :class="testingChannelId === ch.id ? 'pi-spin pi-spinner' : 'pi-send'"></i>
                     {{ testingChannelId === ch.id ? 'Testing...' : 'Test' }}
                   </button>
-                  <button class="btn-action" @click="openEditChannelModal(ch)" title="Edit Channel">
-                    ✏️ Edit
+                  <button class="btn-action" @click="openEditChannelModal(ch)" :aria-label="`Edit channel ${ch.name}`">
+                    <i class="pi pi-pencil" aria-hidden="true"></i>
+                    Edit
                   </button>
-                  <button class="btn-action text-down" @click="confirmDeleteChannel(ch)" title="Delete Channel">
-                    ✕
+                  <!-- Spelled out and set apart from Edit: a bare "✕" beside it was easy to hit by mistake. -->
+                  <button class="btn-action btn-action-delete text-down" @click="confirmDeleteChannel(ch)" :aria-label="`Delete channel ${ch.name}`">
+                    <i class="pi pi-trash" aria-hidden="true"></i>
+                    Delete
                   </button>
                 </div>
               </td>
@@ -172,12 +175,12 @@
         <table class="data-table" aria-label="Alert Delivery Audit Log Table">
           <thead>
             <tr>
-              <th>Delivered At (UTC)</th>
-              <th>Channel</th>
-              <th>Target Endpoint</th>
-              <th>Event Type</th>
-              <th>Delivery Status</th>
-              <th>Response / Error Details</th>
+              <th scope="col">Delivered At (UTC)</th>
+              <th scope="col">Channel</th>
+              <th scope="col">Target Endpoint</th>
+              <th scope="col">Event Type</th>
+              <th scope="col">Delivery Status</th>
+              <th scope="col">Response / Error Details</th>
             </tr>
           </thead>
           <tbody>
@@ -962,7 +965,7 @@ onMounted(() => {
 }
 
 .engine-badge {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.05em;
   padding: 2px 8px;
@@ -1046,6 +1049,10 @@ input:checked + .slider:before {
   gap: 4px;
 }
 
+.btn-action-delete {
+  margin-left: 0.75rem;
+}
+
 .btn-action:hover {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
@@ -1077,7 +1084,7 @@ input:checked + .slider:before {
 }
 
 .provider-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 4px;
@@ -1087,7 +1094,7 @@ input:checked + .slider:before {
 }
 
 .badge-scope {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 6px;
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.08);
@@ -1106,7 +1113,7 @@ input:checked + .slider:before {
 }
 
 .severity-tag {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 3px;
@@ -1156,7 +1163,7 @@ input:checked + .slider:before {
 }
 
 .status-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
@@ -1260,7 +1267,7 @@ input:checked + .slider:before {
 .label-hint {
   font-weight: 400;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .form-input {
@@ -1275,7 +1282,6 @@ input:checked + .slider:before {
 
 .form-input:focus {
   border-color: #0ea5e9;
-  outline: none;
 }
 
 .provider-selector-grid {
@@ -1307,14 +1313,14 @@ input:checked + .slider:before {
 }
 
 .provider-name {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
   text-align: center;
 }
 
 .provider-badge {
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -1397,7 +1403,7 @@ input:checked + .slider:before {
 }
 
 .device-pill {
-  font-size: 10px;
+  font-size: 12px;
   padding: 1px 6px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.08);

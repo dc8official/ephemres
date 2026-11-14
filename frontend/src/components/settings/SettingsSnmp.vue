@@ -44,7 +44,7 @@
       <div v-else-if="!sets.length" class="muted">No credential sets yet.</div>
       <table v-else class="sets-table">
         <thead>
-          <tr><th>Name</th><th>Security</th><th>Port</th><th>Endpoints</th><th></th></tr>
+          <tr><th scope="col">Name</th><th scope="col">Security</th><th scope="col">Port</th><th scope="col">Endpoints</th><th scope="col"></th></tr>
         </thead>
         <tbody>
           <tr v-for="s in sets" :key="s.id">
@@ -177,6 +177,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { useEscapeClose } from '../../composables/useEscapeClose.js'
 import { useToast } from 'primevue/usetoast'
 import {
   getSnmpCredentials, createSnmpCredentials, updateSnmpCredentials, deleteSnmpCredentials, testSnmpCredentials,
@@ -323,6 +324,8 @@ async function runTest() {
   }
 }
 
+useEscapeClose(dialogOpen, () => closeDialog())
+
 onMounted(load)
 </script>
 
@@ -341,7 +344,7 @@ onMounted(load)
   background: var(--bg-surface-selected); border: 1px solid var(--border-color); color: var(--text-primary);
   padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 100%; box-sizing: border-box;
 }
-.form-select:focus, .modal-form input:focus { border-color: #0ea5e9; outline: none; }
+.form-select:focus, .modal-form input:focus { border-color: #0ea5e9; }
 #snmp-interval { width: auto; }
 .switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
 .switch input { opacity: 0; width: 0; height: 0; }
@@ -354,7 +357,7 @@ input:checked + .slider:before { transform: translateX(20px); }
 .sets-table td { padding: 8px; border-bottom: 1px solid var(--border-color); vertical-align: middle; }
 .row-actions { text-align: right; white-space: nowrap; }
 .row-actions > * { margin-left: 6px; }
-.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: var(--bg-surface-selected); border: 1px solid var(--border-color); }
+.chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: var(--bg-surface-selected); border: 1px solid var(--border-color); }
 .btn-primary, .btn-secondary, .btn-danger { border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; border: 1px solid var(--border-color); }
 .btn-primary { background: #0ea5e9; border-color: #0ea5e9; color: #fff; font-weight: 600; }
 .btn-secondary { background: var(--bg-surface-selected); color: var(--text-primary); }
@@ -380,7 +383,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .test-result.ok strong { color: #10b981; }
 .test-result.bad strong { color: #f87171; }
 .test-result ul { margin: 6px 0; padding-left: 18px; color: var(--text-muted); }
-.test-result pre { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; background: var(--bg-surface-selected); padding: 8px; border-radius: 6px; }
+.test-result pre { white-space: pre-wrap; font-size: 12px; max-height: 260px; overflow: auto; background: var(--bg-surface-selected); padding: 8px; border-radius: 6px; }
 .form-error { color: #f87171; font-size: 13px; margin: 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .font-mono { font-family: var(--font-mono); }

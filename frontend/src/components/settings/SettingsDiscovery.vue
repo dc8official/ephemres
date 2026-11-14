@@ -162,7 +162,6 @@ function emitChange() {
 
 .form-select:focus {
   border-color: #0ea5e9;
-  outline: none;
 }
 
 .switch {

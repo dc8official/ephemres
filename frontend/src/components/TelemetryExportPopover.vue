@@ -270,7 +270,6 @@ function executeExport() {
   padding: 0.45rem 0.6rem;
   border-radius: var(--radius-sm, 6px);
   font-size: 0.85rem;
-  outline: none;
 }
 
 .select-input:focus {

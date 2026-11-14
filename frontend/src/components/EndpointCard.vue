@@ -239,7 +239,7 @@ const timeAgo = computed(() => {
 }
 
 .card-latency {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
   background: var(--bg-surface-hover);
@@ -296,7 +296,7 @@ const timeAgo = computed(() => {
 }
 
 .uptime-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
