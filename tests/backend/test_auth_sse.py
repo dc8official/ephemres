@@ -1,6 +1,7 @@
 import pytest
 from app.core.asgi import TestClient
 from app.main import app
+from app.version import VERSION
 
 
 def test_sse_endpoint_requires_authentication():
@@ -32,6 +33,6 @@ def test_sse_endpoint_streaming_headers_and_greeting():
         assert "text/event-stream" in response.headers.get("content-type", "")
         assert "content-length" not in response.headers, "SSE response must not contain content-length"
         assert "CONNECTED" in response.text
-        assert "Ephemres v3.3.5 SSE stream established" in response.text
+        assert f"Ephemres v{VERSION} SSE stream established" in response.text
     finally:
         app.dependency_overrides.pop(get_current_user_sse, None)

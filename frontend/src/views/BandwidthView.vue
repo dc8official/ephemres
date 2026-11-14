@@ -1010,7 +1010,12 @@ const windowWords = computed(() => WINDOW_WORDS[selectedWindow.value] || selecte
 
 // Routers that export flows but sent none in the last five minutes (review O4: the status line
 // turns amber). Picker devices that only answer SNMP are not expected to send any.
-const stoppedRouters = computed(() => flowExporters.value.filter((d) => d.sends_flows && !(d.flows_per_sec > 0)))
+// The routers the status line speaks for: the picked device, else every one in the filter. The
+// flow count beside it is for the same scope ("3 of 3 routers" next to one router's flows read
+// as if the device picker did nothing).
+const statusRouters = computed(() =>
+  flowExporters.value.filter((d) => d.sends_flows && (!selectedDeviceId.value || d.id === selectedDeviceId.value)))
+const stoppedRouters = computed(() => statusRouters.value.filter((d) => !(d.flows_per_sec > 0)))
 
 function shortTime(iso) {
   return iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : ''
@@ -1021,7 +1026,7 @@ function shortTime(iso) {
 const statusParts = computed(() => {
   const o = overview.value
   const parts = []
-  const exporting = flowExporters.value.filter((d) => d.sends_flows).length
+  const exporting = statusRouters.value.length
   const sending = Math.max(0, exporting - stoppedRouters.value.length)
   const routers = { text: `${sending} of ${exporting} router${exporting === 1 ? '' : 's'} sending flows` }
   if (stoppedRouters.value.length) {

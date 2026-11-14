@@ -11,6 +11,7 @@ from app.core.asgi import StreamingResponse
 
 from app.routers.auth import get_current_user_sse
 from app.services.driver_manager import driver_manager
+from app.version import VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def sse_event_generator(
 
     try:
         # Initial greeting event
-        init_payload = json.dumps({"type": "CONNECTED", "message": "Ephemres v3.3.5 SSE stream established."})
+        init_payload = json.dumps({"type": "CONNECTED", "message": f"Ephemres v{VERSION} SSE stream established."})
         yield f"data: {init_payload}\n\n"
 
         next_check = time.monotonic() + SESSION_RECHECK_SECONDS

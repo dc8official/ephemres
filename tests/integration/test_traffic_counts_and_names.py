@@ -189,6 +189,22 @@ def test_conversations_name_the_sites_and_routers_that_saw_them(api_client, run_
     assert abuja[(PC_IP, ERP_IP, 1433)]["total_bytes"] == 9 * MB
 
 
+def test_flows_from_an_unmatched_source_name_no_router(api_client, run_sql):
+    """v3.3.0 stored flows from sources matched to no endpoint under the all-zero exporter id; an
+    upgraded server still has them. They name no router (found by the v3.3.0 -> v3.3.6 upgrade
+    test, 2026-11-14: they showed as a nameless one)."""
+    unmatched = uuid.UUID(int=0)
+    _seed(run_sql, [
+        (5, unmatched, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 3 * MB, 3_000, 2),
+        (5, HQ_ID, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 2 * MB, 2_000, 2),
+        (6, unmatched, None, None, MS365_IP, PC_IP, UDP, 443, 1 * MB, 1_000, 1),
+    ])
+    convs = _conversations(api_client)
+    assert [r["hostname"] for r in convs[(PC_IP, ERP_IP, 1433)]["routers"]] == ["hq-rtr1"]
+    assert convs[(PC_IP, ERP_IP, 1433)]["total_bytes"] == 3 * MB  # still counted, at the larger report
+    assert convs[(MS365_IP, PC_IP, 443)]["routers"] == []
+
+
 SCANNER_IP = "185.220.101.4"
 
 

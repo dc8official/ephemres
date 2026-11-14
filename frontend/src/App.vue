@@ -6,7 +6,7 @@
       <div class="header-inner">
         <div class="brand">
           <span class="brand-name">Ephemres</span>
-          <span class="brand-version">{{ appVersion || 'v3.3.5' }}</span>
+          <span class="brand-version">{{ appVersion }}</span>
         </div>
         <!-- Below ~1000 px the links collapse into a disclosure menu instead of wrapping. -->
         <button
@@ -145,7 +145,8 @@ const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 const isDark = ref(true)
-const appVersion = ref('v3.3.5')
+// From package.json at build time (vite.config.js), replaced by the API's own version once it answers.
+const appVersion = ref(`v${__APP_VERSION__}`)
 const liveAnnouncement = ref('')
 const { subscribe } = useSSE()
 let unsubscribeSSE = null
@@ -223,7 +224,7 @@ onMounted(async () => {
       appVersion.value = `v${res.data.data.version.replace(/^v/, '')}`
     }
   } catch (err) {
-    appVersion.value = 'v3.3.5'
+    appVersion.value = `v${__APP_VERSION__}`
   }
 
   // Global SSE listener for accessibility screen reader announcements

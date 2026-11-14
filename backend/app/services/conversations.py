@@ -51,6 +51,9 @@ _QUICK_WHERE = {
     "bulk": "is_bulk",
 }
 
+# exporter_id of flows from a source matched to no endpoint (monitoring.flow.aggregator.SENTINEL_UUID).
+UNMATCHED_EXPORTER = "00000000-0000-0000-0000-000000000000"
+
 _MINUTE_TABLE = "flow_minute_rollups"
 _HOURLY_TABLE = "flow_conversation_hourly_rollups"
 _BUCKET_SECONDS = {_MINUTE_TABLE: 60, _HOURLY_TABLE: 3600}
@@ -265,6 +268,10 @@ async def conversation_routers(
     reported each, by hostname, with their site (review C1) and their WAN link when they have
     exactly one (review S1). `where_sql` / `params` are build_filters' own, before the CTE."""
     seen = await conversation_exporters(db, where_sql, dict(params), [_conversation_key(r) for r in rows])
+    # The all-zero id stands for flows from a source matched to no endpoint (v3.3.0 stored those;
+    # an upgraded server keeps them for the conversation tier's 90 days). It is no router and has
+    # no site, so it is left out rather than listed as a nameless one.
+    seen = {key: [e for e in exporters if str(e) != UNMATCHED_EXPORTER] for key, exporters in seen.items()}
     ids = sorted({str(e) for exporters in seen.values() for e in exporters})
     if not ids:
         return {}

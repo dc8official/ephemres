@@ -1,9 +1,20 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
+
+// The release, from package.json (kept equal to backend/app/version.py): the UI shows it before
+// the API answers, and the page title carries it. Until v3.3.6 it was typed into each place.
+const APP_VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    { name: 'app-version-title', transformIndexHtml: (html) => html.replaceAll('%APP_VERSION%', APP_VERSION) },
+  ],
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

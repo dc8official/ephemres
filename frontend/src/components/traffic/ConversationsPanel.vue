@@ -232,9 +232,14 @@ function routerLine(c) {
 // not kept.
 const seenTitle = computed(() => (props.window === '1h' ? 'To the minute' : 'To the hour: the first hour it was seen in, and the end of the last'))
 
+// A weekday alone is ambiguous once the window covers a week ("Sat 08:06 to Sat 08:05" at 7d
+// was last Saturday to today), so 7d and longer add the date.
 function when(iso) {
   if (!iso) return '—'
-  const opts = { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }
+  const withDate = ['7d', '30d', '1y'].includes(props.window)
+  const opts = withDate
+    ? { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }
+    : { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }
   try {
     return new Intl.DateTimeFormat(undefined, { ...opts, timeZone: props.timezone || undefined }).format(new Date(iso))
   } catch {

@@ -61,25 +61,80 @@ cd /opt/ephemres/deploy
 
 ---
 
-## 3. Upgrading to Version 3.3.5 (Zero Historical Data Loss)
+## 3. Upgrading to Version 3.3.6 (Zero Historical Data Loss)
 
-To perform an in-place upgrade from `v3.3.0` (LTS) or `v3.3.2.v` to `v3.3.5`:
+### From v3.3.5, v3.3.2.v or v3.3.0: run v3.3.6's own script
+
+The `upgrade.sh` already installed by those releases can't do this upgrade properly: it fetches
+its own release again unless told otherwise, and it never installs what v3.3.6 adds (the
+`ephemres-snmpd` service). Fetch v3.3.6 and run its script instead:
 
 ```bash
-sudo bash /opt/ephemres/deploy/upgrade.sh
+git clone --depth 1 --branch v3.3.6 https://github.com/dc8official/ephemres.git ~/ephemres-v3.3.6
+sudo bash ~/ephemres-v3.3.6/deploy/upgrade.sh
 ```
-`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. No manual `git pull` is needed.
+
+Clone it into a directory that allows running programs (your home directory is fine). The
+upgrade builds the frontend there, and a `/tmp` mounted `noexec` would stop that build.
+
+### From v3.3.6 on
+
+```bash
+sudo EPHEMRES_BRANCH=v3.3.7 bash /opt/ephemres/deploy/upgrade.sh   # name the release you want
+```
+
+`upgrade.sh` fetches the code itself.
+- **From a git checkout,** it pulls that checkout: the branch is `EPHEMRES_BRANCH`, else the
+  checkout's own branch.
+- **From a copy without `.git`** (such as `/opt/ephemres`), it clones the branch from GitHub into
+  `/var/lib/ephemres`: `EPHEMRES_BRANCH`, else the script's own release. Set
+  `EPHEMRES_UPGRADE_STAGE_ROOT` to use another directory. It never stages in `/tmp`.
+- **When the fetched release's `upgrade.sh` differs from the one running,** it hands over to it,
+  so each release's own upgrade steps always run.
+- **It refuses to install an older release than the one installed** (set
+  `EPHEMRES_ALLOW_DOWNGRADE=1` to do it anyway). It also refuses releases older than v3.3.6.
 
 ### Automated Upgrade Lifecycle Steps:
-1. **Pre-Upgrade Database Backup**: Automatically creates a timestamped SQL backup at `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql` before any changes. If the backup fails, the upgrade aborts immediately.
-2. **System Dependencies**: Verifies essential packages (`traceroute`, `libcap2-bin`). It installs no `redis-server` or `libpango-1.0-0`, but doesn't remove them either (see below).
-3. **Network Capabilities**: Sets `cap_net_raw+ep` on `traceroute`, and removes the host-wide `cap_net_raw` file capability that earlier releases placed on the system Python interpreter (other file capabilities are left untouched). The refreshed unit files grant `CAP_NET_RAW` to the daemons.
-4. **Smart Config Migration**: Patches `/etc/ephemres/config.toml` with v3.3.5 defaults (5 pings @ 8s, 120-minute session timeout, 2-session limit, FastStore in-RAM storage, `[alerting]`, and `[flow]` sections including `route_change_minutes` and `route_ecmp_share`).
-5. **Daemon Pause**: Gracefully stops `ephemres-flowd`, `ephemres-engine`, and `ephemres-api`.
-6. **Code & Dependency Sync**: Pulls latest codebase, installs the pinned, hash-checked packages in `backend/requirements.lock` (`uvicorn`, `httptools`, `uvloop`, `asyncpg`, and uvicorn's `click` and `h11`), removes the unused packages older releases installed with `uvicorn[standard]`, and compiles frontend assets.
-7. **Native Async Migrations**: Runs `python3 -m app.core.migrator upgrade head` to apply all database revisions while preserving all historical TimescaleDB hypertable data.
-8. **Unit Refresh & Daemon Restart**: Refreshes `ephemres-api.service`, `ephemres-engine.service`, and `ephemres-flowd.service`, reloads systemd daemons, enables auto-start on boot, and restarts `ephemres-api`, `ephemres-engine`, and `nginx`. If flow ingestion is enabled, automatically starts `ephemres-flowd` and configures UFW rules for UDP 2055 and UDP 4739.
-9. **Health Verification**: Verifies API health and version endpoints (`/api/v1/version`).
+1. **Before anything stops**, nothing on the server changes while it prepares. If any of this
+   fails, the upgrade ends with the running version untouched:
+   - it fetches the release (above);
+   - it builds that release's frontend;
+   - it downloads that release's Python packages and checks their hashes.
+2. **Pre-Upgrade Database Backup**:
+   - It stops the services, records which ones were running, and writes a timestamped SQL backup
+     to `/var/backups/ephemres/ephemres_backup_<TIMESTAMP>.sql`.
+   - If the backup fails, the upgrade ends and the services are started again.
+3. **Network Capabilities**:
+   - Sets `cap_net_raw+ep` on `traceroute`.
+   - Removes the host-wide `cap_net_raw` file capability that earlier releases placed on the
+     system Python interpreter. Other file capabilities are left untouched.
+   - The refreshed unit files grant `CAP_NET_RAW` to the daemons.
+4. **Smart Config Migration**: patches `/etc/ephemres/config.toml` with current defaults:
+   - 5 pings at 8 s, a 2-session limit, FastStore in-RAM storage;
+   - the `[alerting]` and `[flow]` sections, including `route_change_minutes` and
+     `route_ecmp_share`.
+5. **Code & Dependency Sync**:
+   - Copies the release into `/opt/ephemres`.
+   - Installs the pinned packages in `backend/requirements.lock` from the files downloaded in
+     step 1: `uvicorn`, `httptools`, `uvloop`, `asyncpg`, and uvicorn's `click` and `h11`. It
+     goes online only if a package has to be built for this platform.
+   - Removes the unused packages older releases installed with `uvicorn[standard]`.
+6. **Native Async Migrations**: runs `python3 -m app.core.migrator upgrade head`, which applies
+   all database revisions and keeps all historical TimescaleDB hypertable data.
+7. **Unit Refresh & Daemon Restart**:
+   - Refreshes the `ephemres-api`, `ephemres-engine`, `ephemres-flowd` and `ephemres-snmpd`
+     units, reloads systemd and enables them at boot.
+   - Restarts `ephemres-api`, `ephemres-engine`, `ephemres-snmpd` and `nginx`.
+   - If flow ingestion is on, starts `ephemres-flowd` and opens UDP 2055 and 4739 in UFW.
+8. **Health Verification**: checks that the API answers `/api/v1/health`.
+
+**If the upgrade fails after the services stopped** (since v3.3.6), it acts on how far it got:
+- **Before the new code was copied in:** it starts the stopped services again, on the old version.
+- **After the database migrations:** it starts the new services.
+- **In between** (new code, database not migrated): it leaves the services stopped and says
+  so, naming the pre-upgrade backup. Neither version can run against that database.
+
+Until v3.3.6, any failure after the stop left monitoring and alerting down until someone noticed.
 
 ### After Upgrading from v3.2.0 / v3.3.0 (netmon layout)
 The upgrade keeps the old install so you can roll back: `/opt/netmon`, `/etc/netmon` (with a second copy of the database password and secret key), the disabled `netmon-*` units, their sudo rule and logrotate file, `/var/log/netmon`, the `netmon` user, and `redis-server`, which keeps running although v3.3.5 never uses it. Once the upgraded server has proved itself, remove them with the optional cleanup script. It lists what it would remove and changes nothing until you add `--apply`:

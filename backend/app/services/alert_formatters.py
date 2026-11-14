@@ -5,6 +5,7 @@ from email.message import EmailMessage
 import html
 import re
 from typing import Any, Dict, Optional
+from app.version import VERSION
 
 
 def _escape_slack_mrkdwn(text: Any) -> str:
@@ -228,7 +229,7 @@ def build_discord_payload(
                 "url": url,
                 "color": color,
                 "fields": fields,
-                "footer": {"text": "Ephemres Enterprise Observability Engine v3.3.5"},
+                "footer": {"text": f"Ephemres Enterprise Observability Engine v{VERSION}"},
             }
         ],
     }
@@ -288,7 +289,7 @@ def build_slack_payload(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Timestamp (UTC): *{ts_str}* | Ephemres Observability Platform v3.3.5",
+                    "text": f"Timestamp (UTC): *{ts_str}* | Ephemres Observability Platform v{VERSION}",
                 }
             ],
         },
@@ -359,7 +360,7 @@ Timestamp:  {ts_str}
 {"".join(f"{k + ':':<12}{v}" + chr(10) for k, v in facts)}
 Console:    {url}
 --------------------------------------------
-Sent by Ephemres Enterprise Platform v3.3.5
+Sent by Ephemres Enterprise Platform v{VERSION}
 """.strip()
 
     html_body = f"""
@@ -385,7 +386,7 @@ Sent by Ephemres Enterprise Platform v3.3.5
       </div>
     </div>
     <div style="background-color: #121215; padding: 12px 20px; text-align: center; font-size: 12px; color: #71717a;">
-      Ephemres Enterprise Observability Engine v3.3.5 • Autonomous Network Reliability
+      Ephemres Enterprise Observability Engine v{VERSION} • Autonomous Network Reliability
     </div>
   </div>
 </body>

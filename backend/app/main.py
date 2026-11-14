@@ -44,6 +44,7 @@ from app.core.watchdog import start_loop_stall_guard, start_systemd_watchdog
 from app.services.telemetry_relay import CHANNELS as RELAY_CHANNELS, telemetry_relay
 from app.services.scheduler_leader import scheduler_leader
 from app.services.topology import start_topology_flow_refresh_task, topology_manager
+from app.version import VERSION
 
 # Initialize dual console and rotating file logging
 logger = setup_logging(
@@ -109,7 +110,7 @@ async def lifespan(app: FastAPI):
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     stall_guard_task = start_loop_stall_guard()
     logger.info(
-        "Ephemres v3.3.5 started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
+        f"Ephemres v{VERSION} started successfully with Enterprise Alerting, Dual-Storage, Flow Telemetry, Interface Metrics, Cluster Settings Sync & Zero-Trust SSRF Protection."
     )
     yield
     if stall_guard_task is not None:
@@ -125,7 +126,7 @@ async def lifespan(app: FastAPI):
     midnight_task.cancel()
     cleanup_task.cancel()
     await scheduler_leader.stop()
-    logger.info("Ephemres v3.3.5 platform shutting down cleanly.")
+    logger.info("Ephemres v%s platform shutting down cleanly.", VERSION)
 
 
 # The OpenAPI document lists every route and the exact version, and is served without signing
@@ -138,7 +139,7 @@ _SERVE_OPENAPI = settings.environment.lower() in ("development", "test")
 app = EphemresApp(
     title="Ephemres - Network Monitoring Platform",
     description="Ephemres High-Performance Network Monitoring and Observability Platform API",
-    version="3.3.5",
+    version=VERSION,
     docs_url=None,
     redoc_url=None,
     openapi_url="/api/openapi.json" if _SERVE_OPENAPI else None,
@@ -286,19 +287,19 @@ async def query_timeout_handler(request: Request, exc: Exception) -> JSONRespons
 @app.get("/api/v1/version", tags=["system"])
 async def get_version():
     return APIResponse.success(
-        data={"version": "3.3.5", "platform": "Ephemres v3.3.5"}
+        data={"version": VERSION, "platform": f"Ephemres v{VERSION}"}
     )
 
 
 @app.get("/api/v1/health", tags=["system"])
 async def health_check():
-    return APIResponse.success(data={"status": "ok", "version": "3.3.5"})
+    return APIResponse.success(data={"status": "ok", "version": VERSION})
 
 
 @app.get("/health/liveness", tags=["system"])
 @app.get("/api/v1/health/liveness", tags=["system"])
 async def health_liveness():
-    return {"status": "ok", "process": "healthy", "version": "3.3.5"}
+    return {"status": "ok", "process": "healthy", "version": VERSION}
 
 
 @app.get("/health/readiness", tags=["system"])
@@ -357,6 +358,6 @@ async def health_readiness():
                 "enabled": faststore_in_use,
                 "error": redis_err,
             },
-            "version": "3.3.5",
+            "version": VERSION,
         },
     )

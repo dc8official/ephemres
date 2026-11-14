@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Ephemres Network Monitoring Platform v3.3.5 - Automated Upgrade Utility
+# Ephemres Network Monitoring Platform - Automated Upgrade Utility
 # ==============================================================================
 
 set -euo pipefail
@@ -15,6 +15,10 @@ NC='\033[0m' # No Color
 # ==============================================================================
 # 1. Parse Command-Line Options
 # ==============================================================================
+# The release this script belongs to; bump with backend/app/version.py.
+RELEASE_VERSION="3.3.6"
+# Kept for the hand-over to a fetched release's own script (see fetch_release).
+ORIGINAL_ARGS=("$@")
 DRY_RUN=0
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=1
@@ -30,7 +34,7 @@ if [[ ${EUID} -ne 0 && ${DRY_RUN} -eq 0 ]]; then
 fi
 
 echo -e "${BLUE}========================================================================${NC}"
-echo -e "${BLUE}    Ephemres Network Monitoring Platform v3.3.5 - Upgrade Utility        ${NC}"
+echo -e "${BLUE}    Ephemres Network Monitoring Platform v${RELEASE_VERSION} - Upgrade Utility        ${NC}"
 echo -e "${BLUE}========================================================================${NC}"
 
 # Resolve Script and Project Root Directory
@@ -40,9 +44,16 @@ source "${SCRIPT_DIR}/backup_lib.sh"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INSTALL_DIR="/opt/ephemres"
 REPO_URL="${EPHEMRES_REPO_URL:-https://github.com/dc8official/ephemres.git}"
-# Resolve Active or Target Upgrade Branch (defaults to current git branch or v3.3.5)
+# The branch to upgrade to: EPHEMRES_BRANCH, else the git checkout's own branch, else this
+# script's release. Until v3.3.6 the last fallback was a fixed older branch, so the documented
+# command (/opt/ephemres/deploy/upgrade.sh, a copy without .git) fetched that release again
+# instead of the new one (upgrade test 2026-11-14, U1). To move to a later release, name it:
+# sudo EPHEMRES_BRANCH=v3.3.7 bash /opt/ephemres/deploy/upgrade.sh (its own script takes over).
 CURRENT_GIT_BRANCH="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v3.3.5}}"
+[[ "${CURRENT_GIT_BRANCH}" == "HEAD" ]] && CURRENT_GIT_BRANCH=""  # a detached checkout names none
+UPGRADE_BRANCH="${EPHEMRES_BRANCH:-${CURRENT_GIT_BRANCH:-v${RELEASE_VERSION}}}"
+# This script as it was when it started: a git pull may replace the file under it.
+SELF_HASH="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
 UPGRADE_LOG="${EPHEMRES_UPGRADE_LOG:-/var/log/ephemres/upgrade.log}"
 
 # 3. Read Configuration Values
@@ -114,7 +125,7 @@ else
     done
 fi
 if [[ -z "${UPGRADE_PYTHON}" ]]; then
-    echo -e "${RED}[ERROR] Ephemres v3.3.5 needs Python 3.11 or newer with its venv module, and this server has none.${NC}" >&2
+    echo -e "${RED}[ERROR] Ephemres v${RELEASE_VERSION} needs Python 3.11 or newer with its venv module, and this server has none.${NC}" >&2
     echo -e "${RED}        Install it and run the upgrade again, e.g.: sudo apt-get install python3.11 python3.11-venv${NC}" >&2
     echo -e "${RED}        Nothing was changed: services are still running the current version.${NC}" >&2
     exit 1
@@ -131,6 +142,194 @@ if [[ -z "${DB_PASS}" && ${DRY_RUN} -eq 0 ]]; then
     exit 1
 fi
 
+# ==============================================================================
+# Before anything stops: services back up on failure, the release, its frontend and packages
+# ==============================================================================
+# Units this upgrade stopped, so a failure can bring them back (U3). Until v3.3.6 the services
+# were stopped before the backup and the download, and any later failure left monitoring and
+# alerting down until someone noticed (upgrade test 2026-11-14).
+PAUSED_UNITS=()
+CODE_SYNCED=0        # step 5 has replaced the code in ${INSTALL_DIR}
+DB_MIGRATED=0        # step 6 has run the migrations to the end
+UPGRADE_FINISHED=0
+STAGE_DIR=""         # a clone this script made, removed on exit
+PACKAGE_DIR=""       # Python packages downloaded before the stop, removed on exit
+
+pause_services() {
+    local unit
+    for unit in ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd netmon-engine netmon-api netmon-flowd; do
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            PAUSED_UNITS+=("${unit}")
+            systemctl stop "${unit}" || true
+        fi
+    done
+}
+
+on_exit() {
+    local rc=$?
+    [[ -n "${STAGE_DIR}" && -d "${STAGE_DIR}" ]] && rm -rf "${STAGE_DIR}"
+    [[ -n "${PACKAGE_DIR}" && -d "${PACKAGE_DIR}" ]] && rm -rf "${PACKAGE_DIR}"
+    [[ ${rc} -eq 0 || ${UPGRADE_FINISHED} -eq 1 || ${#PAUSED_UNITS[@]} -eq 0 ]] && return
+    if [[ ${CODE_SYNCED} -eq 0 ]]; then
+        # Nothing in ${INSTALL_DIR} or the database changed: the old version comes back as it was.
+        echo -e "${YELLOW}[INFO] Upgrade stopped before changing the installed code: restarting ${PAUSED_UNITS[*]}...${NC}" >&2
+        systemctl start "${PAUSED_UNITS[@]}" || true
+    elif [[ ${DB_MIGRATED} -eq 1 ]]; then
+        # New code and a migrated database: start the new units, whatever step 7 got to.
+        echo -e "${YELLOW}[INFO] Starting the upgraded services after the failure above...${NC}" >&2
+        systemctl daemon-reload || true
+        systemctl start ephemres-api ephemres-engine || true
+        systemctl start ephemres-snmpd 2>/dev/null || true
+    else
+        # New code over a database that was not (fully) migrated: neither version can run it.
+        echo -e "${RED}[ERROR] The new code is in ${INSTALL_DIR} but the database was not migrated, so the services stay stopped.${NC}" >&2
+        echo -e "${RED}        Fix the error above and run the upgrade again, or restore ${BACKUP_FILE:-the pre-upgrade backup}.${NC}" >&2
+    fi
+}
+trap on_exit EXIT
+
+# Version of a code tree from backend/app/version.py; trees from before v3.3.6 have none, and
+# print nothing (not an error: with pipefail a missing file would stop the upgrade of every
+# v3.3.5 server).
+tree_version() {
+    [[ -f "$1/backend/app/version.py" ]] || return 0
+    sed -n 's/^VERSION = "\([0-9.]*\)".*/\1/p' "$1/backend/app/version.py" 2>/dev/null | head -n1
+}
+
+# fetch_release: puts the release in SOURCE_DIR (a git checkout is pulled; a copy without .git
+# clones it from GitHub into /var/lib/ephemres, not /tmp, which hardened servers mount noexec,
+# U4), refuses a downgrade, and hands over to the release's own upgrade.sh when it differs from
+# this one: until v3.3.6 the installed script carried on alone, so an older script missed the
+# new release's steps (v3.3.5's never installed ephemres-snmpd, U2). One function, so bash has
+# read all of it before git can replace this file.
+fetch_release() {
+    echo -e "\n${BLUE}--- Before Stopping Anything: Fetching ${UPGRADE_BRANCH} ---${NC}"
+    if command -v apt-get &>/dev/null; then
+        local pkg missing=""
+        for pkg in git traceroute libcap2-bin rsync; do
+            dpkg -l "${pkg}" 2>/dev/null | grep -q "^ii" || missing="${missing} ${pkg}"
+        done
+        if [[ -n "${missing}" ]]; then
+            echo -e "${GREEN}[INFO] Installing missing system packages:${missing}...${NC}"
+            apt-get update -qq && apt-get install -y ${missing} || true
+        fi
+    fi
+
+    if [[ -n "${EPHEMRES_UPGRADE_SOURCE:-}" ]]; then
+        # Handed over by an older upgrade.sh, which fetched this release already.
+        SOURCE_DIR="${EPHEMRES_UPGRADE_SOURCE}"
+        STAGE_DIR="${EPHEMRES_UPGRADE_STAGE_DIR:-}"
+        echo -e "${GREEN}[INFO] Continuing the upgrade with this release's own script (${SOURCE_DIR}).${NC}"
+    elif [[ -d "${PROJECT_ROOT}/.git" ]]; then
+        echo -e "${GREEN}[INFO] Detected Git repository at ${PROJECT_ROOT}. Pulling ${UPGRADE_BRANCH}...${NC}"
+        git config --global --add safe.directory "${PROJECT_ROOT}" 2>/dev/null || true
+        git -C "${PROJECT_ROOT}" fetch --all --tags --prune || true
+        if ! git -C "${PROJECT_ROOT}" checkout "${UPGRADE_BRANCH}"; then
+            echo -e "${RED}[ERROR] Branch ${UPGRADE_BRANCH} is not in ${PROJECT_ROOT}. Nothing was changed.${NC}" >&2
+            exit 1
+        fi
+        git -C "${PROJECT_ROOT}" pull origin "${UPGRADE_BRANCH}" \
+            || echo -e "${YELLOW}[WARN] git pull failed (offline?); upgrading to the files already checked out.${NC}"
+        SOURCE_DIR="${PROJECT_ROOT}"
+    else
+        local stage_root="${EPHEMRES_UPGRADE_STAGE_ROOT:-/var/lib/ephemres}"
+        mkdir -p "${stage_root}"
+        STAGE_DIR="${stage_root}/upgrade-stage-$$"
+        rm -rf "${STAGE_DIR}"
+        echo -e "${GREEN}[INFO] Downloading ${UPGRADE_BRANCH} from ${REPO_URL} into ${STAGE_DIR}...${NC}"
+        if ! git clone --quiet --depth 1 --branch "${UPGRADE_BRANCH}" "${REPO_URL}" "${STAGE_DIR}"; then
+            echo -e "${RED}[ERROR] Could not download ${UPGRADE_BRANCH} from ${REPO_URL}. Nothing was changed.${NC}" >&2
+            exit 1
+        fi
+        SOURCE_DIR="${STAGE_DIR}"
+    fi
+
+    local target installed
+    target="$(tree_version "${SOURCE_DIR}")"
+    installed="$(tree_version "${INSTALL_DIR}")"
+    if [[ -z "${target}" ]]; then
+        echo -e "${RED}[ERROR] ${UPGRADE_BRANCH} has no backend/app/version.py: it is older than v3.3.6, and this script does not install older releases. Nothing was changed.${NC}" >&2
+        exit 1
+    fi
+    if [[ -n "${installed}" && "$(printf '%s\n%s\n' "${target}" "${installed}" | sort -V | head -n1)" != "${installed}" \
+          && "${EPHEMRES_ALLOW_DOWNGRADE:-0}" != "1" ]]; then
+        echo -e "${RED}[ERROR] ${UPGRADE_BRANCH} holds v${target}, which is older than the installed v${installed}. Nothing was changed.${NC}" >&2
+        echo -e "${RED}        Name the release to upgrade to, e.g. sudo EPHEMRES_BRANCH=v${installed} bash $0${NC}" >&2
+        exit 1
+    fi
+    echo -e "${GREEN}[INFO] Upgrading v${installed:-3.3.5 or older} to v${target}.${NC}"
+
+    if [[ -z "${EPHEMRES_UPGRADE_SOURCE:-}" && -f "${SOURCE_DIR}/deploy/upgrade.sh" ]] \
+          && [[ "$(sha256sum "${SOURCE_DIR}/deploy/upgrade.sh" | cut -d' ' -f1)" != "${SELF_HASH}" ]]; then
+        echo -e "${GREEN}[INFO] Handing over to v${target}'s own upgrade script.${NC}"
+        trap - EXIT  # the clone is the new script's now; nothing is stopped yet
+        exec env EPHEMRES_UPGRADE_SOURCE="${SOURCE_DIR}" EPHEMRES_UPGRADE_STAGE_DIR="${STAGE_DIR}" \
+            EPHEMRES_BRANCH="${UPGRADE_BRANCH}" bash "${SOURCE_DIR}/deploy/upgrade.sh" "${ORIGINAL_ARGS[@]}"
+    fi
+}
+
+SOURCE_DIR="${PROJECT_ROOT}"
+if [[ ${DRY_RUN} -eq 0 ]]; then
+    fetch_release
+else
+    echo -e "[DRY-RUN] Would fetch ${UPGRADE_BRANCH} (git pull of ${PROJECT_ROOT}, or a clone of ${REPO_URL} into /var/lib/ephemres) and hand over to its upgrade.sh if it differs"
+fi
+
+# Pre-Flight: the release's frontend is built before anything stops, so a failed build leaves
+# the running version alone.
+echo -e "\n${BLUE}--- Pre-Flight: Verifying & Compiling Frontend Production Bundle ---${NC}"
+FRONTEND_DIR="${SOURCE_DIR}/frontend"
+if [[ ${DRY_RUN} -eq 0 && -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
+    if command -v npm &>/dev/null; then
+        echo -e "${GREEN}[INFO] Building Vue 3 frontend bundle in pre-flight (${FRONTEND_DIR})...${NC}"
+        if (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build); then
+            echo -e "${GREEN}[SUCCESS] Pre-flight frontend build completed successfully.${NC}"
+        elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
+            echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding with pre-built assets.${NC}"
+        else
+            echo -e "${RED}[ERROR] Frontend build failed and no pre-built frontend/dist/index.html found. Aborting upgrade before stopping services.${NC}" >&2
+            exit 1
+        fi
+    elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
+        echo -e "${GREEN}[INFO] npm command not found; air-gapped environment detected. Using existing pre-built frontend/dist/index.html.${NC}"
+    else
+        echo -e "${RED}[ERROR] npm command not found and no pre-built frontend/dist/index.html exists. Cannot proceed.${NC}" >&2
+        exit 1
+    fi
+else
+    echo -e "[DRY-RUN] Pre-flight frontend build check passed."
+fi
+
+# The release's Python packages, downloaded and hash-checked before anything stops; step 6 then
+# installs them without the network. A netmon (v3.2 / v3.3.0) server has no venv of the new
+# layout yet and its system Python usually no pip, so a throwaway venv (inside PACKAGE_DIR,
+# removed on exit) provides one; the v3.3.0 -> v3.3.6 test skipped the download for that reason.
+# If even that can't run, step 6 downloads them as before.
+if [[ ${DRY_RUN} -eq 0 && -f "${SOURCE_DIR}/backend/requirements.lock" ]]; then
+    mkdir -p "${EPHEMRES_UPGRADE_STAGE_ROOT:-/var/lib/ephemres}"
+    PACKAGE_DIR="$(mktemp -d -p "${EPHEMRES_UPGRADE_STAGE_ROOT:-/var/lib/ephemres}" packages.XXXXXX 2>/dev/null || true)"
+    PACKAGE_PIP=()
+    if [[ -n "${PACKAGE_DIR}" ]]; then
+        if "${UPGRADE_PYTHON}" -m pip --version &>/dev/null; then
+            PACKAGE_PIP=("${UPGRADE_PYTHON}" -m pip)
+        elif "${UPGRADE_PYTHON}" -m venv "${PACKAGE_DIR}/.pip-venv" &>/dev/null; then
+            PACKAGE_PIP=("${PACKAGE_DIR}/.pip-venv/bin/python" -m pip)
+        fi
+    fi
+    if [[ ${#PACKAGE_PIP[@]} -gt 0 ]]; then
+        echo -e "${GREEN}[INFO] Downloading the release's Python packages before stopping services...${NC}"
+        if ! "${PACKAGE_PIP[@]}" download --quiet --require-hashes --no-deps \
+                -r "${SOURCE_DIR}/backend/requirements.lock" -d "${PACKAGE_DIR}"; then
+            echo -e "${RED}[ERROR] Could not download the Python packages. Nothing was changed.${NC}" >&2
+            exit 1
+        fi
+    else
+        [[ -n "${PACKAGE_DIR}" ]] && rm -rf "${PACKAGE_DIR}"
+        PACKAGE_DIR=""
+        echo -e "${YELLOW}[WARN] No pip to download the Python packages with now; step 6 downloads them, after the services stop.${NC}"
+    fi
+fi
+
 # 3. Pre-Upgrade Database Backup
 BACKUP_DIR="/var/backups/ephemres"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -143,12 +342,10 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         exit 1
     fi
 
-    # Gracefully stop services before backup to release database connection pool slots
-    if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
-       systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd 2>/dev/null; then
-        echo -e "${GREEN}[INFO] Pausing background services to release database connection slots...${NC}"
-        systemctl stop ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd netmon-engine netmon-api netmon-flowd 2>/dev/null || true
-    fi
+    # Stop the services before the backup to release database connection slots. pause_services
+    # records them, so a failure from here on starts them again (on_exit).
+    echo -e "${GREEN}[INFO] Pausing background services to release database connection slots...${NC}"
+    pause_services
 
     mkdir -p "${BACKUP_DIR}"
     chown root:postgres "${BACKUP_DIR}" 2>/dev/null || true
@@ -284,137 +481,34 @@ EOF
     fi
 fi
 
-# Fingerprint of a frontend's sources (everything but node_modules and dist), so step 4 can
-# reuse the pre-flight bundle when the git pull left the frontend unchanged.
-frontend_source_hash() {
-    (cd "$1" && find . \( -path ./node_modules -o -path ./dist \) -prune -o -type f -print0 \
-        | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
-}
-
-# Pre-Flight: Build Frontend Assets Before Service Pause
-echo -e "\n${BLUE}--- Pre-Flight: Verifying & Compiling Frontend Production Bundle ---${NC}"
-FRONTEND_DIR="${PROJECT_ROOT}/frontend"
-PREFLIGHT_FRONTEND_HASH=""
-if [[ ${DRY_RUN} -eq 0 && -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
-    if command -v npm &>/dev/null; then
-        echo -e "${GREEN}[INFO] Building Vue 3 frontend bundle in pre-flight (${FRONTEND_DIR})...${NC}"
-        if (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build); then
-            echo -e "${GREEN}[SUCCESS] Pre-flight frontend build completed successfully.${NC}"
-            PREFLIGHT_FRONTEND_HASH=$(frontend_source_hash "${FRONTEND_DIR}")
-        elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
-            echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding with pre-built assets.${NC}"
-        else
-            echo -e "${RED}[ERROR] Frontend build failed and no pre-built frontend/dist/index.html found. Aborting upgrade before stopping services.${NC}" >&2
-            exit 1
-        fi
-    elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
-        echo -e "${GREEN}[INFO] npm command not found; air-gapped environment detected. Using existing pre-built frontend/dist/index.html.${NC}"
-    else
-        echo -e "${RED}[ERROR] npm command not found and no pre-built frontend/dist/index.html exists. Cannot proceed.${NC}" >&2
-        exit 1
-    fi
-else
-    echo -e "[DRY-RUN] Pre-flight frontend build check passed."
-fi
-
 # 5. Service Pause
 echo -e "\n${BLUE}--- Step 3/7: Gracefully Pausing Platform Background Daemons ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
-    if systemctl is-active --quiet ephemres-engine || systemctl is-active --quiet ephemres-api || systemctl is-active --quiet ephemres-flowd || \
-       systemctl is-active --quiet netmon-engine || systemctl is-active --quiet netmon-api || systemctl is-active --quiet netmon-flowd; then
-        echo -e "${GREEN}[INFO] Stopping ephemres-engine, ephemres-api, and ephemres-flowd systemd services...${NC}"
-        systemctl stop ephemres-engine ephemres-api ephemres-flowd ephemres-snmpd netmon-engine netmon-api netmon-flowd || true
-    else
-        echo -e "${YELLOW}[INFO] Platform systemd services are not active. Skipping stop.${NC}"
-    fi
+    # Normally stopped for the backup already; a unit restarted since is stopped and recorded too.
+    pause_services
+    echo -e "${GREEN}[INFO] Platform services are stopped${PAUSED_UNITS[*]:+ (${PAUSED_UNITS[*]})}.${NC}"
 else
     echo -e "[DRY-RUN] Would run: systemctl stop ephemres-engine ephemres-api ephemres-flowd"
 fi
 
-# 6. Fetch Latest Release Files from Repository
-echo -e "\n${BLUE}--- Step 4/7: Fetching Latest Release & Updating System Dependencies ---${NC}"
-SOURCE_DIR="${PROJECT_ROOT}"
-STAGE_DIR="/tmp/ephemres-upgrade-stage-$$"
-
+# 6. Release already fetched and built (before anything stopped); system capabilities
+echo -e "\n${BLUE}--- Step 4/7: Release ${UPGRADE_BRANCH} from ${SOURCE_DIR} & System Capabilities ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
     # Ensure system user ephemres exists
     if ! id "ephemres" &>/dev/null; then
         useradd -r -s /usr/sbin/nologin ephemres || true
     fi
 
-    # Ensure system dependencies (git, traceroute, libcap2-bin, rsync)
-    if command -v apt-get &>/dev/null; then
-        PACKAGES_TO_CHECK="git traceroute libcap2-bin rsync"
-        MISSING_PKGS=""
-        for pkg in ${PACKAGES_TO_CHECK}; do
-            if ! dpkg -l "${pkg}" 2>/dev/null | grep -q "^ii"; then
-                MISSING_PKGS="${MISSING_PKGS} ${pkg}"
-            fi
-        done
-
-        if [[ -n "${MISSING_PKGS}" ]]; then
-            echo -e "${GREEN}[INFO] Installing missing system packages:${MISSING_PKGS}...${NC}"
-            apt-get update -qq && apt-get install -y ${MISSING_PKGS} || true
-        fi
-
-        # Set network capabilities for raw ICMP traceroute
-        TRACEROUTE_PATH=$(command -v traceroute || true)
-        if [[ -n "${TRACEROUTE_PATH}" ]]; then
-            TRACEROUTE_BIN="$(readlink -f "${TRACEROUTE_PATH}" 2>/dev/null || echo "${TRACEROUTE_PATH}")"
-            if [[ -f "${TRACEROUTE_BIN}" ]] && command -v setcap &>/dev/null; then
-                setcap cap_net_raw+ep "${TRACEROUTE_BIN}" || true
-            fi
-        fi
-    fi
-
-    # Case A: PROJECT_ROOT is an existing Git clone directory
-    if [[ -d "${PROJECT_ROOT}/.git" ]]; then
-        echo -e "${GREEN}[INFO] Detected Git repository at ${PROJECT_ROOT}. Pulling latest updates...${NC}"
-        cd "${PROJECT_ROOT}"
-        git config --global --add safe.directory "${PROJECT_ROOT}" 2>/dev/null || true
-        git fetch --all --tags --prune || true
-        git checkout "${UPGRADE_BRANCH}" 2>/dev/null || git checkout v3.3.5 2>/dev/null || git checkout v3.3.2v 2>/dev/null || git checkout v3.3.1n 2>/dev/null || true
-        git pull origin "${UPGRADE_BRANCH}" 2>/dev/null || git pull origin v3.3.5 2>/dev/null || git pull origin v3.3.2v 2>/dev/null || git pull origin v3.3.1n 2>/dev/null || git pull || echo -e "${YELLOW}[WARN] Git pull finished with non-zero exit code. Proceeding with existing files.${NC}"
-        SOURCE_DIR="${PROJECT_ROOT}"
-    # Case B: Running from /opt/ephemres or non-git directory -> clone directly from remote
-    else
-        echo -e "${GREEN}[INFO] Staging fresh release from ${REPO_URL} (branch: ${UPGRADE_BRANCH})...${NC}"
-        rm -rf "${STAGE_DIR}"
-        if git clone --depth 1 --branch "${UPGRADE_BRANCH}" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 --branch "v3.3.5" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 --branch "v3.3.2v" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 --branch "v3.3.1n" "${REPO_URL}" "${STAGE_DIR}" 2>/dev/null || \
-           git clone --depth 1 "${REPO_URL}" "${STAGE_DIR}"; then
-            echo -e "${GREEN}[SUCCESS] Downloaded latest codebase into staging directory.${NC}"
-            SOURCE_DIR="${STAGE_DIR}"
-        else
-            echo -e "${RED}[ERROR] Failed to clone repository from ${REPO_URL}. Check internet connectivity.${NC}" >&2
-            exit 1
-        fi
-    fi
-    # Rebuild Vue 3 frontend in SOURCE_DIR if needed
-    FRONTEND_DIR="${SOURCE_DIR}/frontend"
-    if [[ -d "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
-        if [[ "${FRONTEND_DIR}" == "${PROJECT_ROOT}/frontend" && -n "${PREFLIGHT_FRONTEND_HASH}" \
-              && -f "${FRONTEND_DIR}/dist/index.html" \
-              && "$(frontend_source_hash "${FRONTEND_DIR}")" == "${PREFLIGHT_FRONTEND_HASH}" ]]; then
-            echo -e "${GREEN}[INFO] Frontend sources unchanged since the pre-flight build; reusing that bundle.${NC}"
-        elif command -v npm &>/dev/null; then
-            echo -e "${GREEN}[INFO] Rebuilding production Vue 3 frontend bundle in ${FRONTEND_DIR}...${NC}"
-            (cd "${FRONTEND_DIR}" && npm install --no-update-notifier && npm run build) || {
-                if [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
-                    echo -e "${YELLOW}[WARN] npm build failed or air-gapped network detected. Existing frontend/dist/index.html found; proceeding.${NC}"
-                else
-                    echo -e "${RED}[ERROR] Frontend build failed and no pre-built dist/index.html found.${NC}" >&2
-                    exit 1
-                fi
-            }
-        elif [[ -f "${FRONTEND_DIR}/dist/index.html" ]]; then
-            echo -e "${GREEN}[INFO] npm not found; using existing pre-built ${FRONTEND_DIR}/dist/index.html.${NC}"
+    # Set network capabilities for raw ICMP traceroute
+    TRACEROUTE_PATH=$(command -v traceroute || true)
+    if [[ -n "${TRACEROUTE_PATH}" ]]; then
+        TRACEROUTE_BIN="$(readlink -f "${TRACEROUTE_PATH}" 2>/dev/null || echo "${TRACEROUTE_PATH}")"
+        if [[ -f "${TRACEROUTE_BIN}" ]] && command -v setcap &>/dev/null; then
+            setcap cap_net_raw+ep "${TRACEROUTE_BIN}" || true
         fi
     fi
 else
-    echo -e "[DRY-RUN] Would fetch latest code from ${REPO_URL} (${UPGRADE_BRANCH}), build Vue 3 frontend, and ensure system packages (traceroute, libcap2-bin)"
+    echo -e "[DRY-RUN] Would ensure the ephemres user and traceroute's raw-socket capability"
 fi
 
 # 7. Synchronize Production Files to Target Directory
@@ -445,11 +539,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
             "${SOURCE_DIR}/" "${INSTALL_DIR}/"
         chown -R ephemres:ephemres "${INSTALL_DIR}"
     fi
-
-    # Clean up temporary staging directory if used
-    if [[ -d "${STAGE_DIR}" ]]; then
-        rm -rf "${STAGE_DIR}"
-    fi
+    CODE_SYNCED=1
 else
     echo -e "[DRY-RUN] Would rsync codebase to ${INSTALL_DIR} and set ownership to ephemres:ephemres"
 fi
@@ -492,7 +582,13 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         "${VENV_PATH}/bin/pip" install --upgrade pip
         # Every package pinned with its file hashes (scale and core review M5); pip moves each one
         # to the locked version, up or down, and refuses a file whose hash doesn't match.
-        "${VENV_PATH}/bin/pip" install --require-hashes -r "${INSTALL_DIR}/backend/requirements.lock"
+        # Downloaded and hash-checked before the services stopped, so normally no network is
+        # needed now. A package with no wheel for this platform needs its build tools from the
+        # network, so if the offline install fails it is tried online (as before v3.3.6).
+        if [[ -z "${PACKAGE_DIR}" ]] || ! "${VENV_PATH}/bin/pip" install --require-hashes --no-index \
+                --find-links "${PACKAGE_DIR}" -r "${INSTALL_DIR}/backend/requirements.lock"; then
+            "${VENV_PATH}/bin/pip" install --require-hashes -r "${INSTALL_DIR}/backend/requirements.lock"
+        fi
 
         # Releases up to 3.3.5 installed uvicorn[standard], which added packages Ephemres never
         # used (WebSockets, --reload, --env-file and YAML log support, and what those needed).
@@ -541,6 +637,7 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
         export EPHEMRES_DB_PASSWORD="${DB_PASS}"
         export NETMON_DB_PASSWORD="${DB_PASS}"
         PYTHONPATH="${INSTALL_DIR}:${INSTALL_DIR}/backend" "${MIGRATOR_CMD[@]}" upgrade head
+        DB_MIGRATED=1
         
         if [[ -n "${PYTHON_BIN}" && -f "${PYTHON_BIN}" ]]; then
             # --if-missing: an existing admin keeps its password. The install-time
@@ -889,12 +986,14 @@ EOF
         verify_services_running
     fi
     echo -e "${GREEN}[SUCCESS] Primary platform services (ephemres-api, ephemres-engine) are active, enabled on boot, and the API answers its health check.${NC}"
+    UPGRADE_FINISHED=1
 else
     echo -e "[DRY-RUN] Would run: systemctl enable & restart ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"
-echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v3.3.5 Platform upgraded successfully!     ${NC}"
+UPGRADE_FINISHED=1
+echo -e "${GREEN}   [UPGRADE COMPLETE] Ephemres v${RELEASE_VERSION} Platform upgraded successfully!     ${NC}"
 echo -e "${GREEN}   Pre-Upgrade Database Backup Saved At: ${BACKUP_FILE}${NC}"
 echo -e "${GREEN}========================================================================${NC}"
 if [[ ${LEGACY_NETMON} -eq 1 ]]; then

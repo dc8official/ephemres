@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# Ephemres Network Monitoring Platform v3.3.5 - Production Installer
+# Ephemres Network Monitoring Platform - Production Installer
 # Supports: Debian 12+, Ubuntu 22.04+
 # Usage: sudo bash deploy/install.sh [--dry-run]
 # ============================================================
@@ -20,6 +20,8 @@ DOMAIN_NAME=""
 # Self-locate project root from script location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# The release being installed, from backend/app/version.py (v3.3.6 and later).
+RELEASE_VERSION="$(sed -n 's/^VERSION = "\([0-9.]*\)".*/\1/p' "$PROJECT_ROOT/backend/app/version.py" 2>/dev/null | head -n1)"
 
 # Installation target directory
 INSTALL_DIR="/opt/ephemres"
@@ -618,7 +620,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "DRY RUN complete. No changes were made."
 else
     echo ""
-    echo "Ephemres v3.3.5 is now running."
+    echo "Ephemres v${RELEASE_VERSION:-?} is now running."
     echo ""
     echo "  Dashboard:  https://$DOMAIN_NAME"
     echo ""

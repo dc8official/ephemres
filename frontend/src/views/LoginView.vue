@@ -3,7 +3,7 @@
     <div class="login-container">
       <div class="login-card">
         <div class="brand-header">
-          <h1 class="brand-title">Ephemres v3.3.5</h1>
+          <h1 class="brand-title">Ephemres v{{ appVersion }}</h1>
           <p class="brand-subtitle">Network Uptime Monitoring Platform</p>
         </div>
 
@@ -91,6 +91,9 @@
 import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { login } from '../services/api.js'
+
+// The release, from package.json at build time (vite.config.js).
+const appVersion = __APP_VERSION__
 import { setUserState } from '../services/auth.js'
 import Message from 'primevue/message'
 

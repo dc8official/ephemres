@@ -34,6 +34,7 @@ from app.core.pdf_fonts import (
     to_winansi,
     wrap_text,
 )
+from app.version import VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +232,7 @@ def _encrypt_pdf_object_bytes(
 # ---------------------------------------------------------------------------
 # HTML Report Structural Parser
 # ---------------------------------------------------------------------------
-EPHEMRES_VERSION = "3.3.5"
+EPHEMRES_VERSION = VERSION
 
 # Template classes that mark something the reader must notice. In the PDF these render bold
 # (danger also in red), so the meaning never depends on colour alone.

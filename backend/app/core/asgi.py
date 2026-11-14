@@ -67,6 +67,7 @@ from app.core.schema import (
     _coerce_value,
     _validate_constraints,
 )
+from app.version import VERSION
 
 RequestValidationError = ValidationError
 
@@ -1572,7 +1573,7 @@ class EphemresApp:
         self,
         title: str = "Ephemres Platform",
         description: str = "",
-        version: str = "3.3.5",
+        version: str = VERSION,
         docs_url: Optional[str] = "/docs",
         redoc_url: Optional[str] = "/redoc",
         openapi_url: Optional[str] = "/openapi.json",

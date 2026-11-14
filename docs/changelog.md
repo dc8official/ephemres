@@ -92,6 +92,21 @@ From the review in `docs/architecture/traffic-page-review-2026-11-13.md`. No mig
 | **Any-Vendor SNMPv3 and Device Profiles** | AES-192/256 with both key-stretching methods (net-snmp style `aes192`/`aes256`, Cisco style `aes192c`/`aes256c`) and 3DES, checked against the drafts' published keys, NIST vectors and a Cisco agent; one password for both (Meraki, UniFi); SNMPv3 context names; LLDP-V2-MIB fallback; `ifCounterDiscontinuityTime`; GETNEXT fallback when GETBULK goes unanswered. `monitoring/snmp/profile.py` records what each device answers and its quirks, so polls skip what it drops. Based on `docs/architecture/snmp-vendor-research.md`. | Works with whatever SNMPv3 settings a Cisco, Juniper, Aruba, Meraki, UniFi, Sophos, Fortinet or MikroTik device offers, without vendor-specific code. |
 | **Device Survey** | `python -m monitoring.snmp.survey <host>` reads system info, interfaces (64-bit counters, speeds, errors, twice to show traffic), IPv4 addresses, LLDP and CDP neighbours, and reports what the device answers, what it did not, and what a read costs. Secrets only from the environment or a prompt; `--json` for the full report. See `docs/snmp-guide.md`. | Shows what Meraki, Sophos and other branch devices really expose before the poller's scope is fixed. |
 
+### 🧰 Upgrades That Land the Release, and Never Leave Monitoring Down
+
+From the v3.3.5 → v3.3.6 upgrade test of 2026-11-14 in a systemd container. Run from a git clone
+of v3.3.6, the upgrade passed: data unchanged and sessions kept. Run the documented way, it did
+not.
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **The Right Release** | Run from a copy without `.git`, `upgrade.sh` fetched a hard-coded older branch. It now fetches `EPHEMRES_BRANCH`, else its own release. It refuses a downgrade (`EPHEMRES_ALLOW_DOWNGRADE=1` to force one) and releases older than v3.3.6. | The documented command no longer reinstalls the old release. |
+| **Each Release Upgrades Itself** | After fetching, the script hands over to the fetched release's own `upgrade.sh` when it differs. Until now, the installed script ran the new release with its own older steps, so a v3.3.5 script never installed `ephemres-snmpd`. From v3.3.5, run v3.3.6's script (deployment guide, section 3). | New steps of a release always run. |
+| **Prepared Before Anything Stops** | The release is fetched, its frontend built and its Python packages downloaded and hash-checked before any service stops; on a netmon (v3.2 / v3.3.0) server a throwaway venv provides pip if the system Python has none. The packages are then installed without the network. | A failed download or build leaves the running version untouched. |
+| **Services Back After a Failure** | The script records the services it stops. If it fails before the new code is copied in, it starts them again. After the migrations, it starts the new services. In between (new code, database not migrated), it says so and names the backup. | Until now, any failure left monitoring and alerting down until someone noticed. |
+| **No /tmp** | The clone is staged in `/var/lib/ephemres` (`EPHEMRES_UPGRADE_STAGE_ROOT`), not `/tmp`. | Works on servers that mount `/tmp` noexec (CIS hardening), where the frontend build failed. |
+| **One Version Number** | `backend/app/version.py` holds the release, read by the API, the PDF, alert footers, SSE and the upgrade script. The frontend takes `package.json`'s version through Vite. Install and uninstall banners read it or name none. | The UI, reports and API say 3.3.6; this branch still said 3.3.5 in about 20 places. |
+
 ## [Version 3.3.5] — Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals & NetFlow Route Augmentation
 ### 🧭 NetFlow Route Discovery, WAN Perimeter Accounting, Sub-Cycle Probe Telemetry & Server-Side Conversation Forensics
 
