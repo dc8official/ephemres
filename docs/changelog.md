@@ -54,6 +54,13 @@ The versioning format follows [Semantic Versioning](https://semver.org/).
 | **Time Window Remembered** | `?window=` in the URL, plus the browser tab remembers the last window for links that carry none. | The window no longer resets to 1 hour after leaving the page. |
 | **Header** | The product text "v3.3.5 Flow Engine · NetFlow v5, NetFlow v9 & IPFIX" is removed. | Room for what matters on the page. |
 
+### 🛰️ Route Triggers: Reply TTL Everywhere, Transit Without SNMP
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **Reply TTL on IPv6 and Without Raw Sockets** | Raw ICMPv6 and the unprivileged ping socket get no IP header, so the engine now asks the kernel for each reply's TTL / hop limit as ancillary data (`IP_RECVTTL`, `IPV6_RECVHOPLIMIT`; `ping.enable_reply_ttl`). Until now only raw IPv4 replies had one. | The TTL route trigger runs for IPv6 endpoints and on servers without CAP_NET_RAW. |
+| **Transit Matching Without SNMP** | A route passes through a device when a hop is its monitored address, an SNMP-reported address, or (new) an address it exports NetFlow from. Endpoints whose manual parent is the device count as behind it: re-traced when it goes down, and when it comes back if they are off their normal path. | A router that answers traceroute from another interface is still recognised when it exports flows or has endpoints placed under it. |
+
 ### 📊 Traffic Page Rebuilt: Each WAN Link Now, and Usual
 
 From the review in `docs/architecture/traffic-page-review-2026-11-13.md`. No migration.

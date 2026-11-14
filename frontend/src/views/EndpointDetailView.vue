@@ -750,8 +750,9 @@
             <div v-for="(iface, i) in editingInterfaces" :key="i" class="iface-row-wrap">
             <div class="interface-config-row">
               <div class="form-group idx-col">
-                <label v-if="i === 0">ifIndex *</label>
+                <label :for="`iface-idx-${i}`" :class="{ 'row-label-repeat': i > 0 }">ifIndex *</label>
                 <input
+                  :id="`iface-idx-${i}`"
                   type="number"
                   v-model.number="iface.index"
                   min="1"
@@ -763,8 +764,9 @@
               </div>
 
               <div class="form-group name-col">
-                <label v-if="i === 0">Interface Name / Alias</label>
+                <label :for="`iface-name-${i}`" :class="{ 'row-label-repeat': i > 0 }">Interface Name / Alias</label>
                 <input
+                  :id="`iface-name-${i}`"
                   type="text"
                   v-model="iface.name"
                   :placeholder="iface.snmpName || 'e.g. GigabitEthernet0/1 or WAN-Uplink'"
@@ -774,16 +776,16 @@
               </div>
 
               <div class="form-group role-col">
-                <label v-if="i === 0" :for="`iface-role-${i}`">Role</label>
-                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select" :aria-label="i === 0 ? undefined : 'Role'">
+                <label :for="`iface-role-${i}`" :class="{ 'row-label-repeat': i > 0 }">Role</label>
+                <select :id="`iface-role-${i}`" v-model="iface.role" class="form-select">
                   <option value="lan">Internal</option>
                   <option value="wan">WAN (edge)</option>
                 </select>
               </div>
 
               <div class="form-group preset-col">
-                <label v-if="i === 0">Speed Preset</label>
-                <select v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
+                <label :for="`iface-preset-${i}`" :class="{ 'row-label-repeat': i > 0 }">Speed Preset</label>
+                <select :id="`iface-preset-${i}`" v-model="iface.preset" @change="onPresetChange(iface)" class="form-select">
                   <option value="unset">{{ iface.snmpSpeed ? `From SNMP: ${formatMbps(iface.snmpSpeed)}` : 'Not set' }}</option>
                   <option :value="10">10 Mbps (Ethernet)</option>
                   <option :value="100">100 Mbps (FastEth)</option>
@@ -796,8 +798,9 @@
               </div>
 
               <div class="form-group speed-col" v-if="iface.preset === 'custom'">
-                <label v-if="i === 0">Mbps</label>
+                <label :for="`iface-mbps-${i}`" :class="{ 'row-label-repeat': i > 0 }">Mbps</label>
                 <input
+                  :id="`iface-mbps-${i}`"
                   type="number"
                   v-model.number="iface.speed_mbps"
                   min="1"
@@ -2790,5 +2793,42 @@ h2 {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+/* Interface editor rows (v3.3.6). Every row has its own labels, so each field is named for
+   screen readers; past the first row they are hidden while the columns line up under the first
+   row's. A label never wraps: in a narrow window "Interface Name / Alias" used to wrap into the
+   Role label. Below 820 px the name takes a line of its own and every row shows its labels. */
+.interface-config-row label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.interface-config-row .name-col {
+  min-width: 8rem;
+}
+.row-label-repeat {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (max-width: 820px) {
+  .interface-config-row {
+    flex-wrap: wrap;
+  }
+  .interface-config-row .name-col {
+    flex: 1 1 100%;
+    order: -1;
+  }
+  .row-label-repeat {
+    position: static;
+    width: auto;
+    height: auto;
+    clip: auto;
+  }
 }
 </style>

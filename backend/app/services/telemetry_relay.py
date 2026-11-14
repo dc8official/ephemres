@@ -262,8 +262,13 @@ class TelemetryRelay:
 
         DOWN: endpoints whose CURRENT path goes through it (they must have moved if still up).
         UP: endpoints whose NORMAL path goes through it but whose current path doesn't (they
-        may now move back). Matching is by the device's monitored address appearing as a hop,
-        so a router that answers traceroute from another interface is not recognised."""
+        may now move back).
+
+        A path goes through the device when one of its addresses is a hop: the monitored one,
+        those SNMP reports, and (v3.3.6) those it exports NetFlow from. An endpoint whose manual
+        parent is the device counts as behind it too (v3.3.6): on DOWN always, on UP when it is off
+        its normal path. A router without SNMP that answers traceroute from yet another interface
+        is still missed; learning that from the paths was set aside (build plan 6.5, 2026-11-14)."""
         from app.services.scheduler_leader import scheduler_leader
 
         if scheduler_leader._task is not None and not scheduler_leader.is_leader:
@@ -291,6 +296,13 @@ class TelemetryRelay:
                     addresses += [a for a in ((row[0] if row else None) or []) if a and a not in addresses]
                 except Exception:
                     pass
+                # The addresses it exports NetFlow from (v3.3.6): known without SNMP, and often
+                # another interface than the monitored one (build plan 6.5).
+                exp = await session.execute(
+                    text("SELECT host(a) FROM endpoints, unnest(flow_exporter_ips) AS a WHERE id = CAST(:id AS uuid)"),
+                    {"id": endpoint_id},
+                )
+                addresses += [str(r[0]) for r in exp.fetchall() if r[0] and str(r[0]) not in addresses]
                 probes = {f"probe{i}": [{"ip": a}] for i, a in enumerate(addresses[:20])}
                 on_current = " OR ".join(f"r.hops @> CAST(:{k} AS jsonb)" for k in probes)
                 on_normal = " OR ".join(f"r.normal_hops @> CAST(:{k} AS jsonb)" for k in probes)
@@ -312,6 +324,32 @@ class TelemetryRelay:
                     {**probes, "id": endpoint_id},
                 )
                 dependents = [(str(r[0]), str(r[1])) for r in res.fetchall()]
+
+                # Placed under it by hand (manual parent, v3.3.6): behind it whatever the paths
+                # say. On UP only those off their normal path, compared hop by hop as everywhere
+                # (route_paths.same_path); one with no path yet is re-traced on DOWN.
+                from app.services.route_paths import as_hops, same_path
+
+                res = await session.execute(
+                    text("""
+                        SELECT e.id, host(e.ip_address), r.hops, r.normal_hops
+                        FROM endpoints e
+                        LEFT JOIN endpoint_baseline_routes r ON r.endpoint_id = e.id
+                        WHERE e.manual_parent_id = CAST(:id AS uuid)
+                          AND e.endpoint_status != 'DELETED'
+                          AND e.enable_scheduled_discovery = TRUE
+                    """),
+                    {"id": endpoint_id},
+                )
+                seen = {d[0] for d in dependents}
+                for row in res.fetchall():
+                    if str(row[0]) in seen:
+                        continue
+                    if new_state != "DOWN":
+                        current = as_hops(row[2])
+                        if not current or same_path(current, as_hops(row[3]) or current):
+                            continue
+                    dependents.append((str(row[0]), str(row[1])))
         except Exception as exc:
             logger.debug("Transit trigger lookup failed for %s: %s", endpoint_id, exc)
             return []

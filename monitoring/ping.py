@@ -49,7 +49,9 @@ class PingResult:
     jitter_ms: Optional[float] = None
     # TTL the replies arrived with (the most common one in the cycle), v3.3.6. It drops by one
     # per router on the way back, so a change that lasts means the return path changed length
-    # (monitoring/ttl_watch.py). Only the raw IPv4 socket sees it; None otherwise.
+    # (monitoring/ttl_watch.py). Raw IPv4 reads it from the IP header; raw IPv6 (the hop limit)
+    # and the unprivileged ping socket, which get no header, ask the kernel for it as ancillary
+    # data (enable_reply_ttl). None from the system ping fallback, or if the kernel refuses.
     reply_ttl: Optional[int] = None
 
     @property
@@ -105,6 +107,43 @@ _raw_fallback_logged = False
 # counters advance; the source address and timestamp checks in _handle_incoming_packet catch
 # a reply that matches the wrong probe.
 _ident_counter = os.getpid() & 0xFFFF
+
+
+# Room for one int of ancillary data (the TTL or hop limit) per received datagram.
+_TTL_CMSG_SPACE = socket.CMSG_SPACE(struct.calcsize("i"))
+# Not every Python build exports IP_RECVTTL (3.12 here doesn't, 3.14 does); 12 is its Linux value
+# (<linux/in.h>). Off Linux, without the constant, IPv4 ping-socket replies have no TTL.
+_IP_RECVTTL = getattr(socket, "IP_RECVTTL", 12 if sys.platform.startswith("linux") else None)
+
+
+def enable_reply_ttl(sock: socket.socket, is_ipv6: bool) -> bool:
+    """Asks the kernel to hand over each reply's TTL (IPv4) or hop limit (IPv6) as ancillary
+    data, for sockets that receive no IP header: raw ICMPv6, and the unprivileged ping socket in
+    both families. Until v3.3.6 only raw IPv4 replies had a TTL, so the TTL route trigger never ran
+    for IPv6 endpoints or on servers without CAP_NET_RAW. False if the kernel refuses."""
+    try:
+        if is_ipv6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVHOPLIMIT, 1)
+        else:
+            if _IP_RECVTTL is None:
+                return False
+            sock.setsockopt(socket.IPPROTO_IP, _IP_RECVTTL, 1)
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def ttl_from_ancdata(ancdata: List[Tuple[int, int, bytes]]) -> Optional[int]:
+    """The TTL / hop limit from recvmsg's ancillary data, or None if it isn't there."""
+    for level, kind, data in ancdata or ():
+        if (level == socket.IPPROTO_IP and kind == socket.IP_TTL) or (
+            level == socket.IPPROTO_IPV6 and kind == socket.IPV6_HOPLIMIT
+        ):
+            if len(data) >= struct.calcsize("i"):
+                return struct.unpack("i", data[: struct.calcsize("i")])[0]
+            if data:
+                return data[0]  # some kernels pass a single byte for IP_TTL
+    return None
 
 
 def _next_ident() -> int:
@@ -247,8 +286,10 @@ class _RawICMPMultiplexer:
         self._recv_buf = bytearray(1500)
         # (ident, seq) -> (future for the RTT, target IP, send time in ns)
         self._pending: Dict[Tuple[int, int], Tuple[asyncio.Future[float], str, int]] = {}
-        # (ident, seq) -> TTL of the reply, for the probes still being collected (IPv4 only).
+        # (ident, seq) -> TTL of the reply, for the probes still being collected.
         self._reply_ttls: Dict[Tuple[int, int], int] = {}
+        # Raw ICMPv6 gets no IP header: the hop limit comes as ancillary data (enable_reply_ttl).
+        self._ancillary_ttl = False
         self._closed = False
         self.sock: Optional[socket.socket] = None
 
@@ -258,6 +299,8 @@ class _RawICMPMultiplexer:
             else:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
             set_receive_buffer(self.sock, "ICMPv6 socket" if is_ipv6 else "ICMP socket")
+            if is_ipv6:
+                self._ancillary_ttl = enable_reply_ttl(self.sock, is_ipv6=True)
             self.sock.setblocking(False)
             self.loop.add_reader(self.sock.fileno(), self._on_readable)
         except (PermissionError, OSError):
@@ -269,6 +312,7 @@ class _RawICMPMultiplexer:
         raw_bytes: bytes | bytearray | memoryview,
         responder_ip: str,
         recv_ns: Optional[int] = None,
+        reply_ttl: Optional[int] = None,
     ) -> None:
         parsed = parse_icmp_echo_reply(
             raw_bytes,
@@ -303,8 +347,11 @@ class _RawICMPMultiplexer:
 
         self._pending.pop(key, None)
         # A raw IPv4 read starts with the IP header: byte 8 is the TTL the reply arrived with.
+        # Raw IPv6 has no header: the hop limit came as ancillary data (reply_ttl).
         if not self.is_ipv6 and len(raw_bytes) >= 20 and (raw_bytes[0] >> 4) == 4:
             self._reply_ttls[key] = int(raw_bytes[8])
+        elif reply_ttl is not None:
+            self._reply_ttls[key] = int(reply_ttl)
         if not fut.done():
             if recv_ns is None:
                 recv_ns = time.monotonic_ns()
@@ -316,8 +363,13 @@ class _RawICMPMultiplexer:
             return
         # Read until the socket is empty, so a burst of replies is handled in one callback.
         while not self._closed:
+            reply_ttl = None
             try:
-                nbytes, addr = self.sock.recvfrom_into(self._recv_buf)
+                if self._ancillary_ttl:
+                    nbytes, ancdata, _flags, addr = self.sock.recvmsg_into([self._recv_buf], _TTL_CMSG_SPACE)
+                    reply_ttl = ttl_from_ancdata(ancdata)
+                else:
+                    nbytes, addr = self.sock.recvfrom_into(self._recv_buf)
                 recv_ns = time.monotonic_ns()
             except (BlockingIOError, InterruptedError):
                 break
@@ -329,6 +381,7 @@ class _RawICMPMultiplexer:
                 self._recv_buf[:nbytes],
                 responder_ip,
                 recv_ns=recv_ns,
+                reply_ttl=reply_ttl,
             )
 
     async def send_probe_with_ttl(
@@ -463,15 +516,23 @@ async def _run_dgram_socket_ping_cycle(
 
     sock = socket.socket(family, socket.SOCK_DGRAM, proto)
     sock.setblocking(False)
+    # The ping socket gets no IP header either: the TTL / hop limit comes as ancillary data.
+    ancillary_ttl = enable_reply_ttl(sock, is_ipv6)
 
     recv_buf = bytearray(1500)
     pending_seqs: Dict[int, Tuple[int, asyncio.Future[float]]] = {}
+    reply_ttls: Dict[int, int] = {}
     kernel_ident: Optional[int] = None
 
     def _on_dgram_readable() -> None:
         while True:
+            reply_ttl = None
             try:
-                nbytes, _addr = sock.recvfrom_into(recv_buf)
+                if ancillary_ttl:
+                    nbytes, ancdata, _flags, _addr = sock.recvmsg_into([recv_buf], _TTL_CMSG_SPACE)
+                    reply_ttl = ttl_from_ancdata(ancdata)
+                else:
+                    nbytes, _addr = sock.recvfrom_into(recv_buf)
                 recv_ns = time.monotonic_ns()
             except (BlockingIOError, InterruptedError):
                 break
@@ -493,6 +554,8 @@ async def _run_dgram_socket_ping_cycle(
             entry = pending_seqs.pop(r_seq, None)
             if entry is not None:
                 send_ns, fut = entry
+                if reply_ttl is not None:
+                    reply_ttls[r_seq] = reply_ttl
                 if not fut.done():
                     rtt_ms = max(0.0, (recv_ns - send_ns) / 1_000_000.0)
                     fut.set_result(rtt_ms)
@@ -500,6 +563,7 @@ async def _run_dgram_socket_ping_cycle(
     fd = sock.fileno()
     loop.add_reader(fd, _on_dgram_readable)
     rtts: List[float] = []
+    ttls: List[int] = []
     try:
         for seq in range(1, count + 1):
             fut: asyncio.Future[float] = loop.create_future()
@@ -518,10 +582,13 @@ async def _run_dgram_socket_ping_cycle(
                         pass
                 rtt = await asyncio.wait_for(fut, timeout=timeout)
                 rtts.append(rtt)
+                if seq in reply_ttls:
+                    ttls.append(reply_ttls[seq])
             except (asyncio.TimeoutError, OSError):
                 pass
             finally:
                 pending_seqs.pop(seq, None)
+                reply_ttls.pop(seq, None)
 
             if seq < count and interval > 0:
                 await asyncio.sleep(interval)
@@ -535,7 +602,7 @@ async def _run_dgram_socket_ping_cycle(
         except Exception:
             pass
 
-    return result_from_rtts(rtts, count)
+    return result_from_rtts(rtts, count, ttls)
 
 
 async def run_system_ping_fallback(

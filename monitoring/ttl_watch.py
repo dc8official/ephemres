@@ -2,8 +2,9 @@
 
 Every router on the way back lowers a reply's TTL by one, so when the TTL an endpoint's replies
 arrive with changes and stays changed, the return path got longer or shorter, e.g. after a link
-failed and traffic moved to a backup. The engine reads it from every cycle (PingResult.reply_ttl,
-raw IPv4 socket only) and, once a new value has held for CONFIRM_CYCLES cycles in a row,
+failed and traffic moved to a backup. The engine reads it from every cycle (PingResult.reply_ttl:
+from the IPv4 header on a raw socket; as ancillary data for raw IPv6 and the unprivileged ping
+socket, since v3.3.6) and, once a new value has held for CONFIRM_CYCLES cycles in a row,
 publishes a ROUTE_HINT with reason "ttl"; the API's leader worker then re-traces that endpoint
 (services/telemetry_relay.py), and route_paths decides whether the path really changed.
 

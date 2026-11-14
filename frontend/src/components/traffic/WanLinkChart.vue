@@ -13,6 +13,7 @@
 <script setup>
 import { computed } from 'vue'
 import { Line as LineChart } from 'vue-chartjs'
+import { Chart } from 'chart.js'
 import { formatBps } from '../../utils/format.js'
 import { useChartTheme, withAlpha, readToken } from '../../composables/useChartTheme.js'
 import { summarizeSeries } from '../../utils/chartSummary.js'
@@ -67,6 +68,8 @@ const chartData = computed(() => {
     datasets.push({
       label: `Usual ${dir}`, group: `usual-${dir}`, data: col(`usual_${dir}_high`), hidden,
       borderWidth: 0, pointRadius: 0, fill: false, backgroundColor: withAlpha(color, 0.14), spanGaps: false,
+      // The legend swatch: the band's own 14% fill all but vanished on the dark theme.
+      legendFill: withAlpha(color, 0.45), legendStroke: color,
     })
     datasets.push({
       label: `Usual ${dir} (low)`, group: `usual-${dir}`, data: col(`usual_${dir}_low`), hidden,
@@ -169,6 +172,12 @@ const chartOptions = computed(() => {
           font: { family: t.fontSans, size: 10 },
           // One legend entry per group: the band's bottom goes with its top.
           filter: (item, data) => !String(data.datasets[item.datasetIndex].label).endsWith('(low)'),
+          // A band's swatch is drawn stronger than the band (legendFill / legendStroke), so it can
+          // be found in the legend; everything else keeps Chart.js's own swatch.
+          generateLabels: (chart) => Chart.defaults.plugins.legend.labels.generateLabels(chart).map((item) => {
+            const ds = chart.data.datasets[item.datasetIndex]
+            return ds.legendFill ? { ...item, fillStyle: ds.legendFill, strokeStyle: ds.legendStroke, lineWidth: 1 } : item
+          }),
         },
         // Clicking an entry shows or hides its whole group (a band is two datasets).
         onClick: (_e, item, legend) => {

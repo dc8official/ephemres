@@ -247,6 +247,95 @@ def test_transit_trigger_retraces_endpoints_routed_through_a_device(timescale_ds
     assert [(str(q[0]), q[2]) for q in queued] == [(str(moved_id), "transit")]
 
 
+def _transit(timescale_dsn, router_id, direction, address):
+    """Runs the transit trigger for a router; returns the endpoint ids it looked at."""
+    from unittest.mock import patch
+
+    from app.services import baseline_route
+    from app.services.telemetry_relay import TelemetryRelay
+
+    async def go():
+        engine = create_async_engine(timescale_dsn.replace("postgresql://", "postgresql+asyncpg://", 1))
+        factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        relay = TelemetryRelay()
+        try:
+            with patch("app.services.telemetry_relay.AsyncSessionLocal", factory), \
+                 patch.object(baseline_route, "discovery_route_queue", asyncio.Queue()), \
+                 patch.object(baseline_route, "discovery_in_progress", set()):
+                looked_at = await relay._maybe_trace_dependents(str(router_id), direction, address, delay=0)
+                for t in list(relay._transit_tasks):
+                    t.cancel()
+                return sorted(looked_at)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+def test_transit_recognises_a_router_by_the_address_it_exports_flows_from(timescale_dsn, run_sql):
+    """Build plan 6.5: a router without SNMP that answers traceroute from another interface was
+    missed. The address it exports NetFlow from is known without SNMP and counts too."""
+    import json as _json
+
+    router_id, behind_id = uuid.uuid4(), uuid.uuid4()
+
+    async def seed(conn):
+        await conn.execute(
+            """INSERT INTO endpoints (id, ip_address, hostname, device_type, endpoint_status, flow_exporter_ips)
+               VALUES ($1, '10.50.0.1', 'r-ph', 'Router', 'ACTIVE', '{10.51.0.1}'),
+                      ($2, '10.52.0.9', 'ph-sw', 'Switch', 'ACTIVE', '{}')""",
+            router_id, behind_id,
+        )
+        path = _json.dumps(hops("10.1.0.1", "10.51.0.1", "10.52.0.9"))
+        await conn.execute(
+            "INSERT INTO endpoint_baseline_routes (endpoint_id, total_hops, hops, normal_hops) VALUES ($1, 3, $2::jsonb, $2::jsonb)",
+            behind_id, path,
+        )
+
+    run_sql(seed)
+    assert _transit(timescale_dsn, router_id, "DOWN", "10.50.0.1") == [str(behind_id)]
+
+
+def test_transit_includes_endpoints_placed_under_it_by_hand(timescale_dsn, run_sql):
+    """An endpoint whose manual parent is the router is behind it whatever its path shows: on DOWN
+    always (even with no path yet), on UP only when it is off its normal path."""
+    import json as _json
+
+    router_id, no_path, on_normal, moved = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    async def seed(conn):
+        await conn.execute(
+            """INSERT INTO endpoints (id, ip_address, hostname, device_type, endpoint_status)
+               VALUES ($1, '10.60.0.1', 'r-kano', 'Router', 'ACTIVE')""", router_id,
+        )
+        for eid, ip, name in ((no_path, "10.61.0.1", "kano-ap"), (on_normal, "10.61.0.2", "kano-sw"),
+                              (moved, "10.61.0.3", "kano-cam")):
+            await conn.execute(
+                """INSERT INTO endpoints (id, ip_address, hostname, device_type, endpoint_status, manual_parent_id)
+                   VALUES ($1, $2, $3, 'Switch', 'ACTIVE', $4)""", eid, ip, name, router_id,
+            )
+        # Neither path shows the router's address (it answers from an interface we don't know).
+        normal = hops("10.1.0.1", "10.62.0.1", "10.61.0.2")
+        await conn.execute(
+            "INSERT INTO endpoint_baseline_routes (endpoint_id, total_hops, hops, normal_hops) VALUES ($1, 3, $2::jsonb, $2::jsonb)",
+            on_normal, _json.dumps(normal),
+        )
+        # Same path, but the stored hops carry RTTs: still on its normal path.
+        await conn.execute(
+            "UPDATE endpoint_baseline_routes SET hops = $2::jsonb WHERE endpoint_id = $1",
+            on_normal, _json.dumps([{**h, "rtt_ms": 3.2} for h in normal]),
+        )
+        await conn.execute(
+            "INSERT INTO endpoint_baseline_routes (endpoint_id, total_hops, hops, normal_hops) VALUES ($1, 4, $2::jsonb, $3::jsonb)",
+            moved, _json.dumps(hops("10.1.0.1", "10.1.0.254", "41.0.0.9", "10.61.0.3")),
+            _json.dumps(hops("10.1.0.1", "10.62.0.1", "10.61.0.3")),
+        )
+
+    run_sql(seed)
+    assert _transit(timescale_dsn, router_id, "DOWN", "10.60.0.1") == sorted([str(no_path), str(on_normal), str(moved)])
+    assert _transit(timescale_dsn, router_id, "UP", "10.60.0.1") == [str(moved)]
+
+
 def test_parallel_traces_take_turns_at_a_shared_router(timescale_dsn, run_sql):
     """Parallel 3: A and B both route through 10.1.0.1 and must not overlap; C goes through
     10.9.9.1 and runs alongside A."""
