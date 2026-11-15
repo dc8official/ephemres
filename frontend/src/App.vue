@@ -478,6 +478,36 @@ button { cursor: pointer; border: none; background: none; }
   background: rgba(22, 163, 74, 0.08);
 }
 
+/* ── Help text on keyboard focus ──
+   A title attribute only shows on mouse hover. An element that also carries the same words in
+   data-tip shows them under itself while it has keyboard focus (:focus-visible, so not after a
+   mouse click, where the title tooltip already serves). Right-aligned: these sit in panel
+   headers at the right edge, where a centred box would run off the panel. */
+[data-tip] {
+  position: relative;
+}
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: max-content;
+  max-width: 18rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-surface, #fff);
+  color: var(--text-primary, #111);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
 /* ── Skip link: off screen until it takes keyboard focus ── */
 .skip-link {
   position: absolute;

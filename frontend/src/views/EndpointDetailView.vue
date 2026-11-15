@@ -853,7 +853,7 @@
 
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch } from 'vue'
-import { useEscapeClose } from '../composables/useEscapeClose.js'
+import { useModalDialog } from '../composables/useModalDialog.js'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { getEndpoint, getUptimeReport, getEndpointEvents, updateEndpoint, refreshEndpointBaseline, logout, getTrafficSeries, getInterfaceTelemetry, updateEndpointInterfaces, getProbeSeries, getEndpointFlowPaths } from '../services/api.js'
 import { user, isAdmin, loadUserFromStorage, clearUserState } from '../services/auth.js'
@@ -1633,9 +1633,9 @@ const handleLogout = async () => {
   }
 }
 
-// Escape closes the modal; reopening it starts without the last attempt's message.
-useEscapeClose(showSettingsModal, () => { showSettingsModal.value = false })
-useEscapeClose(showInterfaceModal, () => { showInterfaceModal.value = false })
+// Escape, focus and Tab handling for the modals; reopening one starts without the last attempt's message.
+useModalDialog(showSettingsModal, () => { showSettingsModal.value = false })
+useModalDialog(showInterfaceModal, () => { showInterfaceModal.value = false })
 watch(showSettingsModal, () => { settingsNotice.value = null })
 watch(showInterfaceModal, () => { interfaceError.value = null })
 

@@ -209,6 +209,14 @@ class PostgresSessionStore(SessionStore):
 
         async with self.session_factory() as db:
             try:
+                # 0. One sign-in at a time per account: the account's row is locked until this
+                #    commits. Two at the same moment each counted only their own new session
+                #    in step 3, which left the account one over its limit.
+                await db.execute(
+                    text("SELECT id FROM users WHERE id = CAST(:uid AS uuid) FOR UPDATE"),
+                    {"uid": u_uuid},
+                )
+
                 # 1. End every session that has timed out, so it neither counts against the
                 #    session limit nor gets reported as "signed in elsewhere" below.
                 await db.execute(text(self._SWEEP_ENDED_SQL), {"now": now})

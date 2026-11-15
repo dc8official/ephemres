@@ -491,7 +491,7 @@
 
 <script setup>
 import { ref, reactive, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useEscapeClose } from '../composables/useEscapeClose.js'
+import { useModalDialog } from '../composables/useModalDialog.js'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import { 
@@ -1107,9 +1107,9 @@ function initSSE() {
   })
 }
 
-// Escape closes the modal; reopening it starts without the last attempt's message.
-useEscapeClose(displayDialog, () => { displayDialog.value = false })
-useEscapeClose(displayDeleteDialog, () => { displayDeleteDialog.value = false })
+// Escape, focus and Tab handling for the modals; reopening one starts without the last attempt's message.
+useModalDialog(displayDialog, () => { displayDialog.value = false })
+useModalDialog(displayDeleteDialog, () => { displayDeleteDialog.value = false })
 watch(displayDialog, () => { formError.value = null })
 watch(displayDeleteDialog, () => { deleteError.value = null })
 

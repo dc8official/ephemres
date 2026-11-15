@@ -206,7 +206,7 @@
 
 <script setup>
 import { ref } from 'vue'
-import { useEscapeClose } from '../../composables/useEscapeClose.js'
+import { useModalDialog } from '../../composables/useModalDialog.js'
 import { useToast } from 'primevue/usetoast'
 import { testFlowPreflight } from '../../services/api.js'
 
@@ -226,7 +226,7 @@ const emit = defineEmits(['change'])
 const toast = useToast()
 
 const showPreflightModal = ref(false)
-useEscapeClose(showPreflightModal, () => { showPreflightModal.value = false })
+useModalDialog(showPreflightModal, () => { showPreflightModal.value = false })
 const preflightChecking = ref(false)
 const preflightResult = ref(null)
 

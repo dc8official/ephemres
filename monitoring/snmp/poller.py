@@ -61,6 +61,7 @@ DISCONTINUITY = mib.IF_X_TABLE["ifCounterDiscontinuityTime"]
 FIELDS = ("in_bytes", "out_bytes", "in_packets", "out_packets", "in_errors", "out_errors", "in_discards", "out_discards")
 COUNTER32 = 2 ** 32
 MAX_GAP_INTERVALS = 3  # a delta over a longer gap says too little about any one minute
+UPTIME_WRAP_WINDOW = 24 * 3600 * 100  # one day of sysUpTime ticks either side of its 32-bit wrap
 RATE_SLACK = 1.5  # a delta above link speed x this is a counter glitch, not traffic
 
 
@@ -83,6 +84,17 @@ class Sample:
             return cls(float(at), uptime, disc, bool(hc), list(values))
         except (TypeError, ValueError):
             return None
+
+
+def uptime_went_back(prev: Optional[int], cur: Optional[int]) -> bool:
+    """True when sysUpTime fell in a way that means a restart. sysUpTime is a 32-bit count of
+    1/100 s, so on its own it returns to zero after about 497 days: a fall from the last
+    UPTIME_WRAP_WINDOW before the limit to within the same window after zero is that, not a
+    reboot. (A real reboot in exactly that day is missed here; engine boots still catches it
+    on SNMPv3.)"""
+    if prev is None or cur is None or cur >= prev:
+        return False
+    return not (prev > COUNTER32 - UPTIME_WRAP_WINDOW and cur < UPTIME_WRAP_WINDOW)
 
 
 def counter_delta(prev: Sample, cur: Sample, interval: float, speed_mbps: Optional[int]) -> Optional[List[int]]:
@@ -766,7 +778,7 @@ class DevicePoller:
         boots = _value(vbs.get(ENGINE_BOOTS))
         now_dt = datetime.now(timezone.utc)
 
-        rebooted = (uptime is not None and self.sys_uptime is not None and uptime < self.sys_uptime) or \
+        rebooted = uptime_went_back(self.sys_uptime, uptime) or \
                    (boots is not None and self.engine_boots is not None and boots > self.engine_boots)
         if rebooted:
             # sysUpTime going back can also be the SNMP agent restarting; engine boots or a

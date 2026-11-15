@@ -177,7 +177,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { useEscapeClose } from '../../composables/useEscapeClose.js'
+import { useModalDialog } from '../../composables/useModalDialog.js'
 import { useToast } from 'primevue/usetoast'
 import {
   getSnmpCredentials, createSnmpCredentials, updateSnmpCredentials, deleteSnmpCredentials, testSnmpCredentials,
@@ -324,7 +324,7 @@ async function runTest() {
   }
 }
 
-useEscapeClose(dialogOpen, () => closeDialog())
+useModalDialog(dialogOpen, () => closeDialog())
 
 onMounted(load)
 </script>

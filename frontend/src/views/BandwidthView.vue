@@ -701,7 +701,7 @@
 
 <script setup>
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
-import { useEscapeClose } from '../composables/useEscapeClose.js'
+import { useModalDialog } from '../composables/useModalDialog.js'
 import { useRoute, useRouter } from 'vue-router'
 import { Line as LineChart } from 'vue-chartjs'
 import {
@@ -1656,10 +1656,10 @@ watch(
   }
 )
 
-// Escape closes the modal; reopening it starts without the last attempt's message.
-useEscapeClose(showMappingModal, () => { showMappingModal.value = false })
-useEscapeClose(showEnrollModal, () => { showEnrollModal.value = false })
-useEscapeClose(showInterfaceModal, () => { showInterfaceModal.value = false })
+// Escape, focus and Tab handling for the modals; reopening one starts without the last attempt's message.
+useModalDialog(showMappingModal, () => { showMappingModal.value = false })
+useModalDialog(showEnrollModal, () => { showEnrollModal.value = false })
+useModalDialog(showInterfaceModal, () => { showInterfaceModal.value = false })
 watch(showInterfaceModal, () => { interfaceError.value = null })
 
 onMounted(() => {

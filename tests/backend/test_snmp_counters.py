@@ -2,7 +2,7 @@
 (monitoring/snmp/poller.py counter_delta and spread)."""
 from datetime import datetime, timezone
 
-from monitoring.snmp.poller import COUNTER32, Sample, counter_delta, spread
+from monitoring.snmp.poller import COUNTER32, UPTIME_WRAP_WINDOW, Sample, counter_delta, spread, uptime_went_back
 
 T0 = 1_762_934_400.0  # 2025-11-12 08:00:00 UTC, a minute boundary
 
@@ -53,3 +53,16 @@ def test_spread_shares_by_time_and_keeps_totals_exact():
     assert list(spread(T0 + 5, T0 + 50, [9, 0, 0, 0, 0, 0, 0, 0]).values()) == [[9, 0, 0, 0, 0, 0, 0, 0]]
     assert spread(T0 + 5, T0 + 5, [9, 0, 0, 0, 0, 0, 0, 0]) == {}
     assert next(iter(spread(T0, T0 + 10, [1] + [0] * 7))) == datetime.fromtimestamp(T0, tz=timezone.utc)
+
+
+def test_sysuptime_wrapping_after_497_days_is_not_a_reboot():
+    # A fall is a restart...
+    assert uptime_went_back(5_000_000, 3_000) is True
+    assert uptime_went_back(COUNTER32 - 100, COUNTER32 // 2) is True
+    # ...unless the counter was within a day of its 32-bit limit and is now just past zero.
+    assert uptime_went_back(COUNTER32 - 6_000, 12) is False
+    assert uptime_went_back(COUNTER32 - UPTIME_WRAP_WINDOW + 1, UPTIME_WRAP_WINDOW - 1) is False
+    # Moving forward, standing still or an unknown reading is never one.
+    assert uptime_went_back(100, 200) is False
+    assert uptime_went_back(100, 100) is False
+    assert uptime_went_back(None, 5) is False and uptime_went_back(5, None) is False

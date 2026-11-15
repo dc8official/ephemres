@@ -12,6 +12,7 @@
           class="btn-secondary btn-small"
           :disabled="busy"
           title="Treat the path in use now as this endpoint's normal path"
+          data-tip="Treat the path in use now as this endpoint's normal path"
           @click="makeNormal(false)"
         >Make current path normal</button>
         <button
@@ -20,6 +21,7 @@
           class="btn-secondary btn-small"
           :disabled="busy"
           title="Make the path in use now normal and keep it so until unpinned"
+          data-tip="Make the path in use now normal and keep it so until unpinned"
           @click="makeNormal(true)"
         >Pin as normal</button>
         <button
@@ -28,6 +30,7 @@
           class="btn-secondary btn-small"
           :disabled="busy"
           title="Let the normal path follow the current one again after 24 hours"
+          data-tip="Let the normal path follow the current one again after 24 hours"
           @click="unpin"
         >Unpin</button>
       </template>

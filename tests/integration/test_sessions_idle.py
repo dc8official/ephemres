@@ -334,3 +334,19 @@ def test_end_by_id_needs_the_right_account(timescale_dsn, make_user, run_sql):
     assert _with_stores(timescale_dsn, lambda s: s.is_session_active(owner, "eb-1")) is False
     assert _ended(run_sql, "eb-1") == ("ended_by_admin", None)
     assert _with_stores(timescale_dsn, lambda s: s.end_session_by_id(owner, str(row_id), "ended_by_admin")) is False
+
+
+def test_sign_ins_at_the_same_moment_do_not_exceed_the_session_limit(timescale_dsn, make_user, run_sql):
+    """Six workers register a session for one account at once (limit 2). Each used to count
+    only its own new session when ending the oldest, which left the account over its limit;
+    the account's row is now locked for the length of a sign-in."""
+    uid = make_user(max_sessions=2)
+
+    async def _all_at_once(*stores):
+        await asyncio.gather(*[_register(s, uid, f"race-{i}") for i, s in enumerate(stores)])
+
+    _with_stores(timescale_dsn, _all_at_once, count=6)
+    live = run_sql(lambda c: c.fetchval("SELECT count(*) FROM user_sessions WHERE user_id = $1::uuid", uid))
+    ended = run_sql(lambda c: c.fetchval(
+        "SELECT count(*) FROM ended_sessions WHERE user_id = $1::uuid AND reason = 'signed_in_elsewhere'", uid))
+    assert (live, ended) == (2, 4)
