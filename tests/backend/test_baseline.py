@@ -14,6 +14,7 @@ from app.services.baseline_service import (
     calculate_z_score,
     is_latency_degraded,
 )
+from app.services.timezone_utils import server_zone
 from monitoring.ping import PingResult, classify_ping_result
 
 
@@ -36,8 +37,10 @@ class TestHybridAdaptiveBaseline(unittest.TestCase):
 
         # Populate cache 1D array of 168 entries
         arr = [None] * 168
-        dow = self.now.weekday()
-        hour = self.now.hour
+        # Slots are the server's local hours (v3.3.6).
+        local = self.now.astimezone(server_zone())
+        dow = local.weekday()
+        hour = local.hour
         idx = (dow * 24) + hour
         arr[idx] = (20.0, 5.0, 100)
         self.cache._cache[self.endpoint_id] = arr
@@ -51,8 +54,10 @@ class TestHybridAdaptiveBaseline(unittest.TestCase):
         self.cache._onboarded_dates[self.endpoint_id] = onboarded_time
 
         arr = [None] * 168
-        dow = self.now.weekday()
-        hour = self.now.hour
+        # Slots are the server's local hours (v3.3.6).
+        local = self.now.astimezone(server_zone())
+        dow = local.weekday()
+        hour = local.hour
         idx = (dow * 24) + hour
         expected_mean, expected_stddev, expected_count = 25.5, 4.2, 250
         arr[idx] = (expected_mean, expected_stddev, expected_count)

@@ -21,7 +21,7 @@ Ephemres eliminates false-positive SLA penalties through **5-Ping Sub-Cycle Burs
 ---
 
 ## 2. Four-State Classification Matrix
-At the conclusion of each 5-ping cycle, `classify_ping_result()` (`monitoring/ping.py`) returns an operational state (`UP` / `DOWN`) and one of four detailed states. Loss sets the state; when all 5 replies arrive, latency is checked against the endpoint's hour-of-week baseline (endpoints with no baseline history yet, such as during their first 7 days or hours with null baseline data, judge state by loss alone):
+At the conclusion of each 5-ping cycle, `classify_ping_result()` (`monitoring/ping.py`) returns an operational state (`UP` / `DOWN`) and one of four detailed states. Loss sets the state; when all 5 replies arrive, latency is checked against the endpoint's hour-of-week baseline, in the server's local hours since v3.3.6 (endpoints with no baseline history yet, such as during their first 7 days or hours with null baseline data, judge state by loss alone):
 
 | Operational State | Packets Lost (out of 5) | Packet Loss % | SLA Availability Credit | Operational Meaning |
 | :--- | :--- | :--- | :--- | :--- |

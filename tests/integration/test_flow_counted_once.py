@@ -87,12 +87,12 @@ def test_endpoint_series_on_the_hourly_tier_counts_once(api_client, run_sql):
 def test_endpoint_conversations_and_top_talkers_count_once(api_client, run_sql):
     _seed(run_sql)
     convs = _get(api_client, "conversations", window="1h")
-    assert [(c["src_ip"], c["dst_ip"], c["total_bytes"]) for c in convs["items"]] == [
-        (INTERNET_IP, HOST_A_IP, 12 * MB),
-        (HOST_A_IP, INTERNET_IP, 7 * MB),
-        (HOST_A_IP, HOST_B_IP, 3 * MB),
+    # Request and reply in one row since v3.3.6 (C3): host A (inside) first, what each side sent.
+    assert [(c["src_ip"], c["dst_ip"], c["total_bytes"], c["src_bytes"], c["dst_bytes"]) for c in convs["items"]] == [
+        (HOST_A_IP, INTERNET_IP, 19 * MB, 7 * MB, 12 * MB),
+        (HOST_A_IP, HOST_B_IP, 3 * MB, 3 * MB, 0),
     ]
-    assert convs["items"][1]["total_packets"] == 6_000
+    assert convs["items"][0]["src_packets"] == 6_000
 
     talkers = {t["ip_address"]: t for t in _get(api_client, "top-talkers", window="1h")["top_endpoints"]}
     assert (talkers[HOST_A_IP]["ingress_bytes"], talkers[HOST_A_IP]["egress_bytes"]) == (12 * MB, 10 * MB)
@@ -102,7 +102,7 @@ def test_endpoint_conversations_and_top_talkers_count_once(api_client, run_sql):
 def test_fleet_conversations_count_once(api_client, run_sql):
     _seed(run_sql)
     convs = _data(api_client.get("/api/v1/bandwidth/conversations", params={"window": "1h"}))
-    assert [c["total_bytes"] for c in convs["items"]] == [12 * MB, 7 * MB, 3 * MB]
+    assert [c["total_bytes"] for c in convs["items"]] == [19 * MB, 3 * MB]  # each pair once
 
 
 def test_endpoint_applications_and_qos_count_once(api_client, run_sql):
@@ -122,4 +122,5 @@ def test_endpoint_applications_and_qos_count_once(api_client, run_sql):
 def test_one_router_view_still_shows_its_own_reports(api_client, run_sql):
     _seed(run_sql)
     core = _get(api_client, "conversations", window="1h", exporter_id=str(CORE_ID))
-    assert [c["total_bytes"] for c in core["items"]] == [12 * MB, 5_900_000, 3 * MB]
+    # One row per pair since v3.3.6 (C3): 12 MB in and the core's 5.9 MB report out together.
+    assert [c["total_bytes"] for c in core["items"]] == [17_900_000, 3 * MB]

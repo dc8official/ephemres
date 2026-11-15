@@ -153,6 +153,8 @@ class SettingsUpdate(BaseModel):
     # of each endpoint (6, 12 or 24 in the UI; the API takes 1-168).
     discovery_parallel: Optional[int] = Field(default=None, ge=1, le=8)
     rediscovery_hours: Optional[int] = Field(default=None, ge=1, le=168)
+    # Of those, how many may pass through the same router at once (1-3, build plan 11b).
+    discovery_per_router: Optional[int] = Field(default=None, ge=1, le=3)
     # Traffic alerts on WAN links (v3.3.6 build plan 7.4).
     traffic_alerts_enabled: Optional[bool] = None
     traffic_alert_threshold_pct: Optional[int] = Field(default=None, ge=50, le=99)
@@ -186,6 +188,7 @@ class SettingsPayload(BaseModel):
     flowSamplingMultiplier: int
     discovery_parallel: int = 2
     rediscovery_hours: int = 24
+    discovery_per_router: int = 1
     traffic_alerts_enabled: bool = False
     traffic_alert_threshold_pct: int = 80
     traffic_alert_minutes: int = 15
@@ -277,6 +280,7 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
         "flowSamplingMultiplier": flow_sampling,
         "discovery_parallel": rt.discovery_parallel,
         "rediscovery_hours": rt.rediscovery_hours,
+        "discovery_per_router": rt.discovery_per_router,
         "traffic_alerts_enabled": rt.traffic_alerts_enabled,
         "traffic_alert_threshold_pct": rt.traffic_alert_threshold_pct,
         "traffic_alert_minutes": rt.traffic_alert_minutes,
@@ -388,6 +392,8 @@ async def update_settings(
         await _upsert_setting(db, "discovery_parallel", str(payload.discovery_parallel))
     if payload.rediscovery_hours is not None:
         await _upsert_setting(db, "rediscovery_hours", str(payload.rediscovery_hours))
+    if payload.discovery_per_router is not None:
+        await _upsert_setting(db, "discovery_per_router", str(payload.discovery_per_router))
     if payload.traffic_alerts_enabled is not None:
         await _upsert_setting(db, "traffic_alerts_enabled", "true" if payload.traffic_alerts_enabled else "false")
     if payload.traffic_alert_threshold_pct is not None:

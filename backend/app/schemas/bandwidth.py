@@ -249,6 +249,14 @@ class TrafficSeriesResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class NameHint(BaseModel):
+    """A name for an address that is no endpoint (v3.3.6, build plan 11b): `provider` from the
+    providers' published ranges ("Microsoft 365"), `dns` from reverse DNS. See
+    services/address_names.py."""
+    name: str
+    source: Literal["provider", "dns"]
+
+
 class TopTalkerItem(BaseModel):
     """Aggregated volume and packet statistics for an individual network host endpoint."""
     endpoint_id: Optional[UUID] = None
@@ -263,6 +271,8 @@ class TopTalkerItem(BaseModel):
     avg_packet_size: int = 0
     # The endpoint's site, else the sites of the routers that saw the address (sorted).
     sites: List[str] = Field(default_factory=list)
+    # For an address with no endpoint hostname: a provider or reverse-DNS name, when one is known.
+    name_hint: Optional[NameHint] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -385,6 +395,9 @@ class TopConversationItem(BaseModel):
     dst_ip: str
     src_hostname: Optional[str] = None
     dst_hostname: Optional[str] = None
+    # For a side with no endpoint hostname: a provider or reverse-DNS name, when one is known.
+    src_name_hint: Optional[NameHint] = None
+    dst_name_hint: Optional[NameHint] = None
     protocol: str
     dst_port: int
     # flow_metrics.service_name: "HTTPS", "QUIC (HTTP/3)"; None for a port with no name. The
@@ -393,6 +406,13 @@ class TopConversationItem(BaseModel):
     total_bytes: int
     flow_count: int
     total_packets: int = 0
+    # Request and reply together (C3, v3.3.6): what each side sent. src_ip is the inside address
+    # (monitored or private) when only one side is, else the lower address. avg_packet_size is
+    # the busier direction's.
+    src_bytes: int = 0
+    dst_bytes: int = 0
+    src_packets: int = 0
+    dst_packets: int = 0
     avg_packet_size: int = 0
     packets_per_flow: float = 0.0
     traffic_profile: str = "Standard"

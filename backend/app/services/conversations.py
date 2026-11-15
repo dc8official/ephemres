@@ -21,7 +21,7 @@ from app.schemas.bandwidth import (
     format_dscp_label,
     format_tcp_flags,
 )
-from app.services import wan_edge
+from app.services import address_names, wan_edge
 from app.services.flow_metrics import (
     PROTOCOL_MAP,
     TRAFFIC_ZONES,
@@ -31,6 +31,7 @@ from app.services.flow_metrics import (
     ZONE_NORTH_SOUTH_INGRESS,
     bulk_sql,
     dscp_from_tos,
+    internal_sql,
     service_name,
     tcp_anomaly_sql,
     zone_sql,
@@ -127,16 +128,66 @@ def tier_table(where_sql: str, params: Dict[str, Any]) -> str:
 
 
 def _conversation_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """`labelled`: one row per conversation, its request and reply together (C3, decided
+    2026-11-15, build plan 11b). flowd stores each direction as its own row under the service's
+    port and keeps no source port, so which side is the server is not known; the pair is formed
+    here, when reading. `src_ip` is the inside address (a monitored endpoint or a private one,
+    the zones rule) when exactly one side is inside, else the lower address; `dst_ip` the other.
+    `src_bytes` / `dst_bytes` are what each side sent.
+
+    - The suspicious-traffic rule looks at each direction: a scan answered by SYN-ACK keeps a
+      "SYN only" request, and a SYN answered by RST is a refused connection ("TCP_RST" wins).
+      Applied to the pair's combined flags the SYN-ACK would have hidden the scan.
+    - Profile and Bulk use the busier direction's average packet: the stream of small ACKs
+      coming back would otherwise pull a backup below the full-size threshold.
+    - The time seen counts each bucket once, whichever directions it held.
+    """
     counted_once, params = counted_once_cte(where_sql, params)
-    avg_packet = "COALESCE(total_bytes / NULLIF(total_packets, 0), 0)"
+    src_in = internal_sql("src_ip", "src_endpoint_id")
+    dst_in = internal_sql("dst_ip", "dst_endpoint_id")
+    anomaly_src = tcp_anomaly_sql("src_flags", "protocol")
+    anomaly_dst = tcp_anomaly_sql("dst_flags", "protocol")
+    avg_packet = (
+        "COALESCE(CASE WHEN src_bytes >= dst_bytes THEN src_bytes / NULLIF(src_packets, 0) "
+        "ELSE dst_bytes / NULLIF(dst_packets, 0) END, 0)"
+    )
     return f"""
         WITH {counted_once},
+        oriented AS (
+            SELECT counted_once.*,
+                   CASE WHEN {src_in} AND NOT {dst_in} THEN TRUE
+                        WHEN {dst_in} AND NOT {src_in} THEN FALSE
+                        ELSE src_ip <= dst_ip END AS forward
+            FROM counted_once
+        ),
+        pair_bucket AS (
+            SELECT CASE WHEN forward THEN src_ip ELSE dst_ip END AS src_ip,
+                   CASE WHEN forward THEN dst_ip ELSE src_ip END AS dst_ip,
+                   protocol, dst_port, bucket,
+                   MAX(bucket_seconds) AS bucket_seconds,
+                   SUM(bytes) FILTER (WHERE forward) AS src_bytes,
+                   SUM(bytes) FILTER (WHERE NOT forward) AS dst_bytes,
+                   SUM(packets) FILTER (WHERE forward) AS src_packets,
+                   SUM(packets) FILTER (WHERE NOT forward) AS dst_packets,
+                   BIT_OR(tcp_flags) FILTER (WHERE forward) AS src_flags,
+                   BIT_OR(tcp_flags) FILTER (WHERE NOT forward) AS dst_flags,
+                   SUM(flow_count) AS flow_count,
+                   MAX(tos) AS tos
+            FROM oriented
+            GROUP BY 1, 2, protocol, dst_port, bucket
+        ),
         conv AS (
             SELECT src_ip, dst_ip, protocol, dst_port,
-                   SUM(bytes) AS total_bytes,
+                   COALESCE(SUM(src_bytes), 0) AS src_bytes,
+                   COALESCE(SUM(dst_bytes), 0) AS dst_bytes,
+                   COALESCE(SUM(src_bytes), 0) + COALESCE(SUM(dst_bytes), 0) AS total_bytes,
+                   COALESCE(SUM(src_packets), 0) AS src_packets,
+                   COALESCE(SUM(dst_packets), 0) AS dst_packets,
+                   COALESCE(SUM(src_packets), 0) + COALESCE(SUM(dst_packets), 0) AS total_packets,
                    SUM(flow_count) AS total_flows,
-                   SUM(packets) AS total_packets,
-                   BIT_OR(tcp_flags) AS tcp_flags_mask,
+                   BIT_OR(src_flags) AS src_flags,
+                   BIT_OR(dst_flags) AS dst_flags,
+                   COALESCE(BIT_OR(src_flags), 0) | COALESCE(BIT_OR(dst_flags), 0) AS tcp_flags_mask,
                    MAX(tos) AS max_tos,
                    SUM(bucket_seconds) AS seen_seconds,
                    -- First and last seen (review S1): the start of the first bucket and the end
@@ -144,16 +195,21 @@ def _conversation_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict
                    -- hourly tier). The current bucket ends in the future: capped at now.
                    MIN(bucket) AS first_seen,
                    LEAST(MAX(bucket + bucket_seconds * INTERVAL '1 second'), now()) AS last_seen
-            FROM counted_once
+            FROM pair_bucket
             GROUP BY src_ip, dst_ip, protocol, dst_port
         ),
+        flagged AS (
+            SELECT conv.*, {anomaly_src} AS anomaly_src, {anomaly_dst} AS anomaly_dst
+            FROM conv
+        ),
         labelled AS (
-            SELECT conv.*,
-                   {tcp_anomaly_sql("tcp_flags_mask", "protocol")} AS anomaly_hint,
+            SELECT flagged.*,
+                   CASE WHEN 'TCP_RST' IN (anomaly_src, anomaly_dst) THEN 'TCP_RST'
+                        ELSE COALESCE(anomaly_src, anomaly_dst) END AS anomaly_hint,
                    (COALESCE(max_tos, 0) & 255) >> 2 AS dscp,
                    {avg_packet} AS avg_packet_size,
                    {bulk_sql(avg_packet, "seen_seconds", "total_bytes")} AS is_bulk
-            FROM conv
+            FROM flagged
         )
     """, params
 
@@ -216,8 +272,21 @@ def _conversation_key(row: Dict[str, Any]) -> tuple:
     return (_ip_text(row["src_ip"]), _ip_text(row["dst_ip"]), int(row["protocol"]), int(row["dst_port"]))
 
 
+def _flagged_direction(row: Dict[str, Any], combined: int) -> int:
+    """The TCP flags behind a pair's anomaly: the direction whose own flags raised it (TCP_RST
+    wins, as in the SQL), else the pair's combined flags."""
+    anomaly = row.get("anomaly_hint")
+    for side in ("src", "dst"):
+        if anomaly and row.get(f"anomaly_{side}") == anomaly and row.get(f"{side}_flags") is not None:
+            return int(row[f"{side}_flags"])
+    return combined
+
+
 def to_item(
-    row: Dict[str, Any], hostnames: Dict[str, str], routers: Sequence[ConversationRouter] = ()
+    row: Dict[str, Any],
+    hostnames: Dict[str, str],
+    routers: Sequence[ConversationRouter] = (),
+    hints: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> TopConversationItem:
     proto_id = int(row["protocol"])
     proto_name = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
@@ -226,7 +295,8 @@ def to_item(
     total_bytes = int(row["total_bytes"] or 0)
     total_flows = int(row["total_flows"] or 0)
     total_packets = int(row["total_packets"] or 0)
-    avg_packet_size = int(total_bytes // total_packets) if total_packets > 0 else 0
+    # The busier direction's average packet (the pair's would be pulled down by the ACKs).
+    avg_packet_size = int(row.get("avg_packet_size") or 0)
     # Whole packets: "156608.2 pkts/flow" was noise (review C4).
     packets_per_flow = round(total_packets / total_flows) if total_flows > 0 else 0
     dscp = dscp_from_tos(tos)
@@ -238,6 +308,8 @@ def to_item(
         dst_ip=str(row["dst_ip"]),
         src_hostname=hostnames.get(src),
         dst_hostname=hostnames.get(dst),
+        src_name_hint=(hints or {}).get(src) if src not in hostnames else None,
+        dst_name_hint=(hints or {}).get(dst) if dst not in hostnames else None,
         protocol=proto_name,
         dst_port=port,
         total_bytes=total_bytes,
@@ -250,11 +322,17 @@ def to_item(
             anomaly, avg_packet_size, packets_per_flow, dscp, port, bulk=bool(row.get("is_bulk"))
         ),
         tcp_flags=flags,
-        tcp_flags_labels=format_tcp_flags(flags) if proto_name == "TCP" else [],
+        # On a suspicious row, the flags of the direction that made it so: the pair's combined
+        # flags read "SYN ACK" next to "SYN only" when the target answered a scan (C3).
+        tcp_flags_labels=format_tcp_flags(_flagged_direction(row, flags)) if proto_name == "TCP" else [],
         tos=tos,
         dscp=dscp,
         dscp_label=format_dscp_label(tos),
         anomaly_hint=anomaly,
+        src_bytes=int(row.get("src_bytes") or 0),
+        dst_bytes=int(row.get("dst_bytes") or 0),
+        src_packets=int(row.get("src_packets") or 0),
+        dst_packets=int(row.get("dst_packets") or 0),
         first_seen=row.get("first_seen"),
         last_seen=row.get("last_seen"),
         routers=list(routers),
@@ -358,9 +436,11 @@ async def query_conversations(
     rows = [dict(r) for r in page_res.mappings()]
     ips = sorted({_ip_text(r["src_ip"]) for r in rows} | {_ip_text(r["dst_ip"]) for r in rows})
     hostnames = await _hostnames(db, ips)
+    # Names for the other addresses (build plan 11b): provider ranges now, reverse DNS from cache.
+    hints = address_names.names_for(ip for ip in ips if ip not in hostnames)
     routers = await conversation_routers(db, where_sql, filter_params, rows)
     return {
-        "items": [to_item(r, hostnames, routers.get(_conversation_key(r), [])) for r in rows],
+        "items": [to_item(r, hostnames, routers.get(_conversation_key(r), []), hints) for r in rows],
         "counts": counts,
         "total": counts.get(quick, counts["all"]),
     }
@@ -464,14 +544,20 @@ async def conversation_exporters(
 ) -> Dict[tuple, list]:
     """{(src_ip, dst_ip, protocol, dst_port): [exporter ids]}: the routers that reported each
     of `keys` in the window. A conversation counted once may have been seen by several; the
-    PDF names them all."""
+    PDF names them all. A key is a pair (C3): its reply, stored the other way round, counts too."""
     if not keys:
         return {}
     tiers, params = _tiers(where_sql, params)
     values, key_params = [], {}
+    asked = {}
     for i, (src, dst, proto, port) in enumerate(keys):
-        values.append(f"(CAST(:ks{i} AS inet), CAST(:kd{i} AS inet), CAST(:kp{i} AS smallint), CAST(:kt{i} AS integer))")
-        key_params.update({f"ks{i}": _ip_text(src), f"kd{i}": _ip_text(dst), f"kp{i}": int(proto), f"kt{i}": int(port)})
+        key = (_ip_text(src), _ip_text(dst), int(proto), int(port))
+        asked[key] = key
+        asked[(key[1], key[0], key[2], key[3])] = key
+        for j, (a, b) in enumerate(((key[0], key[1]), (key[1], key[0]))):
+            n = f"{i}_{j}"
+            values.append(f"(CAST(:ks{n} AS inet), CAST(:kd{n} AS inet), CAST(:kp{n} AS smallint), CAST(:kt{n} AS integer))")
+            key_params.update({f"ks{n}": a, f"kd{n}": b, f"kp{n}": key[2], f"kt{n}": key[3]})
     wanted = f"(src_ip, dst_ip, protocol, dst_port) IN (VALUES {', '.join(values)})"
     union = "\n UNION ".join(
         f"SELECT DISTINCT src_ip, dst_ip, protocol, dst_port, exporter_id FROM {table} WHERE {where} AND {wanted}"
@@ -480,8 +566,10 @@ async def conversation_exporters(
     res = await db.execute(text(union), {**params, **key_params})
     seen: Dict[tuple, list] = {}
     for r in res.mappings():
-        key = (_ip_text(r["src_ip"]), _ip_text(r["dst_ip"]), int(r["protocol"]), int(r["dst_port"]))
-        seen.setdefault(key, []).append(r["exporter_id"])
+        stored = (_ip_text(r["src_ip"]), _ip_text(r["dst_ip"]), int(r["protocol"]), int(r["dst_port"]))
+        key = asked.get(stored, stored)
+        if r["exporter_id"] not in seen.setdefault(key, []):
+            seen[key].append(r["exporter_id"])
     return seen
 
 

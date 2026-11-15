@@ -37,6 +37,10 @@ class RuntimeSettings:
     # endpoint is re-traced by the rolling schedule.
     discovery_parallel: int = 2
     rediscovery_hours: int = 24
+    # How many of those may go through the same router at once (1-3, decided 2026-11-15, build
+    # plan 11b). Routers rate-limit the ICMP replies traceroute needs, so 1 (take turns) until the
+    # sizing run shows what a branch's gateway allows; the gateway counts like any router.
+    discovery_per_router: int = 1
     # Traffic alerts on WAN links (build plan 7.4): off until switched on; the default rule a
     # link uses unless its own alias entry overrides it or opts out.
     traffic_alerts_enabled: bool = False
@@ -65,6 +69,7 @@ def config_defaults() -> RuntimeSettings:
         flow_sflow_port=int(getattr(flow_cfg, "sflow_port", 6343)),
         discovery_parallel=2,
         rediscovery_hours=24,
+        discovery_per_router=1,
         traffic_alerts_enabled=False,
         traffic_alert_threshold_pct=80,
         traffic_alert_minutes=15,
@@ -99,6 +104,7 @@ def resolve(kv: Mapping[str, str]) -> RuntimeSettings:
         flow_sflow_port=_int_in_range(kv.get("flow_sflow_port"), d.flow_sflow_port, 1, 65535),
         discovery_parallel=_int_in_range(kv.get("discovery_parallel"), d.discovery_parallel, 1, 8),
         rediscovery_hours=_int_in_range(kv.get("rediscovery_hours"), d.rediscovery_hours, 1, 168),
+        discovery_per_router=_int_in_range(kv.get("discovery_per_router"), d.discovery_per_router, 1, 3),
         traffic_alerts_enabled=(
             d.traffic_alerts_enabled if kv.get("traffic_alerts_enabled") is None
             else kv["traffic_alerts_enabled"].strip().lower() in TRUE_VALUES

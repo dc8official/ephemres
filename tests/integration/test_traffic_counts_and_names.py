@@ -137,7 +137,8 @@ def test_pdf_counts_once_and_names_every_router(timescale_dsn, run_sql):
     top = data["conversations"][0]
     assert (top["src_display"], top["dst_display"], top["port_label"]) == (ERP_IP, PC_IP, "1433 / MS SQL")
     assert top["router_name"] == "abj-rtr1, hq-rtr1"
-    assert top["pct_of_transit"] == pytest.approx(20 / 35 * 100)
+    # The ERP request (10 MB) and reply (20 MB) are one row since v3.3.6 (C3): 30 of 35 MB.
+    assert top["pct_of_transit"] == pytest.approx(30 / 35 * 100)
     assert "443 / QUIC (HTTP/3)" in {c["port_label"] for c in data["conversations"]}
 
 
@@ -169,8 +170,14 @@ def test_top_talkers_are_placed_by_site(api_client, run_sql):
 
 
 def _conversations(api_client, **params):
+    """Conversations by (address, address, port), either way round: a row is a request and its
+    reply together since v3.3.6 (C3), with the inside address first."""
     page = _data(api_client.get("/api/v1/bandwidth/conversations", params={"window": "1h", **params}))
-    return {(c["src_ip"].split("/")[0], c["dst_ip"].split("/")[0], c["dst_port"]): c for c in page["items"]}
+    out = {}
+    for c in page["items"]:
+        a, b = c["src_ip"].split("/")[0], c["dst_ip"].split("/")[0]
+        out[(a, b, c["dst_port"])] = out[(b, a, c["dst_port"])] = c
+    return out
 
 
 def test_conversations_name_the_sites_and_routers_that_saw_them(api_client, run_sql):
@@ -180,13 +187,15 @@ def test_conversations_name_the_sites_and_routers_that_saw_them(api_client, run_
     erp = convs[(PC_IP, ERP_IP, 1433)]
     # Both routers reported it (its bytes counted once, at the larger report), by site.
     assert [(r["hostname"], r["site"]) for r in erp["routers"]] == [("abj-rtr1", "Abuja"), ("hq-rtr1", "Lagos HQ")]
-    assert erp["total_bytes"] == 10 * MB
+    # Request and reply together (C3): 10 MB to the ERP server, 20 MB back; ERP first (both
+    # inside, so the lower address).
+    assert (erp["total_bytes"], erp["src_ip"], erp["src_bytes"], erp["dst_bytes"]) == (30 * MB, ERP_IP, 20 * MB, 10 * MB)
     assert [r["hostname"] for r in convs[(MS365_IP, PC_IP, 443)]["routers"]] == ["abj-rtr1"]
 
     # The shared filter keeps the routers in scope, in the table and in each row.
     abuja = _conversations(api_client, site="Abuja")
     assert [r["hostname"] for r in abuja[(PC_IP, ERP_IP, 1433)]["routers"]] == ["abj-rtr1"]
-    assert abuja[(PC_IP, ERP_IP, 1433)]["total_bytes"] == 9 * MB
+    assert abuja[(PC_IP, ERP_IP, 1433)]["total_bytes"] == 29 * MB  # Abuja's own reports: 9 + 20
 
 
 def test_flows_from_an_unmatched_source_name_no_router(api_client, run_sql):
@@ -346,3 +355,77 @@ def test_sql_rules_match_python(run_sql):
     for r in rows:
         assert r["bulk"] == fm.is_bulk(r["a"], r["seen"], r["b"]), dict(r)
     assert {r["bulk"] for r in rows} == {True, False}
+
+
+# --- C3: request and reply in one row (decided 2026-11-15, build plan 11b) -------------------
+
+SYN, ACK, RST, FIN, PSH = 0x02, 0x10, 0x04, 0x01, 0x08
+
+
+def _flows_with_flags(run_sql, rows):
+    """rows: (minutes ago, exporter, src, dst, proto, port, bytes, packets, flows, tcp flags)."""
+    now = _seed(run_sql, [])
+
+    async def add(conn):
+        await conn.executemany(
+            """INSERT INTO flow_minute_rollups (bucket, exporter_id, src_ip, dst_ip, protocol, dst_port,
+                                                bytes, packets, flow_count, tcp_flags, tos)
+               VALUES ($1, $2, $3::inet, $4::inet, $5, $6, $7, $8, $9, $10, 0)""",
+            [(now - datetime.timedelta(minutes=ago), *rest) for ago, *rest in rows],
+        )
+
+    run_sql(add)
+
+
+def test_the_suspicious_rule_looks_at_each_direction(api_client, run_sql):
+    # A scan answered by SYN-ACK: the request stays SYN only (the pair's combined flags have ACK
+    # and would hide it). A SYN answered by RST: a refused connection. A normal session: nothing.
+    _flows_with_flags(run_sql, [
+        (5, HQ_ID, SCANNER_IP, "10.0.0.7", TCP, 22, 600, 10, 10, SYN),
+        (5, HQ_ID, "10.0.0.7", SCANNER_IP, TCP, 22, 600, 10, 10, SYN | ACK),
+        (5, HQ_ID, SCANNER_IP, "10.0.0.8", TCP, 3389, 60, 1, 1, SYN),
+        (5, HQ_ID, "10.0.0.8", SCANNER_IP, TCP, 3389, 60, 1, 1, RST | ACK),
+        (5, HQ_ID, PC_IP, MS365_IP, TCP, 443, 50_000, 100, 1, SYN | ACK | PSH | FIN),
+        (5, HQ_ID, MS365_IP, PC_IP, TCP, 443, 900_000, 600, 1, SYN | ACK | PSH | FIN),
+    ])
+    convs = _conversations(api_client)
+    assert convs[("10.0.0.7", SCANNER_IP, 22)]["anomaly_hint"] == "SYN_ONLY"
+    assert convs[("10.0.0.8", SCANNER_IP, 3389)]["anomaly_hint"] == "TCP_RST"
+    assert convs[(PC_IP, MS365_IP, 443)]["anomaly_hint"] is None
+    # Each pair once, the inside address first, what each side sent.
+    web = convs[(PC_IP, MS365_IP, 443)]
+    assert (web["src_ip"], web["src_bytes"], web["dst_bytes"], web["total_bytes"]) == (PC_IP, 50_000, 900_000, 950_000)
+    page = _data(api_client.get("/api/v1/bandwidth/conversations", params={"window": "1h"}))
+    assert page["counts"]["all"] == 3 and page["counts"]["anomalies"] == 2
+    tiles = _data(api_client.get("/api/v1/bandwidth/anomalies", params={"window": "1h"}))
+    assert (tiles["conversations"], tiles["syn_conversations"], tiles["rst_conversations"]) == (2, 1, 1)
+
+
+def test_a_backup_stays_bulk_with_its_acks_coming_back(api_client, run_sql):
+    # 55 minutes of ~8 Mb/s in full-size packets one way, a stream of 60 B ACKs the other: the
+    # busier direction's packets decide (the pair's average would be ~750 B, under 1100).
+    rows = []
+    for m in range(2, 57):
+        rows.append((m, HQ_ID, "10.0.0.30", "10.0.0.40", TCP, 873, 60 * MB, 43_000, 1, ACK | PSH))
+        rows.append((m, HQ_ID, "10.0.0.40", "10.0.0.30", TCP, 873, 1_290_000, 21_500, 1, ACK))
+    _flows_with_flags(run_sql, rows)
+    backup = _conversations(api_client)[("10.0.0.30", "10.0.0.40", 873)]
+    assert backup["traffic_profile"] == "Bulk Transfer"
+    assert backup["avg_packet_size"] == 60 * MB // 43_000
+    # Both directions in the same minutes: seen for 55 minutes, not 110.
+    first = datetime.datetime.fromisoformat(backup["first_seen"])
+    last = datetime.datetime.fromisoformat(backup["last_seen"])
+    assert last - first == datetime.timedelta(minutes=55)
+
+
+def test_an_outside_address_is_named_from_the_providers_ranges(api_client, run_sql):
+    # Build plan 11b: 52.97.146.2 is in Microsoft's published Exchange Online ranges.
+    _seed(run_sql, _erp_flows())
+    convs = _conversations(api_client)
+    quic = convs[(PC_IP, MS365_IP, 443)]
+    hint = quic["dst_name_hint"] if quic["dst_ip"].startswith(MS365_IP) else quic["src_name_hint"]
+    assert hint["source"] == "provider" and hint["name"].startswith("Microsoft")
+    talkers = {t["ip_address"]: t for t in _data(api_client.get(
+        "/api/v1/bandwidth/top-talkers", params={"window": "1h"}))["top_endpoints"]}
+    assert talkers[MS365_IP]["name_hint"]["name"].startswith("Microsoft")
+    assert talkers[ERP_IP]["name_hint"] is None  # an endpoint keeps its hostname

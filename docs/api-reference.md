@@ -218,7 +218,7 @@ Retrieves the parent-child topology DAG (nodes with state and hop level, plus ed
 Rebuilds the in-memory topology DAG from the database (requires `Admin` role).
 
 ### `POST /topology/discover-all`
-Queues background traceroute discovery for all active endpoints that are currently `UP` (requires `Admin` role). They run up to the `discovery_parallel` setting at once, 500 ms apart, with traces through the same router taking turns.
+Queues background traceroute discovery for all active endpoints that are currently `UP` (requires `Admin` role). They run up to the `discovery_parallel` setting at once, 500 ms apart, with at most `discovery_per_router` of them through the same router.
 
 ---
 
@@ -399,6 +399,7 @@ Updates runtime parameters (requires `Admin` role).
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
   - `discovery_parallel` (int, 1–8, default 2; v3.3.6): Route traceroutes run at once. Traces whose paths share a router take turns. Incident and root-cause traces get 2 slots on top.
   - `rediscovery_hours` (int, 1–168, default 24; v3.3.6): Each endpoint's route is re-traced on this period, spread out (the UI offers 6, 12 and 24). Replaces the run at midnight.
+  - `discovery_per_router` (int, 1–3, default 1; v3.3.6): How many of those traces may pass through the same router at once (the server's gateway counts). `GET /settings` returns it as `discoveryPerRouter`.
   - `traffic_alerts_enabled` (bool, default `false`; v3.3.6): Traffic alerts on WAN links with a speed set (see the user guide). Delivered only to channels whose `severity_filters` name `TRAFFIC_HIGH`, `TRAFFIC_NORMAL`, `TRAFFIC_SILENT` or `TRAFFIC_RESUMED`, as event type `TRAFFIC_ALERT`.
   - `traffic_alert_threshold_pct` (int, 50–99, default 80; v3.3.6): Default utilisation threshold, inbound or outbound (the UI offers 70–95).
   - `traffic_alert_minutes` (int, 5–60, default 15; v3.3.6): Minutes above the threshold, every one of them, before a link alerts.
@@ -614,7 +615,9 @@ Conversations (source, destination, protocol, service port) over the window, fil
 - **Query Parameters:** `window`, the scope (above), `endpoint_id` (either side), `ip` (either side), `port` (service port), `dscp` (0–63), `quick` (`all` | `anomalies` | `qos` | `bulk`), `sort` (`bytes` | `flows` | `packets`), `limit` (1–200, default 25), `offset`.
 - `quick`: `anomalies` = the OR of the conversation's TCP flags over the window is SYN without ACK or RST without FIN (the same rule as the overview KPI and the PDF report); `qos` = DSCP > 0; `bulk` (v3.3.6) = average packet ≥ 1100 bytes, seen for at least 30 minutes, at 5 Mb/s or more over the time it was seen (`traffic_profile` "Bulk Transfer"; large packets without that are "Download").
 - **Response:** `items` (the fields of `top_conversations` below, plus those listed next), `counts` (`all`, `anomalies`, `qos`, `bulk` over every conversation matching the other filters), `total` (count for the requested `quick`), `limit`, `offset`, `window`.
+- **One row per conversation, request and reply together (v3.3.6):** `src_ip` is the inside address (a monitored endpoint or a private one) when only one side is inside, otherwise the lower address; `dst_ip` is the other. `src_bytes` / `dst_bytes` and `src_packets` / `dst_packets` are what each side sent; `total_bytes`, `total_packets` and `flow_count` cover both. `avg_packet_size` is the busier direction's. `anomaly_hint` is judged per direction (`TCP_RST` when either direction is, else `SYN_ONLY` when either is), and `tcp_flags_labels` on such a row are that direction's flags; `tcp_flags` stays the pair's combined flags. Until v3.3.6 each direction was its own row, so counts were up to twice as high.
 - **Item fields added in v3.3.6:**
+  - `src_name_hint`, `dst_name_hint`: as `name_hint` in `GET /bandwidth/top-talkers`, for a side with no endpoint hostname.
   - `service_name`: the port's name from the one table the page and the PDF share ("HTTPS", "QUIC (HTTP/3)" for UDP 443); `null` for a port with no name. `packets_per_flow` is a whole number.
   - `routers`: the routers in scope that reported the conversation, each `exporter_id`, `hostname` (`null` for an exporter that is no endpoint), `site`, and `wan_link`: the router's WAN link name **only when it has exactly one**. Flows are stored per router, not per interface, so with two WAN links the one it arrived on is not known. Sorted by site (none last), then hostname. The bytes are counted once however many routers are listed. Flows from a source matched to no endpoint (stored under the all-zero exporter id by v3.3.0, so kept on upgraded servers for up to 90 days) name no router.
   - `first_seen`, `last_seen`: the start of the first bucket it was seen in and the end of the last (never later than now). To the minute for windows up to 2 hours, to the hour beyond.
@@ -626,7 +629,7 @@ Retrieves the highest-volume addresses and the largest conversations within the 
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
   - `limit` (int, default `25`, range `1`–`200`): Maximum records to return.
   - The scope (above); `endpoint_id` (UUID, optional): flows involving one endpoint.
-- Each address has `sites` (v3.3.6): an endpoint's own site, else the sites of the routers that saw the address. `ingress_bytes` is what the address received, `egress_bytes` what it sent.
+- Each address has `sites` (v3.3.6): an endpoint's own site, else the sites of the routers that saw the address. `ingress_bytes` is what the address received, `egress_bytes` what it sent. `name_hint` (v3.3.6) names an address with no endpoint hostname, when a name is known: `{"name": "Microsoft 365 (Exchange)", "source": "provider"}` from the providers' published ranges, or `"source": "dns"` from reverse DNS (looked up in the background and cached a day, so it can appear on a later request).
 - **Response:** `200 OK`
   ```json
   {

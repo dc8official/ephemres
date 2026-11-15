@@ -336,9 +336,11 @@ def test_transit_includes_endpoints_placed_under_it_by_hand(timescale_dsn, run_s
     assert _transit(timescale_dsn, router_id, "UP", "10.60.0.1") == [str(moved)]
 
 
-def test_parallel_traces_take_turns_at_a_shared_router(timescale_dsn, run_sql):
-    """Parallel 3: A and B both route through 10.1.0.1 and must not overlap; C goes through
-    10.9.9.1 and runs alongside A."""
+@pytest.mark.parametrize("per_router", [1, 2])
+def test_parallel_traces_take_turns_at_a_shared_router(timescale_dsn, run_sql, per_router):
+    """Parallel 3: A and B both route through 10.1.0.1; C goes through 10.9.9.1 and runs
+    alongside A. With one trace per router (the default) A and B take turns; with 2 (the setting
+    added 2026-11-15, build plan 11b) they overlap."""
     import json as _json
     import time
     from unittest.mock import AsyncMock, patch
@@ -379,7 +381,7 @@ def test_parallel_traces_take_turns_at_a_shared_router(timescale_dsn, run_sql):
         engine = create_async_engine(timescale_dsn.replace("postgresql://", "postgresql+asyncpg://", 1))
         factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
         queue = asyncio.Queue()
-        set_runtime_settings(replace(config_defaults(), discovery_parallel=3))
+        set_runtime_settings(replace(config_defaults(), discovery_parallel=3, discovery_per_router=per_router))
         try:
             with patch.object(baseline_route, "discovery_route_queue", queue), \
                  patch.object(baseline_route, "discovery_in_progress", set()), \
@@ -405,5 +407,5 @@ def test_parallel_traces_take_turns_at_a_shared_router(timescale_dsn, run_sql):
     def overlap(x, y):
         return spans[x][0] < spans[y][1] and spans[y][0] < spans[x][1]
 
-    assert not overlap("A", "B")
+    assert overlap("A", "B") is (per_router >= 2)
     assert overlap("A", "C")

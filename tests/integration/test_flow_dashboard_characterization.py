@@ -221,8 +221,11 @@ def test_interfaces_rates_cover_the_time_with_data(api_client, run_sql):
     assert wan["out_bps"] == pytest.approx(3_000_000 * 8 / covered, rel=0.02)
     # Busiest minute and 95th percentile minute (idle minutes count as 0).
     assert wan["in_peak_bps"] == pytest.approx(9_000_000 * 8 / 60)
-    slots = -(-covered // 60)
-    assert wan["in_p95_bps"] == pytest.approx(percentile_with_idle([9_000_000], slots) * 8 / 60, rel=0.02)
+    # The API reports covered_seconds truncated to whole seconds, but counts minutes from the exact
+    # value: just past a minute boundary (120.4 s, shown as 120) it has one more slot than the
+    # truncated figure gives. Either count is right for that second (this failed now and then).
+    p95 = {percentile_with_idle([9_000_000], -(-c // 60)) * 8 / 60 for c in (covered, covered + 1)}
+    assert any(wan["in_p95_bps"] == pytest.approx(v, rel=0.02) for v in p95), (wan["in_p95_bps"], p95)
     assert wan["peak_utilization_percentage"] == pytest.approx(1.2)
     assert wan["speed_configured"] is True
     assert wan["is_active"] is True
@@ -273,11 +276,13 @@ def test_top_talkers_and_conversations(api_client, run_sql):
     assert {t["ip_address"] for t in talkers[3:]} == {TRANSIT_SRC_IP, TRANSIT_DST_IP, SCANNER_IP}
 
     convs = data["top_conversations"]
-    assert [c["total_bytes"] for c in convs] == [12_000_000, 6_000_000, 3_000_000, 1_200_000, 3_000]
-    db_conv = convs[2]
+    # CHANGED IN v3.3.6 (C3): request and reply in one row; the 443 pair is 12 MB in + 6 MB out.
+    assert [c["total_bytes"] for c in convs] == [18_000_000, 3_000_000, 1_200_000, 3_000]
+    assert (convs[0]["src_ip"], convs[0]["src_bytes"], convs[0]["dst_bytes"]) == (HOST_A_IP, 6_000_000, 12_000_000)
+    db_conv = convs[1]
     assert (db_conv["src_hostname"], db_conv["dst_hostname"], db_conv["dst_port"]) == ("app-a", "db-b", 5432)
     assert (db_conv["dscp"], db_conv["dscp_label"]) == (46, "EF (VoIP)")
-    scan = convs[4]
+    scan = convs[3]
     assert (scan["protocol"], scan["anomaly_hint"]) == ("TCP", "SYN_ONLY")
     assert convs[0]["anomaly_hint"] is None
 
@@ -350,33 +355,35 @@ def _conversations(api_client, **params):
 def test_conversations_counts_cover_every_match(api_client, run_sql):
     _seed(run_sql)
     page = _conversations(api_client, limit=2)
-    # Counts are over all five conversations, not the two returned.
+    # Counts are over all four conversations (request and reply paired, v3.3.6), not the two
+    # returned.
     # CHANGED IN v3.3.6 PHASE 5 (review C2): Bulk also needs a steady flow (80% of the window,
     # 1 Mb/s on average). Each conversation here lasts one minute of the hour, so none is bulk;
     # test_traffic_counts_and_names.py covers the rule.
-    assert page["counts"] == {"all": 5, "anomalies": 1, "qos": 1, "bulk": 0}
-    assert page["total"] == 5
-    assert [c["total_bytes"] for c in page["items"]] == [12_000_000, 6_000_000]
-    assert page["items"][0]["dst_hostname"] == "app-a"
+    assert page["counts"] == {"all": 4, "anomalies": 1, "qos": 1, "bulk": 0}
+    assert page["total"] == 4
+    assert [c["total_bytes"] for c in page["items"]] == [18_000_000, 3_000_000]
+    assert page["items"][0]["src_hostname"] == "app-a"  # the inside address first
 
     second = _conversations(api_client, limit=2, offset=2)
-    assert [c["total_bytes"] for c in second["items"]] == [3_000_000, 1_200_000]
+    assert [c["total_bytes"] for c in second["items"]] == [1_200_000, 3_000]
 
 
 def test_conversations_server_filters(api_client, run_sql):
     _seed(run_sql)
     by_ip = _conversations(api_client, ip=HOST_B_IP)
-    assert {(c["src_ip"], c["dst_port"]) for c in by_ip["items"]} == {(HOST_A_IP, 5432), (SCANNER_IP, 22)}
+    # The inside address first: host B for the scan aimed at it.
+    assert {(c["src_ip"], c["dst_port"]) for c in by_ip["items"]} == {(HOST_A_IP, 5432), (HOST_B_IP, 22)}
     assert by_ip["counts"]["all"] == 2
 
     by_port = _conversations(api_client, port=443)
-    assert by_port["total"] == 2
+    assert by_port["total"] == 1  # the request and its reply
 
     by_dscp = _conversations(api_client, dscp=46)
     assert [c["dst_port"] for c in by_dscp["items"]] == [5432]
 
     anomalies = _conversations(api_client, quick="anomalies")
-    assert [(c["src_ip"], c["anomaly_hint"]) for c in anomalies["items"]] == [(SCANNER_IP, "SYN_ONLY")]
+    assert [(c["dst_ip"], c["anomaly_hint"]) for c in anomalies["items"]] == [(SCANNER_IP, "SYN_ONLY")]
 
     # CHANGED IN v3.3.6 PHASE 5 (review C2): large packets alone (both 443 flows at 1333 and
     # 1200 B, the transit DNS flow at 1200 B) no longer make a conversation bulk; one minute of

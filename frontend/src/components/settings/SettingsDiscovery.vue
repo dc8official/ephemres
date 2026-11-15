@@ -28,9 +28,8 @@
           <div>
             <label class="setting-label" for="discovery-parallel">Parallel route traces</label>
             <p class="setting-hint">
-              Traceroutes run at once. Traces through the same router still take turns, because
-              routers answer only about once a second and a crowd of traces comes back full of
-              gaps. Incident and root-cause traces always get 2 more slots.
+              Traceroutes run at once, within the per-router limit below. Incident and root-cause
+              traces always get 2 more slots.
             </p>
           </div>
           <select
@@ -41,6 +40,29 @@
           >
             <option v-for="n in [1, 2, 3, 4, 6, 8]" :key="n" :value="n">
               {{ n }}{{ n === 2 ? ' (default)' : '' }}
+            </option>
+          </select>
+        </div>
+
+        <!-- v3.3.6 (build plan 11b): with one gateway every trace shares it, so this decides
+             whether "Parallel route traces" can do anything. 1 until measured on site. -->
+        <div class="setting-row">
+          <div>
+            <label class="setting-label" for="discovery-per-router">Traces through the same router at once</label>
+            <p class="setting-hint">
+              Routers answer traceroute only so fast, and a crowd of traces through one comes back
+              full of gaps. 1 makes traces that share a router, including this server's gateway,
+              take turns. Raise it only if traces still come back complete.
+            </p>
+          </div>
+          <select
+            id="discovery-per-router"
+            v-model.number="settings.discoveryPerRouter"
+            class="form-select font-mono tnum"
+            @change="emitChange"
+          >
+            <option v-for="n in [1, 2, 3]" :key="n" :value="n">
+              {{ n }}{{ n === 1 ? ' (default)' : '' }}
             </option>
           </select>
         </div>

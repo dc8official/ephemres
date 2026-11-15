@@ -63,6 +63,7 @@ from app.schemas.bandwidth import (
     WanLinksResponse,
 )
 from app.schemas.endpoints import InterfaceConfig
+from app.services import address_names
 from app.services import conversations as conversation_queries
 from app.services import interface_table, interface_traffic, snmp_inventory, wan_edge, wan_links
 from app.services.driver_manager import driver_manager
@@ -838,6 +839,10 @@ async def get_top_talkers(
         exporters = seen_by.get(str(row["ip"]).split("/")[0], [])
         return sorted({sites[e] for e in exporters if sites.get(e)})
 
+    # Names for talkers that are no endpoint (build plan 11b): "Microsoft 365", or reverse DNS.
+    hints = address_names.names_for(
+        str(r["ip"]).split("/")[0] for r in talker_rows if not hostnames.get(r["endpoint_id"])
+    )
     top_endpoints = []
     for r in talker_rows:
         total_bytes = int(r["total_bytes"] or 0)
@@ -854,6 +859,7 @@ async def get_top_talkers(
                 total_packets=total_packets,
                 avg_packet_size=int(total_bytes // total_packets) if total_packets > 0 else 0,
                 sites=talker_sites(r),
+                name_hint=None if hostnames.get(r["endpoint_id"]) else hints.get(str(r["ip"]).split("/")[0]),
             )
         )
 

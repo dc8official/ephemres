@@ -198,6 +198,12 @@
                   <div class="node-cell">
                     <span class="node-host font-bold">{{ t.hostname || t.ip_address }}</span>
                     <span class="node-ip tnum text-muted" v-if="t.hostname">{{ t.ip_address }}</span>
+                    <!-- No endpoint: a provider or reverse-DNS name when known (v3.3.6). -->
+                    <span
+                      v-else-if="t.name_hint"
+                      class="node-ip text-muted"
+                      :title="t.name_hint.source === 'provider' ? `From ${t.name_hint.name}'s published address ranges` : 'Reverse DNS'"
+                    >{{ t.name_hint.name }}</span>
                   </div>
                 </td>
                 <!-- An endpoint's site, else the sites of the routers that saw the address. -->

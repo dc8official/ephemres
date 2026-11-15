@@ -35,8 +35,10 @@
       <table class="dense-table" :aria-label="title" :aria-busy="loading">
         <thead>
           <tr>
-            <th scope="col">Source</th>
-            <th scope="col">Destination</th>
+            <!-- Request and reply in one row (C3, v3.3.6): the inside address first when only
+                 one side is inside, with what each side sent under the total. -->
+            <th scope="col" title="The inside address (monitored or private) when only one side is inside">Host</th>
+            <th scope="col">Peer</th>
             <th scope="col">Site</th>
             <th scope="col" v-if="showSeen">First / last seen</th>
             <th scope="col">Protocol</th>
@@ -52,10 +54,12 @@
             <td>
               <button type="button" class="ip-link font-mono tnum" :title="`Show conversations of ${c.src_ip}`" @click="setIp(c.src_ip)">{{ stripMask(c.src_ip) }}</button>
               <span v-if="c.src_hostname" class="text-muted text-xs block">{{ c.src_hostname }}</span>
+              <span v-else-if="c.src_name_hint" class="text-muted text-xs block name-hint" :title="hintTitle(c.src_name_hint)">{{ c.src_name_hint.name }}</span>
             </td>
             <td>
               <button type="button" class="ip-link font-mono tnum" :title="`Show conversations of ${c.dst_ip}`" @click="setIp(c.dst_ip)">{{ stripMask(c.dst_ip) }}</button>
               <span v-if="c.dst_hostname" class="text-muted text-xs block">{{ c.dst_hostname }}</span>
+              <span v-else-if="c.dst_name_hint" class="text-muted text-xs block name-hint" :title="hintTitle(c.dst_name_hint)">{{ c.dst_name_hint.name }}</span>
             </td>
             <!-- Where it was seen (review C1): the sites of the routers that reported it, the
                  routers themselves on hover. On Security the router and, when it has only one,
@@ -104,7 +108,12 @@
                 >{{ c.dscp_label }}</button>
               </div>
             </td>
-            <td class="text-right tnum font-bold">{{ formatBytes(c.total_bytes) }}</td>
+            <td class="text-right tnum">
+              <span class="font-bold block">{{ formatBytes(c.total_bytes) }}</span>
+              <span class="text-muted text-xs block nowrap" :title="`The host sent ${formatBytes(c.src_bytes)} and received ${formatBytes(c.dst_bytes)}`">
+                ↑ {{ formatBytes(c.src_bytes) }} · ↓ {{ formatBytes(c.dst_bytes) }}
+              </span>
+            </td>
             <td class="text-right tnum text-muted">{{ formatNumber(c.flow_count) }}</td>
           </tr>
           <tr v-if="!loading && items.length === 0">
@@ -186,7 +195,14 @@ const sortOptions = [
   { value: 'packets', label: 'Packets' },
 ]
 
-const hintText = computed(() => props.hint || `Last ${props.window} · grouped by source, destination, protocol and service port`)
+const hintText = computed(() => props.hint || `Last ${props.window} · request and reply together, by the two addresses, protocol and service port`)
+
+// Where an address's name came from (services/address_names.py).
+function hintTitle(hint) {
+  return hint.source === 'provider'
+    ? `From ${hint.name}'s published address ranges`
+    : 'Reverse DNS (the name the address resolves to)'
+}
 
 const activeChips = computed(() => {
   const chips = []

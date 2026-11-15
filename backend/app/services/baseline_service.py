@@ -1,7 +1,11 @@
 """Each endpoint's normal round-trip time, for telling a slow endpoint from a healthy one.
 
 For every endpoint and hour of the week (Monday 00:00 to Sunday 23:00, 168 slots) the cache
-holds the mean and standard deviation of RTT from node_historical_baselines. The engine passes
+holds the mean and standard deviation of RTT. Since v3.3.6 the hours are the server's local hours
+(timezone_utils.server_zone), as on the Traffic page's usual ranges: "Monday 09:00" is the
+operators' Monday 09:00, all year where clocks change. The data is unchanged (UTC hour buckets in
+node_historical_baselines_cagg, migration 0009); only how each bucket is labelled moved, so no
+migration was needed. The old node_historical_baselines view (UTC labels) is no longer read. The engine passes
 the current slot's figures to classify_ping_result, which marks an endpoint that answers every
 ping UP-UNSTABLE when its RTT is above mean + 3 x deviation.
 
@@ -13,12 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
 from app.core.orm import text
 from app.core.orm import AsyncSession
+from app.services.timezone_utils import server_zone
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,46 @@ DEFAULT_MEAN_MS: float = 50.0
 DEFAULT_STDDEV_MS: float = 15.0
 DEFAULT_K_MULTIPLIER: float = 3.0
 GRACE_PERIOD_DAYS: int = 7
+
+
+def _zone_sql() -> Tuple[str, Dict[str, object]]:
+    """`AT TIME ZONE` operand for the server's zone, and its parameter. A named zone follows
+    summer time; the fixed-offset fallback (no zone name found) is passed as an interval."""
+    zone = server_zone()
+    key = getattr(zone, "key", None)
+    if key:
+        return "CAST(:tz AS text)", {"tz": key}
+    offset = datetime.now(zone).utcoffset() or timedelta(0)
+    return "CAST(:tz AS interval)", {"tz": f"{int(offset.total_seconds())} seconds"}
+
+
+async def _has_hourly_cagg(db: AsyncSession) -> bool:
+    res = await db.execute(text("SELECT to_regclass('node_historical_baselines_cagg') IS NOT NULL"))
+    return bool(res.scalar())
+
+
+def _local_hours_query(hourly: bool) -> Tuple[object, Dict[str, object]]:
+    """Mean and spread per endpoint and local hour of the week. From the hourly aggregate (28 days
+    kept) as the old view did, averaging its hours; without TimescaleDB from the events."""
+    zone, params = _zone_sql()
+    if hourly:
+        local, mean, spread, source = (f"(bucket AT TIME ZONE {zone})", "AVG(hourly_mean)",
+                                       "AVG(hourly_stddev)", "node_historical_baselines_cagg")
+        where = "TRUE"
+    else:
+        local, mean, spread, source = (f"(start_time AT TIME ZONE {zone})", "AVG(avg_rtt_ms)",
+                                       "STDDEV(avg_rtt_ms)", "endpoint_events")
+        where = "avg_rtt_ms IS NOT NULL"
+    return text(f"""
+        SELECT endpoint_id,
+               EXTRACT(isodow FROM {local})::INTEGER AS day_of_week,
+               EXTRACT(hour FROM {local})::INTEGER AS hour_of_day,
+               {mean}::FLOAT AS historical_mean,
+               {spread}::FLOAT AS historical_stddev
+        FROM {source}
+        WHERE {where}
+        GROUP BY 1, 2, 3
+    """), params
 
 
 class BaselineCache:
@@ -63,26 +108,15 @@ class BaselineCache:
             for row in ep_result.fetchall():
                 onboarded[UUID(str(row.id))] = row.created_at
 
-            # Step 2: Query continuous aggregate view node_historical_baselines
-            baseline_query = text("""
-                SELECT
-                    endpoint_id,
-                    day_of_week,
-                    hour_of_day,
-                    historical_mean,
-                    historical_stddev
-                FROM node_historical_baselines
-            """)
-            bl_result = await db.execute(baseline_query)
+            # Step 2: each endpoint's hours of the week, labelled in the server's zone.
+            bl_result = await db.execute(*_local_hours_query(await _has_hourly_cagg(db)))
 
             new_cache: Dict[UUID, List[Optional[Tuple[float, float, int]]]] = {}
             for row in bl_result.fetchall():
                 ep_id = UUID(str(row.endpoint_id))
-                pg_dow = int(row.day_of_week)
+                # ISO day of week, 1 = Monday ... 7 = Sunday, so 0 = Monday ... 6 = Sunday here.
+                dow = int(row.day_of_week) - 1
                 hour = int(row.hour_of_day)
-
-                # Map PostgreSQL DOW (0=Sunday, 1=Monday...6=Saturday) to 0=Monday..6=Sunday
-                dow = (pg_dow - 1) % 7 if (0 <= pg_dow <= 6) else 0
 
                 idx = (dow * 24) + hour
                 if not (0 <= idx < 168):
@@ -127,8 +161,8 @@ class BaselineCache:
 
         Can be called with:
           - (endpoint_id, day_of_week: int, hour_of_day: int)
-          - (endpoint_id, dt: datetime)
-          - (endpoint_id)  [uses current UTC datetime]
+          - (endpoint_id, dt: datetime)  [an aware time is taken in the server's zone]
+          - (endpoint_id)  [now, in the server's zone]
 
         Index Calculation = (day_of_week * 24) + hour_of_day (0=Monday..6=Sunday).
 
@@ -148,15 +182,16 @@ class BaselineCache:
             if age_days < GRACE_PERIOD_DAYS:
                 return None
 
+        # The slots are the server's local hours (refresh_from_db), so the lookup is too.
         if isinstance(day_of_week, datetime):
-            dt = day_of_week
+            dt = day_of_week.astimezone(server_zone()) if day_of_week.tzinfo else day_of_week
             dow = dt.weekday()
             hour = dt.hour
         elif isinstance(day_of_week, int) and hour_of_day is not None:
             dow = day_of_week
             hour = hour_of_day
         else:
-            dt = now_utc
+            dt = now_utc.astimezone(server_zone())
             dow = dt.weekday()
             hour = dt.hour
 

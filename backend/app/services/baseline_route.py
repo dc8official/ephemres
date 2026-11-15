@@ -23,6 +23,7 @@ import logging
 import re
 import socket
 import struct
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
@@ -410,8 +411,9 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
     pass at midnight). Three loops:
 
     - The dispatcher runs queued traces, up to the "parallel route traces" setting at once
-      (runtime_settings.discovery_parallel), starting them 0.5 s apart. Traces whose current
-      paths share a router take turns (_routers_on_path), because routers answer only about
+      (runtime_settings.discovery_parallel), starting them 0.5 s apart. At most
+      runtime_settings.discovery_per_router of them (default 1) may pass through the same router
+      (_routers_on_path), because routers answer only about
       once a second and a crowd of traces would come back full of "* * *". A trace that leaves
       a path pending queues its own confirming trace (schedule_confirmation).
     - The rolling schedule (leader only), every 5 minutes, queues the endpoints whose route is
@@ -459,20 +461,26 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
                     discovery_route_queue.task_done()
 
                 limit = max(1, int(get_runtime_settings().discovery_parallel))
-                busy = set().union(*running.values()) if running else set()
+                # Traces running through each router. With the default 1 per router, traces that
+                # share one (the server's own gateway included) take turns; 2 or 3 lets them
+                # overlap where the sizing run shows a branch's gateway keeps up (build plan 11b).
+                per_router = max(1, int(get_runtime_settings().discovery_per_router))
+                busy: Counter = Counter()
+                for on_path in running.values():
+                    busy.update(on_path)
                 started = False
                 for item in list(backlog):
                     if len(running) >= limit:
                         break
                     async with db_session_factory() as db:
                         routers = await _routers_on_path(db, item[0], item[1])
-                    if routers & busy:
-                        continue  # shares a router with a running trace: wait its turn
+                    if any(busy[r] >= per_router for r in routers):
+                        continue  # a router on its path is at its limit: wait its turn
                     backlog.remove(item)
                     task = asyncio.create_task(_run_one(item))
                     worked["since_idle"] = True
                     running[task] = routers
-                    busy |= routers
+                    busy.update(routers)
                     task.add_done_callback(lambda t: (running.pop(t, None), wake.set()))
                     started = True
                     await asyncio.sleep(START_GAP_SECONDS)
