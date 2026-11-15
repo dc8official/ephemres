@@ -412,7 +412,7 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
 
     - The dispatcher runs queued traces, up to the "parallel route traces" setting at once
       (runtime_settings.discovery_parallel), starting them 0.5 s apart. At most
-      runtime_settings.discovery_per_router of them (default 1) may pass through the same router
+      runtime_settings.discovery_per_router of them (default 3) may pass through the same router
       (_routers_on_path), because routers answer only about
       once a second and a crowd of traces would come back full of "* * *". A trace that leaves
       a path pending queues its own confirming trace (schedule_confirmation).
@@ -461,9 +461,9 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
                     discovery_route_queue.task_done()
 
                 limit = max(1, int(get_runtime_settings().discovery_parallel))
-                # Traces running through each router. With the default 1 per router, traces that
-                # share one (the server's own gateway included) take turns; 2 or 3 lets them
-                # overlap where the sizing run shows a branch's gateway keeps up (build plan 11b).
+                # Traces running through each router. Up to discovery_per_router may share one,
+                # the server's own gateway included (default 3, build plan 11b); at 1 they take
+                # turns, for a site whose gateway answers too slowly for more.
                 per_router = max(1, int(get_runtime_settings().discovery_per_router))
                 busy: Counter = Counter()
                 for on_path in running.values():

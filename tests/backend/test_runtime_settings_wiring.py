@@ -266,12 +266,12 @@ def test_flow_buffer_limit_caps_conversations_held_while_the_database_is_down():
     assert agg.flows_ingested == 6
 
 
-def test_traces_through_one_router_default_to_one_and_stay_within_1_to_3():
-    # Build plan 11b (2026-11-15): 1 keeps traces that share a router taking turns until the
-    # sizing run shows a branch's gateway keeps up with 2 or 3.
+def test_traces_through_one_router_default_to_three_and_stay_within_1_to_3():
+    # Build plan 11b: Kenneth set the default to 3 (2026-11-15); a site whose traces come back
+    # with gaps can lower it to 1.
     from app.services.runtime_settings import resolve
 
-    assert resolve({}).discovery_per_router == 1
-    assert resolve({"discovery_per_router": "2"}).discovery_per_router == 2
+    assert resolve({}).discovery_per_router == 3
+    assert resolve({"discovery_per_router": "1"}).discovery_per_router == 1
     for bad in ("0", "4", "two"):
-        assert resolve({"discovery_per_router": bad}).discovery_per_router == 1
+        assert resolve({"discovery_per_router": bad}).discovery_per_router == 3

@@ -37,10 +37,11 @@ class RuntimeSettings:
     # endpoint is re-traced by the rolling schedule.
     discovery_parallel: int = 2
     rediscovery_hours: int = 24
-    # How many of those may go through the same router at once (1-3, decided 2026-11-15, build
-    # plan 11b). Routers rate-limit the ICMP replies traceroute needs, so 1 (take turns) until the
-    # sizing run shows what a branch's gateway allows; the gateway counts like any router.
-    discovery_per_router: int = 1
+    # How many of those may go through the same router at once (1-3, build plan 11b; the
+    # gateway counts like any router). Default 3 (Kenneth, 2026-11-15): with one gateway, 1 made
+    # every trace wait for the one before. Routers rate-limit the ICMP replies traceroute needs,
+    # so a site whose traces come back with gaps can lower it to 1.
+    discovery_per_router: int = 3
     # Traffic alerts on WAN links (build plan 7.4): off until switched on; the default rule a
     # link uses unless its own alias entry overrides it or opts out.
     traffic_alerts_enabled: bool = False
@@ -69,7 +70,7 @@ def config_defaults() -> RuntimeSettings:
         flow_sflow_port=int(getattr(flow_cfg, "sflow_port", 6343)),
         discovery_parallel=2,
         rediscovery_hours=24,
-        discovery_per_router=1,
+        discovery_per_router=3,
         traffic_alerts_enabled=False,
         traffic_alert_threshold_pct=80,
         traffic_alert_minutes=15,

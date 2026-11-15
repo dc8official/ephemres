@@ -45,14 +45,14 @@
         </div>
 
         <!-- v3.3.6 (build plan 11b): with one gateway every trace shares it, so this decides
-             whether "Parallel route traces" can do anything. 1 until measured on site. -->
+             whether "Parallel route traces" can do anything. Default 3 (2026-11-15). -->
         <div class="setting-row">
           <div>
             <label class="setting-label" for="discovery-per-router">Traces through the same router at once</label>
             <p class="setting-hint">
-              Routers answer traceroute only so fast, and a crowd of traces through one comes back
-              full of gaps. 1 makes traces that share a router, including this server's gateway,
-              take turns. Raise it only if traces still come back complete.
+              Traces that share a router, including this server's gateway, may run together up to
+              this number. Routers answer traceroute only so fast: if traces come back with gaps
+              (* * *), lower it to 1 so they take turns.
             </p>
           </div>
           <select
@@ -62,7 +62,7 @@
             @change="emitChange"
           >
             <option v-for="n in [1, 2, 3]" :key="n" :value="n">
-              {{ n }}{{ n === 1 ? ' (default)' : '' }}
+              {{ n }}{{ n === 3 ? ' (default)' : '' }}
             </option>
           </select>
         </div>

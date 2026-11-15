@@ -188,7 +188,7 @@ class SettingsPayload(BaseModel):
     flowSamplingMultiplier: int
     discovery_parallel: int = 2
     rediscovery_hours: int = 24
-    discovery_per_router: int = 1
+    discovery_per_router: int = 3
     traffic_alerts_enabled: bool = False
     traffic_alert_threshold_pct: int = 80
     traffic_alert_minutes: int = 15

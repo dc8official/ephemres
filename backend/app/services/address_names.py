@@ -4,8 +4,9 @@ The Traffic page showed outside addresses as numbers: "52.97.146.2" is Microsoft
 said so. Two sources, in order:
 
 1. The providers' published ranges, shipped with each release in app/data/provider_ranges.json
-   (devtools/update_provider_ranges.py): Microsoft 365 and Teams, Google, AWS and CloudFront,
+   (deploy/update-provider-ranges.sh): Microsoft 365 and Teams, Google, AWS and CloudFront,
    Cloudflare, Zoom. No lookup at run time, so it works on a server without Internet access.
+   Re-read within TABLE_CHECK_SECONDS when the script replaces the file: no restart needed.
 2. Reverse DNS (PTR) for the rest, through the server's own resolver: an internal DNS often names
    users' PCs too. Never on the request path: names_for() answers from the cache and queues the
    unknown addresses, which a background task resolves (2 s each, 8 at a time). A page shows them
@@ -35,19 +36,44 @@ NAME_TTL_SECONDS = 24 * 3600
 NO_NAME_TTL_SECONDS = 3600
 # Queued lookups beyond this are dropped and asked for again on a later request.
 QUEUE_LIMIT = 500
+# How often the table file is checked for a newer copy (update-provider-ranges.sh on a server).
+TABLE_CHECK_SECONDS = 300
 
 _table: Optional[Tuple[List[str], Dict[int, Tuple[List[int], List[int], List[int]]]]] = None
+_table_mtime: Optional[float] = None
+_table_checked_at = 0.0
 _dns_cache: Dict[str, Tuple[Optional[str], float]] = {}
 _queue: "asyncio.Queue[str] | None" = None
 _queued: set = set()
 _worker: "asyncio.Task | None" = None
 
 
+def _table_changed() -> bool:
+    """True when the file's modification time differs from the loaded table's; checked at most
+    every TABLE_CHECK_SECONDS, so a lookup costs no stat call."""
+    global _table_checked_at
+    now = time.monotonic()
+    if now - _table_checked_at < TABLE_CHECK_SECONDS:
+        return False
+    _table_checked_at = now
+    try:
+        return TABLE.stat().st_mtime != _table_mtime
+    except OSError:
+        return _table_mtime is not None
+
+
 def _load() -> Tuple[List[str], Dict[int, Tuple[List[int], List[int], List[int]]]]:
     """(names, {4|6: (firsts, lasts, name indexes)}) sorted by first address; empty if the table is
-    missing or unreadable (reverse DNS still works)."""
-    global _table
+    missing or unreadable (reverse DNS still works). Reloaded when the file changes."""
+    global _table, _table_mtime, _table_checked_at
+    if _table is not None and _table_changed():
+        _table = None
     if _table is None:
+        _table_checked_at = time.monotonic()
+        try:
+            _table_mtime = TABLE.stat().st_mtime
+        except OSError:
+            _table_mtime = None
         names: List[str] = []
         families: Dict[int, Tuple[List[int], List[int], List[int]]] = {4: ([], [], []), 6: ([], [], [])}
         try:
@@ -159,8 +185,10 @@ async def _resolve_forever(queue: "asyncio.Queue[str]") -> None:
 
 
 def reset_for_tests() -> None:
-    global _table, _queue, _worker
+    global _table, _queue, _worker, _table_mtime, _table_checked_at
     _table = None
+    _table_mtime = None
+    _table_checked_at = 0.0
     _dns_cache.clear()
     _queued.clear()
     _queue = None

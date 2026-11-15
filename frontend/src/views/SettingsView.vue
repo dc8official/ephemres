@@ -173,7 +173,7 @@ const settings = reactive({
   flowSflowPort: 6343,
   flowSamplingMultiplier: 1,
   discoveryParallel: 2,
-  discoveryPerRouter: 1,
+  discoveryPerRouter: 3,
   rediscoveryHours: 24,
   trafficAlertsEnabled: false,
   trafficAlertThresholdPct: 80,
@@ -285,7 +285,7 @@ async function loadSettings() {
       settings.flowSflowPort = Number(d.flow_sflow_port ?? d.flowSflowPort ?? 6343)
       settings.flowSamplingMultiplier = Number(d.flow_sampling_multiplier ?? d.flowSamplingMultiplier ?? 1)
       settings.discoveryParallel = Number(d.discovery_parallel ?? d.discoveryParallel ?? 2)
-      settings.discoveryPerRouter = Number(d.discovery_per_router ?? d.discoveryPerRouter ?? 1)
+      settings.discoveryPerRouter = Number(d.discovery_per_router ?? d.discoveryPerRouter ?? 3)
       settings.rediscoveryHours = Number(d.rediscovery_hours ?? d.rediscoveryHours ?? 24)
       settings.trafficAlertsEnabled = Boolean(d.traffic_alerts_enabled ?? d.trafficAlertsEnabled ?? false)
       settings.trafficAlertThresholdPct = Number(d.traffic_alert_threshold_pct ?? d.trafficAlertThresholdPct ?? 80)

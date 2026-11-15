@@ -1,7 +1,7 @@
 """Names for outside addresses (decided 2026-11-15, build plan 11b; review O5): the providers'
 published ranges first, reverse DNS in the background for the rest."""
 import asyncio
-import importlib.util
+import subprocess
 import ipaddress
 import json
 from pathlib import Path
@@ -85,18 +85,58 @@ def test_without_an_event_loop_nothing_is_queued():
     assert address_names.names_for(["192.0.2.7"]) == {}
 
 
-def test_the_build_keeps_the_more_specific_provider(monkeypatch):
-    spec = importlib.util.spec_from_file_location("upr", ROOT / "devtools" / "update_provider_ranges.py")
-    upr = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(upr)
-    # AWS's AMAZON set covers its CloudFront ranges; CloudFront is the useful name there.
-    monkeypatch.setattr(upr, "SOURCES", {"Amazon": lambda: iter([
-        ("Amazon AWS", "18.64.0.0/14"), ("Amazon CloudFront", "18.64.0.0/16"), ("Amazon AWS", "2600:1f00::/24"),
-    ])})
-    names, ranges, counts = upr.build()
-    rows = [(ipaddress.ip_address(int(a)), ipaddress.ip_address(int(b)), names[i]) for a, b, i in ranges["v4"]]
-    assert rows == [
-        (ipaddress.ip_address("18.64.0.0"), ipaddress.ip_address("18.64.255.255"), "Amazon CloudFront"),
-        (ipaddress.ip_address("18.65.0.0"), ipaddress.ip_address("18.67.255.255"), "Amazon AWS"),
-    ]
-    assert len(ranges["v6"]) == 1 and counts == {"Amazon": 3}
+def _lists(folder, amazon_extra=()):
+    """The six files deploy/update-provider-ranges.sh reads with --from-dir, tiny ones."""
+    folder.mkdir(exist_ok=True)
+    (folder / "microsoft.json").write_text(json.dumps([
+        {"serviceArea": "Exchange", "ips": ["52.96.0.0/14"]}, {"serviceArea": "Skype", "ips": ["52.112.0.0/14"]}]))
+    (folder / "google.json").write_text(json.dumps({"prefixes": [{"ipv4Prefix": "8.8.8.0/24"}]}))
+    (folder / "amazon.json").write_text(json.dumps({
+        "prefixes": [{"ip_prefix": "18.64.0.0/14", "service": "AMAZON"},
+                     {"ip_prefix": "18.64.0.0/16", "service": "CLOUDFRONT"}, *amazon_extra],
+        "ipv6_prefixes": [{"ipv6_prefix": "2600:1f00::/24", "service": "AMAZON"}]}))
+    (folder / "cloudflare-v4.txt").write_text("104.16.0.0/13\n")
+    (folder / "cloudflare-v6.txt").write_text("2606:4700::/32\n")
+    (folder / "zoom.txt").write_text("170.114.0.0/16\n")
+    return folder
+
+
+def _script(*args):
+    return subprocess.run(["bash", str(ROOT / "deploy" / "update-provider-ranges.sh"), *map(str, args)],
+                          capture_output=True, text=True)
+
+
+def test_the_script_builds_the_table_and_the_more_specific_name_wins(tmp_path):
+    out = tmp_path / "ranges.json"
+    run = _script("--from-dir", _lists(tmp_path / "lists"), "--output", out)
+    assert run.returncode == 0, run.stderr
+    data = json.loads(out.read_text())
+    names = data["names"]
+    rows = [(ipaddress.ip_address(int(a)), ipaddress.ip_address(int(b)), names[i]) for a, b, i in data["v4"]]
+    # AWS's AMAZON /14 covers CloudFront's /16: CloudFront keeps its name there.
+    assert (ipaddress.ip_address("18.64.0.0"), ipaddress.ip_address("18.64.255.255"), "Amazon CloudFront") in rows
+    assert (ipaddress.ip_address("18.65.0.0"), ipaddress.ip_address("18.67.255.255"), "Amazon AWS") in rows
+    assert {r[2] for r in rows} == {"Microsoft 365 (Exchange)", "Microsoft Teams", "Google", "Amazon CloudFront",
+                                    "Amazon AWS", "Cloudflare", "Zoom"}
+    assert len(data["v6"]) == 2
+
+
+def test_check_writes_nothing_and_a_missing_list_keeps_the_old_table(tmp_path):
+    out = tmp_path / "ranges.json"
+    out.write_text("old")
+    lists = _lists(tmp_path / "lists")
+    assert _script("--check", "--from-dir", lists, "--output", out).returncode == 0
+    assert out.read_text() == "old"
+    (lists / "zoom.txt").unlink()
+    run = _script("--from-dir", lists, "--output", out)
+    assert run.returncode != 0 and "left as it is" in run.stderr
+    assert out.read_text() == "old"
+
+
+def test_the_api_picks_up_a_replaced_table_without_a_restart(tmp_path, monkeypatch):
+    _table(tmp_path, monkeypatch, rows_v4=[[_ip("52.96.0.0"), _ip("52.99.255.255"), 0]])
+    monkeypatch.setattr(address_names, "TABLE_CHECK_SECONDS", 0)
+    assert address_names.provider_name("170.114.52.2") is None
+    run = _script("--from-dir", _lists(tmp_path / "lists"), "--output", address_names.TABLE)
+    assert run.returncode == 0, run.stderr
+    assert address_names.provider_name("170.114.52.2") == "Zoom"

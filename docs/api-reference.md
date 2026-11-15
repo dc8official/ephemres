@@ -399,7 +399,7 @@ Updates runtime parameters (requires `Admin` role).
   - `lockout_threshold` (int, 1–100): Maximum failed attempts before IP lockout.
   - `discovery_parallel` (int, 1–8, default 2; v3.3.6): Route traceroutes run at once. Traces whose paths share a router take turns. Incident and root-cause traces get 2 slots on top.
   - `rediscovery_hours` (int, 1–168, default 24; v3.3.6): Each endpoint's route is re-traced on this period, spread out (the UI offers 6, 12 and 24). Replaces the run at midnight.
-  - `discovery_per_router` (int, 1–3, default 1; v3.3.6): How many of those traces may pass through the same router at once (the server's gateway counts). `GET /settings` returns it as `discoveryPerRouter`.
+  - `discovery_per_router` (int, 1–3, default 3; v3.3.6): How many of those traces may pass through the same router at once (the server's gateway counts). `GET /settings` returns it as `discoveryPerRouter`.
   - `traffic_alerts_enabled` (bool, default `false`; v3.3.6): Traffic alerts on WAN links with a speed set (see the user guide). Delivered only to channels whose `severity_filters` name `TRAFFIC_HIGH`, `TRAFFIC_NORMAL`, `TRAFFIC_SILENT` or `TRAFFIC_RESUMED`, as event type `TRAFFIC_ALERT`.
   - `traffic_alert_threshold_pct` (int, 50–99, default 80; v3.3.6): Default utilisation threshold, inbound or outbound (the UI offers 70–95).
   - `traffic_alert_minutes` (int, 5–60, default 15; v3.3.6): Minutes above the threshold, every one of them, before a link alerts.
