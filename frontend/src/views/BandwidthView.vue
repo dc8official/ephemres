@@ -98,6 +98,13 @@
     </WanLinksNow>
 
     <h2 class="window-heading">Over the last {{ windowWords }}</h2>
+    <!-- sFlow and sampled NetFlow report one packet in every N, scaled up: totals are close,
+         but a short conversation may be missed or overstated (build plan 8.2). -->
+    <p v-if="overview.sampled_exporters_count" class="sampled-note text-xs" role="note">
+      {{ overview.sampled_exporters_count === 1 ? '1 router sends' : `${overview.sampled_exporters_count} routers send` }}
+      sampled traffic (sFlow or sampled NetFlow). Its figures are estimates: totals are close, but
+      conversations and suspicious-traffic counts can miss short exchanges.
+    </p>
 
     <SegmentedControl
       class="view-switcher"
@@ -892,6 +899,7 @@ const overview = ref({
   avg_packet_size: 0,
   active_exporters_count: 0,
   unmatched_exporters_count: 0,
+  sampled_exporters_count: 0,
   total_flows_count: 0,
   anomaly_flows_count: 0,
   wan_interfaces_count: 0,
@@ -1822,6 +1830,11 @@ onUnmounted(() => {
   color: var(--status-text-warn);
 }
 /* Separates the five-minute "Now" from everything that follows the time window (review P1). */
+.sampled-note {
+  margin: 0 0 0.5rem;
+  color: var(--text-muted);
+}
+
 .window-heading {
   margin: 0.5rem 0 0.5rem;
   font-size: var(--text-lg);

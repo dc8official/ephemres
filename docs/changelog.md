@@ -5,6 +5,15 @@ All notable technical changes, architectural upgrades, security enhancements, an
 The versioning format follows [Semantic Versioning](https://semver.org/).
 
 ## [Version 3.3.6] — Unreleased (branch `v3.3.6`)
+### 🌊 sFlow v5
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **sFlow v5 Listener** | `monitoring/flow/sflow_parser.py`, hand-written like the NetFlow parsers. `ephemres-flowd` listens on UDP 6343 (`flow.sflow_port`, or the sFlow port in Settings → Data collection) and also recognises sFlow sent to the NetFlow or IPFIX port. Only enrolled exporters are read, as for NetFlow. | Switches and routers that only speak sFlow now appear on the Traffic page and in reports. |
+| **Per-Sample Scaling** | Each sampled packet is scaled by the sampling rate carried in its own sample; bytes are the IP length, so totals agree with NetFlow. The global sampling multiplier is not applied on top. Counter samples are skipped (interface counters come from SNMP). | Devices with different sampling rates can report to one server without a shared multiplier. |
+| **Estimates Note** | `GET /bandwidth/overview` returns `sampled_exporters_count`; the Traffic page says its figures are estimates while any exporter sends sampled traffic (sFlow, or NetFlow v5 with a rate in its header). | Nobody reads a sampled conversation count as exact. |
+| **Upgrade** | `deploy/upgrade.sh` opens UDP 6343 in UFW when flow ingestion is on. No migration. | An upgraded server accepts sFlow without manual firewall work. |
+
 ### 🔐 Per-Account Sessions
 
 | Upgrade Domain | Technical Implementation | Operational & Performance Benefit |

@@ -382,6 +382,7 @@ Retrieves the active system configuration from the database. The alerting and fl
     "flow_netflow_port": 2055,
     "flowNetflowPort": 2055,
     "flow_ipfix_port": 4739,
+    "flow_sflow_port": 6343,
     "flowIpfixPort": 4739,
     "flow_sampling_multiplier": 1,
     "flowSamplingMultiplier": 1
@@ -406,6 +407,7 @@ Updates runtime parameters (requires `Admin` role).
   - `flow_ingestion_enabled` (bool, optional): Master toggle for passive NetFlow/IPFIX collection. Turning it on runs the flow preflight below first (with the ports in the same request, if given) and answers `400` if it fails.
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
   - `flow_ipfix_port` (int, 1–65535, optional): IPFIX UDP listening port (default: 4739).
+  - `flow_sflow_port` (int, 1–65535, optional): sFlow v5 UDP listening port (default: 6343).
   - `flow_sampling_multiplier` (int, >= 1, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
 
 ### `POST /settings/flow/preflight`

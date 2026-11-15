@@ -121,7 +121,7 @@ def test_preflight_checks_the_ports_being_saved(client, no_side_effects):
     _db_with(mock_session, flow_ingestion_enabled="false")
     with patch("app.routers.settings.check_flow_prerequisites", AsyncMock(return_value=(True, "Ready"))) as check:
         resp = test_client.patch(
-            "/api/v1/settings", json={"flow_ingestion_enabled": True, "flowNetflowPort": 9995, "flow_ipfix_port": 9996}
+            "/api/v1/settings", json={"flow_ingestion_enabled": True, "flowNetflowPort": 9995, "flow_ipfix_port": 9996, "flow_sflow_port": 9997}
         )
     assert resp.status_code == 200
-    check.assert_awaited_once_with(9995, 9996)
+    check.assert_awaited_once_with(9995, 9996, 9997)

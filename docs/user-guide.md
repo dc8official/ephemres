@@ -92,7 +92,7 @@ Clicking any endpoint opens its detailed forensic view with a live status bar (S
 Administrators configure the platform across five tabs (v3.3.6 order and names):
 1. **👥 Users & access:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation. **Edit** sets an account's role, idle timeout and session limit; the table's **Session** column shows the timeout and how many sessions are open against the limit ("1 of 2 sessions"). Click that count to see each session (device, address, when it signed in, when it last saw activity, when it ends if left alone) and to end one, or all of them. On your own account, "End all sessions" keeps the browser you are using. A new timeout applies to the account's open sessions at once; a new session limit applies from its next sign-in. An admin can change their own timeout and limit, but not their own role. **Sign-in protection** holds the brute-force lockout threshold (failed attempts per address and username before a 15-minute lockout).
 2. **🌐 Discovery & topology:** Layer-2 subnet auto-bypass for traceroutes; **Parallel route traces** (1–8, default 2: traces through the same router still take turns, and incident and root-cause traces always get 2 more); **Re-trace every** 6, 12 or 24 hours (default 24), spread over the period instead of all at midnight.
-3. **📡 Data collection:** NetFlow v5/v9 and IPFIX collector controls (UDP 2055/4739), flow diagnostic preflight, sampling rate, and the FastStore event-routing toggle (`performance_mode`; flows don't depend on it). **SNMP polling** (v3.3.6): the on/off switch, how often each device is polled (30 s to 5 min, default 1 min), and the **SNMP credential sets** (see section 9).
+3. **📡 Data collection:** NetFlow v5/v9, IPFIX and sFlow v5 collector controls (UDP 2055/4739/6343), flow diagnostic preflight, sampling rate, and the FastStore event-routing toggle (`performance_mode`; flows don't depend on it). **SNMP polling** (v3.3.6): the on/off switch, how often each device is polled (30 s to 5 min, default 1 min), and the **SNMP credential sets** (see section 9).
 4. **🔔 Alerts:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
 5. **🏢 Organization:** Company name, department / NOC unit, report footer disclaimer, and corporate logo (PNG or JPEG, up to 1 MB) for branded PDF reports, plus renaming sites, locations and tags.
 
@@ -196,7 +196,7 @@ Administrators can customize corporate identity settings to brand all compiled P
 
 ## 8. Traffic (`/bandwidth`)
 
-The Traffic page (**Traffic** in the top bar) shows what the routers' flows (NetFlow v5, v9, IPFIX) and SNMP counters say about your links. v3.3.6 rebuilt it around one question: *how full is each WAN link now, and is that usual?* Everything else on the page is "over the last {window}" below that.
+The Traffic page (**Traffic** in the top bar) shows what the routers' flows (NetFlow v5, v9, IPFIX, sFlow v5) and SNMP counters say about your links. v3.3.6 rebuilt it around one question: *how full is each WAN link now, and is that usual?* Everything else on the page is "over the last {window}" below that.
 
 ### 8.1 What the page covers: filter, device and window
 * **Filter bar.** The same filter as the dashboard, reports and map: site, location, tags, type and search. It picks **routers** (devices that export flows or are polled over SNMP); every figure on the page is the traffic those routers saw. Hosts are not filtered on their own.

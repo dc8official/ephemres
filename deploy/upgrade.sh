@@ -474,6 +474,7 @@ EOF
 enabled = false
 netflow_port = 2055
 ipfix_port = 4739
+sflow_port = 6343
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
 EOF
@@ -972,9 +973,10 @@ EOF
 
         # Manage firewall if ufw is active
         if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-            echo -e "${GREEN}[INFO] Configuring firewall rules for NetFlow (UDP 2055) and IPFIX (UDP 4739)...${NC}"
+            echo -e "${GREEN}[INFO] Configuring firewall rules for NetFlow (UDP 2055), IPFIX (UDP 4739) and sFlow (UDP 6343)...${NC}"
             ufw allow 2055/udp comment 'Ephemres NetFlow v5/v9 Telemetry' || true
             ufw allow 4739/udp comment 'Ephemres IPFIX Telemetry' || true
+            ufw allow 6343/udp comment 'Ephemres sFlow Telemetry' || true
         fi
     else
         echo -e "${YELLOW}[INFO] Flow telemetry is disabled in settings. ephemres-flowd service installed and ready for UI activation.${NC}"

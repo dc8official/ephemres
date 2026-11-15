@@ -43,13 +43,13 @@
       <div class="card-header">
         <div class="flex-1">
           <div class="flex-row-center gap-2">
-            <h2 class="card-title">🌊 Network Flow Telemetry Engine (NetFlow & IPFIX)</h2>
+            <h2 class="card-title">🌊 Network Flow Telemetry Engine (NetFlow, IPFIX & sFlow)</h2>
             <span class="engine-badge" :class="settings.flowIngestionEnabled ? 'badge-faststore' : 'badge-pg'">
               {{ settings.flowIngestionEnabled ? 'FLOW INGESTION ACTIVE' : 'FLOW INGESTION DISABLED' }}
             </span>
           </div>
           <p class="card-desc mt-1">
-            Receives NetFlow v5, NetFlow v9 and IPFIX from your routers, matches them to monitored endpoints and stores per-minute rollups in TimescaleDB.
+            Receives NetFlow v5, NetFlow v9, IPFIX and sFlow v5 from your routers, matches them to monitored endpoints and stores per-minute rollups in TimescaleDB.
           </p>
         </div>
         <div class="master-toggle-wrap">
@@ -93,8 +93,24 @@
 
         <div class="setting-row">
           <div>
+            <label class="setting-label" for="flow-sflow-port">sFlow Listen Port (v5)</label>
+            <p class="setting-hint">UDP port for sFlow v5. Each sample is scaled by its own sampling rate, so its traffic figures are estimates.</p>
+          </div>
+          <input
+            id="flow-sflow-port"
+            type="number"
+            v-model.number="settings.flowSflowPort"
+            class="setting-input font-mono tnum"
+            min="1024"
+            max="65535"
+            @input="emitChange"
+          />
+        </div>
+
+        <div class="setting-row">
+          <div>
             <label class="setting-label">Sampling Multiplier Override</label>
-            <p class="setting-hint">Hardware sampling scale factor (1 = 1:1 unsampled, e.g. 1000 for 1:1000 sampling).</p>
+            <p class="setting-hint">Hardware sampling scale factor (1 = 1:1 unsampled, e.g. 1000 for 1:1000 sampling). Not applied to sFlow or to NetFlow v5 that reports its own rate.</p>
           </div>
           <input 
             type="number" 

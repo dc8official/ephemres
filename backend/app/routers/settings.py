@@ -145,6 +145,7 @@ class SettingsUpdate(BaseModel):
     flow_netflow_port: Optional[int] = Field(default=None, ge=1, le=65535)
     flowNetflowPort: Optional[int] = Field(default=None, ge=1, le=65535)
     flow_ipfix_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    flow_sflow_port: Optional[int] = Field(default=None, ge=1, le=65535)
     flowIpfixPort: Optional[int] = Field(default=None, ge=1, le=65535)
     flow_sampling_multiplier: Optional[int] = Field(default=None, ge=1)
     flowSamplingMultiplier: Optional[int] = Field(default=None, ge=1)
@@ -180,6 +181,7 @@ class SettingsPayload(BaseModel):
     flowNetflowPort: int
     flow_ipfix_port: int
     flowIpfixPort: int
+    flow_sflow_port: int
     flow_sampling_multiplier: int
     flowSamplingMultiplier: int
     discovery_parallel: int = 2
@@ -270,6 +272,7 @@ async def _read_settings_dict(db: AsyncSession) -> dict[str, Any]:
         "flowNetflowPort": flow_nf_port,
         "flow_ipfix_port": flow_ipfix_port,
         "flowIpfixPort": flow_ipfix_port,
+        "flow_sflow_port": rt.flow_sflow_port,
         "flow_sampling_multiplier": flow_sampling,
         "flowSamplingMultiplier": flow_sampling,
         "discovery_parallel": rt.discovery_parallel,
@@ -354,6 +357,7 @@ async def update_settings(
         ready, err_msg = await check_flow_prerequisites(
             payload.flow_netflow_port or payload.flowNetflowPort,
             payload.flow_ipfix_port or payload.flowIpfixPort,
+            payload.flow_sflow_port,
         )
         if not ready:
             raise HTTPException(
@@ -416,6 +420,12 @@ async def update_settings(
     if flow_ipfix_val is not None:
         await _upsert_setting(db, "flow_ipfix_port", str(flow_ipfix_val))
 
+    # Snake case only: the camelCase twins above are kept for old clients, and no client older
+    # than this setting exists.
+    flow_sflow_val = payload.flow_sflow_port
+    if flow_sflow_val is not None:
+        await _upsert_setting(db, "flow_sflow_port", str(flow_sflow_val))
+
     flow_sampling_val = payload.flow_sampling_multiplier
     if flow_sampling_val is None and payload.flowSamplingMultiplier is not None:
         flow_sampling_val = payload.flowSamplingMultiplier
@@ -434,6 +444,7 @@ async def update_settings(
     ports_changed = (
         (flow_nf_val is not None and int(flow_nf_val) != current_settings.get("flow_netflow_port"))
         or (flow_ipfix_val is not None and int(flow_ipfix_val) != current_settings.get("flow_ipfix_port"))
+        or (flow_sflow_val is not None and int(flow_sflow_val) != current_settings.get("flow_sflow_port"))
     )
     if ports_changed and flow_ingestion_val is None and current_flow_enabled:
         spawn(manage_flow_service(enable=True), "manage_flow_service")
@@ -531,7 +542,8 @@ async def update_organization_settings(
     return APIResponse.success(data=branding)
 
 
-async def _run_flow_check(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None) -> FlowPreflightResponse:
+async def _run_flow_check(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None,
+                          sflow_port: Optional[int] = None) -> FlowPreflightResponse:
     """Checks what ephemres-flowd needs to run: FastStore opens (flowd stops at start-up
     without it), and the UDP ports it will listen on are free. rmem_max below 2 MB is reported
     but does not fail the check: flowd still runs, it just drops packets sooner under load."""
@@ -549,7 +561,8 @@ async def _run_flow_check(netflow_port: Optional[int] = None, ipfix_port: Option
     # config.toml, or the ones being saved right now. Checking config.toml's tested the wrong
     # ports once an admin had changed them.
     rt = get_runtime_settings()
-    ports = (netflow_port or rt.flow_netflow_port, ipfix_port or rt.flow_ipfix_port)
+    ports = (netflow_port or rt.flow_netflow_port, ipfix_port or rt.flow_ipfix_port,
+             sflow_port or rt.flow_sflow_port)
     flow_bind = getattr(app_cfg.flow, "bind_host", "0.0.0.0")
     port_conflicts = await _udp_port_conflicts(flow_bind, ports)
     udp_ports_ok = len(port_conflicts) == 0
@@ -586,9 +599,10 @@ async def _run_flow_check(netflow_port: Optional[int] = None, ipfix_port: Option
     )
 
 
-async def check_flow_prerequisites(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None) -> tuple[bool, str]:
+async def check_flow_prerequisites(netflow_port: Optional[int] = None, ipfix_port: Optional[int] = None,
+                                   sflow_port: Optional[int] = None) -> tuple[bool, str]:
     """The flow preflight as (ready, message), for PATCH /settings."""
-    res = await _run_flow_check(netflow_port, ipfix_port)
+    res = await _run_flow_check(netflow_port, ipfix_port, sflow_port)
     return res.ready, res.message
 
 

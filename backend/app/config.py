@@ -235,6 +235,7 @@ class FlowSettings:
     bind_host: str = "0.0.0.0"
     netflow_port: int = 2055
     ipfix_port: int = 4739
+    sflow_port: int = 6343
     sampling_multiplier: int = 1
     buffer_memory_limit_mb: int = 512
     # Route changes seen in flows: minutes a new path must stay dominant before it counts, and
@@ -254,6 +255,7 @@ class FlowSettings:
             ) from exc
         self.netflow_port = _coerce_int(self.netflow_port, "flow.netflow_port", ge=1, le=65535)
         self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
+        self.sflow_port = _coerce_int(self.sflow_port, "flow.sflow_port", ge=1, le=65535)
         self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
         self.buffer_memory_limit_mb = _coerce_int(self.buffer_memory_limit_mb, "flow.buffer_memory_limit_mb", ge=64)
         self.route_change_minutes = _coerce_int(self.route_change_minutes, "flow.route_change_minutes", ge=1, le=60)

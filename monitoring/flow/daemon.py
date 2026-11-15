@@ -1,4 +1,4 @@
-"""ephemres-flowd: receives NetFlow v5/v9 and IPFIX from routers and stores per-minute traffic.
+"""ephemres-flowd: receives NetFlow v5/v9, IPFIX and sFlow v5 from routers and stores per-minute traffic.
 
 The pipeline runs in one process:
   FlowCollector (UDP sockets, parsing) -> FlowAggregator (1-minute sums in memory, written every
@@ -9,9 +9,11 @@ way the routers forward traffic to monitored endpoints, to spot route changes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import sys
+import time
 from pathlib import Path
 
 # Add backend directory to sys.path so app modules are discoverable
@@ -72,6 +74,28 @@ async def _log_flow_stats(collector: FlowCollector, aggregator: FlowAggregator) 
             logger.info("ephemres-flowd: last minute %d flows received, %d rollup rows stored", received, stored)
 
 
+# Read by the API (routers/bandwidth) for the Traffic page's "estimates" note.
+SAMPLED_EXPORTERS_KEY = "flow:sampled:exporters"
+SAMPLED_EXPORTER_TTL_SECONDS = 900
+
+
+async def _publish_sampled_exporters(collector: FlowCollector, store) -> None:
+    """Once a minute, tells the API which exporters sent sampled traffic in the last 15 minutes
+    (sFlow, or NetFlow v5 with a sampling rate). The key expires on its own, so the note goes
+    when flowd stops or the exporter does."""
+    while True:
+        await asyncio.sleep(STATS_INTERVAL_SECONDS)
+        try:
+            cutoff = time.time() - SAMPLED_EXPORTER_TTL_SECONDS
+            for ip in [ip for ip, seen in collector.sampled_exporters.items() if seen < cutoff]:
+                del collector.sampled_exporters[ip]
+            if collector.sampled_exporters:
+                await store.set(SAMPLED_EXPORTERS_KEY, json.dumps(sorted(collector.sampled_exporters)),
+                                ex=SAMPLED_EXPORTER_TTL_SECONDS)
+        except Exception as e:
+            logger.debug("ephemres-flowd: could not publish the sampled exporters: %s", e)
+
+
 async def run_flow_daemon() -> None:
     logger.info("Starting ephemres-flowd Network Flow Telemetry Daemon (v3.3.5)...")
 
@@ -118,6 +142,7 @@ async def run_flow_daemon() -> None:
     bind_host = getattr(flow_cfg, "bind_host", "0.0.0.0") if flow_cfg else "0.0.0.0"
     netflow_port = rt.flow_netflow_port
     ipfix_port = rt.flow_ipfix_port
+    sflow_port = rt.flow_sflow_port
 
     correlator = FlowCorrelator(AsyncSessionLocal, store_client=store_client)
     # Route changes seen in flows go to the API (targeted traceroute) over the same broker the
@@ -143,6 +168,7 @@ async def run_flow_daemon() -> None:
         bind_host=bind_host,
         netflow_port=netflow_port,
         ipfix_port=ipfix_port,
+        sflow_port=sflow_port,
         exporter_filter=correlator.admit_exporter,
     )
 
@@ -150,6 +176,7 @@ async def run_flow_daemon() -> None:
     await aggregator.start()
     await collector.start()
     stats_task = asyncio.create_task(_log_flow_stats(collector, aggregator), name="flow_stats")
+    sampled_task = asyncio.create_task(_publish_sampled_exporters(collector, store_client), name="flow_sampled")
 
     watchdog_task = await start_systemd_watchdog(interval_seconds=10)
     # FastStore switched in Settings: follow the API onto the new event broker (route hints).
@@ -158,9 +185,10 @@ async def run_flow_daemon() -> None:
     settings_sync_task = asyncio.create_task(start_settings_sync_listener(AsyncSessionLocal), name="settings_sync_listener")
 
     logger.info(
-        "ephemres-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d).",
+        "ephemres-flowd running successfully (NetFlow: UDP %d, IPFIX: UDP %d, sFlow: UDP %d).",
         netflow_port,
         ipfix_port,
+        sflow_port,
     )
 
     # Run until systemd stops the service (SIGTERM) or Ctrl+C, then shut down in order so the
@@ -179,6 +207,7 @@ async def run_flow_daemon() -> None:
     logger.info("ephemres-flowd: Shutdown signal received. Stopping services...")
     watchdog_task.cancel()
     stats_task.cancel()
+    sampled_task.cancel()
     runtime_settings_task.cancel()
     settings_sync_task.cancel()
     try:

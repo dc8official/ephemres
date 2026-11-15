@@ -42,6 +42,7 @@ log_dir = "/var/log/ephemres"
 enabled = false
 netflow_port = 2055
 ipfix_port = 4739
+sflow_port = 6343
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
 # Route changes seen in flows (next-hop export, see docs/netflow-guide.md §2.5)

@@ -65,6 +65,9 @@ class BandwidthOverview(BaseModel):
     total_egress_bps: float
     active_exporters_count: int
     unmatched_exporters_count: int
+    # Exporters whose traffic is scaled up from samples (sFlow, sampled NetFlow v5): with any,
+    # the page says its conversation figures are estimates. Whole fleet, not the page's scope.
+    sampled_exporters_count: int = 0
     total_flows_count: int
     total_ingress_pps: float = 0.0
     total_egress_pps: float = 0.0

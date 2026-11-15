@@ -170,6 +170,7 @@ const settings = reactive({
   flowIngestionEnabled: false,
   flowNetflowPort: 2055,
   flowIpfixPort: 4739,
+  flowSflowPort: 6343,
   flowSamplingMultiplier: 1,
   discoveryParallel: 2,
   rediscoveryHours: 24,
@@ -203,6 +204,7 @@ const isFlowDirty = computed(() => {
     settings.flowIngestionEnabled !== savedSettings.value.flowIngestionEnabled ||
     settings.flowNetflowPort !== savedSettings.value.flowNetflowPort ||
     settings.flowIpfixPort !== savedSettings.value.flowIpfixPort ||
+    settings.flowSflowPort !== savedSettings.value.flowSflowPort ||
     settings.flowSamplingMultiplier !== savedSettings.value.flowSamplingMultiplier ||
     settings.snmpEnabled !== savedSettings.value.snmpEnabled ||
     settings.snmpPollSeconds !== savedSettings.value.snmpPollSeconds
@@ -278,6 +280,7 @@ async function loadSettings() {
       settings.flowIngestionEnabled = Boolean(d.flow_ingestion_enabled ?? d.flowIngestionEnabled ?? false)
       settings.flowNetflowPort = Number(d.flow_netflow_port ?? d.flowNetflowPort ?? 2055)
       settings.flowIpfixPort = Number(d.flow_ipfix_port ?? d.flowIpfixPort ?? 4739)
+      settings.flowSflowPort = Number(d.flow_sflow_port ?? d.flowSflowPort ?? 6343)
       settings.flowSamplingMultiplier = Number(d.flow_sampling_multiplier ?? d.flowSamplingMultiplier ?? 1)
       settings.discoveryParallel = Number(d.discovery_parallel ?? d.discoveryParallel ?? 2)
       settings.rediscoveryHours = Number(d.rediscovery_hours ?? d.rediscoveryHours ?? 24)
@@ -306,6 +309,7 @@ async function saveAllSettings() {
       flow_ingestion_enabled: settings.flowIngestionEnabled,
       flow_netflow_port: parseInt(settings.flowNetflowPort, 10),
       flow_ipfix_port: parseInt(settings.flowIpfixPort, 10),
+      flow_sflow_port: parseInt(settings.flowSflowPort, 10),
       flow_sampling_multiplier: parseInt(settings.flowSamplingMultiplier, 10),
       discovery_parallel: settings.discoveryParallel,
       rediscovery_hours: settings.rediscoveryHours,

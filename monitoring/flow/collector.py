@@ -1,4 +1,5 @@
-"""UDP listener for flow exports: receives each datagram, parses it and hands its flows on."""
+"""UDP listener for flow exports (NetFlow v5/v9, IPFIX, sFlow v5): receives each datagram, parses
+it and hands its flows on."""
 from __future__ import annotations
 
 import asyncio
@@ -7,10 +8,12 @@ import logging
 import os
 import socket
 import struct
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.runtime_settings import get_runtime_settings
 from monitoring.flow.ipfix_parser import IPFIXParser
+from monitoring.flow.sflow_parser import is_sflow, parse_sflow_packet, sample_count
 from monitoring.flow.v5_parser import parse_v5_packet
 from monitoring.flow.v9_parser import V9Parser
 from monitoring.sockbuf import set_receive_buffer
@@ -43,7 +46,7 @@ class FlowUDPProtocol(asyncio.DatagramProtocol):
 
 class FlowCollector:
     """
-    Dual-port UDP Flow Collector listening on UDP 2055 (NetFlow) and UDP 4739 (IPFIX).
+    UDP Flow Collector listening on UDP 2055 (NetFlow), UDP 4739 (IPFIX) and UDP 6343 (sFlow).
 
     Each datagram is parsed and its flows handed to `sink` (FlowAggregator.ingest) at once, in
     the same process. When flowd can't keep up, the kernel drops datagrams at the socket; those
@@ -56,6 +59,7 @@ class FlowCollector:
         bind_host: str = "0.0.0.0",
         netflow_port: int = 2055,
         ipfix_port: int = 4739,
+        sflow_port: int = 6343,
         *,
         exporter_filter: Optional[Callable[[str, int], bool]] = None,
     ):
@@ -67,6 +71,11 @@ class FlowCollector:
         self.bind_host = bind_host
         self.netflow_port = netflow_port
         self.ipfix_port = ipfix_port
+        self.sflow_port = sflow_port
+        # {exporter ip: when it last sent flows already scaled by a sampling rate} (sFlow, or
+        # NetFlow v5 with a rate in its header). flowd publishes it so the Traffic page can say
+        # which figures are estimates.
+        self.sampled_exporters: Dict[str, float] = {}
 
         self.v9_parser = V9Parser()
         self.ipfix_parser = IPFIXParser()
@@ -97,9 +106,14 @@ class FlowCollector:
         if len(data) < 4:
             return
 
-        # Every format starts with a 16-bit version: 5 and 9 for NetFlow, 10 for IPFIX (RFC 7011).
+        # NetFlow and IPFIX start with a 16-bit version: 5 and 9 for NetFlow, 10 for IPFIX
+        # (RFC 7011). sFlow's version is 32 bits, so there those 16 bits are zero.
         version = struct.unpack_from("!H", data, 0)[0]
-        if self.exporter_filter is not None and version in (5, 9, 10):
+        sflow = version == 0 and is_sflow(data)
+        if self.exporter_filter is not None and sflow:
+            if not self.exporter_filter(exporter_ip, sample_count(data)):
+                return
+        elif self.exporter_filter is not None and version in (5, 9, 10):
             # v5 and v9 headers carry the record count; IPFIX only a length, so count 1 per packet.
             records = struct.unpack_from("!H", data, 2)[0] if version in (5, 9) else 1
             if not self.exporter_filter(exporter_ip, records):
@@ -107,7 +121,9 @@ class FlowCollector:
         flows: List[dict[str, Any]] = []
 
         try:
-            if version == 5:
+            if sflow:
+                flows = parse_sflow_packet(data, exporter_ip)
+            elif version == 5:
                 flows = parse_v5_packet(data, exporter_ip)
             elif version == 9:
                 flows = self.v9_parser.parse_packet(data, exporter_ip)
@@ -130,6 +146,8 @@ class FlowCollector:
                         f["bytes"] = int(f.get("bytes", 0) or 0) * multiplier
                         f["packets"] = int(f.get("packets", 0) or 0) * multiplier
 
+            if flows[0].get("header_sampled"):
+                self.sampled_exporters[exporter_ip] = time.time()
             self.flows_received += len(flows)
             if self.sink is not None:
                 try:
@@ -175,28 +193,17 @@ class FlowCollector:
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
 
-        # Listen on UDP 2055 (NetFlow)
-        try:
-            sock_nf = self._create_socket(self.netflow_port)
-            transport_nf, _ = await loop.create_datagram_endpoint(
-                lambda: FlowUDPProtocol(self, self.netflow_port), sock=sock_nf
-            )
-            self._transports.append(transport_nf)
-            logger.info("FlowCollector: Listening on UDP port %d (NetFlow)", self.netflow_port)
-        except Exception as e:
-            logger.error("FlowCollector: Failed to bind UDP %d: %s", self.netflow_port, e)
-
-        # Listen on UDP 4739 (IPFIX)
-        try:
-            sock_ipfix = self._create_socket(self.ipfix_port)
-            transport_ipfix, _ = await loop.create_datagram_endpoint(
-                lambda: FlowUDPProtocol(self, self.ipfix_port), sock=sock_ipfix
-            )
-            self._transports.append(transport_ipfix)
-            logger.info("FlowCollector: Listening on UDP port %d (IPFIX)", self.ipfix_port)
-        except Exception as e:
-            logger.error("FlowCollector: Failed to bind UDP %d: %s", self.ipfix_port, e)
-
+        # A port that cannot be bound is logged and skipped: the other formats still work.
+        for port, name in ((self.netflow_port, "NetFlow"), (self.ipfix_port, "IPFIX"), (self.sflow_port, "sFlow")):
+            try:
+                sock = self._create_socket(port)
+                transport, _ = await loop.create_datagram_endpoint(
+                    lambda port=port: FlowUDPProtocol(self, port), sock=sock
+                )
+                self._transports.append(transport)
+                logger.info("FlowCollector: Listening on UDP port %d (%s)", port, name)
+            except Exception as e:
+                logger.error("FlowCollector: Failed to bind UDP %d (%s): %s", port, name, e)
 
     async def stop(self) -> None:
         for t in self._transports:

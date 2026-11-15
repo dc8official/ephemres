@@ -109,7 +109,7 @@ def test_flow_preflight_success(client):
     test_client, _ = client
     store = AsyncMock()
     store.ping = AsyncMock(return_value=True)
-    runtime = SimpleNamespace(flow_netflow_port=9995, flow_ipfix_port=9996)
+    runtime = SimpleNamespace(flow_netflow_port=9995, flow_ipfix_port=9996, flow_sflow_port=9997)
     with patch("app.core.faststore.FastStoreClient", return_value=store), \
          patch("app.routers.settings.get_runtime_settings", return_value=runtime), \
          patch("app.routers.settings._udp_port_conflicts", AsyncMock(return_value=[])) as ports:
@@ -119,7 +119,7 @@ def test_flow_preflight_success(client):
     assert res["faststore_connected"] is True and res["udp_ports_available"] is True
     assert res["ready"] is True
     assert "stream_write_success" not in res and "redis_version" not in res
-    assert ports.await_args.args[1] == (9995, 9996)
+    assert ports.await_args.args[1] == (9995, 9996, 9997)
 
 
 def test_flow_preflight_reports_a_port_conflict(client):
@@ -128,7 +128,7 @@ def test_flow_preflight_reports_a_port_conflict(client):
     test_client, _ = client
     store = AsyncMock()
     store.ping = AsyncMock(return_value=True)
-    runtime = SimpleNamespace(flow_netflow_port=2055, flow_ipfix_port=4739)
+    runtime = SimpleNamespace(flow_netflow_port=2055, flow_ipfix_port=4739, flow_sflow_port=6343)
     with patch("app.core.faststore.FastStoreClient", return_value=store), \
          patch("app.routers.settings.get_runtime_settings", return_value=runtime), \
          patch("app.routers.settings._udp_port_conflicts", AsyncMock(return_value=[2055])):

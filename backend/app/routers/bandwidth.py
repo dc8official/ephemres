@@ -10,6 +10,7 @@ wan_edge, flow_paths) hold the shared rules, so the dashboard and the PDF report
 """
 from __future__ import annotations
 
+import json
 import datetime
 import ipaddress
 from dataclasses import dataclass
@@ -333,6 +334,19 @@ async def get_bandwidth_overview(
             except Exception:
                 pass
 
+    # Exporters sending sampled traffic, published by flowd (monitoring/flow/daemon.py). No
+    # FastStore or no key reads as none: the note is then simply not shown.
+    sampled_count = 0
+    if store_client:
+        try:
+            raw_sampled = await store_client.get("flow:sampled:exporters")
+            if raw_sampled:
+                if isinstance(raw_sampled, bytes):
+                    raw_sampled = raw_sampled.decode()
+                sampled_count = len(json.loads(raw_sampled))
+        except Exception as exc:
+            logger.debug("Could not read the sampled exporters: %s", exc)
+
     return APIResponse.success(
         data=BandwidthOverview(
             total_ingress_bps=round(bits_per_second(side["ingress_bytes"], seconds), 2),
@@ -341,6 +355,7 @@ async def get_bandwidth_overview(
             total_transit_bps=round(bits_per_second(side["transit_bytes"], seconds), 2),
             active_exporters_count=active_exporters,
             unmatched_exporters_count=unmatched_count,
+            sampled_exporters_count=sampled_count,
             total_flows_count=total_flows,
             total_ingress_pps=round(side["ingress_packets"] / seconds, 2),
             total_egress_pps=round(side["egress_packets"] / seconds, 2),

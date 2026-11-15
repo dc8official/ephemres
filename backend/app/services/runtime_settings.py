@@ -31,6 +31,7 @@ class RuntimeSettings:
     flow_sampling_multiplier: int
     flow_netflow_port: int
     flow_ipfix_port: int
+    flow_sflow_port: int
     # Route discovery (v3.3.6 build plan 6.2): how many traceroutes may run at once (traces
     # through the same router still take turns, services/baseline_route), and how often each
     # endpoint is re-traced by the rolling schedule.
@@ -61,6 +62,7 @@ def config_defaults() -> RuntimeSettings:
         flow_sampling_multiplier=int(getattr(flow_cfg, "sampling_multiplier", 1)),
         flow_netflow_port=int(getattr(flow_cfg, "netflow_port", 2055)),
         flow_ipfix_port=int(getattr(flow_cfg, "ipfix_port", 4739)),
+        flow_sflow_port=int(getattr(flow_cfg, "sflow_port", 6343)),
         discovery_parallel=2,
         rediscovery_hours=24,
         traffic_alerts_enabled=False,
@@ -94,6 +96,7 @@ def resolve(kv: Mapping[str, str]) -> RuntimeSettings:
         flow_sampling_multiplier=_int_in_range(kv.get("flow_sampling_multiplier"), d.flow_sampling_multiplier, 1),
         flow_netflow_port=_int_in_range(kv.get("flow_netflow_port"), d.flow_netflow_port, 1, 65535),
         flow_ipfix_port=_int_in_range(kv.get("flow_ipfix_port"), d.flow_ipfix_port, 1, 65535),
+        flow_sflow_port=_int_in_range(kv.get("flow_sflow_port"), d.flow_sflow_port, 1, 65535),
         discovery_parallel=_int_in_range(kv.get("discovery_parallel"), d.discovery_parallel, 1, 8),
         rediscovery_hours=_int_in_range(kv.get("rediscovery_hours"), d.rediscovery_hours, 1, 168),
         traffic_alerts_enabled=(

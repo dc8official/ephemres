@@ -36,6 +36,7 @@ def test_resolve_prefers_db_values_over_config():
             "flow_sampling_multiplier": "100",
             "flow_netflow_port": "9995",
             "flow_ipfix_port": "4740",
+            "flow_sflow_port": "6344",
         }
     )
     assert rt.session_timeout_minutes == 45
@@ -44,6 +45,7 @@ def test_resolve_prefers_db_values_over_config():
     assert rt.flow_sampling_multiplier == 100
     assert rt.flow_netflow_port == 9995
     assert rt.flow_ipfix_port == 4740
+    assert rt.flow_sflow_port == 6344
 
 
 def test_resolve_falls_back_to_config_for_missing_or_invalid_rows():

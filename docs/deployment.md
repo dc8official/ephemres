@@ -125,7 +125,7 @@ sudo EPHEMRES_BRANCH=v3.3.7 bash /opt/ephemres/deploy/upgrade.sh   # name the re
    - Refreshes the `ephemres-api`, `ephemres-engine`, `ephemres-flowd` and `ephemres-snmpd`
      units, reloads systemd and enables them at boot.
    - Restarts `ephemres-api`, `ephemres-engine`, `ephemres-snmpd` and `nginx`.
-   - If flow ingestion is on, starts `ephemres-flowd` and opens UDP 2055 and 4739 in UFW.
+   - If flow ingestion is on, starts `ephemres-flowd` and opens UDP 2055, 4739 and 6343 in UFW.
 8. **Health Verification**: checks that the API answers `/api/v1/health`.
 
 **If the upgrade fails after the services stopped** (since v3.3.6), it acts on how far it got:
@@ -210,6 +210,7 @@ performance_mode = false
 enabled = false
 netflow_port = 2055
 ipfix_port = 4739
+sflow_port = 6343
 sampling_multiplier = 1
 buffer_memory_limit_mb = 512
 route_change_minutes = 3
@@ -265,11 +266,13 @@ Routers and firewalls must be permitted to stream flow datagrams to the Ephemres
 | :--- | :--- | :--- | :--- |
 | **NetFlow v5 / v9** | UDP 2055 | Exporter Routers / Switches | Raw NetFlow datagram collection |
 | **IPFIX** | UDP 4739 | Exporter Routers / Firewalls | Raw IPFIX datagram collection |
+| **sFlow v5** | UDP 6343 | Exporter Switches / Routers | Sampled packet headers, scaled by each sample's rate |
 
 ```bash
 # Example UFW commands to allow flow ingestion from your management subnet:
 sudo ufw allow proto udp from 10.0.0.0/16 to any port 2055 comment 'Ephemres NetFlow v5/v9 Ingestion'
 sudo ufw allow proto udp from 10.0.0.0/16 to any port 4739 comment 'Ephemres IPFIX Ingestion'
+sudo ufw allow proto udp from 10.0.0.0/16 to any port 6343 comment 'Ephemres sFlow Ingestion'
 ```
 
 ### Egress Firewall Policies (Enterprise Alerting)
