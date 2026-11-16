@@ -70,7 +70,7 @@
                   v-if="item.p95_utilization_percentage != null"
                   class="util-marker util-marker-p95"
                   :style="{ left: `${Math.min(100, item.p95_utilization_percentage)}%` }"
-                  :title="`95th percentile: ${item.p95_utilization_percentage.toFixed(1)}%`"
+                  :title="`95th percentile of ${p95Seconds >= 3600 ? 'hourly' : 'one-minute'} averages: ${item.p95_utilization_percentage.toFixed(1)}%`"
                 ></span>
                 <span
                   v-if="item.peak_utilization_percentage != null"
@@ -123,6 +123,8 @@ const props = defineProps({
   isAdmin: { type: Boolean, default: false },
   selectedIdx: { type: Number, default: null },
   windowLabel: { type: String, default: '' },
+  // Seconds per slot of the 95th percentile: 60, or 3600 when the server read hourly figures.
+  p95Seconds: { type: Number, default: 60 },
   // Server timezone name: down times are shown in it, like the rest of the page.
   timezone: { type: String, default: '' },
   emptyText: { type: String, default: 'No interfaces in this window.' },

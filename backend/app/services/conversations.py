@@ -140,13 +140,17 @@ def _conversation_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict
       Applied to the pair's combined flags the SYN-ACK would have hidden the scan.
     - Profile and Bulk use the busier direction's average packet: the stream of small ACKs
       coming back would otherwise pull a backup below the full-size threshold.
-    - The time seen counts each bucket once, whichever directions it held.
+    - The time seen counts each bucket once, whichever directions it held (distinct buckets).
     """
     counted_once, params = counted_once_cte(where_sql, params)
     src_in = internal_sql("src_ip", "src_endpoint_id")
     dst_in = internal_sql("dst_ip", "dst_endpoint_id")
     anomaly_src = tcp_anomaly_sql("src_flags", "protocol")
     anomaly_dst = tcp_anomaly_sql("dst_flags", "protocol")
+    seen_seconds = " + ".join(
+        f"{seconds} * COUNT(DISTINCT bucket) FILTER (WHERE bucket_seconds = {seconds})"
+        for seconds in sorted(set(_BUCKET_SECONDS.values()))
+    )
     avg_packet = (
         "COALESCE(CASE WHEN src_bytes >= dst_bytes THEN src_bytes / NULLIF(src_packets, 0) "
         "ELSE dst_bytes / NULLIF(dst_packets, 0) END, 0)"
@@ -160,43 +164,34 @@ def _conversation_cte(where_sql: str, params: Dict[str, Any]) -> tuple[str, Dict
                         ELSE src_ip <= dst_ip END AS forward
             FROM counted_once
         ),
-        pair_bucket AS (
+        conv AS (
+            -- One aggregate from the oriented rows (review H2, 2026-11-15). There used to be a
+            -- level in between, one row per pair and bucket, only so that a bucket holding both
+            -- directions counted once towards the time seen; it cost more than half the query
+            -- (3.4 of 6 s on 570,000 rows). Counting the distinct buckets says the same: the
+            -- tiers do not overlap in time, so a bucket has one length.
             SELECT CASE WHEN forward THEN src_ip ELSE dst_ip END AS src_ip,
                    CASE WHEN forward THEN dst_ip ELSE src_ip END AS dst_ip,
-                   protocol, dst_port, bucket,
-                   MAX(bucket_seconds) AS bucket_seconds,
-                   SUM(bytes) FILTER (WHERE forward) AS src_bytes,
-                   SUM(bytes) FILTER (WHERE NOT forward) AS dst_bytes,
-                   SUM(packets) FILTER (WHERE forward) AS src_packets,
-                   SUM(packets) FILTER (WHERE NOT forward) AS dst_packets,
+                   protocol, dst_port,
+                   COALESCE(SUM(bytes) FILTER (WHERE forward), 0) AS src_bytes,
+                   COALESCE(SUM(bytes) FILTER (WHERE NOT forward), 0) AS dst_bytes,
+                   COALESCE(SUM(bytes), 0) AS total_bytes,
+                   COALESCE(SUM(packets) FILTER (WHERE forward), 0) AS src_packets,
+                   COALESCE(SUM(packets) FILTER (WHERE NOT forward), 0) AS dst_packets,
+                   COALESCE(SUM(packets), 0) AS total_packets,
+                   SUM(flow_count) AS total_flows,
                    BIT_OR(tcp_flags) FILTER (WHERE forward) AS src_flags,
                    BIT_OR(tcp_flags) FILTER (WHERE NOT forward) AS dst_flags,
-                   SUM(flow_count) AS flow_count,
-                   MAX(tos) AS tos
-            FROM oriented
-            GROUP BY 1, 2, protocol, dst_port, bucket
-        ),
-        conv AS (
-            SELECT src_ip, dst_ip, protocol, dst_port,
-                   COALESCE(SUM(src_bytes), 0) AS src_bytes,
-                   COALESCE(SUM(dst_bytes), 0) AS dst_bytes,
-                   COALESCE(SUM(src_bytes), 0) + COALESCE(SUM(dst_bytes), 0) AS total_bytes,
-                   COALESCE(SUM(src_packets), 0) AS src_packets,
-                   COALESCE(SUM(dst_packets), 0) AS dst_packets,
-                   COALESCE(SUM(src_packets), 0) + COALESCE(SUM(dst_packets), 0) AS total_packets,
-                   SUM(flow_count) AS total_flows,
-                   BIT_OR(src_flags) AS src_flags,
-                   BIT_OR(dst_flags) AS dst_flags,
-                   COALESCE(BIT_OR(src_flags), 0) | COALESCE(BIT_OR(dst_flags), 0) AS tcp_flags_mask,
+                   COALESCE(BIT_OR(tcp_flags), 0) AS tcp_flags_mask,
                    MAX(tos) AS max_tos,
-                   SUM(bucket_seconds) AS seen_seconds,
+                   {seen_seconds} AS seen_seconds,
                    -- First and last seen (review S1): the start of the first bucket and the end
-                   -- of the last, so to the minute up to 2 hours and to the hour beyond (the
+                   -- of the last, so they are exact to the bucket (a minute, or an hour in the
                    -- hourly tier). The current bucket ends in the future: capped at now.
                    MIN(bucket) AS first_seen,
                    LEAST(MAX(bucket + bucket_seconds * INTERVAL '1 second'), now()) AS last_seen
-            FROM pair_bucket
-            GROUP BY src_ip, dst_ip, protocol, dst_port
+            FROM oriented
+            GROUP BY 1, 2, protocol, dst_port
         ),
         flagged AS (
             SELECT conv.*, {anomaly_src} AS anomaly_src, {anomaly_dst} AS anomaly_dst
@@ -403,37 +398,42 @@ async def query_conversations(
         params["dscp"] = dscp
     cte, params = _conversation_cte(where_sql, params)
 
-    counts_res = await db.execute(
-        text(f"""
-            {cte}
-            SELECT COUNT(*) AS all_count,
-                   COUNT(*) FILTER (WHERE {_QUICK_WHERE["anomalies"]}) AS anomalies,
-                   COUNT(*) FILTER (WHERE {_QUICK_WHERE["qos"]}) AS qos,
-                   COUNT(*) FILTER (WHERE {_QUICK_WHERE["bulk"]}) AS bulk
-            FROM labelled WHERE {post}
-        """),
-        params,
-    )
-    c = dict(counts_res.mappings().first() or {})
-    counts = {
-        "all": int(c.get("all_count") or 0),
-        "anomalies": int(c.get("anomalies") or 0),
-        "qos": int(c.get("qos") or 0),
-        "bulk": int(c.get("bulk") or 0),
-    }
-
+    # Counts and page from one statement (review H2): `labelled` is read twice in it, so
+    # PostgreSQL builds it once. As two statements every conversation of the window was
+    # aggregated twice, 6 s each on a busy 24 h window. The counts ride on every page row; with
+    # no row on the page the LEFT JOIN still gives the counts, beside NULLs.
     order_col = SORT_COLUMNS.get(sort, "total_bytes")
-    page_res = await db.execute(
+    res = await db.execute(
         text(f"""
-            {cte}
-            SELECT * FROM labelled
-            WHERE {post} AND {_QUICK_WHERE.get(quick, "TRUE")}
-            ORDER BY {order_col} DESC, total_bytes DESC
-            LIMIT :limit OFFSET :offset
+            {cte},
+            counts AS (
+                SELECT COUNT(*) AS count_all,
+                       COUNT(*) FILTER (WHERE {_QUICK_WHERE["anomalies"]}) AS count_anomalies,
+                       COUNT(*) FILTER (WHERE {_QUICK_WHERE["qos"]}) AS count_qos,
+                       COUNT(*) FILTER (WHERE {_QUICK_WHERE["bulk"]}) AS count_bulk
+                FROM labelled WHERE {post}
+            ),
+            page AS (
+                SELECT * FROM labelled
+                WHERE {post} AND {_QUICK_WHERE.get(quick, "TRUE")}
+                ORDER BY {order_col} DESC, total_bytes DESC
+                LIMIT :limit OFFSET :offset
+            )
+            SELECT counts.*, page.*
+            FROM counts LEFT JOIN page ON TRUE
+            ORDER BY page.{order_col} DESC, page.total_bytes DESC
         """),
         {**params, "limit": limit, "offset": offset},
     )
-    rows = [dict(r) for r in page_res.mappings()]
+    found = [dict(r) for r in res.mappings()]
+    c = found[0] if found else {}
+    counts = {
+        "all": int(c.get("count_all") or 0),
+        "anomalies": int(c.get("count_anomalies") or 0),
+        "qos": int(c.get("count_qos") or 0),
+        "bulk": int(c.get("count_bulk") or 0),
+    }
+    rows = [r for r in found if r.get("src_ip") is not None]
     ips = sorted({_ip_text(r["src_ip"]) for r in rows} | {_ip_text(r["dst_ip"]) for r in rows})
     hostnames = await _hostnames(db, ips)
     # Names for the other addresses (build plan 11b): provider ranges now, reverse DNS from cache.

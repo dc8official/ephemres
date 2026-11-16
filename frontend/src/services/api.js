@@ -463,7 +463,9 @@ export function getTrafficSeries(window = '1h', scope = null, endpointId = null,
 }
 
 export function getTopTalkers(window = '1h', limit = 25, endpointId = null, scope = null) {
-  const params = { window, limit, ...trafficScopeParams(scope) }
+  // conversations=false: the page lists conversations through getConversations; without it the
+  // API computed the same list here again on every refresh (review H2).
+  const params = { window, limit, conversations: false, ...trafficScopeParams(scope) }
   if (endpointId) params.endpoint_id = endpointId
   return api.get('/bandwidth/top-talkers', { params })
 }

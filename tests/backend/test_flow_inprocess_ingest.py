@@ -177,3 +177,25 @@ def test_buffer_full_error_is_logged_once_a_minute_at_most(monkeypatch):
     clock[0] += 31
     _fill(agg, 20, salt=3)
     assert log.error.call_count == 2
+
+
+def test_a_record_with_a_value_no_column_holds_is_left_out_at_ingest(caplog):
+    """First-phase review H1: bytes above BIGINT or a protocol above SMALLINT reached the write,
+    which then failed for every flow flushed with it, at every flush."""
+    agg = _aggregator()
+    base = {"exporter_ip": "10.0.0.1", "src_ip": "10.1.1.1", "dst_ip": "8.8.8.8", "src_port": 40000,
+            "dst_port": 443, "protocol": 6, "bytes": 1000, "packets": 2, "start_time": 1_794_000_000.0}
+    bad = [
+        {**base, "bytes": 2 ** 64 - 1},      # an 8-byte IPFIX counter of all ones
+        {**base, "packets": 2 ** 63},
+        {**base, "bytes": -1},
+        {**base, "protocol": 70000},         # a 4-byte protocol field in a v9 template
+        {**base, "dst_port": 2 ** 31},
+        {**base, "start_time": 1e300},       # no calendar holds it: costs only this record
+    ]
+    with caplog.at_level("WARNING"):
+        agg.ingest(bad + [{**base, "src_ip": "10.1.1.2"}])
+    assert [k[4] for k in agg._accumulator] == ["10.1.1.2"]
+    assert agg.flows_rejected == 5
+    # Said once, not once a record: a broken export sends thousands.
+    assert sum("left out" in r.message for r in caplog.records) == 1

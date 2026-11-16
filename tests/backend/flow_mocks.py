@@ -36,6 +36,13 @@ def conversation_row(src, dst, protocol, port, total_bytes, flows, packets=0, fl
     }
 
 
+def conversation_page_result(conversations, counts=None):
+    """The one statement behind a conversation page: every page row carries the quick-filter
+    counts, and a page with no row is still one row of counts beside NULLs."""
+    counts = {"count_all": len(conversations), "count_anomalies": 0, "count_qos": 0, "count_bulk": 0, **(counts or {})}
+    return mapping_result([{**counts, **row} for row in conversations] or [{**counts, "src_ip": None}])
+
+
 def talker_row(ip, endpoint_id, ingress, egress, flows, packets=0):
     return {
         "ip": ip,
@@ -51,7 +58,7 @@ def talker_row(ip, endpoint_id, ingress, egress, flows, packets=0):
 def top_talkers_results(talkers, hostnames, conversations, conversation_hostnames, seen_by=()):
     """Result sequence for GET /bandwidth/top-talkers, in query order: talkers, the routers
     that saw each talker (`seen_by`: (ip, exporter_id) pairs), endpoint names and sites (only
-    when a talker or router is an endpoint), conversation counts, conversation page,
+    when a talker or router is an endpoint), the conversation page with its counts,
     conversation hostnames and the routers that reported each conversation (only when the page
     is non-empty; none here, which ends that lookup). `hostnames` holds (id, name) or
     (id, name, site)."""
@@ -62,8 +69,7 @@ def top_talkers_results(talkers, hostnames, conversations, conversation_hostname
         host = MagicMock()
         host.all.return_value = [tuple(h) + (None,) * (3 - len(h)) for h in hostnames]
         results.append(host)
-    results.append(mapping_result([{"all_count": len(conversations), "anomalies": 0, "qos": 0, "bulk": 0}]))
-    results.append(mapping_result(conversations))
+    results.append(conversation_page_result(conversations))
     if conversations:
         results.append(mapping_result([{"ip": ip, "hostname": h} for ip, h in conversation_hostnames]))
         results.append(mapping_result([]))

@@ -63,6 +63,16 @@ The versioning format follows [Semantic Versioning](https://semver.org/).
 | **Time Window Remembered** | `?window=` in the URL, plus the browser tab remembers the last window for links that carry none. | The window no longer resets to 1 hour after leaving the page. |
 | **Header** | The product text "v3.3.5 Flow Engine · NetFlow v5, NetFlow v9 & IPFIX" is removed. | Room for what matters on the page. |
 
+### 🧪 First-Phase Review Fixes (2026-11-15/16)
+
+| Upgrade Domain | Technical Implementation | Operational & Performance Benefit |
+| :--- | :--- | :--- |
+| **One Bad Flow Record No Longer Stops Flow Storage** | `FlowAggregator.ingest` leaves out a record whose bytes or packets exceed 2^50, whose protocol exceeds 255 or whose port exceeds 65535 (counted, logged once a minute). A write the database refuses for a value is retried in pieces, each its own transaction, and only the refused rows are dropped; a database that is away still keeps everything for the next flush. | Before, one such record (an 8-byte IPFIX counter of all ones, a 4-byte protocol field) failed the write at every flush and ephemres-flowd stored nothing until it was restarted. |
+| **Traffic Page on Long Periods** | Top talkers no longer computes a conversation list the page does not show (`conversations=false`); the conversations call runs one statement instead of two, and one grouping level less (same rows, checked against the old query over six windows); the interfaces table reads hourly figures when the minute rows would pass 500,000. | On a test week with 570,000 conversation rows a day and 1,104 SNMP interfaces, 24 hours: top talkers 14.8 s to 2.2 s, conversations 11.7 s to 4.4 s, interfaces 8.2 s to 0.4 s, security summary 5.2 s to 2.4 s. 7 days answers where it timed out. |
+| **Heavy Traffic Queries Share the Database** | Six Traffic calls take a slot before they query: a quarter of each API worker's pool. A call that waits 20 s answers 503 with a sentence the page shows. | Three tabs on a slow 24-hour view used to take 18 of 20 connections: the dashboard waited 5 s and got a 503. The same test now leaves the dashboard at under 0.5 s. |
+| **Traffic Page Says What Failed** | Each of the page's nine calls is shown or reported on its own (`Promise.allSettled`); a notice names the figures that could not be loaded, with "Try again". Figures loaded for another period or scope are cleared, figures for the same one are kept and dated. An older refresh that arrives after a newer one is dropped. | Before, one failed call discarded all nine results without a word, and after a change of period the previous period's figures stood under the new heading. |
+| **Interfaces Table: Which Percentile** | The P95 marker's tooltip says "of one-minute averages" or "of hourly averages" (`p95_resolution_seconds`). | The figure says what it is when the server reads the hourly tier. |
+
 ### 🔁 Conversations, Names, Traces and Baselines (decided 2026-11-15)
 
 | Upgrade Domain | Technical Implementation | Operational & Performance Benefit |

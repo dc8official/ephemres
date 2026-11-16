@@ -38,6 +38,17 @@ SENTINEL = "00000000-0000-0000-0000-000000000000"
 
 # Up to 7 days the minute table answers; 30 days needs the hourly tier (minutes are kept 7 days).
 MINUTE_TIER_UP_TO = datetime.timedelta(days=7)
+# ... unless that is more minute rows than this (first-phase review H2, 2026-11-15). The table
+# reads one row per interface and minute: 1,104 SNMP interfaces over 24 h are 1.6 million rows,
+# 8 s and a 139 MB sort on disk, and over 7 days the call ran into the 10 s statement limit. Past
+# the budget the hours are read instead, and the 95th percentile is of hourly averages, as it
+# already is beyond 7 days (the API says which in `hourly`; peaks still come from each hour's
+# busiest minute). 500,000 keeps a routers-only fleet on minutes as before (6 routers x 8
+# interfaces x 7 days = 484,000) and answers in about 2.5 s at worst.
+# As beyond 7 days, the hours read are the whole ones inside the window, so the table then
+# covers up to an hour less than the period asked for; `covered_seconds` says how much, and the
+# rates are averages over that.
+MINUTE_ROWS_BUDGET = 500_000
 
 _STATUS_ORDER_LAST = "shut_down"
 
@@ -172,6 +183,27 @@ def _order(rows: List[InterfaceRow], single_device: bool) -> List[InterfaceRow]:
     return sorted(rows, key=key)
 
 
+async def _too_many_minutes(
+    db: AsyncSession, routers: Optional[List[UUID]], start: datetime.datetime, now: datetime.datetime
+) -> bool:
+    """True when the window's minute rows would pass MINUTE_ROWS_BUDGET, counted from the hourly
+    tier (one row per interface and hour with traffic, so cheap to count). The hour still being
+    filled is not in the aggregate yet; it is under 2% of the shortest window that can pass."""
+    if routers is None:
+        scope, params = "exporter_id != CAST(:sentinel AS uuid)", {"sentinel": SENTINEL}
+    else:
+        scope, params = "exporter_id = ANY(CAST(:ids AS uuid[]))", {"ids": tuple(str(r) for r in routers)}
+    res = await db.execute(text(f"""
+        SELECT (SELECT COUNT(*) FROM snmp_interface_hourly_rollups WHERE {scope} AND bucket >= :start)
+             + (SELECT COUNT(*) FROM flow_interface_hourly_rollups WHERE {scope} AND bucket >= :start) AS hours
+    """), {**params, "start": start})
+    hours = int(res.scalar() or 0)
+    span_minutes = max(1.0, (now - start).total_seconds() / 60.0)
+    # An interface with traffic all hour has 60 minute rows; a window shorter than an hour
+    # cannot have more minutes than it is long.
+    return hours * min(60.0, span_minutes) > MINUTE_ROWS_BUDGET
+
+
 async def interface_table(
     db: AsyncSession,
     routers: Optional[List[UUID]],
@@ -186,7 +218,9 @@ async def interface_table(
     the rollups yet; they count as "traffic seen"."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     start = now - window
-    hourly = window > MINUTE_TIER_UP_TO
+    if routers is not None and not routers:
+        return InterfaceTable([], start, now, 60, False, 0.0)
+    hourly = window > MINUTE_TIER_UP_TO or await _too_many_minutes(db, routers, start, now)
     slot_seconds = 3600 if hourly else 60
     peak_in_col, peak_out_col = ("peak_in_minute_bytes", "peak_out_minute_bytes") if hourly else ("in_bytes", "out_bytes")
     now_end = now.replace(second=0, microsecond=0)

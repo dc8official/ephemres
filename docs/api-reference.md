@@ -623,12 +623,15 @@ Conversations (source, destination, protocol, service port) over the window, fil
   - `first_seen`, `last_seen`: the start of the first bucket it was seen in and the end of the last (never later than now). To the minute for windows up to 2 hours, to the hour beyond.
 - **Errors:** `400` for an unknown `quick` or `sort`, or an invalid `ip`.
 
+**Busy answers (v3.3.6).** `top-talkers`, `conversations`, `applications`, `anomalies`, `interfaces` and `traffic-series` aggregate every flow row of the window. In each API worker at most a quarter of the database pool runs them at once (5 of the default 20); the others wait their turn, and one that waits 20 s answers `503` with `Retry-After: 10` and a sentence saying the server is busy. The rest of the API keeps its connections.
+
 ### `GET /bandwidth/top-talkers`
 Retrieves the highest-volume addresses and the largest conversations within the specified window. Each address's ingress (as destination) and egress (as source) come from one aggregation; `top_conversations` is the first page of `GET /bandwidth/conversations`.
 - **Query Parameters:**
   - `window` (string, default `"1h"`): Time window (`"1h"`, `"6h"`, `"24h"`, `"7d"`, `"30d"`).
   - `limit` (int, default `25`, range `1`–`200`): Maximum records to return.
   - The scope (above); `endpoint_id` (UUID, optional): flows involving one endpoint.
+  - `conversations` (bool, default `true`, v3.3.6): `false` leaves `top_conversations` empty and skips the query behind it, which is most of this call's time on a long window. The Traffic page sends `false` and lists conversations through `GET /bandwidth/conversations`.
 - Each address has `sites` (v3.3.6): an endpoint's own site, else the sites of the routers that saw the address. `ingress_bytes` is what the address received, `egress_bytes` what it sent. `name_hint` (v3.3.6) names an address with no endpoint hostname, when a name is known: `{"name": "Microsoft 365 (Exchange)", "source": "provider"}` from the providers' published ranges, or `"source": "dns"` from reverse DNS (looked up in the background and cached a day, so it can appear on a later request).
 - **Response:** `200 OK`
   ```json
@@ -769,6 +772,7 @@ Per-interface traffic for one router, or (v3.3.6) for every router in scope.
 - **Query Params:** the scope (above), `window` (default `1h`; same values as the other bandwidth endpoints). Without a device, every router in scope; with no filter either, every live endpoint that reported interface traffic in the window, is polled over SNMP or has interfaces typed in. Until v3.3.6 `exporter_id` was required (`422` without it).
 - **Response:** `exporter_id` (the device, `null` across devices), `devices` (how many routers), `window`, `covered_seconds`, `source`, `interfaces`.
 - **Rows:** interfaces with traffic, typed in, or that SNMP sees up; plus ports an admin shut down and ports with an SNMP down event in the window. A port SNMP sees down with none of those is left out.
+- **Percentile resolution (v3.3.6):** `p95_resolution_seconds` is `60` when the 95th percentile is of one-minute figures and `3600` when it is of hourly averages. Hourly applies beyond 7 days, and to shorter windows whose minute rows would pass 500,000 (about 350 interfaces over 24 hours): reading those took over 8 s. Peaks come from each hour's busiest minute either way.
 - **Order:** one device: by index, shut-down ports last. Across devices: WAN links first by average utilisation (no speed after), then the others by the busier direction's average, shut-down ports last.
 - Rates average over `covered_seconds`: from the later of the window start and the router's first data in the window, to now. Up to 7 days the 1-minute rollup is used (`p95_resolution_seconds` 60); 30 days uses the hourly rollup (p95 over hourly averages, `p95_resolution_seconds` 3600). Idle minutes count as zero in the percentile.
 - Traffic figures come from the device's SNMP counters for the minutes that have them and from flows otherwise (`services/interface_traffic.py`); `traffic_source` is `snmp` when any minute in the window came from counters, else `flow`. `flow_count` always counts flows. Names and speeds are the typed ones, else the device's from SNMP: each interface also carries `name_source` / `speed_source` (`manual`, `snmp` or `default`), `snmp_name`, `snmp_speed_mbps`, `oper_status` and `admin_status`.

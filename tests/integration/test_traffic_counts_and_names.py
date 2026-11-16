@@ -63,12 +63,18 @@ def _seed(run_sql, flows):
 
 def _erp_flows():
     """ERP traffic both routers report (Abuja's report slightly smaller), a QUIC download only
-    Abuja sees, and a PC with no endpoint sending to the Internet."""
+    Abuja sees, and a PC with no endpoint sending to the Internet.
+
+    The ERP rows are three minutes old, not five: the overview reads the last five whole minutes
+    counted from the request's own clock, so rows on the window's oldest minute fell out of it
+    whenever the minute changed between the seed and the request (a test in test_traffic_scope.py
+    failed that way now and then, found 2026-11-16). Three leaves two minutes to spare; the QUIC
+    rows, six minutes old, are outside the window either way."""
     return [
-        (5, HQ_ID, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 10 * MB, 10_000, 4),
-        (5, ABJ_ID, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 9 * MB, 9_000, 4),
-        (5, HQ_ID, ERP_ID, None, ERP_IP, PC_IP, TCP, 1433, 20 * MB, 15_000, 4),
-        (5, ABJ_ID, ERP_ID, None, ERP_IP, PC_IP, TCP, 1433, 20 * MB, 15_000, 4),
+        (3, HQ_ID, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 10 * MB, 10_000, 4),
+        (3, ABJ_ID, None, ERP_ID, PC_IP, ERP_IP, TCP, 1433, 9 * MB, 9_000, 4),
+        (3, HQ_ID, ERP_ID, None, ERP_IP, PC_IP, TCP, 1433, 20 * MB, 15_000, 4),
+        (3, ABJ_ID, ERP_ID, None, ERP_IP, PC_IP, TCP, 1433, 20 * MB, 15_000, 4),
         (6, ABJ_ID, None, None, MS365_IP, PC_IP, UDP, 443, 4 * MB, 3_000, 2),
         (6, ABJ_ID, None, None, PC_IP, MS365_IP, UDP, 443, 1 * MB, 1_000, 2),
     ]
@@ -145,7 +151,7 @@ def test_pdf_counts_once_and_names_every_router(timescale_dsn, run_sql):
 def test_overview_and_all_flows_use_the_zones_rule(api_client, run_sql):
     _seed(run_sql, _erp_flows())
     ov = _data(api_client.get("/api/v1/bandwidth/overview"))
-    # Over the 5-minute window: the ERP rows (5 min ago) are in, the QUIC rows (6 min) are not.
+    # Over the 5-minute window: the ERP rows (3 min ago) are in, the QUIC rows (6 min) are not.
     assert ov["total_internal_bps"] == pytest.approx(30 * MB * 8 / 300)
     assert ov["total_transit_bps"] == 0
 

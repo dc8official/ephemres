@@ -10,6 +10,7 @@ wan_edge, flow_paths) hold the shared rules, so the dashboard and the PDF report
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import datetime
 import ipaddress
@@ -255,6 +256,46 @@ async def _scope(
     return _Scope(routers=routers, device=picked if routers and routers == [picked] else None)
 
 
+# --- A share of the database for the heavy Traffic queries (first-phase review H2, 2026-11-15) ---
+# Top talkers, conversations, applications, the anomaly summary, the interfaces table and the
+# traffic series each aggregate every flow row of the window. On a busy 24 h or 7 d view they
+# take seconds, the page asks for six at once, and every open tab asks again each minute. Three
+# tabs held 18 of the pool's 20 connections: the dashboard waited 5 s and got a 503. At most a
+# quarter of this worker's pool now runs these at once; the rest wait their turn holding no
+# connection (the slot is taken before sign-in is checked, which is what first uses one), and a
+# call that waits TRAFFIC_QUEUE_SECONDS answers 503 with a sentence the page shows.
+TRAFFIC_QUEUE_SECONDS = 20.0
+_traffic_slots: Optional[asyncio.Semaphore] = None
+
+
+def traffic_query_slots() -> int:
+    from app.database import _MAX_OVERFLOW, _POOL_SIZE
+
+    return max(2, (_POOL_SIZE + _MAX_OVERFLOW) // 4)
+
+
+async def _traffic_query_slot():
+    global _traffic_slots
+    if _traffic_slots is None:
+        _traffic_slots = asyncio.Semaphore(traffic_query_slots())
+    slots = _traffic_slots
+    try:
+        await asyncio.wait_for(slots.acquire(), TRAFFIC_QUEUE_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server is busy with other Traffic queries. Try again in a moment, or pick a shorter period.",
+            headers={"Retry-After": "10"},
+        )
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+_HEAVY = [Depends(_traffic_query_slot)]
+
+
 @router.get("/overview", response_model=APIResponse)
 async def get_bandwidth_overview(
     exporter_id: Optional[UUID] = Query(default=None),
@@ -472,7 +513,7 @@ async def get_wan_links(
     ))
 
 
-@router.get("/anomalies", response_model=APIResponse)
+@router.get("/anomalies", response_model=APIResponse, dependencies=_HEAVY)
 async def get_anomaly_summary(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
@@ -548,7 +589,7 @@ async def _wan_overview(
     }
 
 
-@router.get("/traffic-series", response_model=APIResponse)
+@router.get("/traffic-series", response_model=APIResponse, dependencies=_HEAVY)
 async def get_traffic_series(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
@@ -761,19 +802,23 @@ async def _interface_series(
     )
 
 
-@router.get("/top-talkers", response_model=APIResponse)
+@router.get("/top-talkers", response_model=APIResponse, dependencies=_HEAVY)
 async def get_top_talkers(
     window: str = Query(default="1h"),
     limit: int = Query(default=25, ge=1, le=200),
     endpoint_id: Optional[UUID] = Query(default=None),
     exporter_id: Optional[UUID] = Query(default=None),
     device_id: Optional[UUID] = Query(default=None),
+    # The largest conversations beside the talkers. The Traffic page asks for them through
+    # GET /bandwidth/conversations and sends conversations=false here: computing them again took
+    # 12 of this call's 15 s on a busy 24 h window (review H2). On by default for other clients.
+    conversations: bool = Query(default=True),
     endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Top addresses by total volume, plus the largest conversations (first page of
-    GET /bandwidth/conversations, kept for existing clients).
+    GET /bandwidth/conversations, kept for existing clients; left out with conversations=false).
 
     Each address's ingress (received, as destination) and egress (sent, as source) come from
     one aggregation, so neither side is cut off by a separate per-direction limit. `sites`:
@@ -863,15 +908,20 @@ async def get_top_talkers(
             )
         )
 
-    page = await conversation_queries.query_conversations(
-        db, start_time, endpoint_id=endpoint_id, limit=limit, exporter_ids=scope.routers
-    )
+    # `is False`: a caller that is not the router (a test, another route) passes no value and gets
+    # the Query marker here, which must mean the default.
+    top_conversations = []
+    if conversations is not False:
+        page = await conversation_queries.query_conversations(
+            db, start_time, endpoint_id=endpoint_id, limit=limit, exporter_ids=scope.routers
+        )
+        top_conversations = page["items"]
     return APIResponse.success(
-        data=TopTalkersResponse(top_endpoints=top_endpoints, top_conversations=page["items"])
+        data=TopTalkersResponse(top_endpoints=top_endpoints, top_conversations=top_conversations)
     )
 
 
-@router.get("/conversations", response_model=APIResponse)
+@router.get("/conversations", response_model=APIResponse, dependencies=_HEAVY)
 async def get_conversations(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
@@ -936,7 +986,7 @@ async def get_conversations(
     )
 
 
-@router.get("/applications", response_model=APIResponse)
+@router.get("/applications", response_model=APIResponse, dependencies=_HEAVY)
 async def get_applications_breakdown(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
@@ -1393,7 +1443,7 @@ async def map_unmatched_exporter(
     )
 
 
-@router.get("/interfaces", response_model=APIResponse)
+@router.get("/interfaces", response_model=APIResponse, dependencies=_HEAVY)
 async def get_interfaces_telemetry(
     exporter_id: Optional[UUID] = Query(default=None),
     window: str = Query(default="1h"),

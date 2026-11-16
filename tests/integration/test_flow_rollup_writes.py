@@ -25,7 +25,7 @@ def _flow(i, **kw):
     return f
 
 
-async def _ingest_and_flush(dsn, batches):
+async def _ingest_and_flush(dsn, batches, tamper=None):
     from app.core.orm import AsyncSession, async_sessionmaker, create_async_engine
     from monitoring.flow.aggregator import FlowAggregator
 
@@ -37,8 +37,10 @@ async def _ingest_and_flush(dsn, batches):
     try:
         factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
         agg = FlowAggregator(store_client=None, correlator=Correlator(), db_session_factory=factory, memory_limit_mb=64)
-        for flows in batches:
+        for n, flows in enumerate(batches):
             agg.ingest(flows)
+            if tamper is not None:
+                tamper(agg, n)  # reach past ingest's own checks, into what is about to be written
             await agg.flush_to_timescaledb()
         return agg
     finally:
@@ -83,3 +85,95 @@ def test_rollups_cross_the_chunk_boundary_and_merge_on_conflict(timescale_dsn, s
     assert merged["exporter_id"] == EXPORTER_ID
     assert agg.rows_stored == 6010
     assert agg._accumulator == {}
+
+
+BIGINT_MAX = 2 ** 63 - 1
+
+
+def _stored(seeded):
+    async def read(conn):
+        return [r["src"] for r in await conn.fetch("SELECT host(src_ip) AS src FROM flow_minute_rollups ORDER BY src_ip")]
+
+    return seeded(read)
+
+
+def test_a_row_the_driver_cannot_send_is_left_out_and_the_rest_stored(timescale_dsn, seeded):
+    """First-phase review H1: one value outside BIGINT failed the whole write, the batch was kept
+    "for the next flush" and failed again every time, so flowd stored nothing until a restart."""
+    def tamper(agg, n):
+        if n == 0:
+            key = next(k for k in agg._accumulator if k[4] == "10.1.0.3")
+            agg._accumulator[key][0] = 2 ** 64  # what many records at the ingest limit could add up to
+
+    agg = asyncio.run(_ingest_and_flush(
+        timescale_dsn, [[_flow(i) for i in range(20)], [_flow(100 + i) for i in range(5)]], tamper))
+
+    stored = _stored(seeded)
+    assert "10.1.0.3" not in stored and len(stored) == 19 + 5  # the later flush went in too
+    assert agg.rows_rejected == 1 and agg.rows_stored == 24
+    assert agg._accumulator == {} and agg.last_flush_error is None
+
+
+def test_a_row_the_database_refuses_is_left_out_and_the_rest_stored(timescale_dsn, seeded):
+    """The other way to the same fault: each value fits, but added to the stored row the sum does
+    not, and PostgreSQL refuses it inside the transaction ("bigint out of range")."""
+    def tamper(agg, n):
+        if n == 0:
+            key = next(k for k in agg._accumulator if k[4] == "10.1.0.3")
+            agg._accumulator[key][0] = BIGINT_MAX - 10
+
+    # The second batch repeats the conversations in the same minute: 10.1.0.3 would pass BIGINT.
+    agg = asyncio.run(_ingest_and_flush(
+        timescale_dsn, [[_flow(i) for i in range(20)], [_flow(i) for i in range(20)]], tamper))
+
+    async def read(conn):
+        return {r["src"]: r["bytes"] for r in await conn.fetch("SELECT host(src_ip) AS src, bytes FROM flow_minute_rollups")}
+
+    by_src = seeded(read)
+    assert by_src["10.1.0.3"] == BIGINT_MAX - 10  # its second write was left out
+    assert by_src["10.1.0.4"] == 2000 and len(by_src) == 20  # the others merged as usual
+    assert agg.rows_rejected == 1 and agg._accumulator == {} and agg.last_flush_error is None
+
+
+def test_an_interface_row_the_database_refuses_does_not_hold_back_the_flows(timescale_dsn, seeded):
+    def tamper(agg, n):
+        key = next(k for k in agg._interface_accumulator if k[2] == 7)
+        agg._interface_accumulator[key][0] = 2 ** 64
+
+    flows = [_flow(i, input_if=3 + (i % 5), output_if=1) for i in range(20)]
+    agg = asyncio.run(_ingest_and_flush(timescale_dsn, [flows], tamper))
+
+    async def read(conn):
+        return [r["interface_idx"] for r in await conn.fetch(
+            "SELECT interface_idx FROM flow_interface_minute_rollups ORDER BY interface_idx")]
+
+    assert seeded(read) == [1, 3, 4, 5, 6]  # 7 left out
+    assert len(_stored(seeded)) == 20
+    assert agg.rows_rejected == 1 and agg._interface_accumulator == {} and agg._accumulator == {}
+
+
+def test_a_database_that_is_away_keeps_every_flow_for_the_next_flush(timescale_dsn, seeded):
+    """Not a refusal: nothing may be dropped when the write fails because the database is away."""
+    from app.core.orm import DatabaseUnavailableError
+    from monitoring.flow.aggregator import FlowAggregator, refused_for_its_data
+
+    assert not refused_for_its_data(DatabaseUnavailableError("connection refused"))
+    assert not refused_for_its_data(TimeoutError())
+    assert refused_for_its_data(ValueError("invalid input for query argument $9"))
+
+    class Away:
+        async def __aenter__(self):
+            raise DatabaseUnavailableError("connection refused")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Correlator:
+        def correlate(self, exporter_ip, src_ip, dst_ip):
+            return EXPORTER_ID, None, None
+
+    agg = FlowAggregator(store_client=None, correlator=Correlator(), db_session_factory=Away, memory_limit_mb=64)
+    agg.ingest([_flow(i) for i in range(5)])
+    asyncio.run(agg._flush_rollups())
+    assert len(agg._accumulator) == 5 and agg.rows_rejected == 0
+    assert "connection refused" in agg.last_flush_error

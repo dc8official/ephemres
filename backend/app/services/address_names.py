@@ -9,9 +9,9 @@ said so. Two sources, in order:
    Re-read within TABLE_CHECK_SECONDS when the script replaces the file: no restart needed.
 2. Reverse DNS (PTR) for the rest, through the server's own resolver: an internal DNS often names
    users' PCs too. Never on the request path: names_for() answers from the cache and queues the
-   unknown addresses, which a background task resolves (2 s each, 8 at a time). A page shows them
-   from its next update, a minute later. Cached per API worker: a name for a day, "no name" for
-   an hour.
+   unknown addresses, which a background task resolves, 8 at a time on threads of its own. A
+   page shows them from its next update, a minute later. Cached per API worker: a name for a
+   day, "no name" for an hour.
 
 Endpoints keep their own hostname; callers ask only for the other addresses.
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import concurrent.futures
 import ipaddress
 import json
 import logging
@@ -30,6 +31,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 TABLE = Path(__file__).resolve().parents[1] / "data" / "provider_ranges.json"
+# An address with no answer after this long is shown without a name for now ("no name" in the
+# cache); the lookup itself runs on until the resolver gives up, and a late name is still kept.
 DNS_TIMEOUT_SECONDS = 2.0
 DNS_PARALLEL = 8
 NAME_TTL_SECONDS = 24 * 3600
@@ -46,6 +49,12 @@ _dns_cache: Dict[str, Tuple[Optional[str], float]] = {}
 _queue: "asyncio.Queue[str] | None" = None
 _queued: set = set()
 _worker: "asyncio.Task | None" = None
+# The lookups' own threads (first-phase review M2, 2026-11-16). They ran in the event loop's
+# default pool, which FastStore commands, PDF rendering and asyncio.to_thread share: with a
+# resolver that does not answer (a server without Internet access), blocked lookups filled it
+# and a to_thread call waited 8 s. gethostbyaddr cannot be interrupted, so a slow resolver
+# still holds these threads; now it holds nothing else.
+_dns_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
 
 
 def _table_changed() -> bool:
@@ -165,18 +174,41 @@ def _reverse(address: str) -> Optional[str]:
     return None if not name or name == address else name.rstrip(".")
 
 
+def _pool() -> concurrent.futures.ThreadPoolExecutor:
+    global _dns_pool
+    if _dns_pool is None:
+        _dns_pool = concurrent.futures.ThreadPoolExecutor(max_workers=DNS_PARALLEL, thread_name_prefix="ephemres-dns")
+    return _dns_pool
+
+
+def _remember(address: str, name: Optional[str]) -> None:
+    ttl = NAME_TTL_SECONDS if name else NO_NAME_TTL_SECONDS
+    _dns_cache[address] = (name, time.monotonic() + ttl)
+
+
 async def _resolve_forever(queue: "asyncio.Queue[str]") -> None:
     gate = asyncio.Semaphore(DNS_PARALLEL)
     loop = asyncio.get_running_loop()
 
     async def one(address: str) -> None:
+        # The slot is held until the thread is back, not until the 2 s are up: a lookup handed
+        # to the pool while all its threads are blocked would only wait in the pool's queue,
+        # and be written off as "no name" without ever having been asked.
         async with gate:
+            lookup = loop.run_in_executor(_pool(), _reverse, address)
             try:
-                name = await asyncio.wait_for(loop.run_in_executor(None, _reverse, address), DNS_TIMEOUT_SECONDS)
+                name = await asyncio.wait_for(asyncio.shield(lookup), DNS_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                name = None
-            ttl = NAME_TTL_SECONDS if name else NO_NAME_TTL_SECONDS
-            _dns_cache[address] = (name, time.monotonic() + ttl)
+                # No name for now, so pages stop asking; the resolver's late answer replaces it.
+                _remember(address, None)
+                _queued.discard(address)
+                try:
+                    name = await lookup
+                except Exception:  # noqa: BLE001 - _reverse returns None for every lookup failure
+                    name = None
+                if not name:
+                    return
+            _remember(address, name)
             _queued.discard(address)
 
     while True:
@@ -185,7 +217,7 @@ async def _resolve_forever(queue: "asyncio.Queue[str]") -> None:
 
 
 def reset_for_tests() -> None:
-    global _table, _queue, _worker, _table_mtime, _table_checked_at
+    global _table, _queue, _worker, _table_mtime, _table_checked_at, _dns_pool
     _table = None
     _table_mtime = None
     _table_checked_at = 0.0
@@ -195,3 +227,6 @@ def reset_for_tests() -> None:
     if _worker is not None and not _worker.done():
         _worker.cancel()
     _worker = None
+    if _dns_pool is not None:
+        _dns_pool.shutdown(wait=False, cancel_futures=True)
+    _dns_pool = None

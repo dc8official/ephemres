@@ -306,3 +306,50 @@ def test_restore_waits_for_a_running_refresh_job(monkeypatch):
     monkeypatch.setattr(restore, "AGGREGATE_REFRESH_RETRY_SECONDS", 0)
     asyncio.run(restore._refresh_aggregate_waiting_for_job(None, "x"))
     assert len(calls) == 3
+
+
+def test_top_talkers_without_the_conversation_list_runs_no_conversation_query(client):
+    """First-phase review H2: the Traffic page lists conversations through its own call, and the
+    copy computed here took 12 of this call's 15 s. conversations=false leaves it out."""
+    from tests.backend.flow_mocks import talker_row, top_talkers_results
+
+    test_client, mock_session = client
+    ep_id = uuid4()
+    # Only the talker queries are answered: a conversation query would run out of results.
+    mock_session.execute.side_effect = top_talkers_results(
+        talkers=[talker_row("192.168.1.50", ep_id, ingress=0, egress=1000000, flows=800)],
+        hostnames=[(ep_id, "app-server-1")], conversations=[], conversation_hostnames=[],
+    )[:-1]
+
+    resp = test_client.get("/api/v1/bandwidth/top-talkers?window=1h&conversations=false")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert [t["hostname"] for t in data["top_endpoints"]] == ["app-server-1"]
+    assert data["top_conversations"] == []
+
+
+def test_heavy_traffic_calls_wait_their_turn_and_say_so_when_the_wait_is_too_long(monkeypatch):
+    """First-phase review H2: three tabs on a slow 24 h view held 18 of the pool's 20 connections
+    and the dashboard got a 503. The heavy calls now share a few slots."""
+    import asyncio
+
+    from app.core.asgi import HTTPException
+    from app.routers import bandwidth
+
+    async def scenario():
+        monkeypatch.setattr(bandwidth, "_traffic_slots", asyncio.Semaphore(1))
+        monkeypatch.setattr(bandwidth, "TRAFFIC_QUEUE_SECONDS", 0.05)
+        first = bandwidth._traffic_query_slot()
+        await first.__anext__()                      # holds the only slot
+        second = bandwidth._traffic_query_slot()
+        with pytest.raises(HTTPException) as busy:
+            await second.__anext__()
+        assert busy.value.status_code == 503 and "busy" in busy.value.detail
+        with pytest.raises(StopAsyncIteration):
+            await first.__anext__()                  # the first call ends and gives its slot back
+        third = bandwidth._traffic_query_slot()
+        await third.__anext__()                      # which the next one gets
+        await third.aclose()
+
+    asyncio.run(scenario())
+    assert bandwidth.traffic_query_slots() >= 2

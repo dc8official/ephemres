@@ -59,6 +59,13 @@
          Their flows count under "All devices" only, as they have no site or tags yet. -->
     <!-- Failures of page-level actions show here instead of a blocking alert(). -->
     <div v-if="actionError" class="inline-alert" role="alert">{{ actionError }}</div>
+    <!-- A refresh that failed in part (first-phase review H3): which figures are missing or
+         old, and why. Before, any one failed call left the whole page as it was, so after a
+         change of period the previous period's figures stood under the new heading. -->
+    <div v-if="loadNotice" class="inline-alert load-notice" role="alert">
+      <span>{{ loadNotice }}</span>
+      <button type="button" class="btn-text" :disabled="loading" @click="refreshAll">Try again</button>
+    </div>
     <div v-if="unmatchedExporters.length" class="unregistered-notice" role="status">
       <div class="unregistered-line">
         <span>{{ unregisteredLabel }}</span>
@@ -349,6 +356,7 @@
         :is-admin="isAdmin"
         :selected-idx="selectedInterfaceIdx"
         :window-label="selectedWindow"
+        :p95-seconds="interfaceP95Seconds"
         :timezone="wanLinks?.timezone || ''"
         @select="(item) => toggleInterfaceIsolation(item.interface_idx)"
         @edit="(item) => openInterfaceModal(item.interface_idx)"
@@ -373,6 +381,7 @@
           multi-device
           :is-admin="isAdmin"
           :window-label="selectedWindow"
+        :p95-seconds="interfaceP95Seconds"
           :timezone="wanLinks?.timezone || ''"
           :empty-text="filterState.isActive.value ? 'No interfaces on the devices that match the filter.' : 'No interface data yet: routers send it with their flows or over SNMP.'"
           @select="openDeviceInterface"
@@ -798,6 +807,7 @@ let updateTimer = null
 let clockTimer = null
 
 const updatedLabel = computed(() => {
+  if (failedParts.value.length) return 'Last update incomplete'
   if (!lastUpdated.value) return 'Updating…'
   const secs = Math.max(0, Math.round((nowTick.value - lastUpdated.value) / 1000))
   if (secs < 5) return 'Updated just now'
@@ -846,6 +856,9 @@ const scope = computed(() => ({
   device_id: selectedDeviceId.value || undefined,
 }))
 const interfaceList = shallowRef([])
+// Seconds each slot of the interfaces table's 95th percentile covers: 60, or 3600 when the
+// server read the hourly tier (long periods, or many interfaces; review H2).
+const interfaceP95Seconds = ref(60)
 const selectedInterfaceIdx = ref(null)
 
 // Picker groups, one per site in the order the server sorts them (sites A-Z, no site last).
@@ -1570,57 +1583,111 @@ async function refreshAll() {
   refreshKey.value++
 }
 
-async function refreshData() {
-  loading.value = true
-  try {
-    // The Security tiles' summary is fetched beside the rest; a window the conversation tables
-    // don't cover (1y) gives an error there, shown as empty tiles rather than failing the page.
-    const anomaliesReq = getAnomalySummary(selectedWindow.value, scope.value).catch(() => null)
-    const [ovRes, wanRes, anomaliesRes, seriesRes, talkersRes, appRes, expRes, epListRes, ifRes] = await Promise.all([
-      getBandwidthOverview(scope.value),
-      getWanLinks(scope.value, wantLinkSeries.value ? selectedWindow.value : null),
-      anomaliesReq,
-      getTrafficSeries(selectedWindow.value, scope.value, null, selectedInterfaceIdx.value, wantWanSeries.value),
-      getTopTalkers(selectedWindow.value, 10, null, scope.value),
-      getApplicationDistribution(selectedWindow.value, scope.value),
-      getFlowExporters(filterParams(filterState.filter.value)),
-      getEndpoints(),
-      // One device's interfaces, or every router's in scope (step 6).
-      getInterfaces(scope.value, selectedWindow.value),
-    ])
+// --- Loading the page's figures (first-phase review H3, 2026-11-15) ---------------------------
+// The nine calls are independent: each one's result is shown, or its failure is named in
+// `loadNotice`. They used to be one Promise.all, where a single failure (a 504 on a long period)
+// threw the other eight results away and left every panel as it was.
+const failedParts = ref([])   // [{ label, reason, cleared }] from the last refresh
+// What each part's figures on screen were loaded for (period and scope). Figures loaded for
+// something else are cleared when their refresh fails: an empty panel under a notice, not
+// another period's numbers under this period's heading.
+const shownFor = {}
+let refreshSeq = 0
 
-    if (ovRes.data?.data) {
-      overview.value = ovRes.data.data
-    }
-    wanLinks.value = wanRes.data?.data || null
-    anomalies.value = anomaliesRes?.data?.data || null
-    applySeries(seriesRes.data?.data)
-    if (talkersRes.data?.data) {
-      topEndpoints.value = talkersRes.data.data.top_endpoints || []
-    }
-    if (appRes.data?.data) {
-      applicationStats.value = appRes.data.data.applications || []
-      qosClasses.value = appRes.data.data.qos_classes || []
-      trafficZones.value = appRes.data.data.traffic_zones || []
-    }
-    if (expRes.data?.data) {
-      unmatchedExporters.value = expRes.data.data.unmatched || []
-      flowExporters.value = expRes.data.data.exporters || []
-    }
-    if (epListRes.data?.data) {
-      availableEndpoints.value = epListRes.data.data
-    }
-    if (ifRes?.data?.data?.interfaces) {
-      interfaceList.value = ifRes.data.data.interfaces
-    } else {
-      interfaceList.value = []
-    }
-    lastUpdated.value = Date.now()
-  } catch (err) {
-    console.error('Failed to load bandwidth telemetry data:', err)
+function failureReason(err) {
+  const status = err?.response?.status
+  if (status === 504) return 'the server took too long to answer for this period'
+  return err?.response?.data?.detail || 'the server could not be reached'
+}
+
+const loadNotice = computed(() => {
+  const failed = failedParts.value
+  if (!failed.length) return ''
+  const names = failed.map((f) => f.label).join(', ')
+  // One reason is enough when they share it (usually: the period is too long, or the server busy).
+  const reasons = [...new Set(failed.map((f) => f.reason.replace(/\.$/, '')))]
+  const why = reasons.length === 1 ? reasons[0] : reasons.join('; ')
+  const cleared = failed.filter((f) => f.cleared).length
+  let state = ''
+  if (cleared === failed.length) state = ' Left empty rather than showing figures from another period.'
+  else if (cleared === 0) state = lastUpdated.value ? ` Still showing the figures from ${formatClock(lastUpdated.value)}.` : ''
+  else state = ' Some are left empty; the rest still show the last figures loaded.'
+  return `Could not load ${names}: ${why}.${state}`
+})
+
+function formatClock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+async function refreshData() {
+  const seq = ++refreshSeq
+  loading.value = true
+  const period = selectedWindow.value
+  const scopeKey = JSON.stringify(scope.value)
+  const windowKey = JSON.stringify([period, scope.value, selectedInterfaceIdx.value, wantWanSeries.value, wantLinkSeries.value])
+  // label: how the notice names it. key: what the figures depend on (the Now area, the device
+  // and endpoint lists do not change with the period). apply / clear: show the result, or empty
+  // the panel. No `clear`: kept on failure (the pickers are better stale than empty).
+  const parts = [
+    { id: 'overview', label: 'the Now figures', key: scopeKey, call: () => getBandwidthOverview(scope.value),
+      apply: (d) => { if (d) overview.value = d } },
+    { id: 'wan', label: 'WAN links', key: windowKey, call: () => getWanLinks(scope.value, wantLinkSeries.value ? period : null),
+      apply: (d) => { wanLinks.value = d || null }, clear: () => { wanLinks.value = null } },
+    // A period the conversation tables don't cover (1y) answers 400 here: empty tiles, by design.
+    { id: 'anomalies', label: 'the security summary', key: windowKey, call: () => getAnomalySummary(period, scope.value),
+      apply: (d) => { anomalies.value = d || null }, clear: () => { anomalies.value = null }, quiet: (err) => err?.response?.status === 400 },
+    { id: 'series', label: 'the traffic chart', key: windowKey,
+      call: () => getTrafficSeries(period, scope.value, null, selectedInterfaceIdx.value, wantWanSeries.value),
+      apply: (d) => applySeries(d), clear: () => { seriesPoints.value = [] } },
+    { id: 'talkers', label: 'top talkers', key: windowKey, call: () => getTopTalkers(period, 10, null, scope.value),
+      apply: (d) => { topEndpoints.value = d?.top_endpoints || [] }, clear: () => { topEndpoints.value = [] } },
+    { id: 'apps', label: 'applications and QoS', key: windowKey, call: () => getApplicationDistribution(period, scope.value),
+      apply: (d) => {
+        applicationStats.value = d?.applications || []
+        qosClasses.value = d?.qos_classes || []
+        trafficZones.value = d?.traffic_zones || []
+      },
+      clear: () => { applicationStats.value = []; qosClasses.value = []; trafficZones.value = [] } },
+    { id: 'exporters', label: 'the device list', key: scopeKey, call: () => getFlowExporters(filterParams(filterState.filter.value)),
+      apply: (d) => { if (d) { unmatchedExporters.value = d.unmatched || []; flowExporters.value = d.exporters || [] } } },
+    { id: 'endpoints', label: 'the endpoint list', key: 'all', call: () => getEndpoints(),
+      apply: (d) => { if (d) availableEndpoints.value = d } },
+    // One device's interfaces, or every router's in scope (step 6).
+    { id: 'interfaces', label: 'interfaces', key: windowKey, call: () => getInterfaces(scope.value, period),
+      apply: (d) => { interfaceList.value = d?.interfaces || []; interfaceP95Seconds.value = d?.p95_resolution_seconds || 60 },
+      clear: () => { interfaceList.value = [] } },
+  ]
+  const results = await Promise.allSettled(parts.map((part) => part.call()))
+  // The period or scope changed while these were on their way: the newer refresh shows its own.
+  if (seq !== refreshSeq) return
+
+  const failed = []
+  try {
+    applyResults(parts, results, failed)
   } finally {
+    failedParts.value = failed
+    if (!failed.length) lastUpdated.value = Date.now()
     loading.value = false
   }
+}
+
+function applyResults(parts, results, failed) {
+  parts.forEach((part, i) => {
+    const result = results[i]
+    if (result.status === 'fulfilled') {
+      part.apply(result.value?.data?.data)
+      shownFor[part.id] = part.key
+      return
+    }
+    const stale = shownFor[part.id] !== part.key
+    if (stale && part.clear) {
+      part.clear()
+      delete shownFor[part.id]
+    }
+    if (part.quiet?.(result.reason)) return
+    console.error(`Failed to load ${part.label}:`, result.reason)
+    failed.push({ label: part.label, reason: failureReason(result.reason), cleared: stale && !!part.clear })
+  })
 }
 
 watch(
@@ -2288,5 +2355,17 @@ onUnmounted(() => {
     height: auto;
     clip: auto;
   }
+}
+
+/* The partial-load notice: the sentence, then "Try again" at its end. */
+.load-notice {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.load-notice .btn-text {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 </style>

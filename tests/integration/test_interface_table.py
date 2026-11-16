@@ -162,3 +162,40 @@ def test_a_router_that_stops_answering_snmp(api_client, run_sql):
     statuses = {(r["exporter_hostname"], r["interface_idx"]): r["status"] for r in _table(api_client)["interfaces"]}
     assert statuses[("hq-rtr1", 1)] == statuses[("hq-rtr1", 2)] == "not_answering"
     assert statuses[("abj-rtr1", 1)] == "traffic_seen"
+
+
+
+def test_more_minute_rows_than_the_budget_are_read_by_the_hour(api_client, run_sql, monkeypatch):
+    """First-phase review H2: 1,104 SNMP interfaces over 24 h were 1.6 million minute rows, 8 s
+    and a 139 MB sort on disk; over 7 days the call ran into the statement limit. Past
+    MINUTE_ROWS_BUDGET the table reads the hours, and says so.
+
+    Only which tier is read is checked here, with the count answered for it: what the hourly
+    aggregates hold at a given moment depends on their refresh job (conftest.settle_interface_hourly),
+    and their figures are checked in test_snmp_poller and test_link_hours."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.services import interface_table
+
+    _seed(run_sql)
+    assert _table(api_client, window="6h")["p95_resolution_seconds"] == 60
+
+    async def too_many(*args):
+        return True
+
+    monkeypatch.setattr(interface_table, "_too_many_minutes", too_many)
+    assert _table(api_client, window="6h")["p95_resolution_seconds"] == 3600
+    monkeypatch.undo()
+
+    # The count itself: hours of interface traffic in the window, times the minutes each can hold.
+    def decide(hours, span):
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(scalar=MagicMock(return_value=hours))
+        now = datetime.datetime(2026, 11, 16, 12, 0, tzinfo=datetime.timezone.utc)
+        return asyncio.run(interface_table._too_many_minutes(db, None, now - span, now))
+
+    day, week = datetime.timedelta(hours=24), datetime.timedelta(days=7)
+    assert decide(1104 * 24, day) is True        # 1.6 million minute rows: read the hours
+    assert decide(48 * 168, week) is False       # 6 routers x 8 interfaces, 7 days: minutes, as before
+    assert decide(1104, datetime.timedelta(minutes=30)) is False  # half an hour has 30 minutes, not 60

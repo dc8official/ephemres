@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 
 from app.core.asgi import EphemresApp, FastAPI, Request, status
-from app.core.asgi import CORSMiddleware
+from app.core.asgi import CORSMiddleware, SameOriginWritesMiddleware
 from app.core.asgi import JSONResponse
 from app.core.orm import DatabaseUnavailableError, PoolTimeoutError
 from app.core.orm import text
@@ -231,6 +231,10 @@ if "*" in settings.api.allowed_origins:
     raise ValueError(
         "CORS configuration error: allowed_origins cannot contain '*' when allow_credentials=True."
     )
+
+# Added before CORS so CORS wraps it: a refusal to a named front end still carries the CORS
+# headers, and that page can read why (review M1).
+app.add_middleware(SameOriginWritesMiddleware, allow_origins=settings.api.allowed_origins)
 
 app.add_middleware(
     CORSMiddleware,

@@ -38,6 +38,36 @@ ROLLUP_ROWS_PER_STATEMENT = 5000
 # and can't be NULL.
 SENTINEL_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
+# What one flow record may claim (first-phase review H1, 2026-11-15). bytes and packets are BIGINT
+# columns and protocol a SMALLINT: a record outside them made the whole write fail, and flowd
+# kept retrying the same batch, so nothing was stored until a restart. 2^50 bytes is a petabyte in
+# one record; no export says that honestly (8-byte IPFIX counters and a sampled sFlow record
+# times its rate can), and it leaves room for 8,000 such records to add up inside a BIGINT.
+MAX_FLOW_COUNTER = 2 ** 50
+MAX_PROTOCOL = 255
+MAX_PORT = 65535
+# Rows the database refused that are named in the log per flush; the rest are only counted.
+REJECTED_ROWS_LOGGED = 5
+
+
+def refused_for_its_data(exc: Optional[BaseException]) -> bool:
+    """True when the database (or the driver, encoding the parameters) refused a write because of
+    a value in it: PostgreSQL's data-exception and integrity classes (SQLSTATE 22xxx, 23xxx), or
+    asyncpg's own "invalid input for query argument", which is a ValueError. Writing the same
+    rows again fails the same way. Anything else (no connection, pool busy, a timeout) is the
+    database being away or slow, and the same rows go in later."""
+    for _ in range(5):  # the error itself and what it was raised from
+        if exc is None:
+            return False
+        state = getattr(exc, "sqlstate", None)
+        if isinstance(state, str) and state[:2] in ("22", "23"):
+            return True
+        if isinstance(exc, (ValueError, TypeError, OverflowError)):
+            return True
+        exc = exc.__cause__ or getattr(exc, "orig", None)
+    return False
+
+
 # flow_path_observations rows not seen for this long, and flow_route_changes older than this,
 # are pruned hourly.
 PATH_OBSERVATION_RETENTION_DAYS = 30
@@ -111,6 +141,11 @@ class FlowAggregator:
         self.flows_ingested = 0
         self.flows_dropped_memory = 0
         self.rows_stored = 0
+        # Records left out at ingest for a value no column can hold, and rows the database
+        # refused at a flush (H1): counted and logged, never retried.
+        self.flows_rejected = 0
+        self.rows_rejected = 0
+        self._rejected_logged_at: Optional[float] = None
         # How the last rollup flush went, so a full buffer can be blamed on the right thing: a
         # failing database (last_flush_error) or writes that can't keep up (a slow flush).
         self.last_flush_error: Optional[str] = None
@@ -174,15 +209,27 @@ class FlowAggregator:
                 # IPFIX interface indexes are 32-bit; anything outside the column's range is unknown.
                 in_if = int(f.get("input_if") or 0)
                 out_if = int(f.get("output_if") or 0)
+                flow_bytes = int(f.get("bytes") or 0)
+                flow_packets = int(f.get("packets") or 0)
+                protocol = int(f.get("protocol") or 0)
+                src_port = int(f.get("src_port") or 0)
+                dst_port = int(f.get("dst_port") or 0)
+                # A value outside its column is left out here, with its record: stored, it would
+                # fail the write of everything flushed with it (H1).
+                if not (0 <= flow_bytes <= MAX_FLOW_COUNTER and 0 <= flow_packets <= MAX_FLOW_COUNTER
+                        and 0 <= protocol <= MAX_PROTOCOL
+                        and 0 <= src_port <= MAX_PORT and 0 <= dst_port <= MAX_PORT):
+                    self._reject_flow(f)
+                    continue
                 self.accumulate_flow(
                     exporter_ip=f.get("exporter_ip", ""),
                     src_ip=src_ip,
                     dst_ip=dst_ip,
-                    src_port=int(f.get("src_port") or 0),
-                    dst_port=int(f.get("dst_port") or 0),
-                    protocol=int(f.get("protocol") or 0),
-                    flow_bytes=int(f.get("bytes") or 0),
-                    flow_packets=int(f.get("packets") or 0),
+                    src_port=src_port,
+                    dst_port=dst_port,
+                    protocol=protocol,
+                    flow_bytes=flow_bytes,
+                    flow_packets=flow_packets,
                     start_time_unix=start,
                     in_if=in_if if 0 < in_if <= 2147483647 else 0,
                     out_if=out_if if 0 < out_if <= 2147483647 else 0,
@@ -191,8 +238,24 @@ class FlowAggregator:
                     next_hop=next_hop,
                     end_time_unix=end,
                 )
-            except (TypeError, ValueError) as err:
+            except (TypeError, ValueError, OverflowError, OSError) as err:
+                # OverflowError and OSError: a start time no calendar holds. Caught here so the
+                # record costs only itself, not the rest of its datagram.
                 logger.debug("Skipping malformed flow record from %s: %s", f.get("exporter_ip"), err)
+
+    def _reject_flow(self, f: Dict[str, Any]) -> None:
+        """Counts a record left out for an impossible value, and says so at most once a minute:
+        a broken or forged export sends them by the thousand."""
+        self.flows_rejected += 1
+        now = time.monotonic()
+        if self._rejected_logged_at is None or now - self._rejected_logged_at >= 60.0:
+            self._rejected_logged_at = now
+            logger.warning(
+                "Flow record from %s left out: a value no real flow has (bytes=%s packets=%s "
+                "protocol=%s ports=%s/%s). %d left out since flowd started.",
+                f.get("exporter_ip"), f.get("bytes"), f.get("packets"), f.get("protocol"),
+                f.get("src_port"), f.get("dst_port"), self.flows_rejected,
+            )
 
     def accumulate_interface_flow(
         self,
@@ -480,40 +543,100 @@ class FlowAggregator:
 
             if rows or if_rows:
                 started = time.monotonic()
+                batch = ROLLUP_ROWS_PER_STATEMENT
+
+                def rollup_params(chunk: List[Dict[str, Any]]) -> Dict[str, Any]:
+                    # Tuples, not lists: the ORM sends a list parameter as JSON, a tuple goes to
+                    # asyncpg as a PostgreSQL array.
+                    return {name: tuple(r[name] for r in chunk) for name in ROLLUP_COLUMNS}
+
+                # What leaves the accumulator after the write: everything on the usual path.
+                done_rows, done_if_rows = rows, if_rows
+                written = len(rows)
+                interrupted = False
                 try:
                     async with self.db_factory() as session:
-                        if rows:
-                            batch_size = ROLLUP_ROWS_PER_STATEMENT
-                            for i in range(0, len(rows), batch_size):
-                                chunk = rows[i : i + batch_size]
-                                # Tuples, not lists: the ORM sends a list parameter as JSON, a
-                                # tuple goes to asyncpg as a PostgreSQL array.
-                                await session.execute(
-                                    insert_sql, {name: tuple(r[name] for r in chunk) for name in ROLLUP_COLUMNS}
-                                )
-                        if if_rows:
-                            batch_size = 1000
-                            for i in range(0, len(if_rows), batch_size):
-                                chunk = if_rows[i : i + batch_size]
-                                await session.execute(insert_if_sql, chunk)
+                        for i in range(0, len(rows), batch):
+                            await session.execute(insert_sql, rollup_params(rows[i : i + batch]))
+                        for i in range(0, len(if_rows), 1000):
+                            await session.execute(insert_if_sql, if_rows[i : i + 1000])
                         await session.commit()
-                    if rows:
-                        logger.info("Successfully persisted %d flow rollup records to TimescaleDB.", len(rows))
-                    if if_rows:
-                        logger.info("Successfully persisted %d interface rollup records to TimescaleDB.", len(if_rows))
                 except Exception as e:
-                    logger.error("Failed to commit flow rollup micro-batch to DB: %s", e)
-                    self.last_flush_error = f"{type(e).__name__}: {e}"[:200]
-                    # Keep the accumulator intact; the next flush retries.
-                    return
-                self.last_flush_error = None
-                self.last_flush_seconds = time.monotonic() - started
-                self.last_flush_rows = len(rows)
-                self.rows_stored += len(rows)
+                    if not refused_for_its_data(e):
+                        logger.error("Failed to commit flow rollup micro-batch to DB: %s", e)
+                        self.last_flush_error = f"{type(e).__name__}: {e}"[:200]
+                        # The database is away or slow: keep the accumulator intact; the next
+                        # flush retries.
+                        return
+                    # The database answered and refused a value (H1). Retrying the batch as it
+                    # is would fail the same way at every flush, and nothing would be stored
+                    # again until a restart. Write it in pieces, each its own transaction, and
+                    # leave out only the rows that are refused on their own.
+                    logger.error(
+                        "Flow rollup write refused for a value in it (%s): writing the %d rows in "
+                        "pieces to leave out only the bad ones.", e, len(rows) + len(if_rows),
+                    )
 
-                # Only deduct committed quantities from accumulator on successful DB commit
-                if rows:
-                    for k, flushed_vals in snapshot.items():
+                    async def write_rollups(chunk: List[Dict[str, Any]]) -> None:
+                        async with self.db_factory() as session:
+                            await session.execute(insert_sql, rollup_params(chunk))
+                            await session.commit()
+
+                    async def write_interfaces(chunk: List[Dict[str, Any]]) -> None:
+                        async with self.db_factory() as session:
+                            await session.execute(insert_if_sql, chunk)
+                            await session.commit()
+
+                    stored: List[Dict[str, Any]] = []
+                    refused: List[Dict[str, Any]] = []
+                    if_stored: List[Dict[str, Any]] = []
+                    if_refused: List[Dict[str, Any]] = []
+                    try:
+                        for i in range(0, len(rows), batch):
+                            await self._store_splitting(rows[i : i + batch], write_rollups, stored, refused)
+                        for i in range(0, len(if_rows), 1000):
+                            await self._store_splitting(if_rows[i : i + 1000], write_interfaces, if_stored, if_refused)
+                    except Exception as away:
+                        # The database went away part-way. What already went in must still leave
+                        # the accumulator (written again it would be counted twice); the rest
+                        # stays for the next flush.
+                        logger.error("Failed to commit flow rollup micro-batch to DB: %s", away)
+                        self.last_flush_error = f"{type(away).__name__}: {away}"[:200]
+                        interrupted = True
+                    for r in (refused + if_refused)[:REJECTED_ROWS_LOGGED]:
+                        logger.error("Flow rollup row refused by the database and left out: %s", r)
+                    if refused or if_refused:
+                        self.rows_rejected += len(refused) + len(if_refused)
+                        logger.error(
+                            "%d flow rollup rows left out at this flush (%d since flowd started); "
+                            "the other %d were stored.",
+                            len(refused) + len(if_refused), self.rows_rejected, len(stored) + len(if_stored),
+                        )
+                    done_rows, done_if_rows = stored + refused, if_stored + if_refused
+                    written = len(stored)
+
+                if not interrupted:
+                    self.last_flush_error = None
+                    self.last_flush_seconds = time.monotonic() - started
+                    self.last_flush_rows = written
+                if written:
+                    logger.info("Successfully persisted %d flow rollup records to TimescaleDB.", written)
+                if done_if_rows:
+                    logger.info("Successfully persisted %d interface rollup records to TimescaleDB.",
+                                len(done_if_rows) if done_if_rows is if_rows else len(if_stored))
+                self.rows_stored += written
+
+                # Take what was written (or refused) out of the accumulator: the snapshot's
+                # amounts, not the whole entry, because flows kept arriving during the write.
+                # A stored row can come from several accumulator keys (the same conversation
+                # with and without its endpoints resolved).
+                keys_of: Dict[Tuple[Any, ...], List[Tuple[Any, ...]]] = {}
+                for k in snapshot:
+                    keys_of.setdefault((k[0], k[1], k[4], k[5], k[6], k[7]), []).append(k)
+                for r in done_rows:
+                    pk = (r["bucket"], r["exporter_id"], r["src_ip"], r["dst_ip"], r["protocol"], r["dst_port"])
+                    for k in keys_of.get(pk, ()):
+                        flushed_vals = snapshot[k]
                         if k in self._accumulator:
                             self._accumulator[k][0] -= flushed_vals[0]
                             self._accumulator[k][1] -= flushed_vals[1]
@@ -521,16 +644,17 @@ class FlowAggregator:
                             if self._accumulator[k][2] <= 0:
                                 del self._accumulator[k]
 
-                if if_rows:
-                    for k, flushed_vals in if_snapshot.items():
-                        if k in self._interface_accumulator:
-                            self._interface_accumulator[k][0] -= flushed_vals[0]
-                            self._interface_accumulator[k][1] -= flushed_vals[1]
-                            self._interface_accumulator[k][2] -= flushed_vals[2]
-                            self._interface_accumulator[k][3] -= flushed_vals[3]
-                            self._interface_accumulator[k][4] -= flushed_vals[4]
-                            if self._interface_accumulator[k][4] <= 0:
-                                del self._interface_accumulator[k]
+                for r in done_if_rows:
+                    k = (r["bucket"], r["exporter_id"], r["interface_idx"])
+                    flushed_vals = if_snapshot[k]
+                    if k in self._interface_accumulator:
+                        self._interface_accumulator[k][0] -= flushed_vals[0]
+                        self._interface_accumulator[k][1] -= flushed_vals[1]
+                        self._interface_accumulator[k][2] -= flushed_vals[2]
+                        self._interface_accumulator[k][3] -= flushed_vals[3]
+                        self._interface_accumulator[k][4] -= flushed_vals[4]
+                        if self._interface_accumulator[k][4] <= 0:
+                            del self._interface_accumulator[k]
 
                 # Flush active interfaces to FastStore with TTL
                 if self.store and active_if_snapshot:
@@ -544,6 +668,31 @@ class FlowAggregator:
                         self._active_interfaces_set.difference_update(active_if_snapshot)
                     except Exception as store_err:
                         logger.warning("Failed to record active interfaces in FastStore: %s", store_err)
+
+    async def _store_splitting(
+        self,
+        rows: List[Dict[str, Any]],
+        write: Callable[[List[Dict[str, Any]]], Awaitable[None]],
+        stored: List[Dict[str, Any]],
+        refused: List[Dict[str, Any]],
+    ) -> None:
+        """Writes `rows` with `write` (one transaction a call). When the database refuses them
+        for a value, halves them and tries each half, down to the single rows it refuses, which
+        go to `refused`; the rest end in `stored`. An error that is not about the data (the
+        database away) is raised: the caller keeps what is not yet in either list."""
+        try:
+            await write(rows)
+        except Exception as exc:
+            if not refused_for_its_data(exc):
+                raise
+            if len(rows) == 1:
+                refused.append(rows[0])
+                return
+            mid = len(rows) // 2
+            await self._store_splitting(rows[:mid], write, stored, refused)
+            await self._store_splitting(rows[mid:], write, stored, refused)
+            return
+        stored.extend(rows)
 
     def buffer_full_reason(self) -> str:
         """Why the flow buffer filled up, for the log: the database refusing writes, or rollup

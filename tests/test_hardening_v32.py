@@ -617,8 +617,9 @@ async def test_top_talkers_with_endpoint_id_filter():
 
     queries = [str(call[0][0]) for call in mock_db.execute.call_args_list]
     endpoint_filter = "src_endpoint_id = CAST(:endpoint_id AS uuid) OR dst_endpoint_id = CAST(:endpoint_id AS uuid)"
-    # Talkers query plus the conversation count and page queries all carry the filter.
-    assert sum(endpoint_filter in q for q in queries) >= 3, f"Endpoint ID filter missing: {queries}"
+    # The talkers query and the conversation statement (counts and page in one since the
+    # first-phase review, H2) both carry the filter.
+    assert sum(endpoint_filter in q for q in queries) == 2, f"Endpoint ID filter missing: {queries}"
 
 
 @pytest.mark.anyio

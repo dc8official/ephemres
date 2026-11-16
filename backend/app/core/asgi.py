@@ -1472,6 +1472,89 @@ class BaseHTTPMiddleware:
         raise NotImplementedError("Middleware subclasses must implement dispatch()")
 
 
+def _host_of(value: str) -> Optional[str]:
+    """The host name in an Origin ("https://monitor.example:8443") or a Host header
+    ("monitor.example:8443", "[::1]:8000"), lower-cased, without the port; None if unreadable."""
+    try:
+        return urllib.parse.urlsplit(value if "//" in value else "//" + value).hostname
+    except ValueError:
+        return None
+
+
+def cross_origin_write(
+    method: str, path: str, headers: Mapping[str, str], allowed_origins: Sequence[str] = (),
+) -> Optional[str]:
+    """The origin a state-changing API request was sent from when that is not this server's own
+    page, else None (first-phase review M1, 2026-11-16).
+
+    Sign-in is a cookie, and a browser sends the cookie with a request any page makes. Before
+    this check a form on another site, posting text/plain, created an ADMIN account; only the
+    cookie's SameSite=Lax stood in the way, and that does not stop a sibling subdomain or an
+    old browser. Browsers name the page a request comes from in `Origin` (always on a POST, PUT,
+    PATCH or DELETE that crosses origins), and a page cannot change it.
+
+    - Own page: the Origin's host is the request's Host. Hosts only, no port or scheme: nginx
+      passes `Host $host`, which has neither, and cookies are not kept apart by port anyway.
+    - `allowed_origins` (api.allowed_origins, the CORS list) also pass: the Vite dev server and
+      any front end an admin has named.
+    - No Origin: a script, curl or the deploy tools, which carry no browser's cookie. Unless
+      the browser says through Sec-Fetch-Site that another site sent it.
+    """
+    if method.upper() not in ("POST", "PUT", "PATCH", "DELETE") or not path.startswith("/api/"):
+        return None
+    origin = headers.get("origin")
+    if origin is None:
+        fetch_site = (headers.get("sec-fetch-site") or "").lower()
+        return f"another site (Sec-Fetch-Site: {fetch_site})" if fetch_site in ("cross-site", "same-site") else None
+    if origin in allowed_origins:
+        return None
+    # "null" (a sandboxed frame, a file) has no host and is never this server's page.
+    origin_host = _host_of(origin) if origin != "null" else None
+    own_host = _host_of(headers.get("host") or "")
+    if origin_host is not None and origin_host == own_host:
+        return None
+    return origin
+
+
+class SameOriginWritesMiddleware:
+    """Answers 403 to a state-changing API request another site's page sent (cross_origin_write
+    has the rule and the reason). Reads go through: they change nothing, and another site
+    cannot read their answer (CORS)."""
+
+    def __init__(self, app: Any, allow_origins: Optional[Sequence[str]] = None) -> None:
+        self.app = app
+        self.allow_origins = list(allow_origins or [])
+
+    async def __call__(
+        self,
+        scope: Dict[str, Any],
+        receive: Callable[[], Any],
+        send: Callable[[Dict[str, Any]], Any],
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive, send)
+        sender = cross_origin_write(request.method, scope.get("path", ""), request.headers, self.allow_origins)
+        if sender is None:
+            await self.app(scope, receive, send)
+            return
+        # Rare and worth a line each: either an attack on a signed-in user, or a front end on
+        # an address the server was not told about.
+        logger.warning(
+            "Refused %s %s sent from %s (Host: %s). If that is this server's own page, add it "
+            "to api.allowed_origins.",
+            request.method, scope.get("path", ""), sender, request.headers.get("host"),
+        )
+        res = JSONResponse(
+            status_code=403,
+            content={"detail": "This request came from another site's page and was refused. "
+                               "If you opened Ephemres under a new address, ask an admin to add "
+                               "it to api.allowed_origins."},
+        )
+        await res(scope, receive, send)
+
+
 class CORSMiddleware:
     """Zero-dependency CORS middleware ensuring cross-origin security."""
 
@@ -2295,6 +2378,7 @@ __all__ = [
     "Header",
     "BackgroundTasks",
     "CORSMiddleware",
+    "SameOriginWritesMiddleware",
     "BaseHTTPMiddleware",
     "status",
     "TestClient",
