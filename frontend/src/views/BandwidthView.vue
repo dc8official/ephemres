@@ -381,8 +381,12 @@
           multi-device
           :is-admin="isAdmin"
           :window-label="selectedWindow"
-        :p95-seconds="interfaceP95Seconds"
+          :p95-seconds="interfaceP95Seconds"
+          :total="interfaceTotal"
+          :show-all="showAllInterfaces"
+          :loading-all="loadingAllInterfaces"
           :timezone="wanLinks?.timezone || ''"
+          @update:show-all="setShowAllInterfaces"
           :empty-text="filterState.isActive.value ? 'No interfaces on the devices that match the filter.' : 'No interface data yet: routers send it with their flows or over SNMP.'"
           @select="openDeviceInterface"
           @edit="(item) => openSpeedEditor(item)"
@@ -856,6 +860,44 @@ const scope = computed(() => ({
   device_id: selectedDeviceId.value || undefined,
 }))
 const interfaceList = shallowRef([])
+// Across devices the server sends every WAN link plus this many other interfaces, the rows the
+// table shows (MAX_OTHERS in InterfacesTable.vue), until "Show all" asks for the rest: every
+// interface of a large fleet was 935 KB on each one-minute update (first-phase review M4).
+const INTERFACE_OTHERS = 20
+const showAllInterfaces = ref(false)
+const loadingAllInterfaces = ref(false)
+// How many interfaces and devices there are in all, from the server: the list may hold fewer.
+const interfaceTotal = ref(0)
+const interfaceDevices = ref(0)
+function applyInterfaces(d) {
+  interfaceList.value = d?.interfaces || []
+  interfaceP95Seconds.value = d?.p95_resolution_seconds || 60
+  interfaceTotal.value = d?.total_interfaces ?? interfaceList.value.length
+  interfaceDevices.value = d?.devices ?? new Set(interfaceList.value.map((i) => i.exporter_id)).size
+}
+const interfaceOthers = () => (showAllInterfaces.value ? null : INTERFACE_OTHERS)
+// "Show all" fetches the whole list at once rather than waiting for the next update; "Show
+// fewer" needs no call (the table cuts what it has, and the next update fetches the short list).
+async function setShowAllInterfaces(all) {
+  showAllInterfaces.value = all
+  if (!all || interfaceList.value.length >= interfaceTotal.value) return
+  loadingAllInterfaces.value = true
+  actionError.value = null
+  const asked = JSON.stringify([selectedWindow.value, scope.value])
+  try {
+    const res = await getInterfaces(scope.value, selectedWindow.value, null)
+    // The period or scope changed meanwhile: the page's own update shows the new one.
+    if (asked === JSON.stringify([selectedWindow.value, scope.value]) && showAllInterfaces.value) {
+      applyInterfaces(res.data?.data)
+    }
+  } catch (err) {
+    console.error('Failed to load every interface:', err)
+    showAllInterfaces.value = false
+    actionError.value = err.response?.data?.detail || 'Could not load every interface. The busiest are still shown.'
+  } finally {
+    loadingAllInterfaces.value = false
+  }
+}
 // Seconds each slot of the interfaces table's 95th percentile covers: 60, or 3600 when the
 // server read the hourly tier (long periods, or many interfaces; review H2).
 const interfaceP95Seconds = ref(60)
@@ -1164,8 +1206,8 @@ async function fetchTrafficSeriesData() {
 }
 
 const crossDeviceHint = computed(() => {
-  const devices = new Set(interfaceList.value.map((i) => i.exporter_id)).size
-  return `${interfaceList.value.length} interfaces on ${devices} device${devices === 1 ? '' : 's'} · Now: last 5 complete minutes · Status from SNMP where a router is polled · Click a row to open its device`
+  const devices = interfaceDevices.value
+  return `${interfaceTotal.value} interfaces on ${devices} device${devices === 1 ? '' : 's'} · Now: last 5 complete minutes · Status from SNMP where a router is polled · Click a row to open its device`
 })
 
 // A row across devices: open its device on the Interfaces tab with that interface isolated in the
@@ -1653,9 +1695,9 @@ async function refreshData() {
     { id: 'endpoints', label: 'the endpoint list', key: 'all', call: () => getEndpoints(),
       apply: (d) => { if (d) availableEndpoints.value = d } },
     // One device's interfaces, or every router's in scope (step 6).
-    { id: 'interfaces', label: 'interfaces', key: windowKey, call: () => getInterfaces(scope.value, period),
-      apply: (d) => { interfaceList.value = d?.interfaces || []; interfaceP95Seconds.value = d?.p95_resolution_seconds || 60 },
-      clear: () => { interfaceList.value = [] } },
+    { id: 'interfaces', label: 'interfaces', key: windowKey, call: () => getInterfaces(scope.value, period, interfaceOthers()),
+      apply: (d) => applyInterfaces(d),
+      clear: () => applyInterfaces(null) },
   ]
   const results = await Promise.allSettled(parts.map((part) => part.call()))
   // The period or scope changed while these were on their way: the newer refresh shows its own.

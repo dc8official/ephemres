@@ -236,15 +236,6 @@ export function getEndpointEvents(id, startDate, endDate, page = 1, pageSize = 5
   })
 }
 
-export function getAvailabilityReport(id, startDate, endDate) {
-  return api.get(`/reports/availability/${id}`, {
-    params: {
-      start_date: startDate,
-      end_date: endDate,
-    },
-  })
-}
-
 // With `filter`, the server exports the listed endpoints the filter matches (or all it matches
 // when the list is empty).
 export function exportBatchTelemetry(endpointIds, startTime, endTime, columns = null, filter = null) {
@@ -266,15 +257,6 @@ export function exportBatchTelemetry(endpointIds, startTime, endTime, columns = 
   )
 }
 
-export function exportTelemetryCsv(endpointId, startDate, endDate) {
-  return api.get(`/reports/telemetry/export/${endpointId}`, {
-    params: {
-      start_date: startDate,
-      end_date: endDate,
-    },
-    responseType: 'blob',
-  })
-}
 
 export function login(username, password) {
   return api.post('/auth/login', { username, password })
@@ -505,8 +487,12 @@ export function mapFlowExporter(ip, endpointId) {
 
 // The Interfaces table (build plan 7.5 step 6): one device's (a device id), or every router the
 // shared filter picks.
-export function getInterfaces(scope = null, window = '1h') {
-  return api.get('/bandwidth/interfaces', { params: { window, ...trafficScopeParams(scope) } })
+// `others`: across devices, every WAN link plus that many other interfaces (the response's
+// total_interfaces counts them all); null for every interface. One device is never cut.
+export function getInterfaces(scope = null, window = '1h', others = null) {
+  const params = { window, ...trafficScopeParams(scope) }
+  if (others !== null) params.others = others
+  return api.get('/bandwidth/interfaces', { params })
 }
 
 export function getInterfaceTelemetry(deviceId, window = '1h') {

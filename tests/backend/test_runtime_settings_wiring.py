@@ -275,3 +275,20 @@ def test_traces_through_one_router_default_to_three_and_stay_within_1_to_3():
     assert resolve({"discovery_per_router": "1"}).discovery_per_router == 1
     for bad in ("0", "4", "two"):
         assert resolve({"discovery_per_router": bad}).discovery_per_router == 3
+
+
+def test_the_sampling_multiplier_has_an_upper_bound():
+    """First-phase review L3: any number was accepted, and every unsampled flow's bytes are
+    multiplied by it. Above 1 in 1,000,000 the API refuses it, and a stored one is not used."""
+    import pytest
+
+    from app.core.schema import ValidationError
+    from app.routers.settings import SettingsUpdate
+    from app.services.runtime_settings import MAX_FLOW_SAMPLING_MULTIPLIER, resolve
+
+    assert SettingsUpdate(flow_sampling_multiplier=MAX_FLOW_SAMPLING_MULTIPLIER).flow_sampling_multiplier == 1_000_000
+    with pytest.raises(ValidationError):
+        SettingsUpdate(flow_sampling_multiplier=MAX_FLOW_SAMPLING_MULTIPLIER + 1)
+    assert resolve({"flow_sampling_multiplier": "1000"}).flow_sampling_multiplier == 1000
+    # A value saved before the bound existed: the default, not the stored number.
+    assert resolve({"flow_sampling_multiplier": "5000000"}).flow_sampling_multiplier == resolve({}).flow_sampling_multiplier

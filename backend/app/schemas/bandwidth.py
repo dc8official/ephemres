@@ -630,7 +630,9 @@ class InterfaceTelemetryResponse(BaseModel):
     exporter_id: Optional[UUID] = None
     window: str
     interfaces: List[InterfaceTelemetryItem]
-    # How many routers the interfaces belong to.
+    # How many interfaces there are, and on how many routers: more than `interfaces` holds when
+    # the request's `others` cut the list.
+    total_interfaces: int = 0
     devices: int = 0
     covered_seconds: int = 0
     p95_resolution_seconds: int = 60

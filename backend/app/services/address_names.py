@@ -39,6 +39,9 @@ NAME_TTL_SECONDS = 24 * 3600
 NO_NAME_TTL_SECONDS = 3600
 # Queued lookups beyond this are dropped and asked for again on a later request.
 QUEUE_LIMIT = 500
+# Reverse-DNS answers kept per API worker (review L3: the cache was never emptied, and a scan
+# or a busy Internet link shows new addresses all day). About 3 MB at this size.
+DNS_CACHE_LIMIT = 20_000
 # How often the table file is checked for a newer copy (update-provider-ranges.sh on a server).
 TABLE_CHECK_SECONDS = 300
 
@@ -87,14 +90,24 @@ def _load() -> Tuple[List[str], Dict[int, Tuple[List[int], List[int], List[int]]
         families: Dict[int, Tuple[List[int], List[int], List[int]]] = {4: ([], [], []), 6: ([], [], [])}
         try:
             data = json.loads(TABLE.read_text(encoding="utf-8"))
-            names = list(data.get("names") or [])
+            # Read whole into `read` and kept only if every row is sound: the file can be any
+            # JSON at all (hand-edited, half-copied), and names_for() is on the request path.
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
+            read_names = [str(n) for n in data.get("names") or []]
+            read: Dict[int, Tuple[List[int], List[int], List[int]]] = {4: ([], [], []), 6: ([], [], [])}
             for key, version in (("v4", 4), ("v6", 6)):
-                firsts, lasts, idx = families[version]
+                firsts, lasts, idx = read[version]
                 for first, last, i in data.get(key) or []:
+                    if not 0 <= int(i) < len(read_names):
+                        raise ValueError(f"a {key} range names entry {i} of {len(read_names)}")
                     firsts.append(int(first))
                     lasts.append(int(last))
                     idx.append(int(i))
-        except (OSError, ValueError) as exc:
+            names, families = read_names, read
+        # TypeError: a row that is no list, a number where a list belongs (review L3: a file
+        # that was valid JSON but no object raised AttributeError, a 500 on the Traffic page).
+        except (OSError, ValueError, TypeError) as exc:
             logger.warning("Provider range table %s not loaded (%s); outside addresses get DNS names only.", TABLE, exc)
         _table = (names, families)
     return _table
@@ -182,8 +195,23 @@ def _pool() -> concurrent.futures.ThreadPoolExecutor:
 
 
 def _remember(address: str, name: Optional[str]) -> None:
+    now = time.monotonic()
+    if len(_dns_cache) >= DNS_CACHE_LIMIT and address not in _dns_cache:
+        _prune(now)
     ttl = NAME_TTL_SECONDS if name else NO_NAME_TTL_SECONDS
-    _dns_cache[address] = (name, time.monotonic() + ttl)
+    _dns_cache[address] = (name, now + ttl)
+
+
+def _prune(now: float) -> None:
+    """Makes room in a full cache: the answers past their time go, and if that frees less than
+    a tenth, the tenth that would have gone soonest (mostly "no name" answers, kept an hour).
+    Runs once per tenth of the limit added, not once per answer."""
+    for address in [a for a, (_, until) in _dns_cache.items() if until <= now]:
+        del _dns_cache[address]
+    excess = len(_dns_cache) - (DNS_CACHE_LIMIT - DNS_CACHE_LIMIT // 10)
+    if excess > 0:
+        for address, _ in sorted(_dns_cache.items(), key=lambda item: item[1][1])[:excess]:
+            del _dns_cache[address]
 
 
 async def _resolve_forever(queue: "asyncio.Queue[str]") -> None:

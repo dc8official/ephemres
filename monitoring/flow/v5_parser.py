@@ -122,6 +122,9 @@ def parse_v5_packet(data: bytes, exporter_ip: str) -> List[dict[str, Any]]:
                 "next_hop": next_hop,
                 "start_time": start_time,
                 "end_time": end_time,
+                # The exporter's clock when it sent the packet: the aggregator compares it with
+                # the arrival time and corrects a router whose clock is wrong (review M3).
+                "export_time": float(unix_secs),
             }
         )
 

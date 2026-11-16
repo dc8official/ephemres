@@ -1864,6 +1864,21 @@ class EphemresApp:
         path = request.url.path
         method = request.method
 
+        # A NUL character (%00) in the path or the query string: no value here holds one, and
+        # PostgreSQL refuses it in text, which was a 500 on every route that reads the query
+        # string itself (the shared filter's site, location, tag, type and q; first-phase
+        # review L1). Refused before routing, so no route has to remember.
+        if "\x00" in path or any(
+            "\x00" in key or any("\x00" in v for v in values)
+            for key, values in request.query_params._dict.items()
+        ):
+            resp = JSONResponse(
+                {"detail": "The request's address has a NUL character (%00), which no value can hold."},
+                status_code=400,
+            )
+            await resp(scope, receive, send)
+            return
+
         matched_route: Optional[Route] = None
         matched_params: Dict[str, str] = {}
         allowed_methods_for_path: Set[str] = set()

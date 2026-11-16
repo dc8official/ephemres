@@ -24,7 +24,11 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
+        // The page's own Host is passed on, as nginx does on a server. The API refuses a
+        // write whose Origin is not the host it was sent to (first-phase review M1); with
+        // changeOrigin the API saw "127.0.0.1:8000" for a page at "localhost:5173" and
+        // refused every write from the dev server, sign-in included.
+        changeOrigin: false,
       },
     },
   },

@@ -139,6 +139,27 @@ def test_every_routers_interfaces_wan_first_then_busiest_shut_down_last(api_clie
     assert "Gi0/9" not in by_name
 
 
+def test_the_page_asks_for_only_the_rows_it_shows(api_client, run_sql):
+    """First-phase review M4: every interface of a 1,104-interface fleet was 935 KB on each
+    one-minute update, for a table that shows the WAN links and the 20 busiest others."""
+    _seed(run_sql)
+    everything = _table(api_client)
+    assert everything["total_interfaces"] == 8 == len(everything["interfaces"])
+
+    short = _table(api_client, others=2)
+    # Every WAN link, then the two busiest others; the totals still count them all.
+    assert [r["name"] for r in short["interfaces"]] == ["Glo MPLS", "MTN fibre", "Airtel backup", "WAN", "Core LAN", "LAN"]
+    assert (short["total_interfaces"], short["devices"]) == (8, 3)
+    assert [r["name"] for r in everything["interfaces"][:6]] == [r["name"] for r in short["interfaces"]]
+    assert [r["role"] for r in _table(api_client, others=0)["interfaces"]] == ["wan"] * 4
+    assert len(_table(api_client, others=50)["interfaces"]) == 8
+
+    # One device is never cut: its table is by index and the page shows all of it.
+    one = _table(api_client, device_id=str(HQ), others=1)
+    assert len(one["interfaces"]) == 4 == one["total_interfaces"]
+    assert api_client.get("/api/v1/bandwidth/interfaces", params={"others": -1}).status_code == 422
+
+
 def test_one_device_by_index_and_the_filter_applies(api_client, run_sql):
     _seed(run_sql)
     one = _table(api_client, device_id=str(HQ))

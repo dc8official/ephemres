@@ -473,10 +473,37 @@ def _coerce_value(
     return val
 
 
+# The widest integer a PostgreSQL column or parameter holds (bigint).
+_INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+
+
+def _has_nul(val: Any, depth: int = 0) -> bool:
+    """True when a string in `val` (or in a list, tuple, set or dict inside it) has a NUL."""
+    if isinstance(val, str):
+        return "\x00" in val
+    if depth >= 6:
+        return False
+    if isinstance(val, dict):
+        return any(_has_nul(k, depth + 1) or _has_nul(v, depth + 1) for k, v in val.items())
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return any(_has_nul(v, depth + 1) for v in val)
+    return False
+
+
 def _validate_constraints(val: Any, f_info: _FieldInfo, field_name: str) -> None:
-    """Enforce numeric bounds, string/collection lengths, and regex patterns."""
+    """Enforce numeric bounds, string/collection lengths, and regex patterns.
+
+    Two rules hold for every field, whatever it declares (first-phase review L1, 2026-11-16):
+    PostgreSQL text holds no NUL character and no integer wider than 64 bits, so a value with
+    either reached the database and came back as a 500. They are refused here as the client's
+    mistake they are."""
     if val is None:
         return
+
+    if _has_nul(val):
+        raise ValueError("Input should not contain a NUL character")
+    if isinstance(val, int) and not isinstance(val, bool) and not (_INT64_MIN <= val <= _INT64_MAX):
+        raise ValueError("Input should be a 64-bit integer")
 
     # Numeric bounds
     if isinstance(val, (int, float)) and not isinstance(val, bool):

@@ -79,6 +79,12 @@ def config_defaults() -> RuntimeSettings:
     )
 
 
+# The largest sampling rate an admin can set for exporters that do not report their own (review
+# L3: it had no upper bound, and every flow's bytes are multiplied by it). 1 in 1,000,000 is
+# beyond what routers sample at; a larger number is a typing mistake.
+MAX_FLOW_SAMPLING_MULTIPLIER = 1_000_000
+
+
 def _int_in_range(raw: Optional[str], default: int, lo: int, hi: Optional[int] = None) -> int:
     if raw is None:
         return default
@@ -99,7 +105,9 @@ def resolve(kv: Mapping[str, str]) -> RuntimeSettings:
         session_timeout_minutes=_int_in_range(kv.get("session_timeout"), d.session_timeout_minutes, 1, 1440),
         lockout_threshold=_int_in_range(kv.get("lockout_threshold"), d.lockout_threshold, 1, 100),
         l2_auto_bypass=d.l2_auto_bypass if l2_raw is None else l2_raw.strip().lower() in TRUE_VALUES,
-        flow_sampling_multiplier=_int_in_range(kv.get("flow_sampling_multiplier"), d.flow_sampling_multiplier, 1),
+        flow_sampling_multiplier=_int_in_range(
+            kv.get("flow_sampling_multiplier"), d.flow_sampling_multiplier, 1, MAX_FLOW_SAMPLING_MULTIPLIER,
+        ),
         flow_netflow_port=_int_in_range(kv.get("flow_netflow_port"), d.flow_netflow_port, 1, 65535),
         flow_ipfix_port=_int_in_range(kv.get("flow_ipfix_port"), d.flow_ipfix_port, 1, 65535),
         flow_sflow_port=_int_in_range(kv.get("flow_sflow_port"), d.flow_sflow_port, 1, 65535),

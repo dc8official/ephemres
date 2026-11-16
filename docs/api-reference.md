@@ -16,6 +16,10 @@ Most JSON endpoints wrap their payload in a common envelope (`app.schemas.APIRes
 
 Exceptions: `GET /health/liveness`, `GET /health/readiness`, streaming responses (SSE, CSV, PDF), and the examples below that show a bare object.
 
+**Writes from another site's page (v3.3.6).** A `POST`, `PUT`, `PATCH` or `DELETE` under `/api/` that a browser sends from a page on another host answers `403` with `{"detail": "..."}` and reaches no handler: its `Origin` must be the host the request was sent to (ports and scheme are not compared) or one of `api.allowed_origins`. A request with no `Origin` header (scripts, curl) passes, unless it carries `Sec-Fetch-Site: cross-site` or `same-site`. A front end served from another address than the API's needs that address in `api.allowed_origins`.
+
+**Values no column holds (v3.3.6).** A NUL character (`%00`) in the path or the query string answers `400` with `{"detail": "..."}` before any route runs; in a JSON body it is a `422` validation error on its field. An integer outside the 64-bit range is a `422` on any field. `page` accepts up to 2,000,000,000, `offset` the same, `interface_idx` up to 2,147,483,647.
+
 ---
 
 ## 1. System & Real-Time Events
@@ -409,7 +413,7 @@ Updates runtime parameters (requires `Admin` role).
   - `flow_netflow_port` (int, 1–65535, optional): NetFlow UDP listening port (default: 2055).
   - `flow_ipfix_port` (int, 1–65535, optional): IPFIX UDP listening port (default: 4739).
   - `flow_sflow_port` (int, 1–65535, optional): sFlow v5 UDP listening port (default: 6343).
-  - `flow_sampling_multiplier` (int, >= 1, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
+  - `flow_sampling_multiplier` (int, 1–1,000,000, optional): Hardware packet sampling multiplier (e.g. 1000 for 1-in-1000 sampling).
 
 ### `POST /settings/flow/preflight`
 Checks what `ephemres-flowd` needs before flow ingestion is turned on: FastStore opens, and the UDP ports it will listen on (the ones saved in Settings) are free. The UDP check binds `flow.bind_host` and those ports exactly as the collector would; ports held by an active `ephemres-flowd` are not reported as conflicts. `rmem_max` below 2 MB is reported but does not make `ready` false. (The Redis version and stream-write fields were removed: flows no longer go through a FastStore stream.)
@@ -770,7 +774,8 @@ Creates a new passive endpoint for an unmatched exporter IP (requires `Admin` ro
 ### `GET /bandwidth/interfaces`
 Per-interface traffic for one router, or (v3.3.6) for every router in scope.
 - **Query Params:** the scope (above), `window` (default `1h`; same values as the other bandwidth endpoints). Without a device, every router in scope; with no filter either, every live endpoint that reported interface traffic in the window, is polled over SNMP or has interfaces typed in. Until v3.3.6 `exporter_id` was required (`422` without it).
-- **Response:** `exporter_id` (the device, `null` across devices), `devices` (how many routers), `window`, `covered_seconds`, `source`, `interfaces`.
+- **Response:** `exporter_id` (the device, `null` across devices), `devices` (how many routers), `total_interfaces`, `window`, `covered_seconds`, `source`, `interfaces`.
+- **Short list (v3.3.6):** `others=N` (0–100000), across devices only, returns every WAN link plus the first N other interfaces in the table's order; `total_interfaces` and `devices` still count them all. The Traffic page sends `others=20` and asks again without it for "Show all". One device's list is never cut.
 - **Rows:** interfaces with traffic, typed in, or that SNMP sees up; plus ports an admin shut down and ports with an SNMP down event in the window. A port SNMP sees down with none of those is left out.
 - **Percentile resolution (v3.3.6):** `p95_resolution_seconds` is `60` when the 95th percentile is of one-minute figures and `3600` when it is of hourly averages. Hourly applies beyond 7 days, and to shorter windows whose minute rows would pass 500,000 (about 350 interfaces over 24 hours): reading those took over 8 s. Peaks come from each hour's busiest minute either way.
 - **Order:** one device: by index, shut-down ports last. Across devices: WAN links first by average utilisation (no speed after), then the others by the busier direction's average, shut-down ports last.

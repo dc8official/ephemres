@@ -48,6 +48,33 @@ MAX_PROTOCOL = 255
 MAX_PORT = 65535
 # Rows the database refused that are named in the log per flush; the rest are only counted.
 REJECTED_ROWS_LOGGED = 5
+# Flow times (first-phase review M3, 2026-11-16). The exporter's clock was trusted: a router
+# without NTP, or with local time set as UTC, put its traffic an hour or years away from where
+# the page looks, and each far date made a chunk of its own. The export packet carries the
+# exporter's clock at sending, which should be the arrival time; when the two differ by more
+# than CLOCK_TOLERANCE_SECONDS the exporter's clock is taken as wrong by that much and its flow
+# times are moved by the difference (how long ago a flow started is still the exporter's word).
+# Two minutes: more than the 10 s a data set can wait for its template, less than would move
+# traffic out of the Now figures.
+CLOCK_TOLERANCE_SECONDS = 120.0
+# A start older than this, or in the future, is no live flow's (a bad uptime counter, a forged
+# record): it is dated at arrival. A day, because older minutes are already compressed.
+MAX_FLOW_AGE_SECONDS = 86400.0
+CLOCK_WARNING_EVERY_SECONDS = 3600.0
+# Exporters whose clock offset is remembered; sources are UDP addresses, which can be forged.
+CLOCK_OFFSETS_KEPT = 1000
+
+
+def _span(seconds: float) -> str:
+    """"1 h 2 min", "3 min", "11 years": a clock offset for the log."""
+    seconds = round(abs(seconds))
+    if seconds >= 2 * 365 * 86400:
+        return f"{seconds / (365 * 86400):.0f} years"
+    if seconds >= 2 * 86400:
+        return f"{seconds / 86400:.0f} days"
+    # Whole minutes first: 3,599 s is "1 h 0 min", not "60 min".
+    hours, minutes = divmod(round(seconds / 60), 60)
+    return f"{hours} h {minutes} min" if hours else f"{minutes} min"
 
 
 def refused_for_its_data(exc: Optional[BaseException]) -> bool:
@@ -144,6 +171,11 @@ class FlowAggregator:
         # Records left out at ingest for a value no column can hold, and rows the database
         # refused at a flush (H1): counted and logged, never retried.
         self.flows_rejected = 0
+        # Flows whose time was not the exporter's (M3): moved by its clock offset, or dated at
+        # arrival. clock_offsets: exporter address -> seconds its clock is ahead (+) or behind.
+        self.flows_redated = 0
+        self.clock_offsets: Dict[str, float] = {}
+        self._clock_logged_at: Dict[str, float] = {}
         self.rows_rejected = 0
         self._rejected_logged_at: Optional[float] = None
         # How the last rollup flush went, so a full buffer can be blamed on the right thing: a
@@ -192,14 +224,17 @@ class FlowAggregator:
 
     def ingest(self, flows: List[Dict[str, Any]]) -> None:
         """Adds one packet's parsed flows (the collector calls this for every datagram)."""
+        # One arrival time for the datagram: its records were sent together.
+        arrived = time.time()
         for f in flows:
             src_ip = f.get("src_ip")
             dst_ip = f.get("dst_ip")
             if not src_ip or not dst_ip:
                 continue
             try:
-                start = float(f.get("start_time") or time.time())
+                start = float(f.get("start_time") or arrived)
                 end = float(f.get("end_time") or start)
+                start, end = self._credible_times(f, start, end, arrived)
                 next_hop = f.get("next_hop") or None
                 if next_hop is not None:
                     try:
@@ -242,6 +277,42 @@ class FlowAggregator:
                 # OverflowError and OSError: a start time no calendar holds. Caught here so the
                 # record costs only itself, not the rest of its datagram.
                 logger.debug("Skipping malformed flow record from %s: %s", f.get("exporter_ip"), err)
+
+    def _credible_times(self, f: Dict[str, Any], start: float, end: float, arrived: float) -> Tuple[float, float]:
+        """The flow's start and end with a wrong exporter clock taken out (see
+        CLOCK_TOLERANCE_SECONDS). sFlow carries no export time: its parser dates by arrival."""
+        export = f.get("export_time")
+        if export is not None:
+            ahead = float(export) - arrived
+            if abs(ahead) > CLOCK_TOLERANCE_SECONDS:
+                start -= ahead
+                end -= ahead
+                self.flows_redated += 1
+                self._note_clock(str(f.get("exporter_ip") or ""), ahead)
+        # Also true for NaN and infinity, which no comparison holds for.
+        if not (arrived - MAX_FLOW_AGE_SECONDS <= start <= arrived + CLOCK_TOLERANCE_SECONDS):
+            if export is None or abs(float(export) - arrived) <= CLOCK_TOLERANCE_SECONDS:
+                self.flows_redated += 1  # not counted twice when the clock was already corrected
+            start = arrived
+        if not (start <= end <= arrived + CLOCK_TOLERANCE_SECONDS):
+            end = start
+        return start, end
+
+    def _note_clock(self, exporter_ip: str, ahead: float) -> None:
+        """Remembers an exporter's clock offset and says so once an hour: the fix is on the
+        router (NTP), and until then its traffic is only placed as well as this server can."""
+        if exporter_ip not in self.clock_offsets and len(self.clock_offsets) >= CLOCK_OFFSETS_KEPT:
+            return
+        self.clock_offsets[exporter_ip] = ahead
+        now = time.monotonic()
+        last = self._clock_logged_at.get(exporter_ip)
+        if last is None or now - last >= CLOCK_WARNING_EVERY_SECONDS:
+            self._clock_logged_at[exporter_ip] = now
+            logger.warning(
+                "The clock of flow exporter %s is %s %s this server's. Its flows are stored at "
+                "the corrected time; set NTP on the router. %d flows re-dated since flowd started.",
+                exporter_ip, _span(ahead), "ahead of" if ahead > 0 else "behind", self.flows_redated,
+            )
 
     def _reject_flow(self, f: Dict[str, Any]) -> None:
         """Counts a record left out for an impossible value, and says so at most once a minute:

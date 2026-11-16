@@ -594,7 +594,7 @@ async def get_traffic_series(
     window: str = Query(default="1h"),
     exporter_id: Optional[UUID] = Query(default=None),
     endpoint_id: Optional[UUID] = Query(default=None),
-    interface_idx: Optional[int] = Query(default=None),
+    interface_idx: Optional[int] = Query(default=None, ge=0, le=2147483647),
     wan_only: bool = Query(default=False),
     device_id: Optional[UUID] = Query(default=None),
     endpoint_filter: EndpointFilter = Depends(_traffic_filter),
@@ -932,7 +932,7 @@ async def get_conversations(
     quick: str = Query(default="all"),
     sort: str = Query(default="bytes"),
     limit: int = Query(default=25, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=2_000_000_000),
     device_id: Optional[UUID] = Query(default=None),
     endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
@@ -1448,6 +1448,7 @@ async def get_interfaces_telemetry(
     exporter_id: Optional[UUID] = Query(default=None),
     window: str = Query(default="1h"),
     device_id: Optional[UUID] = Query(default=None),
+    others: Optional[int] = Query(default=None, ge=0, le=100000),
     endpoint_filter: EndpointFilter = Depends(_traffic_filter),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1458,7 +1459,12 @@ async def get_interfaces_telemetry(
 
     Status comes from SNMP for a polled router (up / down / shut down, with the time it was down
     in the window), else from whether flows showed traffic. One device: by index; across devices:
-    WAN links first, then the busiest; shut-down ports last (services/interface_table)."""
+    WAN links first, then the busiest; shut-down ports last (services/interface_table).
+
+    `others` (across devices only): every WAN link plus that many of the other interfaces, in
+    the table's order; `total_interfaces` and `devices` still count them all. The page asks for
+    the 20 it shows: every interface of a 1,104-interface fleet was 935 KB each minute
+    (first-phase review M4). Without it, all of them, as before."""
     delta = _get_window_delta(window)
     picked = _as_uuid(device_id) or _as_uuid(exporter_id)
     scope = await _scope(db, endpoint_filter, device_id, exporter_id)
@@ -1480,8 +1486,19 @@ async def get_interfaces_telemetry(
     table = await interface_table.interface_table(
         db, routers, delta, active_indices=active, single_device=picked is not None,
     )
+    rows = table.rows
+    if others is not None and picked is None:
+        kept = 0
+        shown = []
+        for r in rows:
+            if r.role != "wan":
+                kept += 1
+                if kept > others:
+                    continue
+            shown.append(r)
+        rows = shown
     items = []
-    for r in table.rows:
+    for r in rows:
         alias_data = r.alias_data
         items.append(InterfaceTelemetryItem(
             **r.source_info,
@@ -1523,7 +1540,9 @@ async def get_interfaces_telemetry(
             exporter_id=picked if picked is not None and scope.routers != [] else None,
             window=window,
             interfaces=items,
-            devices=len({i.exporter_id for i in items}),
+            # Counted before `others` cut the list: the page's "Show all 1,104" and its hint.
+            total_interfaces=len(table.rows),
+            devices=len({r.exporter_id for r in table.rows}),
             covered_seconds=int(table.covered_seconds),
             p95_resolution_seconds=table.slot_seconds,
             # The tier, named as before v3.3.6 (clients may read it). SNMP minutes are mixed in per

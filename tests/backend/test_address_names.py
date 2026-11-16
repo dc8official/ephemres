@@ -80,6 +80,95 @@ def test_unknown_addresses_are_resolved_in_the_background_and_named_next_time(tm
     assert sorted(asked) == ["10.0.20.15", "41.58.10.5"]  # each asked once; never the provider one
 
 
+def test_a_resolver_that_does_not_answer_holds_only_its_own_threads(monkeypatch):
+    """First-phase review M2: lookups ran in the event loop's default thread pool, and the 2 s
+    limit freed the waiter but not the thread. With a dead resolver the pool filled, and
+    everything else that uses it (FastStore commands, PDF rendering, to_thread) waited 8 s."""
+    import threading
+    import time
+
+    answer = threading.Event()
+    lock = threading.Lock()
+    running = {"now": 0, "most": 0}
+
+    def stuck_reverse(address):
+        with lock:
+            running["now"] += 1
+            running["most"] = max(running["most"], running["now"])
+        answer.wait(10)
+        with lock:
+            running["now"] -= 1
+        return "late-pc.corp.example" if address == "10.9.0.0" else None
+
+    monkeypatch.setattr(address_names, "_reverse", stuck_reverse)
+    monkeypatch.setattr(address_names, "DNS_TIMEOUT_SECONDS", 0.05)
+    addresses = [f"10.9.0.{i}" for i in range(40)]
+
+    async def go():
+        try:
+            assert address_names.names_for(addresses) == {}
+            # Several times the limit: the old code had handed every lookup to the shared pool by now.
+            await asyncio.sleep(0.5)
+            started = time.monotonic()
+            assert await asyncio.to_thread(lambda: "free") == "free"
+            waited = time.monotonic() - started
+            # The first eight are past their limit: no name for now, and not asked for again.
+            assert address_names._cached_dns("10.9.0.0", time.monotonic()) == (True, None)
+            assert address_names.names_for(addresses[:8]) == {}
+        finally:
+            answer.set()
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if address_names._cached_dns("10.9.0.0", time.monotonic())[1]:
+                break
+        return waited, address_names.names_for(["10.9.0.0"])
+
+    waited, late = asyncio.run(go())
+    assert waited < 0.3
+    # Never more lookups at once than their own threads, however many are queued.
+    assert running["most"] == address_names.DNS_PARALLEL
+    # The resolver's late answer replaced "no name".
+    assert late == {"10.9.0.0": {"name": "late-pc.corp.example", "source": "dns"}}
+
+
+@pytest.mark.parametrize("content", [
+    "[1, 2, 3]",                                   # valid JSON, no object (review L3: AttributeError)
+    '"provider ranges"',
+    "null",
+    '{"names": ["Zoom"], "v4": [[1, 2]]}',         # a row with a field missing
+    '{"names": ["Zoom"], "v4": [5]}',              # a row that is no list
+    '{"names": ["Zoom"], "v4": [["1", "9", 3]]}',  # names an entry the list does not have
+    '{"names": 7, "v4": []}',
+    '{"names": ["Zoom"], "v4": [["a", "b", 0]]}',
+    "{not json",
+])
+def test_a_table_file_of_any_shape_costs_only_the_provider_names(tmp_path, monkeypatch, content):
+    path = tmp_path / "ranges.json"
+    path.write_text(content)
+    monkeypatch.setattr(address_names, "TABLE", path)
+    assert address_names.provider_name("0.0.0.5") is None
+    assert address_names.names_for(["0.0.0.5", "52.97.146.2"]) == {}
+
+
+def test_the_dns_cache_stays_within_its_limit(monkeypatch):
+    """Review L3: nothing ever left the cache, and a scan shows new addresses all day."""
+    import time
+
+    monkeypatch.setattr(address_names, "DNS_CACHE_LIMIT", 100)
+    now = time.monotonic()
+    # Twenty answers already past their time, then far more than the limit.
+    for i in range(20):
+        address_names._dns_cache[f"10.0.0.{i}"] = (None, now - 1)
+    address_names._remember("10.1.0.1", "kept-pc.corp.example")
+    for i in range(1000):
+        address_names._remember(f"10.2.{i // 250}.{i % 250}", None)
+    assert len(address_names._dns_cache) <= 100
+    assert "10.0.0.3" not in address_names._dns_cache
+    # A name is kept a day and "no name" an hour, so the names outlast the rest.
+    assert address_names._dns_cache["10.1.0.1"][0] == "kept-pc.corp.example"
+    assert "10.2.3.249" in address_names._dns_cache  # the newest answer
+
+
 def test_without_an_event_loop_nothing_is_queued():
     # Called from synchronous code (a script): provider names only, no crash.
     assert address_names.names_for(["192.0.2.7"]) == {}

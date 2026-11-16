@@ -256,7 +256,7 @@ class FlowSettings:
         self.netflow_port = _coerce_int(self.netflow_port, "flow.netflow_port", ge=1, le=65535)
         self.ipfix_port = _coerce_int(self.ipfix_port, "flow.ipfix_port", ge=1, le=65535)
         self.sflow_port = _coerce_int(self.sflow_port, "flow.sflow_port", ge=1, le=65535)
-        self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1)
+        self.sampling_multiplier = _coerce_int(self.sampling_multiplier, "flow.sampling_multiplier", ge=1, le=1_000_000)
         self.buffer_memory_limit_mb = _coerce_int(self.buffer_memory_limit_mb, "flow.buffer_memory_limit_mb", ge=64)
         self.route_change_minutes = _coerce_int(self.route_change_minutes, "flow.route_change_minutes", ge=1, le=60)
         try:

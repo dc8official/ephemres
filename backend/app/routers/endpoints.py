@@ -228,7 +228,7 @@ async def get_endpoint_flow_paths(
 @router.get("/", response_model=APIResponse)
 async def list_endpoints(
     status: Optional[str] = Query(default=None),
-    page: Optional[int] = Query(default=None, ge=1),
+    page: Optional[int] = Query(default=None, ge=1, le=2_000_000_000),
     page_size: Optional[int] = Query(default=None, ge=1, le=500),
     endpoint_filter: EndpointFilter = Depends(endpoint_filter_dep),
     current_user: dict = Depends(get_current_user),

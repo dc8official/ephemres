@@ -27,7 +27,12 @@ from app.routers.auth import get_current_user, require_admin
 from app.schemas import APIResponse
 from app.schemas.bandwidth import FlowPreflightResponse
 from app.services.driver_manager import driver_manager
-from app.services.runtime_settings import get_runtime_settings, refresh_runtime_settings, resolve as resolve_runtime_settings
+from app.services.runtime_settings import (
+    MAX_FLOW_SAMPLING_MULTIPLIER,
+    get_runtime_settings,
+    refresh_runtime_settings,
+    resolve as resolve_runtime_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +152,7 @@ class SettingsUpdate(BaseModel):
     flow_ipfix_port: Optional[int] = Field(default=None, ge=1, le=65535)
     flow_sflow_port: Optional[int] = Field(default=None, ge=1, le=65535)
     flowIpfixPort: Optional[int] = Field(default=None, ge=1, le=65535)
-    flow_sampling_multiplier: Optional[int] = Field(default=None, ge=1)
+    flow_sampling_multiplier: Optional[int] = Field(default=None, ge=1, le=MAX_FLOW_SAMPLING_MULTIPLIER)
     flowSamplingMultiplier: Optional[int] = Field(default=None, ge=1)
     # Route discovery (v3.3.6): traceroutes at once (1-8), and hours between scheduled re-traces
     # of each endpoint (6, 12 or 24 in the UI; the API takes 1-168).

@@ -102,9 +102,9 @@
       </tbody>
     </table>
     <div v-if="hiddenCount > 0 || showAll" class="if-more">
-      <span class="text-xs text-muted">{{ showAll ? `All ${rows.length} interfaces` : `WAN links and the ${MAX_OTHERS} busiest other interfaces` }}</span>
-      <button type="button" class="btn-secondary btn-small" @click="showAll = !showAll">
-        {{ showAll ? 'Show fewer' : `Show all ${rows.length}` }}
+      <span class="text-xs text-muted">{{ hiddenCount > 0 ? `WAN links and the ${MAX_OTHERS} busiest other interfaces` : `All ${rows.length} interfaces` }}</span>
+      <button type="button" class="btn-secondary btn-small" :disabled="loadingAll" @click="$emit('update:showAll', !showAll)">
+        {{ loadingAll ? 'Loading…' : showAll && hiddenCount === 0 ? 'Show fewer' : `Show all ${totalCount}` }}
       </button>
     </div>
   </div>
@@ -114,7 +114,8 @@
 import { computed, ref } from 'vue'
 import { formatBps } from '../../utils/format.js'
 
-// Across devices: every WAN link, then this many of the busiest others (review I1).
+// Across devices: every WAN link, then this many of the busiest others (review I1). The page
+// asks the server for the same number (INTERFACE_OTHERS in BandwidthView.vue).
 const MAX_OTHERS = 20
 
 const props = defineProps({
@@ -128,13 +129,17 @@ const props = defineProps({
   // Server timezone name: down times are shown in it, like the rest of the page.
   timezone: { type: String, default: '' },
   emptyText: { type: String, default: 'No interfaces in this window.' },
+  // Across devices the server sends only the rows shown until "Show all" (first-phase review
+  // M4: all 1,104 interfaces were 935 KB each minute). total: how many there are in all;
+  // showAll: the page's switch, which makes it fetch the rest; loadingAll: that fetch is on.
+  total: { type: Number, default: null },
+  showAll: { type: Boolean, default: false },
+  loadingAll: { type: Boolean, default: false },
 })
-defineEmits(['select', 'edit'])
+defineEmits(['select', 'edit', 'update:showAll'])
 
 const sortKey = ref(null)
 const sortDir = ref(1)
-const showAll = ref(false)
-
 const STATUS_RANK = { down: 0, not_answering: 1, unknown: 2, up: 3, traffic_seen: 4, idle: 5, shut_down: 6 }
 
 const columns = computed(() => {
@@ -174,12 +179,15 @@ const ariaSort = (col) => (sortKey.value === col.key ? (sortDir.value === 1 ? 'a
 const sortMark = (col) => (sortKey.value === col.key ? (sortDir.value === 1 ? ' ▲' : ' ▼') : '')
 
 // The API's order across devices: WAN links (busiest first), the busiest others, shut-down last.
+// Cut here as well: after "Show fewer" the full list stays until the page's next update.
 const capped = computed(() => {
-  if (!props.multiDevice || showAll.value) return props.rows
+  if (!props.multiDevice || props.showAll) return props.rows
   let others = 0
   return props.rows.filter((r) => r.role === 'wan' || ++others <= MAX_OTHERS)
 })
-const hiddenCount = computed(() => props.rows.length - capped.value.length)
+const totalCount = computed(() => Math.max(props.total ?? 0, props.rows.length))
+// Rows there are but not shown: cut here, or not sent by the server.
+const hiddenCount = computed(() => (props.multiDevice ? totalCount.value - capped.value.length : 0))
 
 const visibleRows = computed(() => {
   const col = columns.value.find((c) => c.key === sortKey.value)

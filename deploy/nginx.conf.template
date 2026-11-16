@@ -80,5 +80,15 @@ server {
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        # What the page may load and where it may send (first-phase review L3, 2026-11-16).
+        # Everything Ephemres uses comes from this server: scripts, styles, fonts, the API and
+        # its event stream. So a script injected into a page cannot be fetched from elsewhere,
+        # and cannot send what it reads to another host.
+        #   style-src 'unsafe-inline': the components set style attributes.
+        #   img-src data: blob:        the organisation's logo is stored as a data URL.
+        #   frame-ancestors 'self'     as X-Frame-Options above, for current browsers.
+        # Checked against every page of the built front end; a change that loads from another
+        # host (map tiles, a font service) has to be added here.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'" always;
     }
 }

@@ -191,7 +191,6 @@ def test_a_record_with_a_value_no_column_holds_is_left_out_at_ingest(caplog):
         {**base, "bytes": -1},
         {**base, "protocol": 70000},         # a 4-byte protocol field in a v9 template
         {**base, "dst_port": 2 ** 31},
-        {**base, "start_time": 1e300},       # no calendar holds it: costs only this record
     ]
     with caplog.at_level("WARNING"):
         agg.ingest(bad + [{**base, "src_ip": "10.1.1.2"}])
@@ -199,3 +198,74 @@ def test_a_record_with_a_value_no_column_holds_is_left_out_at_ingest(caplog):
     assert agg.flows_rejected == 5
     # Said once, not once a record: a broken export sends thousands.
     assert sum("left out" in r.message for r in caplog.records) == 1
+
+
+def _minutes_from_now(agg):
+    """Each stored conversation's source address -> whole minutes its bucket is from now."""
+    import datetime
+    this_minute = datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0)
+    return {k[4]: round((k[0] - this_minute).total_seconds() / 60) for k in agg._accumulator}
+
+
+def test_a_wrong_exporter_clock_does_not_move_its_traffic(caplog):
+    """First-phase review M3: the exporter's clock was trusted, so NetFlow dated 2015 and 2027
+    was stored under those years, and a router an hour out showed its traffic an hour away. The
+    packet says what the exporter's clock read when it was sent; that should be now."""
+    import time
+
+    agg = _aggregator()
+    now = time.time()
+    base = {"exporter_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "src_port": 40000, "dst_port": 443,
+            "protocol": 6, "bytes": 1000, "packets": 2}
+
+    def flow(src, clock_ahead, started_ago, **extra):
+        # A flow that began `started_ago` seconds before it was sent, by a clock `clock_ahead` out.
+        sent = now + clock_ahead
+        return {**base, "src_ip": src, "export_time": sent, "start_time": sent - started_ago,
+                "end_time": sent, **extra}
+
+    with caplog.at_level("WARNING"):
+        agg.ingest([
+            flow("10.1.0.1", 0, 180),                                      # a good clock
+            flow("10.1.0.2", 45, 180),                                     # a little out: left alone
+            flow("10.1.0.3", 3600, 180, exporter_ip="10.0.0.3"),           # local time set as UTC
+            flow("10.1.0.4", -11 * 365 * 86400, 180, exporter_ip="10.0.0.4"),  # never set: 2015
+            flow("10.1.0.5", 400 * 86400, 180, exporter_ip="10.0.0.5"),    # 2027
+            flow("10.1.0.6", 3600, 240, exporter_ip="10.0.0.3"),           # same router again
+        ])
+    age = _minutes_from_now(agg)
+    assert age["10.1.0.1"] in (-3, -4) and age["10.1.0.2"] in (-2, -3, -4)
+    # Three minutes before arrival, whatever the router's clock said; the 240 s flow four.
+    assert all(age[src] in (-3, -4) for src in ("10.1.0.3", "10.1.0.4", "10.1.0.5"))
+    assert age["10.1.0.6"] in (-4, -5)
+    assert agg.flows_redated == 4
+    assert round(agg.clock_offsets["10.0.0.3"]) == 3600 and "10.0.0.1" not in agg.clock_offsets
+    # Said once per router, not once per flow.
+    said = [r.getMessage() for r in caplog.records if "clock of flow exporter" in r.getMessage()]
+    assert len(said) == 3
+    assert any("10.0.0.3 is 1 h 0 min ahead of" in m for m in said)
+    assert any("10.0.0.4 is 11 years behind" in m for m in said)
+
+
+def test_a_time_no_live_flow_has_is_dated_at_arrival():
+    """A good clock but an impossible flow time (a wrapped uptime counter, a forged record):
+    the traffic is real, so it is kept, at the minute it arrived. sFlow sends no export time."""
+    import time
+
+    agg = _aggregator()
+    now = time.time()
+    base = {"exporter_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "src_port": 40000, "dst_port": 443,
+            "protocol": 6, "bytes": 1000, "packets": 2, "export_time": now}
+    agg.ingest([
+        {**base, "src_ip": "10.2.0.1", "start_time": now - 3 * 86400},   # older than a day
+        {**base, "src_ip": "10.2.0.2", "start_time": now + 900},         # in the future
+        {**base, "src_ip": "10.2.0.3", "start_time": 1e300},             # no calendar holds it
+        {**base, "src_ip": "10.2.0.4", "start_time": float("nan")},
+        {**base, "src_ip": "10.2.0.5", "start_time": now - 1800},        # a 30-minute flow: kept there
+        {"exporter_ip": "10.0.0.9", "src_ip": "10.2.0.6", "dst_ip": "8.8.8.8", "protocol": 6,
+         "bytes": 1000, "packets": 2, "start_time": now - 120},          # sFlow-like: no export time
+    ])
+    age = _minutes_from_now(agg)
+    assert all(age[f"10.2.0.{i}"] in (0, -1) for i in (1, 2, 3, 4))
+    assert age["10.2.0.5"] in (-30, -31) and age["10.2.0.6"] in (-2, -3)
+    assert agg.flows_redated == 4 and agg.clock_offsets == {}
