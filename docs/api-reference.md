@@ -1,6 +1,6 @@
-# Ephemres API Reference — Version 3.3.5
+# Ephemres API Reference — Version 3.3.6
 
-Ephemres v3.3.5 exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
+Ephemres v3.3.6 exposes a RESTful and Server-Sent Events (SSE) API built on the Native ASGI 3.0 Engine (`app.core.asgi`). The API is located under the `/api/v1` base path and requires JWT Bearer authentication or HttpOnly session cookies for protected endpoints.
 
 ## Base URL
 `http(s)://<server-ip>:<port>/api/v1`
@@ -30,17 +30,17 @@ Returns the current platform version metadata (no authentication required).
   ```json
   {
     "status": "success",
-    "data": { "version": "3.3.5", "platform": "Ephemres v3.3.5" },
+    "data": { "version": "3.3.6", "platform": "Ephemres v3.3.6" },
     "meta": null,
     "error": null
   }
   ```
 
 ### `GET /api/v1/health`
-Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.5"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
+Static process health check: returns `{"status": "success", "data": {"status": "ok", "version": "3.3.6"}, ...}` whenever the API process is serving requests. It does **not** check the database; use readiness for that.
 
 ### `GET /api/v1/health/liveness` (also `/health/liveness`)
-Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.5"}`.
+Bare liveness probe: `{"status": "ok", "process": "healthy", "version": "3.3.6"}`.
 
 ### `GET /api/v1/health/readiness` (also `/health/readiness`)
 Readiness probe that runs `SELECT 1` against PostgreSQL and pings FastStore when it is enabled. Returns `200` with `"status": "ready"` or `503` with `"status": "degraded"`, plus per-dependency `database` and `redis` (FastStore) objects with `status` and `error`.
@@ -627,7 +627,7 @@ Conversations (source, destination, protocol, service port) over the window, fil
   - `first_seen`, `last_seen`: the start of the first bucket it was seen in and the end of the last (never later than now). To the minute for windows up to 2 hours, to the hour beyond.
 - **Errors:** `400` for an unknown `quick` or `sort`, or an invalid `ip`.
 
-**Busy answers (v3.3.6).** `top-talkers`, `conversations`, `applications`, `anomalies`, `interfaces` and `traffic-series` aggregate every flow row of the window. In each API worker at most a quarter of the database pool runs them at once (5 of the default 20); the others wait their turn, and one that waits 20 s answers `503` with `Retry-After: 10` and a sentence saying the server is busy. The rest of the API keeps its connections.
+**Busy answers (v3.3.6).** `top-talkers`, `conversations`, `applications`, `anomalies`, `interfaces` and `traffic-series` aggregate every flow row of the window. In each API worker at most a quarter of the database pool runs them at once, and never fewer than 2 (2 with the service's `EPHEMRES_API_DB_POOL=10`, 5 with the built-in pool of 20); the others wait their turn, and one that waits 20 s answers `503` with `Retry-After: 10` and a sentence saying the server is busy. The rest of the API keeps its connections.
 
 ### `GET /bandwidth/top-talkers`
 Retrieves the highest-volume addresses and the largest conversations within the specified window. Each address's ingress (as destination) and egress (as source) come from one aggregation; `top_conversations` is the first page of `GET /bandwidth/conversations`.

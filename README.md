@@ -1,10 +1,10 @@
-# Ephemres: Autonomous Network Observability Platform v3.3.5
+# Ephemres: Autonomous Network Observability Platform v3.3.6
 
 > **Vertical Integration Architecture — Zero-Dependency Native Core**
 
-A high-precision, decoupled network telemetry and autonomous monitoring platform combining active multi-protocol health probing with passive high-volume network flow ingestion (NetFlow v5, NetFlow v9, and IPFIX), WAN edge capacity accounting, per-cycle probe telemetry, and NetFlow-assisted route discovery. Engineered for continuous endpoint verification, sub-second route diagnostics, adaptive statistical alerting, automated root-cause analysis (RCA), real-time Server-Sent Events (SSE), in-RAM accelerated storage, enterprise multi-channel incident dispatch, and dynamic topology visualization with crossing-free layout routing.
+A high-precision, decoupled network telemetry and autonomous monitoring platform combining active multi-protocol health probing with passive high-volume network flow ingestion (NetFlow v5, NetFlow v9, IPFIX and sFlow v5), SNMP polling, WAN edge capacity accounting, per-cycle probe telemetry, and NetFlow-assisted route discovery. Engineered for continuous endpoint verification, sub-second route diagnostics, adaptive statistical alerting, automated root-cause analysis (RCA), real-time Server-Sent Events (SSE), in-RAM accelerated storage, enterprise multi-channel incident dispatch, and dynamic topology visualization with crossing-free layout routing.
 
-Beginning in **Version 3.3.2.v** and expanded in **Version 3.3.5**, Ephemres operates on a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **12 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform runs on the pure Python Standard Library plus four named runtime packages: `uvicorn` (ASGI HTTP server) with its `httptools` parser and `uvloop` event loop, and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver). Servers install them from `backend/requirements.lock`, six packages in all (with uvicorn's `click` and `h11`), each pinned and checked against its hash.
+Beginning in **Version 3.3.2.v** and expanded in **Versions 3.3.5 and 3.3.6**, Ephemres operates on a **Vertically Integrated Architecture**: eliminating 13 heavy external runtime frameworks, third-party ORMs, and daemon dependencies (`fastapi`, `starlette`, `pydantic`, `sqlalchemy`, `alembic`, `redis`, `psycopg2-binary`, `httpx`, `jinja2`, `weasyprint`, `pypdf`, `psutil`, `argon2-cffi`) in favor of **12 zero-dependency native engines** residing directly in `backend/app/core/`. The entire platform runs on the pure Python Standard Library plus four named runtime packages: `uvicorn` (ASGI HTTP server) with its `httptools` parser and `uvloop` event loop, and `asyncpg` (PostgreSQL/TimescaleDB binary protocol driver). Servers install them from `backend/requirements.lock`, six packages in all (with uvicorn's `click` and `h11`), each pinned and checked against its hash.
 
 ---
 
@@ -52,26 +52,27 @@ Beginning in **Version 3.3.2.v** and expanded in **Version 3.3.5**, Ephemres ope
 | **ORM & SQL Overhead** | Heavy SQLAlchemy mapper metamodels | **Direct native asyncpg SQL compilation** | Zero-reflection query generation with sub-millisecond execution. |
 | **Schema Validation** | Pydantic v2 Rust binary extension | **Pure-stdlib `app.core.schema` engine** | Native Python typing with zero binary ABI incompatibilities. |
 
-Startup time and memory were measured on v3.3.0 against v3.3.5, running the API as its systemd unit does (uvicorn, 2 workers), two runs each. "Until the API answers" is the time from launch to the first successful `/api/v1/health` response; "code load" is the time to import the application.
+Startup time and memory were measured on v3.3.0 against v3.3.5 (not repeated on v3.3.6), running the API as its systemd unit does (uvicorn, 2 workers), two runs each. "Until the API answers" is the time from launch to the first successful `/api/v1/health` response; "code load" is the time to import the application.
 
 ---
 
 ## ⚡ Core System Architecture
 
-1. **Network Flow Telemetry Ingestion (`ephemres-flowd`):** Autonomous collector daemon listening on UDP 2055 (NetFlow v5/v9) and UDP 4739 (IPFIX) with 4MB kernel socket buffers (`SO_RCVBUF`), zero-allocation binary decoders (`struct.unpack_from`), dynamic template caching (1,800s TTL), and orphan data set ring buffering.
+1. **Network Flow Telemetry Ingestion (`ephemres-flowd`):** Autonomous collector daemon listening on UDP 2055 (NetFlow v5/v9), UDP 4739 (IPFIX) and UDP 6343 (sFlow v5) with 4MB kernel socket buffers (`SO_RCVBUF`), zero-allocation binary decoders (`struct.unpack_from`), dynamic template caching (1,800s TTL), and orphan data set ring buffering. Records are checked before they are summed: impossible values are left out, a refused write costs only its own rows, and a router with a wrong clock has its flows stored at the corrected time.
 2. **FastStore In-RAM Accelerated Storage:** Pure-stdlib SQLite `WAL` mode storage residing in `/run/ephemres` (falling back to `/dev/shm`) with `synchronous=OFF`, delivering a drop-in async Redis client replacement (`FastStoreClient`) supporting Key-Value with expiry, Sets, Sorted Sets (ZSET sliding 24h prune), Streams (`XADD` with `maxlen` trimming, `XREADGROUP`, `XACK`) for live events between processes when Performance Mode is on, and inter-process Pub/Sub. Sessions, sign-in lockouts and flows don't pass through it.
 3. **Dual-Role $\mathcal{O}(1)$ In-Memory Correlation:** In-memory hash indexing mapping exporter IP addresses (primary endpoint IP + `flow_exporter_ips` secondary aliases) and traffic participants without database roundtrips.
 4. **4-Tier Hierarchical Storage Lifecycle:** flowd in-memory aggregation buffer (`flow.buffer_memory_limit_mb`), 1-minute TimescaleDB rollups (`flow_minute_rollups`, 90-day retention with columnar compression; `flow_interface_minute_rollups`, 7-day retention), real-time 1-hour continuous aggregates (`flow_hourly_rollups`, 30-day retention; `flow_conversation_hourly_rollups`, 90-day retention; `flow_interface_hourly_rollups`, 365-day retention with busiest-minute peaks), and 365-day daily totals (`flow_daily_rollups`).
-5. **Traffic Analytics, WAN Edge Totals & Per-Interface Telemetry:** Multi-view Traffic Analytics cockpit (`Overview`, `Interfaces`, `Conversations`, `QoS`, `Security`), server-side conversation forensics, average/p95/peak link utilization against provisioned speeds, WAN interface role (`role: "wan"`) counting network-edge traffic once at the perimeter, and 1-click exporter enrollment at `/bandwidth`.
+5. **Traffic Analytics, WAN Edge Totals & Per-Interface Telemetry:** A Traffic page built around each WAN link now against its capacity and its usual range, with the shared site/location/tag filter, a device picker, request and reply paired in one conversation row, provider and reverse-DNS names for outside addresses, per-part failure notices, and a fair share of the database for its heaviest queries. Multi-view cockpit (`Overview`, `Interfaces`, `Conversations`, `QoS`, `Security`), server-side conversation forensics, average/p95/peak link utilization against provisioned speeds, WAN interface role (`role: "wan"`) counting network-edge traffic once at the perimeter, and 1-click exporter enrollment at `/bandwidth`.
 6. **NetFlow Route Discovery & Topology Augmentation:** Decodes IPv4/IPv6 next-hop addresses from NetFlow v5/v9 and IPFIX (`flow_path_observations`), detects sustained route shifts vs. ECMP load-balancing (`flow_route_changes`), triggers targeted re-traceroutes (`ROUTE_HINT`) for `UP` endpoints, verifies topology links (`confirmed`, `differs`, `inferred` silent `* * *` hops), and attaches flow evidence to RCA incidents.
 7. **Enterprise Alerting Subsystem:** Independent background task pool pushing state transitions and RCA incidents across Microsoft Teams (Adaptive Cards v1.4 & HTML fallback), Discord (Rich Embeds), Slack (Block Kit), Generic Webhooks, and direct hardened SMTP Email with socket-level SSRF defense, AES-256-GCM encryption at rest, flapping cooldown, and cascade suppression.
 8. **Native Async ORM (`app.core.orm`):** Zero-dependency data access layer supporting declarative models, column constraints, relationship navigation, transactional sessions, and query compilation (`select`, `insert`, `update`, `delete`, `func`, `case`, `text`) directly over `asyncpg`.
-9. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all platform revisions (`0001`–`0021`) sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
+9. **Native Async Migrations (`app.core.migrator`):** In-tree schema migration engine executing all platform revisions (`0001`–`0028`) sequentially with transactional DDL compilation, eliminating `alembic` and `psycopg2`.
 10. **5-Ping @ 8.0s Concurrency Sweeper & Per-Cycle Probe History:** Each endpoint sends 5 pings 8.0s apart (2.0s reply timeout) once per 60-second cycle (~32s typical, 42s worst case), staggered deterministically across the minute by UUID. Every cycle records min/avg/max RTT, jitter, and packet loss into `endpoint_probe_samples` (30d retention) and `endpoint_probe_hourly` (365d retention).
 11. **High-Fidelity Route Diagnostics:** Upgraded traceroute engine (`traceroute -n -q 2 -w 3 -m 30 -I`) with multi-probe latency parsing, raw ICMP capability isolation (`CAP_NET_RAW`), and Layer-2 subnet auto-bypass.
 12. **Real-Time Server-Sent Events (SSE):** Asynchronous event broker streaming telemetry envelopes (`STATE_TRANSITION`, `NODE_STATE_CHANGE`, `RCA_INCIDENT`, `ROUTE_HINT`) and 15-second heartbeat keep-alives via `GET /api/v1/events/stream`.
 13. **Pure-Stdlib PDF Compliance Engine (`app.core.pdf`):** PostScript/PDF binary emitter compiling executive compliance reports (Availability/SLA, Bandwidth/Capacity, Master Dossier) with corporate branding, Base64 logos, and zero external binary dependencies.
 14. **Interactive Crossing-Free Topology Map:** Vue 3 Vis-Network visualizer implementing **BFS DAG Longest-Path Layering** (`Level(v) = max(Level(u) + 1)`), **Sugiyama (1981)** barycenter crossing reduction, **Gansner (1993)** coordinate alignment, **frozen-physics real-time recoloring**, NetFlow link verification (`confirmed`, `differs`, `inferred`), and **Horizontal (LR) ⇄ Vertical (UD)** layout switching.
+15. **SNMP Polling (`ephemres-snmpd`):** Its own daemon, hand-written BER and SNMP v2c/v3 (`monitoring/snmp/`): shared encrypted credential sets, interface names, speeds and status, per-minute interface counters, LLDP/CDP neighbours for the map and root-cause analysis, and WAN link-down alerts. Each device's capabilities are learned on first contact.
 
 ---
 
@@ -79,16 +80,18 @@ Startup time and memory were measured on v3.3.0 against v3.3.5, running the API 
 
 For complete architectural references, operational runbooks, and developer guides, refer to the `docs/` directory:
 
+* **[v3.3.6 Release Notes](docs/release-notes/v3.3.6.md):** Complete release notes for the rebuilt Traffic page, sFlow, SNMP polling, sites and tags, per-account sessions, and the first-phase review fixes.
 * **[v3.3.5 Release Notes](docs/release-notes/v3.3.5.md):** Complete release notes for Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals, and NetFlow Route Augmentation.
 * **[v3.3.2.v Release Notes](docs/release-notes/v3.3.2.v.md):** Architectural release notes detailing the 6 stages of the Vertical Integration Architecture.
-* **[Changelog & Technical Evolution](docs/changelog.md):** Complete evolutionary matrix and milestone chronicle from Version 1.0 to Version 3.3.5.
+* **[Changelog & Technical Evolution](docs/changelog.md):** Complete evolutionary matrix and milestone chronicle from Version 1.0 to Version 3.3.6.
 * **[Architecture Deep-Dive](docs/architecture.md):** Comprehensive breakdown of the 12 native core engines, data pipelines, and concurrency sweeper.
 * **[Developer Guide](docs/developer-guide.md):** Guidelines for contributing with `app.core.orm`, `app.core.schema`, `app.core.asgi`, and `FastStoreClient`.
 * **[Deployment & Operations Guide](docs/deployment.md):** Production deployment runbook, `/run/ephemres` shared memory directory, and zero-Redis service supervision.
-* **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9 and IPFIX setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense), and interface metrics.
+* **[Network Flow Configuration & Telemetry Guide](docs/netflow-guide.md):** Runbook for NetFlow v5/v9, IPFIX and sFlow setup, exporter vendor templates (Cisco, Juniper, Mikrotik, Linux `fprobe`, pfSense/OPNsense, Arista, hsflowd), router clocks, and interface metrics.
+* **[SNMP Guide](docs/snmp-guide.md):** The device survey command, the `ephemres-snmpd` poller, credential sets and what each device is asked.
 * **[Database & TimescaleDB Deep-Dive](docs/database.md):** Full schema dictionary, hypertable partitioning, 7-day chunk compression, flow rollup hypertables, and continuous aggregate policies.
 * **[Disaster Recovery & Restoration Runbook](deploy/RESTORE.md):** Procedures for restoring TimescaleDB backups and executing native async migrations.
-* **[Security Model & Threat Hardening](docs/security.md):** Authentication matrix, Scrypt password hashing, fixed-lifetime sessions, lockout defense, Linux capability isolation, and SSRF guardrails.
+* **[Security Model & Threat Hardening](docs/security.md):** Authentication matrix, Scrypt password hashing, per-account session limits and idle timeouts, same-origin writes, lockout defense, Content-Security-Policy, Linux capability isolation, and SSRF guardrails.
 * **[SLA Calculation Methodology](docs/sla-calculation.md):** Mathematical formulation of uptime availability, flap suppression, and blackout neutralization.
 * **[Troubleshooting Runbook](docs/troubleshooting.md):** Step-by-step diagnostic workflows, permission fixes, flow socket buffer sizing, and log inspection.
 * **[User & Operator Guide](docs/user-guide.md):** Guide to navigating the Live KPI ribbon, Card/Table view switcher, High-Fidelity traceroutes, Bandwidth Fleet Dashboard, and Admin Settings.
@@ -136,26 +139,34 @@ For complete architectural references, operational runbooks, and developer guide
 
 ```bash
 sudo -i
-git clone -b v3.3.5 https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.6 https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```
 
-### 4. Upgrading to v3.3.5 (Zero Historical Data Loss)
+### 4. Upgrading to v3.3.6 (Zero Historical Data Loss)
 
-To upgrade an existing installation (`v3.3.0` LTS or `v3.3.2.v`) to Version 3.3.5:
+**From v3.3.5, v3.3.2.v or v3.3.0**, run v3.3.6's own script. The `upgrade.sh` those releases installed cannot do this upgrade properly: it never installs what v3.3.6 adds (the `ephemres-snmpd` service). Clone v3.3.6 into a directory that allows running programs (your home directory is fine; a `/tmp` mounted `noexec` would stop the frontend build):
 
 ```bash
-sudo bash /opt/ephemres/deploy/upgrade.sh
+git clone --depth 1 --branch v3.3.6 https://github.com/dc8official/ephemres.git ~/ephemres-v3.3.6
+sudo bash ~/ephemres-v3.3.6/deploy/upgrade.sh
 ```
-`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. No manual `git pull` is needed.
+
+**From v3.3.6 on**, the installed script is enough; name the release you want with `EPHEMRES_BRANCH`:
+
+```bash
+sudo EPHEMRES_BRANCH=v3.3.7 bash /opt/ephemres/deploy/upgrade.sh
+```
+
+`upgrade.sh` fetches the code itself: run from a git checkout it pulls that checkout (branch from `EPHEMRES_BRANCH`, else the checkout's current branch); run from a copy without `.git` it shallow-clones the release branch from GitHub into a staging directory. See the [Deployment guide](docs/deployment.md#3-upgrading-to-version-336-zero-historical-data-loss) for the full runbook, including the one line to add to an existing nginx site (the Content-Security-Policy header).
 
 The upgrade utility automatically:
 1. **Pre-Upgrade Backup:** Dumps a timestamped PostgreSQL SQL backup to `/var/backups/ephemres/`.
 2. **Migrates Legacy Installs:** On a server still running the pre-rename `netmon-*` services, carries over `/etc/netmon` configuration, disables the `netmon-*` units and repoints the nginx site; flow ingestion stays on if `netmon-flowd` was receiving flows. The old install, `redis-server` included, is kept for a rollback; `deploy/cleanup-netmon.sh` removes it once you are satisfied (it reports first and changes nothing without `--apply`).
 3. **Synchronizes Dependencies:** Installs the six pinned, hash-checked packages in `backend/requirements.lock` (`uvicorn` with `httptools` and `uvloop`, and `asyncpg`) and removes the unused packages older releases installed with `uvicorn[standard]`.
 4. **Compiles Frontend:** Builds production Vue 3 assets via Vite.
-5. **Executes Native Migrations:** Runs `migrator.py` applying forward schema migrations (`0001`–`0021`) while preserving all historical telemetry and continuous aggregates.
+5. **Executes Native Migrations:** Runs `migrator.py` applying forward schema migrations (`0001`–`0028`) while preserving all historical telemetry and continuous aggregates.
 6. **Restarts Services:** Reloads `ephemres-api` and `ephemres-engine` under systemd, plus `ephemres-flowd` when flow ingestion is enabled.
 7. **Health Verification:** Confirms `/api/v1/version` and `/api/v1/health` report services are healthy.
 

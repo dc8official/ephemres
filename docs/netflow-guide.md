@@ -1,12 +1,12 @@
-# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.5)
+# Ephemres Network Flow Telemetry Configuration & Operations Guide (v3.3.6)
 
-This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, and IPFIX)** and **NetFlow Route Augmentation** in Ephemres v3.3.5.
+This operational manual details the architecture, firewall configuration, vendor router setup, and troubleshooting procedures for **Network Flow Telemetry Ingestion (NetFlow v5, NetFlow v9, IPFIX and, since v3.3.6, sFlow v5)** and **NetFlow Route Augmentation** in Ephemres.
 
 ---
 
 ## 1. Architectural Overview
 
-Ephemres v3.3.5 provides real-time, high-volume flow ingestion, per-interface throughput and WAN edge accounting, and flow-assisted route discovery completely isolated from ICMP polling daemons:
+Ephemres provides real-time, high-volume flow ingestion, per-interface throughput and WAN edge accounting, and flow-assisted route discovery completely isolated from ICMP polling daemons:
 
 ```
 +-------------------------------------------------------------------------------+
@@ -14,12 +14,13 @@ Ephemres v3.3.5 provides real-time, high-volume flow ingestion, per-interface th
 |  (Cisco IOS-XE, Juniper Junos, Fortinet, Mikrotik, Linux softflowd)           |
 +---------------------------------------+---------------------------------------+
                                         |
-                   UDP 2055 (NetFlow v5/v9) / UDP 4739 (IPFIX)
+        UDP 2055 (NetFlow v5/v9) / UDP 4739 (IPFIX) / UDP 6343 (sFlow v5)
                                         v
 +-------------------------------------------------------------------------------+
 |                    EPHEMRES COLLECTOR DAEMON (ephemres-flowd)                 |
 |  - Async Datagram Listeners (4MB SO_RCVBUF)                                   |
 |  - Zero-alloc binary parsers (v5, v9 template cache, IPFIX RFC 7011/7012)     |
+|  - sFlow v5 samples, each scaled by its own sampling rate (v3.3.6)            |
 |  - Parsed flows handed straight to the aggregator (no FastStore buffer)      |
 +---------------------------------------+---------------------------------------+
                                         |
@@ -80,6 +81,15 @@ To ensure maximum telemetry fidelity, eliminate bursty traffic artifacts, and pr
   * Linux: bind to static management IP.
 * **Operational Rationale:** When a router has multiple egress uplinks or dynamic routing protocols (BGP/OSPF/ECMP), packet routes can change. If the flow export source is not explicitly pinned to a Loopback IP, the router's egress interface IP will be used as the exporter IP, causing Ephemres to detect spurious "unmatched exporters". Binding to `Loopback0` guarantees deterministic $\mathcal{O}(1)$ correlation.
 
+### 2.7 Router Clock (NTP)
+* **Recommended Setting:** NTP on every exporting router, with the clock in UTC or with the timezone set correctly.
+* **Operational Rationale:** NetFlow v5/v9 and IPFIX date each flow by the router's own clock. Since v3.3.6 Ephemres checks that clock against the arrival time of every export packet:
+  * within 2 minutes, the router's times are used as they are;
+  * further out (no NTP, or local time set as UTC), the flow's times are moved by the difference, so the traffic still appears at the right minute. flowd logs the offset once an hour per router: `The clock of flow exporter 10.1.0.1 is 1 h 0 min ahead of this server's. Its flows are stored at the corrected time; set NTP on the router.`
+  * a flow start that is still in the future, or more than a day old, is stored at the minute it arrived.
+
+  The correction is only as good as the Ephemres server's own clock, so the server needs NTP too ([Deployment §2](deployment.md)). sFlow carries no flow time and has always been dated by arrival. Fix the router's clock when you see the log line: its own logs and its SNMP traps are dated by the same clock.
+
 ---
 
 ## 3. Firewall & Port Requirements
@@ -90,6 +100,7 @@ Ensure that the Ephemres host permits incoming UDP datagrams from your network i
 | :--- | :--- | :--- | :--- |
 | **NetFlow v5 / v9** | `UDP 2055` | Cisco, Mikrotik, Linux, Fortinet flow export | UDP |
 | **IPFIX** | `UDP 4739` | IANA standard flow export (Juniper, OVS, VyOS) | UDP |
+| **sFlow v5** (v3.3.6) | `UDP 6343` | Sampled packet headers from switches and hosts (Arista, Juniper EX/QFX, Aruba, hsflowd) | UDP |
 
 ### UFW Configuration (Ubuntu/Debian)
 
@@ -103,6 +114,9 @@ sudo ufw allow from 192.168.0.0/16 to any port 2055 proto udp comment 'NetFlow I
 sudo ufw allow from 10.0.0.0/8 to any port 4739 proto udp comment 'IPFIX Ingestion'
 sudo ufw allow from 172.16.0.0/12 to any port 4739 proto udp comment 'IPFIX Ingestion'
 sudo ufw allow from 192.168.0.0/16 to any port 4739 proto udp comment 'IPFIX Ingestion'
+
+# Allow sFlow from internal subnets (v3.3.6; upgrade.sh opens 6343 itself when flow ingestion is on)
+sudo ufw allow from 10.0.0.0/8 to any port 6343 proto udp comment 'sFlow Ingestion'
 ```
 
 ---
@@ -286,15 +300,53 @@ On FreeBSD-based firewalls (pfSense and OPNsense), flow telemetry is provided vi
    - **Inactive Timeout:** `15` seconds.
 4. Click **Apply** to activate.
 
+### 4.7 sFlow v5 (Switches and Hosts, v3.3.6)
+
+sFlow is not NetFlow with another header. A device does not export flows: it exports one in every N packets it forwards (the sampling rate), each as the first bytes of the packet. What that means in Ephemres:
+
+* **Scaling is per sample.** Each sampled packet counts as N packets and its IP length times N bytes, with N taken from the sample itself. Devices with different rates can report to one server, and the global sampling multiplier (Settings → Data collection) is not applied on top.
+* **Figures are estimates.** They get better with volume; a conversation of a few packets may not be sampled at all. The Traffic page says so while any exporter sends sampled traffic.
+* **What is read:** flow samples (compact and expanded) carrying a raw packet header (Ethernet, IPv4 or IPv6) or the pre-decoded sampled IPv4/IPv6 record, plus the extended router record for the next hop. Counter samples are skipped: interface counters come from SNMP polling ([SNMP guide](snmp-guide.md)).
+* **Who sent it:** the exporter is the address the datagrams come from, not the agent address inside them. Enroll or map that address like any other exporter (section 6); datagrams from an unknown address are not read.
+* **Time:** sFlow carries no flow time, so samples are dated when they arrive.
+* **Port:** UDP 6343 by default (`[flow] sflow_port`, or the sFlow port in Settings). sFlow sent to the NetFlow or IPFIX port is recognised too.
+
+A sampling rate of 1 in 1,024 suits 1 Gb/s links and 1 in 4,096 or more suits 10 Gb/s and above; a lower rate (more samples) is finer and costs the device more. Typical configurations follow. Command names differ between software versions, so check them against your platform's reference.
+
+**Arista EOS**
+```text
+sflow sample 1024
+sflow destination <EPHEMRES_IP> 6343
+sflow source-interface Loopback0
+sflow run
+```
+
+**Juniper EX / QFX**
+```text
+set protocols sflow collector <EPHEMRES_IP> udp-port 6343
+set protocols sflow sample-rate ingress 1024
+set protocols sflow source-ip <LOOPBACK_IP>
+set protocols sflow interfaces ge-0/0/0.0
+```
+
+**Linux host (hsflowd, `/etc/hsflowd.conf`)**
+```text
+sflow {
+  sampling = 1024
+  collector { ip = <EPHEMRES_IP> udp = 6343 }
+  pcap { dev = eth0 }
+}
+```
+
 ---
 
 ## 5. Enabling Flow Telemetry in Ephemres
 
 1. Log in to the Ephemres Web Interface as an **Administrator**.
 2. Open **Settings** -> **Data collection**.
-3. In the **Network Flow Telemetry Engine (NetFlow & IPFIX)** card:
+3. In the **Network Flow Telemetry Engine (NetFlow, IPFIX & sFlow)** card:
    - Switch the toggle on. This opens the preflight, which checks that FastStore opens and the flow UDP ports are free (it also reports `rmem_max`). When it passes, click **Activate Flow Telemetry**; the badge then reads **FLOW INGESTION ACTIVE** and the port fields appear. Performance Mode is not needed for flows. **Run Diagnostic Preflight** runs the same check on its own.
-   - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`) match what your exporters send to.
+   - Ensure the ports (NetFlow: `2055`, IPFIX: `4739`, sFlow: `6343`) match what your exporters send to.
    - Click **Save Changes**. Saving runs the preflight again (a failure is refused with its reason), then starts `ephemres-flowd` and enables it at boot.
 4. Check that the service is running. The API starts it through the sudo rule `install.sh` and `upgrade.sh` write to `/etc/sudoers.d/ephemres`; without that rule, start it yourself:
    ```bash
@@ -335,6 +387,9 @@ sudo tcpdump -ni any udp port 2055 -c 5
 
 # Verify IPFIX packets on UDP 4739
 sudo tcpdump -ni any udp port 4739 -c 5
+
+# Verify sFlow datagrams on UDP 6343
+sudo tcpdump -ni any udp port 6343 -c 5
 ```
 
 ### Check What flowd Receives, Stores and Loses
@@ -358,6 +413,20 @@ sudo journalctl -u ephemres-flowd --since "-15 min" | grep "last minute"
 * `rollup writes are falling behind (the last flush wrote N rows in X s, flushes are 10 s apart)`:
   nothing is lost yet, but a flush takes longer than the gap between flushes, so the buffer is
   growing and will fill if this goes on. Same remedies as above.
+
+Since v3.3.6 flowd also says when it leaves something out or corrects it:
+```bash
+sudo journalctl -u ephemres-flowd --since "-1 hour" | grep -E "left out|refused|clock of flow exporter"
+```
+* `Flow record from <ip> left out: a value no real flow has (bytes=... packets=... protocol=... ports=...)`:
+  a record with more than 2^50 bytes or packets, a protocol above 255 or a port above 65535.
+  Logged at most once a minute with the count since flowd started. A steady stream from one
+  router points at a broken export template on it (a field declared with the wrong length).
+* `Flow rollup write refused for a value in it (...)`, then `Flow rollup row refused by the database and left out: ...`
+  and `N flow rollup rows left out at this flush (...); the other M were stored`: the database
+  refused a batch for a value in it, and flowd wrote the batch again in pieces, dropping only
+  the refused rows. Everything else was stored. Report the logged row if this appears.
+* `The clock of flow exporter <ip> is ... ahead of / behind this server's`: see section 2.7.
 
 ### Which Data a View Shows
 Each Traffic page view, the endpoint Bandwidth & Flow tab and the PDF bandwidth report read a minute, hourly or daily table depending on the window, and the longer-term tables keep less detail (no addresses, and the daily one no endpoints). See [Database §3](database.md#3-4-tier-hierarchical-storage-lifecycle) for what each table keeps and which one each view reads.

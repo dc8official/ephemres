@@ -1,6 +1,6 @@
-# Ephemres User & Operator Guide — Version 3.3.5
+# Ephemres User & Operator Guide — Version 3.3.6
 
-Welcome to the Ephemres Network Monitoring Platform v3.3.5 user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet Traffic Analytics and WAN edge capacity, configure multi-channel enterprise alert notifications, use the CSV/PDF report generators, and manage system settings.
+Welcome to the Ephemres Network Monitoring Platform v3.3.6 user guide. This document explains how to navigate the web dashboard, use the interactive topology visualizer, monitor fleet Traffic Analytics and WAN edge capacity, configure multi-channel enterprise alert notifications, use the CSV/PDF report generators, and manage system settings.
 
 ---
 
@@ -20,7 +20,7 @@ Ephemres provides enterprise-grade session protection:
 
 ## 2. Real-Time Dashboard Overview (`/`)
 
-The v3.3.5 dashboard provides instantaneous fleet telemetry with URL-persisted filters and severity-first sorting:
+The v3.3.6 dashboard provides instantaneous fleet telemetry with URL-persisted filters and severity-first sorting:
 
 ### Global Network Health KPI Strip
 * **Summary Ribbon:** Displays total monitored devices, counts of `UP`, `UNSTABLE`, `DOWN`, and **Not Monitored** (passive flow exporters or paused devices), plus the aggregate **Fleet SLA %** (computed strictly across ICMP-monitored endpoints).
@@ -92,7 +92,7 @@ Clicking any endpoint opens its detailed forensic view with a live status bar (S
 Administrators configure the platform across five tabs (v3.3.6 order and names):
 1. **👥 Users & access:** User creation, role management (`ADMIN` / `VIEWER`), password reset, and session revocation. **Edit** sets an account's role, idle timeout and session limit; the table's **Session** column shows the timeout and how many sessions are open against the limit ("1 of 2 sessions"). Click that count to see each session (device, address, when it signed in, when it last saw activity, when it ends if left alone) and to end one, or all of them. On your own account, "End all sessions" keeps the browser you are using. A new timeout applies to the account's open sessions at once; a new session limit applies from its next sign-in. An admin can change their own timeout and limit, but not their own role. **Sign-in protection** holds the brute-force lockout threshold (failed attempts per address and username before a 15-minute lockout).
 2. **🌐 Discovery & topology:** Layer-2 subnet auto-bypass for traceroutes; **Parallel route traces** (1–8, default 2; incident and root-cause traces always get 2 more); **Traces through the same router at once** (1–3, default 3: traces that share a router, this server's gateway included, run together up to this number; routers answer traceroute only so fast, so if traces come back with gaps lower it to 1 and they take turns); **Re-trace every** 6, 12 or 24 hours (default 24), spread over the period instead of all at midnight.
-3. **📡 Data collection:** NetFlow v5/v9, IPFIX and sFlow v5 collector controls (UDP 2055/4739/6343), flow diagnostic preflight, sampling rate, and the FastStore event-routing toggle (`performance_mode`; flows don't depend on it). **SNMP polling** (v3.3.6): the on/off switch, how often each device is polled (30 s to 5 min, default 1 min), and the **SNMP credential sets** (see section 9).
+3. **📡 Data collection:** NetFlow v5/v9, IPFIX and sFlow v5 collector controls (UDP 2055/4739/6343), flow diagnostic preflight, sampling rate (1 to 1,000,000, for routers that sample without saying so), and the FastStore event-routing toggle (`performance_mode`; flows don't depend on it). **SNMP polling** (v3.3.6): the on/off switch, how often each device is polled (30 s to 5 min, default 1 min), and the **SNMP credential sets** (see section 9).
 4. **🔔 Alerts:** Master alerting engine toggle, alert channel inventory (Teams, Discord, Slack, Email, Webhook), live diagnostic test triggers, and historical delivery audit logs.
 5. **🏢 Organization:** Company name, department / NOC unit, report footer disclaimer, and corporate logo (PNG or JPEG, up to 1 MB) for branded PDF reports, plus renaming sites, locations and tags.
 
@@ -102,7 +102,7 @@ Administrators configure the platform across five tabs (v3.3.6 order and names):
 
 ## 6. Configuring Enterprise Alert Channels
 
-Ephemres v3.3.5 includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
+Ephemres v3.3.6 includes an asynchronous, non-blocking notification dispatcher supporting major collaboration platforms and corporate email.
 
 ### Microsoft Teams Workflows Setup
 Microsoft Teams supports two integration patterns:
@@ -154,7 +154,7 @@ Always verify channel reachability before saving:
 
 ## 7. Reports, Auditing & Compliance Documentation
 
-Ephemres v3.3.5 provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
+Ephemres v3.3.6 provides enterprise-grade reporting workflows for compliance audits, executive SLA reviews, and capacity planning.
 
 ### 7.0 Reports for a site, location or tag (v3.3.6)
 The filter bar on **Reports & SLA** limits the summary table, the CSV export and the PDF to the endpoints it matches. "All" in the export and PDF dialogs then means all endpoints in the filter; picking endpoints by hand picks among them. The PDF prints the filter under its scope title. Reports use each endpoint's site, location and tags as assigned now, not as they were during the report period, and say so. The table's own search box is gone: search is in the filter bar.
@@ -204,6 +204,9 @@ The Traffic page (**Traffic** in the top bar) shows what the routers' flows (Net
 * **Window.** 1h, 6h, 24h, 7d or 30d, kept in the address (`?window=24h`) and remembered for the browser tab. Charts are per minute up to 6h and per hour beyond; conversation figures are per minute at 1h and per hour beyond.
 * **Unregistered sources.** A router sending flows that isn't enrolled is not in the picker. One line says "2 unregistered sources sending flows"; **Review** lists each with its flows per second and when it was last seen, and admins can **Enroll** it or **Link** it to an existing endpoint. Its flows are not stored until then.
 * **Updates.** The page updates itself once a minute, about 15 seconds past the minute, once the last minute's totals are written. The line under the title says when it last updated. **Pause** holds the page still and **Resume** updates it at once; nothing updates while the browser tab is hidden. **↻ Refresh** updates on demand.
+* **When something can't be loaded (v3.3.6).** Each part of the page is loaded on its own, so one failure no longer hides the rest. A line under the title names what is missing and why, for example "Could not load top talkers, interfaces: the server took too long to answer for this period", with **Try again**. What happens to the old figures depends on what you changed: after a change of window, filter or device they are cleared ("Left empty rather than showing figures from another period"); when nothing changed they stay, with the time they are from ("Still showing the figures from 14:05"). The line under the title reads "Last update incomplete" until every part loads again.
+* **Busy server.** The six heaviest views (top talkers, conversations, applications, the security summary, interfaces and the chart) take turns on the database so the rest of Ephemres stays quick. If one waits 20 seconds the page says the server is busy with other Traffic queries: try again, or pick a shorter window. Several tabs left open on a 7-day window are the usual cause.
+* **Router clocks (v3.3.6).** Traffic is placed in time by when it arrived whenever a router's clock is more than 2 minutes out, so a router without NTP no longer shows its traffic an hour away or not at all. The flow collector's log names the router and the offset ([Flow guide §2.7](netflow-guide.md)).
 * **Counted once.** Traffic between two sites crosses two routers and both report it. Everywhere on the page (and in the PDF) a conversation counts once, at the larger report, however many routers saw it.
 
 ### 8.2 Now: each WAN link against its capacity
@@ -237,10 +240,10 @@ Links are WAN links when they have the WAN role in the interface editor (section
 ### 8.4 Interfaces
 * **No device picked:** "Interfaces across devices", one table of every router's interfaces in scope:
   * WAN links first, busiest against their speed first;
-  * then the other interfaces by traffic (the top 20, **Show all N** for the rest);
+  * then the other interfaces by traffic (the top 20; **Show all N** fetches the rest, and **Show fewer** goes back). The line above the table gives the full count ("966 interfaces on 26 devices") either way;
   * ports an admin shut down last, greyed.
 * **One device picked:** that router's interfaces by index (shut-down ports last), with its chart above.
-* **Columns:** site and device (across devices), interface, speed, **Now in** / **Now out** (the same five minutes as section 8.2), **Last {window}: avg / P95 / peak** utilisation (without a speed: the average rates), source (SNMP or Flows) and status. Every column sorts: click once ascending, twice descending, a third time back to the default order.
+* **Columns:** site and device (across devices), interface, speed, **Now in** / **Now out** (the same five minutes as section 8.2), **Last {window}: avg / P95 / peak** utilisation (without a speed: the average rates), source (SNMP or Flows) and status. The P95 marker's tooltip says what it is the 95th percentile of: one-minute averages, or hourly averages on windows over 7 days and on large fleets (about 350 interfaces or more over 24 hours), where reading every minute took too long. With hourly figures the table covers the whole hours of the window, so up to an hour less than asked; the peak is still the busiest minute. Every column sorts: click once ascending, twice descending, a third time back to the default order.
 * **Status.** For a polled router, from SNMP: Up, Down, Shut down, or "SNMP not answering". Down time in the window is spelled out: "down 40 min, Thu 14:00", "down since …", or "down 3 times, 1 h 20 min in all". Routers that only export flows show "Traffic seen" or "Idle".
 * **Click a row** across devices to open that router with the interface isolated in the chart.
 * **Interface editor (admins).** **⚙ Configure interfaces**, or **✎** on a row, opens the router's editor: a name, the speed (presets from 10 Mb/s to 100 Gb/s or a custom figure; left empty, SNMP's speed is used), the role (WAN or not) and, on WAN links with a speed, the **Traffic alert** choice (Default, Custom % and minutes, or Off). Saving applies at once to the page and to PDF reports.

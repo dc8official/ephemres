@@ -1,4 +1,4 @@
-# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.5
+# Ephemres Troubleshooting & Disaster Recovery Guide — Version 3.3.6
 
 This guide provides systematic diagnostic steps, platform logging architecture specifications, log triage procedures, and solutions for operational issues encountered when running Ephemres in production.
 
@@ -81,6 +81,10 @@ sudo tail -n 100 /var/log/nginx/access.log | awk '{print $7, $9}'
 | **Probe sweeps failing with permission errors** | `journalctl -u ephemres-engine` | `Operation not permitted`, `socket.error: [Errno 1]` | Check the unit's `AmbientCapabilities` (Section 2.A). |
 | **Services fail to start: `Insecure configuration`** or systemd `Failed to load environment files` | `journalctl -u ephemres-api` | `the JWT signing key is the default development secret`, `shorter than 32 characters`, `ephemres.env: No such file` | `/etc/ephemres/ephemres.env` is missing, unreadable by `ephemres`, or lacks `EPHEMRES_SECRET_KEY`. Restore it from the backup's `.key` file (keep the same key, or saved alert channel secrets cannot be decrypted), `chmod 600`, `chown ephemres:ephemres`. |
 | **Account locked / HTTP 403 on login** | `/var/log/ephemres/ephemres-api.log` | `Account temporarily locked`, `record_failed_attempt` | Wait 15 minutes for the lockout to expire, or reset `admin` with `reset-admin-password.sh` (Sections 2.B and 2.C). |
+| **Saving or signing in fails with HTTP 403 "came from another site's page"** (v3.3.6) | `/var/log/ephemres/ephemres-api.log` | `Refused POST`, `sent from` | The page was opened under an address the API does not count as its own (Section 2.M). |
+| **Traffic page: "Could not load ..." or "The server is busy with other Traffic queries"** (v3.3.6) | `/var/log/ephemres/ephemres-api.log` | `504`, `503`, `took too long` | Pick a shorter window, close extra Traffic tabs (Section 2.N). |
+| **A router's traffic missing, or flow records dropped** (v3.3.6) | `journalctl -u ephemres-flowd` | `left out`, `refused`, `clock of flow exporter` | See [Flow guide §7](netflow-guide.md): a wrong router clock, or an export with impossible values. |
+| **API answers 400 "NUL character" or 422 "64-bit integer"** (v3.3.6) | browser or script output | `%00`, `Input should be a 64-bit integer` | The request itself is wrong (a `%00` in the address, a page number beyond 2,000,000,000). Fix the client. |
 | **Live SSE cards not updating / split-brain** | `/var/log/ephemres/ephemres-api.log` | `TelemetryRelay: listener error`, `FastStoreEventBroker` | Verify PostgreSQL `LISTEN` or FastStore in-memory IPC state (`/run/ephemres`). |
 | **Historical charts or SLA blank** | `/var/log/ephemres/ephemres-api.log` | `timedatectl`, `clock skew`, `unknown_seconds` | Synchronize NTP clock and timezone (Section 2.G). |
 
@@ -373,6 +377,24 @@ Each thread's stack follows. The stuck one is the thread whose frames run throug
   3. **Optionally, correct only recent history:** for example `--since 2026-01-01`, together with `--apply` or on its own.
 * **What it costs**: on a server with a long history, most of the affected periods are in compressed storage (older than 7 days). Correcting them makes the database decompress and rewrite that part of the history. It takes longer and temporarily uses extra disk space; the next compression job compresses it again. The check in step 1 tells you how many periods are affected, so you can choose a quiet time, or use `--since` to limit the work. Take a backup first if you want to be able to go back (see section 3).
 * **The upgrade tells you**: when an upgrade to v3.3.5 or later finds such periods, its last lines say so with the command for step 1. If it says nothing, there is nothing to correct.
+
+### M. Changes Refused with HTTP 403: "came from another site's page" (v3.3.6)
+Since v3.3.6 the API refuses a change (`POST`, `PUT`, `PATCH`, `DELETE`) that a browser sends from a page whose address is not the API's own. This stops another website from acting on a signed-in user's session.
+
+* **Symptoms**: signing in or saving anything fails; the API log has
+  `Refused POST /api/v1/auth/login sent from https://other.example (Host: monitor.example). If that is this server's own page, add it to api.allowed_origins.`
+* **Causes and fixes**:
+  1. **The front end is served from another address than the API** (a separate host, or a reverse proxy in front that rewrites the `Host` header). Either make the proxy pass the original host (`proxy_set_header Host $host;`, as the shipped nginx site does), or add the page's address to `[api] allowed_origins` in `/etc/ephemres/config.toml` (scheme, host and port exactly as in the browser's address bar) and restart `ephemres-api`.
+  2. **A development setup** where the dev server rewrites the host. The shipped `frontend/vite.config.js` passes it on (`changeOrigin: false`); a custom proxy has to do the same.
+  3. **The log names a site you do not know.** Then the refusal did its job: a page on that site tried to change something with a signed-in user's session. Nothing was changed.
+* Scripts are not affected: a request without an `Origin` header passes.
+
+### N. Traffic Page: Figures Could Not Be Loaded, or "The Server Is Busy" (v3.3.6)
+The Traffic page loads each of its parts on its own and names the ones that failed.
+
+* **"the server took too long to answer for this period"** (HTTP 504): one query passed the 10-second limit. Pick a shorter window, or narrow the page with the filter or the device picker. On a large network the 7-day conversations view is the heaviest.
+* **"The server is busy with other Traffic queries"** (HTTP 503 after a 20-second wait): the heavy Traffic views take turns on the database, a quarter of each API worker's connection pool at a time (2 per worker with the service's default `EPHEMRES_API_DB_POOL=10`), so the dashboard and alerts keep their connections. Close Traffic tabs that sit on a long window; each asks again every minute.
+* If either persists on short windows, check the database (Section 2.J) and what flowd stores per minute ([Flow guide §7](netflow-guide.md)): very many distinct conversations per minute make every Traffic query slower.
 
 ---
 

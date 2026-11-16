@@ -1,6 +1,6 @@
-# Ephemres Deployment & Operations Guide — Version 3.3.5
+# Ephemres Deployment & Operations Guide — Version 3.3.6
 
-This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.5 on a production Linux server under the **Vertical Integration Architecture**.
+This guide details the procedures for installing, maintaining, and upgrading the Ephemres Network Monitoring Platform v3.3.6 on a production Linux server under the **Vertical Integration Architecture**.
 
 ---
 
@@ -45,7 +45,7 @@ The initial installation is fully automated via `install.sh`:
 
 ```bash
 sudo -i
-git clone -b v3.3.5 https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.6 https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```
@@ -54,8 +54,8 @@ cd /opt/ephemres/deploy
 1. Adds the NodeSource (Node.js 20), PGDG, and Timescale apt repositories, then installs `postgresql-16`, `timescaledb-2-postgresql-16`, `python3-venv`, `python3-pip`, `nginx`, `certbot`, `traceroute`, `libcap2-bin`, and `nodejs`.
 2. Creates dedicated system user `ephemres` and minimal virtual environment at `/opt/ephemres/venv` (installing only `uvicorn` and `asyncpg`).
 3. Compiles the Vue 3 production bundle (`npm run build`).
-4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.5 defaults.
-5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`, revisions `0001`–`0021`).
+4. Generates `/etc/ephemres/ephemres.env` and `/etc/ephemres/config.toml` with v3.3.6 defaults.
+5. Runs native async database migrations (`python3 -m app.core.migrator upgrade head`, revisions `0001`–`0028`).
 6. Sets `cap_net_raw+ep` on the `traceroute` binary. The daemons receive `CAP_NET_RAW` from `AmbientCapabilities` in their systemd units; no capability is placed on the Python interpreter.
 7. Enables and starts systemd units (`ephemres-api`, `ephemres-engine`, `ephemres-flowd` if enabled, `nginx`).
 
@@ -136,8 +136,21 @@ sudo EPHEMRES_BRANCH=v3.3.7 bash /opt/ephemres/deploy/upgrade.sh   # name the re
 
 Until v3.3.6, any failure after the stop left monitoring and alerting down until someone noticed.
 
+### After Upgrading to v3.3.6: the Content-Security-Policy Header
+New installs send a `Content-Security-Policy` header with the page (see [Security §9.E](security.md)). The upgrade does not edit an nginx site that is already in place: only an unedited v3.2.0/v3.3.0 `netmon` site is replaced by the new template, and gets the header that way. On any other server, check and add it by hand:
+
+```bash
+curl -sI https://monitor.yourdomain.com/ | grep -i content-security-policy     # prints nothing when it is missing
+grep -n "Content-Security-Policy" /opt/ephemres/deploy/nginx.conf.template      # the line to copy
+sudo nano /etc/nginx/sites-available/ephemres     # paste it into the "location /" block, beside the other add_header lines
+                                                  # (the site is still named "netmon" where an edited v3.2.0/v3.3.0 site was kept)
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Nothing else in v3.3.6 needs a change on a server reached through nginx under one address. If your front end is served from a different address than the API (unusual), list that address in `[api] allowed_origins`: since v3.3.6 the API refuses changes sent from a page at any other address ([Security §6.A](security.md)).
+
 ### After Upgrading from v3.2.0 / v3.3.0 (netmon layout)
-The upgrade keeps the old install so you can roll back: `/opt/netmon`, `/etc/netmon` (with a second copy of the database password and secret key), the disabled `netmon-*` units, their sudo rule and logrotate file, `/var/log/netmon`, the `netmon` user, and `redis-server`, which keeps running although v3.3.5 never uses it. Once the upgraded server has proved itself, remove them with the optional cleanup script. It lists what it would remove and changes nothing until you add `--apply`:
+The upgrade keeps the old install so you can roll back: `/opt/netmon`, `/etc/netmon` (with a second copy of the database password and secret key), the disabled `netmon-*` units, their sudo rule and logrotate file, `/var/log/netmon`, the `netmon` user, and `redis-server`, which keeps running although v3.3.6 never uses it. Once the upgraded server has proved itself, remove them with the optional cleanup script. It lists what it would remove and changes nothing until you add `--apply`:
 
 ```bash
 sudo /opt/ephemres/deploy/cleanup-netmon.sh
@@ -148,9 +161,9 @@ It refuses to run while `ephemres-api` or `ephemres-engine` is down, while a `ne
 
 ---
 
-## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` / `v3.3.2v` $\rightarrow$ `v3.3.5`)
+## 4. Disaster Recovery & Backup Restoration (Same-Version or Cross-Version `v3.1.35s` / `v3.3.0` / `v3.3.1n` / `v3.3.2v` / `v3.3.5` $\rightarrow$ `v3.3.6`)
 
-Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s` (end of support), `v3.3.0` (LTS), `v3.3.1n`, `v3.3.2v`, or `v3.3.5`:
+Ephemres includes an automated schema-reconciling restore engine (`deploy/restore.sh` / `python3 -m app.core.restore`) that safely migrates backups from `v3.1.35s` (end of support), `v3.3.0` (LTS), `v3.3.1n`, `v3.3.2v`, `v3.3.5`, or `v3.3.6`:
 
 ```bash
 # Interactive restore (prompts for a new admin password; leave blank to keep the one in the backup)
@@ -216,6 +229,11 @@ buffer_memory_limit_mb = 512
 route_change_minutes = 3
 route_ecmp_share = 0.2
 ```
+
+> [!NOTE]
+> **`[api] allowed_origins`** lists the addresses a front end may be served from when it is not the API's own address. It sets the CORS headers and, since v3.3.6, decides which pages may send changes: a `POST`, `PUT`, `PATCH` or `DELETE` from a page at another address answers `403`. A page served by the same nginx site as the API always passes, whatever this list holds, so the placeholder value is harmless on a standard install.
+>
+> **`[flow] sampling_multiplier`** accepts 1 to 1,000,000 (v3.3.6); the service refuses to start with a larger value. It applies to exporters that sample without reporting their rate.
 
 > [!NOTE]
 > **Performance Mode Toggling**:

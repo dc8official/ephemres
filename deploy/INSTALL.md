@@ -1,6 +1,6 @@
-# Ephemres v3.3.5 — Installation & Deployment Quick Start
+# Ephemres v3.3.6 — Installation & Deployment Quick Start
 
-This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.5**.
+This guide provides direct, step-by-step instructions to install, configure, upgrade, and decommission the **Ephemres Network Monitoring Platform v3.3.6**.
 
 ---
 
@@ -19,7 +19,7 @@ Elevate to root and run the automated installer:
 
 ```bash
 sudo -i
-git clone -b v3.3.5 https://github.com/dc8official/ephemres.git /opt/ephemres
+git clone -b v3.3.6 https://github.com/dc8official/ephemres.git /opt/ephemres
 cd /opt/ephemres/deploy
 ./install.sh
 ```
@@ -48,14 +48,14 @@ If a service does not come up, the script stops with `UPGRADE INCOMPLETE` and a 
 
 ### From v3.2.0 or v3.3.0 (netmon layout)
 
-These releases installed into `/opt/netmon/noop` with `/opt/netmon/venv`, `/etc/netmon`, user `netmon` and `netmon-*` services, so `/opt/ephemres/deploy/upgrade.sh` does not exist yet. Clone v3.3.5 and run its upgrade script; it moves the install to the Ephemres layout:
+These releases installed into `/opt/netmon/noop` with `/opt/netmon/venv`, `/etc/netmon`, user `netmon` and `netmon-*` services, so `/opt/ephemres/deploy/upgrade.sh` does not exist yet. Clone v3.3.6 and run its upgrade script; it moves the install to the Ephemres layout:
 
 ```bash
-git clone --branch v3.3.5 https://github.com/dc8official/ephemres.git ~/ephemres
+git clone --branch v3.3.6 https://github.com/dc8official/ephemres.git ~/ephemres
 sudo bash ~/ephemres/deploy/upgrade.sh
 ```
 
-v3.2.0 and v3.3.0 also installed on Python 3.10, but v3.3.5 needs Python 3.11+ (see Requirements). The script checks this before it changes anything and stops with the command to run if the server has no Python 3.11+ (on Ubuntu 22.04: `sudo apt-get install python3.11 python3.11-venv`, which installs 3.11.0rc1; Ubuntu 24.04 or Debian 12 is the better target).
+v3.2.0 and v3.3.0 also installed on Python 3.10, but v3.3.6 needs Python 3.11+ (see Requirements). The script checks this before it changes anything and stops with the command to run if the server has no Python 3.11+ (on Ubuntu 22.04: `sudo apt-get install python3.11 python3.11-venv`, which installs 3.11.0rc1; Ubuntu 24.04 or Debian 12 is the better target).
 
 The script detects the old layout (`/etc/netmon/netmon.env` and no `/etc/ephemres/ephemres.env`) and, after taking the pre-upgrade backup:
 
@@ -65,7 +65,7 @@ The script detects the old layout (`/etc/netmon/netmon.env` and no `/etc/ephemre
 
 Passwords cannot be carried over: v3.2/v3.3.0 stored argon2 hashes. Every user, the admin included, gets a random temporary password listed in `/opt/ephemres/legacy_password_resets.txt` (root only; the upgrade ends with the command to read the admin's), and everyone must change their password at the next login. The install-time `DEFAULT_ADMIN_PASSWORD` is not reused.
 
-`/opt/netmon`, `/etc/netmon` and the disabled `netmon-*` units are left in place. The database itself is migrated, so a rollback means re-enabling the `netmon-*` units and restoring the pre-upgrade backup; once the new install is confirmed, the optional `sudo /opt/ephemres/deploy/cleanup-netmon.sh` removes what is left: Redis (v3.3.5 doesn't use it), the old units, sudo rule and logrotate file, `/opt/netmon`, `/etc/netmon` (which holds a second copy of the database password and secret key), the old logs and the `netmon` user. It only reports until you add `--apply`, never touches the database, and keeps the live nginx site; `--remove-backups` also deletes `/var/backups/netmon` and `--purge-packages` the Redis and PDF packages nothing else needs. A fresh v3.3.5 install followed by `deploy/restore.sh` with a backup of the old server is a supported alternative.
+`/opt/netmon`, `/etc/netmon` and the disabled `netmon-*` units are left in place. The database itself is migrated, so a rollback means re-enabling the `netmon-*` units and restoring the pre-upgrade backup; once the new install is confirmed, the optional `sudo /opt/ephemres/deploy/cleanup-netmon.sh` removes what is left: Redis (v3.3.6 doesn't use it), the old units, sudo rule and logrotate file, `/opt/netmon`, `/etc/netmon` (which holds a second copy of the database password and secret key), the old logs and the `netmon` user. It only reports until you add `--apply`, never touches the database, and keeps the live nginx site; `--remove-backups` also deletes `/var/backups/netmon` and `--purge-packages` the Redis and PDF packages nothing else needs. A fresh v3.3.6 install followed by `deploy/restore.sh` with a backup of the old server is a supported alternative.
 
 ---
 

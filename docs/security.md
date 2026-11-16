@@ -1,6 +1,6 @@
 # Ephemres Security Model, Threat Architecture & Defense Specification
 
-**Document Version:** 3.3.5  
+**Document Version:** 3.3.6  
 **Last Updated:** October 2026  
 **Classification:** Public Security Specification & Threat Model  
 
@@ -22,13 +22,14 @@ The **Ephemres Network Monitoring Platform** is engineered for mission-critical 
 
 | Version | Release Type | Security Support Status | Recommended Action |
 | :--- | :--- | :--- | :--- |
-| **v3.3.5** | Feature, Telemetry & Route Augmentation Release | **Active / Current Standard** | Current production standard with Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals, and NetFlow Route Augmentation. |
-| **v3.3.2.v** | Vertical Integration Release | **Supported (Production Ready)** | Supported zero-dependency native core release; upgrading to `v3.3.5` is recommended, though `v3.3.2.v` remains safe and supported in production. |
+| **v3.3.6** | Traffic, SNMP & Hardening Release | **Active / Current Standard** | Current production standard: rebuilt Traffic page, sFlow and SNMP polling, sites, tags and the shared filter, per-account sessions, and the first-phase review fixes (same-origin writes, bounded flow records, Content-Security-Policy). |
+| **v3.3.5** | Feature, Telemetry & Route Augmentation Release | **Supported (Production Ready)** | Supported production release with Traffic Analytics, Per-Cycle Probe History, WAN Edge Totals, and NetFlow Route Augmentation; upgrading to `v3.3.6` is recommended. |
+| **v3.3.2.v** | Vertical Integration Release | **Supported (Production Ready)** | Supported zero-dependency native core release; upgrading to `v3.3.6` is recommended, though `v3.3.2.v` remains safe and supported in production. |
 | **v3.3.0** | Enterprise LTS Release | **Supported (Long-Term Support / LTS)** | Supported long-term maintenance track with Flow Exporter & Interface Telemetry. |
-| **v3.1.35s** | Legacy Release | **Unsupported / End of Support** | No longer supported; upgrade to `v3.3.0` (LTS) or the newest release (`v3.3.5`). |
-| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.5`. |
-| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.0` (LTS) or `v3.3.5` recommended. |
-| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.5` immediately. |
+| **v3.1.35s** | Legacy Release | **Unsupported / End of Support** | No longer supported; upgrade to `v3.3.0` (LTS) or the newest release (`v3.3.6`). |
+| **v3.3.1n** | Transitional Rebranding Release | **Unsupported / Superseded** | Transitional rebranding branch; upgrade directly to `v3.3.6`. |
+| **<= v3.2.0** | Legacy Release | **Unsupported / Superseded** | Upgrade to `v3.3.0` (LTS) or `v3.3.6` recommended. |
+| **< v3.1** | Legacy Alpha / Beta | **End of Life (EOL)** | Unmaintained; migrate to `v3.3.6` immediately. |
 
 ---
 
@@ -131,6 +132,7 @@ When an authenticated administrator views alert channels (`GET /api/v1/alerts/ch
 
 ### A. JWT in Secure HttpOnly Cookies
 * **XSS Defense:** Authentication tokens are stored inside browser `HttpOnly`, `SameSite=Lax`, and `Secure` (in HTTPS production) cookies. Malicious client-side JavaScript cannot read session tokens.
+* **Writes Only From the Server's Own Page (v3.3.6):** A cookie travels with any request a browser makes, whichever page asked for it. `ephemres-api` therefore refuses, with `403` and before any handler runs, a `POST`, `PUT`, `PATCH` or `DELETE` under `/api/` whose `Origin` header names another host than the one the request was sent to (`SameOriginWritesMiddleware` in `app.core.asgi`). Hosts are compared without port or scheme, because Nginx passes `Host $host`; origins listed in `[api] allowed_origins` also pass. A request with no `Origin` (a script, `curl`, the deploy tools) passes unless the browser marks it `Sec-Fetch-Site: cross-site` or `same-site`. `SameSite=Lax` alone did not cover a sibling subdomain or an old browser: in the November 2026 review a form on another site, posting `text/plain`, created an admin account. Each refusal is logged with the origin and the path.
 * **Cryptographic JTI Enforcement:** Every issued token carries a cryptographically unique 32-character hex `jti` (JWT ID, generated via `secrets.token_hex(16)`). Tokens lacking a valid `jti` claim are rejected immediately.
 * **Session Lifetime (v3.3.6):** A session ends after the account's own idle timeout (`users.session_idle_minutes`: admin 15, 30 or 60 minutes; viewer 30 minutes to 4 hours), counted from the last real interaction reported through `POST /auth/activity`. Polling and the live-event stream don't count, so an unattended screen still times out. Admin sessions also end 12 hours after sign-in whatever the activity. Tokens and cookies last until that absolute end plus one hour (viewers: a 7-day backstop plus one hour); the session row in PostgreSQL, not the token, decides. A user can call `/auth/activity` from a script to stay signed in; that is accepted, since they could equally keep clicking. The global `session_timeout` setting is no longer used.
 
@@ -197,6 +199,19 @@ Ephemres eliminates external HTML-to-PDF rendering engines (`WeasyPrint`, `wkhtm
 Every generated PDF byte stream is hashed prior to transmission:
 * **SHA-256 Digest Header**: The HTTP response attaches an `X-Report-SHA256` header containing the hex-encoded SHA-256 digest of the exact PDF payload so auditors can verify document authenticity and detect post-export tampering.
 
+### F. Values No Database Column Holds (v3.3.6)
+PostgreSQL text holds no NUL character and no integer wider than 64 bits. Requests carrying either used to reach the database and come back as a `500`.
+* A NUL character (`%00`) in the path or the query string answers `400` before routing, whichever route it was meant for. This matters for the shared filter (`site`, `location`, `tag`, `type`, `q`), which routes read from the query string directly.
+* In a JSON body a NUL in any string, including strings inside lists and objects, is a `422` on its field. So is an integer outside the 64-bit range on any field.
+* Paging values are bounded (`page` and `offset` up to 2,000,000,000; `interface_idx` up to 2,147,483,647).
+
+### G. Flow Records From the Network (v3.3.6)
+Flow export is unauthenticated UDP, so `ephemres-flowd` treats every record as untrusted even from a registered exporter.
+* **Impossible values are left out.** A record whose bytes or packets exceed 2^50, whose protocol exceeds 255 or whose port exceeds 65535 is dropped at intake, counted and logged at most once a minute. Before, one such record made every later write fail until flowd was restarted.
+* **A refused row costs only itself.** If the database still refuses a write for a value in it, the batch is written again in pieces and only the refused rows are dropped, each logged. A database that is unreachable keeps everything for the next flush, as before.
+* **The exporter's clock is not trusted.** The export packet carries the exporter's clock at sending. When it is more than 2 minutes from the arrival time, the flow's times are moved by the difference; a start still in the future or over a day old is stored at arrival. A router with a wrong clock, or a forged timestamp, can no longer place traffic years away or create a storage chunk per far date.
+* **The sampling multiplier is bounded** (1 to 1,000,000), since every unsampled flow's bytes are multiplied by it.
+
 ---
 
 ## 9. Operating System & Privilege Hardening
@@ -231,6 +246,15 @@ Filesystem sandboxing directives (`ProtectSystem=`, `PrivateTmp=`, `NoNewPrivile
 * The same flag marks the session cookie `Secure`.
 * Static frontend assets are served directly by Nginx, which does not add HSTS in the shipped `deploy/nginx.conf.template`; add `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;` to the TLS server block to cover them.
 
+### E. Content-Security-Policy (v3.3.6)
+* The shipped `deploy/nginx.conf.template` sends a policy with the page (`location /`):
+  ```text
+  default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
+  ```
+* Everything Ephemres loads comes from its own server: scripts, styles, fonts, the API and its event stream. With the policy, a script injected into a page cannot be fetched from another host and cannot send what it reads to one. `style-src 'unsafe-inline'` is needed because components set style attributes; `data:` images are the organization logo.
+* **Existing servers:** the upgrade does not rewrite a site you already have (only an unedited v3.2.0/v3.3.0 site is replaced by the template). Add the `add_header Content-Security-Policy ...` line from the template to your site's `location /` block, then run `sudo nginx -t && sudo systemctl reload nginx`. See [Deployment §3](deployment.md).
+* A change that loads from another host (map tiles, a font service) must be added to the policy, or the browser blocks it.
+
 ---
 
 ## 10. Role-Based Access Control (RBAC) Matrix
@@ -256,6 +280,8 @@ Ephemres enforces a strict, two-tier role architecture (`ADMIN` and `VIEWER`), s
 When deploying Ephemres in production, ensure the following hardening steps are verified:
 
 - [ ] **HTTPS Enforced:** Nginx configured with valid SSL/TLS certificates, `[security] hsts_enabled = true` in `config.toml`, and (optionally) an HSTS `add_header` in the Nginx TLS server block for static assets.
+- [ ] **Content-Security-Policy Sent:** `curl -sI https://monitor.yourdomain.com/ | grep -i content-security-policy` prints the policy (Section 9.E). A server installed before v3.3.6 needs the line added by hand.
+- [ ] **Allowed Origins:** `[api] allowed_origins` in `config.toml` lists only addresses your own front end is served from. A page at any other address cannot change anything (Section 6.A).
 - [ ] **File Permissions:** Verify `/etc/ephemres/ephemres.env` has permissions `0600` owned by `ephemres:ephemres`.
 - [ ] **Database & IPC Isolation:** Ensure PostgreSQL (`5432`) listens strictly on `127.0.0.1` and FastStore shared-memory files (`/run/ephemres/ephemres_faststore*`, `/dev/shm` fallback) are owned by `ephemres:ephemres` (`0600`).
 - [ ] **Admin Password Changed:** Sign in with the initial password the installer printed (or the one in `/opt/ephemres/admin_password_reset.txt` after an upgrade), set your own, and delete that file.

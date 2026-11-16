@@ -1,12 +1,12 @@
-# Ephemres Developer & Contributor Guide — Version 3.3.5
+# Ephemres Developer & Contributor Guide — Version 3.3.6
 
-This guide details how to set up a local development environment for the Ephemres Network Monitoring Platform v3.3.5 and outlines coding standards for the **Vertical Integration Architecture**.
+This guide details how to set up a local development environment for the Ephemres Network Monitoring Platform v3.3.6 and outlines coding standards for the **Vertical Integration Architecture**.
 
 ---
 
 ## 1. Architectural Philosophy
 
-Ephemres v3.3.5 operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
+Ephemres v3.3.6 operates on a strict **zero-dependency runtime foundation**. Aside from the ASGI server (`uvicorn`) and asynchronous PostgreSQL driver (`asyncpg`), all backend infrastructure is implemented using the Python Standard Library and native Linux system primitives located in `backend/app/core/`.
 
 > [!IMPORTANT]
 > **No External Runtime Dependencies:** Pull Requests introducing external runtime frameworks, third-party ORMs, or validation libraries will be rejected. All HTTP routing, ORM compilation, schema validation, caching, cryptography, HTTP requests, PDF generation, and templating must leverage the 12 Layer 0 engines in `backend/app/core/`.
@@ -24,7 +24,7 @@ ephemres/
 │   │   │   ├── orm.py          # Native Async ORM compiled directly over asyncpg
 │   │   │   ├── schema.py       # Pure-stdlib SchemaModel validation & serialization
 │   │   │   ├── faststore.py    # In-RAM /run/ephemres (/dev/shm) SQLite WAL cache, pub/sub & streams
-│   │   │   ├── migrator.py     # Native async migration engine (0001-0021)
+│   │   │   ├── migrator.py     # Native async migration engine (0001-0028)
 │   │   │   ├── crypto.py       # Scrypt key derivation & AES-256-GCM encryption
 │   │   │   ├── restore.py      # Cross-version database backup restoration engine
 │   │   │   ├── http_client.py  # Asynchronous socket HTTP client with SSRF defense
@@ -39,11 +39,11 @@ ephemres/
 │   │   ├── services/       # Domain business logic & alert dispatchers
 │   │   ├── logging_config.py # Console + rotating file logging (setup_logging)
 │   │   └── main.py         # EphemresApp initialization & lifecycle
-│   ├── migrations/         # Migration versions (0001-0021)
+│   ├── migrations/         # Migration versions (0001-0028)
 │   ├── requirements.txt    # Runtime dependencies (uvicorn, httptools, uvloop, asyncpg)
 │   └── requirements.lock   # The same, with every package pinned and hashed (servers install this)
 ├── frontend/               # Vue 3 (Composition API), Vite, PrimeVue Aura, native fetch
-├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon
+├── monitoring/             # Monitoring sweeper, synthetic probes, flow daemon (flow/), SNMP poller (snmp/)
 ├── deploy/                 # Systemd units, install.sh, upgrade.sh, restore.sh, nginx config
 ├── devtools/differential/  # Dev-only: the core checked against real Pydantic and SQLAlchemy
 └── tests/                  # Pytest unit & integration test suite
@@ -118,6 +118,8 @@ FastStore requires **zero external daemons**. You do not need to install, start,
    ```
    The frontend will be available at `http://localhost:5173`. Vite proxies `/api` calls directly to `http://localhost:8000`.
 
+   The proxy passes the page's own `Host` on (`changeOrigin: false` in `frontend/vite.config.js`), as nginx does on a server. Keep it that way: since v3.3.6 the API refuses a `POST`, `PUT`, `PATCH` or `DELETE` whose `Origin` host is not the host the request was sent to (`cross_origin_write` in `app.core.asgi`), and with a rewritten host every change from the dev server, sign-in included, answers `403`. A development checkout reads `deploy/config.template.toml`, whose `allowed_origins` holds only a placeholder, so nothing else lets the dev server through. A front end you serve from some other address needs that address in `[api] allowed_origins`.
+
 ---
 
 ## 4. Coding Patterns & Core Idioms
@@ -176,6 +178,12 @@ async def list_endpoints(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 ```
 
+What the framework checks for every route, so a route does not have to (v3.3.6):
+* **NUL characters and wide integers.** A `%00` in the path or query string answers `400` before routing; a NUL in any body string, or an integer outside 64 bits on any field, is a `422`. PostgreSQL holds neither. A route that reads `request.query_params` itself (the shared filter does) is covered by the first rule.
+* **Bounds are still yours to declare.** Give every integer parameter that reaches SQL an upper bound (`Query(default=1, ge=1, le=2_000_000_000)`): a value inside 64 bits can still overflow once it is multiplied or bound to an `integer` column.
+* **Heavy read routes take a slot.** A route that aggregates a whole window of flow rows declares `dependencies=_HEAVY` (`routers/bandwidth.py`): at most a quarter of the worker's database pool runs such routes at once, and one that waits 20 s answers `503`. Add it to any new route of that weight.
+* **Writes come from the server's own page.** See section 3.4. Tests using `TestClient` send no `Origin` and pass; a test of the rule sends one.
+
 ### 4.4 In-RAM Caching & Messaging (`app.core.faststore`)
 Use `FastStoreClient` (an in-process SQLite store with a Redis-style API; `host`/`port` arguments are accepted for compatibility and ignored, and `db` selects the shared-memory database file):
 ```python
@@ -213,6 +221,11 @@ All tests must pass with 0 failures. `pytest.ini` sets `pythonpath = .` and `tes
 The installer picks the newest Python it finds (3.14 first), so run the suite on that version as
 well as on the one you develop with before a release. Python 3.14 evaluates annotations lazily,
 and a difference there once left models without fields while every test passed on 3.12.
+
+A test that seeds rows "N minutes ago" and then reads a window counted from the request's own
+clock must leave room for the minute to change in between: put the rows at least two minutes
+inside the window, not on its oldest minute (`_erp_flows` in
+`tests/integration/test_traffic_counts_and_names.py` says why).
 
 When you change the validator (`app.core.schema`) or the ORM (`app.core.orm`), also run the
 differential suite in [`devtools/differential`](../devtools/differential/README.md). It sends the

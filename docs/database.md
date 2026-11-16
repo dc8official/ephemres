@@ -1,6 +1,6 @@
-# Ephemres Database & TimescaleDB Architecture — Version 3.3.5
+# Ephemres Database & TimescaleDB Architecture — Version 3.3.6
 
-This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.5.
+This document details the PostgreSQL 14+ schema design, TimescaleDB hypertable partitioning, continuous aggregates, columnar compression policies, and 4-tier lifecycle in Ephemres v3.3.6.
 
 ---
 
@@ -95,8 +95,8 @@ Stores state periods: one row per confirmed state, extended while the state pers
 * `created_at` (`TIMESTAMPTZ`, Default: `now()`, Not Null)
 
 ### `flow_minute_rollups` (TimescaleDB Hypertable)
-Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow v9, and IPFIX.
-* `bucket` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null) — 1-minute time boundary.
+Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow v9, IPFIX and (v3.3.6) sFlow v5.
+* `bucket` (`TIMESTAMPTZ`, Primary Key, Partition Key, Not Null) — 1-minute time boundary: the minute the flow started. Since v3.3.6 it is never more than a day in the past or in the future when written: flowd corrects a wrong exporter clock against the arrival time, and dates an impossible start at arrival (sFlow samples are always dated at arrival).
 * `exporter_id` (`UUID`, Primary Key, Not Null) — Associated endpoint UUID (`00000000-0000-0000-0000-000000000000` for unmapped/orphan flows).
 * `src_endpoint_id` (`UUID`, Nullable) — UUID of the source endpoint if matched in inventory.
 * `dst_endpoint_id` (`UUID`, Nullable) — UUID of the destination endpoint if matched in inventory.
@@ -104,7 +104,7 @@ Stores 1-minute aggregated passive flow metrics ingested via NetFlow v5, NetFlow
 * `dst_ip` (`INET`, Primary Key, Not Null) — Flow destination IP address.
 * `protocol` (`SMALLINT`, Primary Key, Not Null) — IANA IP protocol number (e.g. 6 = TCP, 17 = UDP, 1 = ICMP).
 * `dst_port` (`INTEGER`, Primary Key, Not Null) — Destination port normalized to prevent unbounded index cardinality.
-* `bytes` (`BIGINT`, Default: 0, Not Null) — Total bytes transferred in the 1-minute window.
+* `bytes` (`BIGINT`, Default: 0, Not Null) — Total bytes transferred in the 1-minute window. flowd leaves out a record claiming more than 2^50 bytes or packets (v3.3.6), so a sum stays inside the column.
 * `packets` (`BIGINT`, Default: 0, Not Null) — Total packets transferred.
 * `flow_count` (`INTEGER`, Default: 1, Not Null) — Number of discrete flow records aggregated into this rollup.
 * `tcp_flags` (`SMALLINT`, Default: 0, Not Null) — Bitwise OR of the TCP flags seen across the aggregated flows (migration `0013`).
