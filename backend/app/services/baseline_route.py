@@ -460,27 +460,32 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
                     backlog.append(discovery_route_queue.get_nowait())
                     discovery_route_queue.task_done()
 
+                # Cleared before starting anything, not after: a trace that ends during the start
+                # gaps below sets it, and the wait at the bottom must see that. Clearing it later
+                # lost the wake-up, and with nothing left running and nothing new queued the
+                # dispatcher waited for good (GNS3 LNMP II, per router 1, 2026-11-17).
+                wake.clear()
                 limit = max(1, int(get_runtime_settings().discovery_parallel))
                 # Traces running through each router. Up to discovery_per_router may share one,
                 # the server's own gateway included (default 3, build plan 11b); at 1 they take
                 # turns, for a site whose gateway answers too slowly for more.
                 per_router = max(1, int(get_runtime_settings().discovery_per_router))
-                busy: Counter = Counter()
-                for on_path in running.values():
-                    busy.update(on_path)
                 started = False
                 for item in list(backlog):
                     if len(running) >= limit:
                         break
                     async with db_session_factory() as db:
                         routers = await _routers_on_path(db, item[0], item[1])
+                    # Counted afresh for every candidate from the traces running now: traces end
+                    # during the start gaps, and a tally kept since the top of the pass still
+                    # counted them, so a router looked full one trace early.
+                    busy: Counter = Counter(r for on_path in running.values() for r in on_path)
                     if any(busy[r] >= per_router for r in routers):
                         continue  # a router on its path is at its limit: wait its turn
                     backlog.remove(item)
                     task = asyncio.create_task(_run_one(item))
                     worked["since_idle"] = True
                     running[task] = routers
-                    busy.update(routers)
                     task.add_done_callback(lambda t: (running.pop(t, None), wake.set()))
                     started = True
                     await asyncio.sleep(START_GAP_SECONDS)
@@ -491,7 +496,6 @@ async def start_midnight_discovery_worker(db_session_factory) -> asyncio.Task:
                         await _announce_topology_change("FLEET_DISCOVERY_COMPLETED")
                     continue
                 # Wait for a trace to finish or new work to arrive, whichever comes first.
-                wake.clear()
                 getter = asyncio.create_task(discovery_route_queue.get())
                 waiter = asyncio.create_task(wake.wait())
                 done, pending = await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
