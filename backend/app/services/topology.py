@@ -288,6 +288,11 @@ class TopologyGraphManager:
                 }
 
             # 4. Trie/Tree-Merging Algorithm
+            # Endpoints a traceroute put where they are: each one with a path of its own and each
+            # monitored hop on someone's path. A gateway switch is both directly under the root
+            # and a real first hop, so being under the root alone does not mean "not placed";
+            # place_by_neighbours must leave these alone (GNS3 LNMP II, 2026-11-17).
+            traced: Set[str] = set()
             for ep_id, ep_data in monitored_by_id.items():
                 manual_parent = ep_data.get("manual_parent_id")
                 if manual_parent and manual_parent in nodes:
@@ -308,6 +313,7 @@ class TopologyGraphManager:
                     transit_children[root_node_id].add(ep_id)
                     continue
 
+                traced.add(ep_id)
                 previous_node_id: str = root_node_id
                 previous_hop_ip_tag: str = "root"
 
@@ -332,6 +338,7 @@ class TopologyGraphManager:
                         hop_ep_id = monitored_by_ip.get(hop_ip)
                         if hop_ep_id:
                             current_node_id = hop_ep_id
+                            traced.add(hop_ep_id)
                         else:
                             current_node_id = f"transit:{hop_ip}"
                             if current_node_id not in nodes:
@@ -372,7 +379,8 @@ class TopologyGraphManager:
             # cannot place (hung straight off the root) get their parent from the LLDP/CDP links
             # between monitored devices. Manual parents and traceroute paths are untouched.
             adjacency = await self._load_neighbour_adjacency(db, monitored_by_id)
-            l2_edges = self.place_by_neighbours(edges, transit_children, monitored_by_id, root_node_id, adjacency)
+            l2_edges = self.place_by_neighbours(edges, transit_children, monitored_by_id, root_node_id, adjacency,
+                                                traced=traced)
 
             # 4b. Synthetic Subnet Clustering for Direct 1-Hop / L2 Devices
             # Endpoints connecting directly to root with no intermediate hops are grouped by subnet
@@ -731,18 +739,29 @@ class TopologyGraphManager:
         monitored_by_id: Dict[str, Any],
         root_node_id: str,
         adjacency: Dict[str, Dict[str, str]],
+        traced: Optional[Set[str]] = None,
     ) -> Dict[Tuple[str, str], str]:
         """Gives endpoints hung straight off the root a parent from their LLDP/CDP links, and
         returns those edges with their protocol.
+
+        Only endpoints traceroute could not place count as unplaced: under the root, not in
+        ``traced`` (a path of their own or a hop on another's) and with nothing hanging below
+        them. A gateway switch is under the root because it is the first hop; moving it under a
+        router behind it, as CDP once did in the GNS3 lab, made a loop that cut every node off
+        the root and flattened the map.
 
         Walks outward from endpoints that are already placed (by traceroute or by hand): each
         unplaced endpoint reached takes the neighbour it was reached through as its parent, so an
         access switch lands under its core switch, nearest the placed part of the network first.
         A group of linked endpoints with nothing placed among them keeps one of them under the
         root (a router or firewall if there is one, else the best connected) and hangs the
-        others from it. A tree by construction: each endpoint gets at most one parent, from an
-        endpoint already reached."""
-        unplaced = {ep for ep in monitored_by_id if (root_node_id, ep) in edges}
+        others from it. A tree: each endpoint gets at most one parent, from an endpoint already
+        reached, and an unplaced endpoint has nothing below it, so no parent can sit under it."""
+        has_children = {src for (src, _tgt) in edges}
+        unplaced = {
+            ep for ep in monitored_by_id
+            if (root_node_id, ep) in edges and ep not in (traced or set()) and ep not in has_children
+        }
         if not adjacency or not unplaced:
             return {}
         parents: Dict[str, Tuple[str, str]] = {}

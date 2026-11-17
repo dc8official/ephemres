@@ -66,6 +66,40 @@ def test_switches_traceroute_cannot_place_are_placed_by_their_neighbours():
     assert TopologyGraphManager.place_by_neighbours({(root, "x")}, {}, {"x": {}}, root, {}) == {}
 
 
+def _two_way(edges):
+    return [(a, b) for (a, b) in edges if (b, a) in edges]
+
+
+def test_a_traced_gateway_switch_stays_under_the_root():
+    # The GNS3 LNMP II layout (2026-11-17): S1 is the server's gateway, so every traced path
+    # starts at it, and R3 reports S1 over CDP. Moving S1 under R3 made a loop and left the
+    # root with no links, so the map drew every device on one flat line.
+    root = "root"
+    eps = {"S1": {"device_type": "Switch"}, "R2": {"device_type": "Router"}, "R3": {"device_type": "Router"},
+           "R4": {"device_type": "Router"}}
+    edges = {(root, "S1"), ("S1", "R2"), ("S1", "R3"), (root, "R4")}
+    children = {root: {"S1", "R4"}, "S1": {"R2", "R3"}}
+    adjacency = {"S1": {"R2": "CDP", "R3": "CDP"}, "R2": {"S1": "CDP"}, "R3": {"S1": "CDP", "R4": "LLDP"},
+                 "R4": {"R3": "LLDP"}}
+    placed = TopologyGraphManager.place_by_neighbours(edges, children, eps, root, adjacency,
+                                                      traced={"S1", "R2", "R3"})
+    # R4 had no traced route yet: LLDP puts it under R3. S1 stays the first hop.
+    assert placed == {("R3", "R4"): "LLDP"}
+    assert (root, "S1") in edges and not _two_way(edges)
+    assert children[root] == {"S1"}
+
+
+def test_an_endpoint_with_devices_below_it_is_never_moved():
+    # Without the traced set (an older caller, or a path left out by mistake), an endpoint that
+    # already has devices under it is still placed: moving it under one of them is the loop.
+    root = "root"
+    eps = {"S1": {"device_type": "Switch"}, "R2": {"device_type": "Router"}}
+    edges = {(root, "S1"), ("S1", "R2")}
+    placed = TopologyGraphManager.place_by_neighbours(edges, {root: {"S1"}, "S1": {"R2"}}, eps, root,
+                                                      {"S1": {"R2": "CDP"}, "R2": {"S1": "CDP"}})
+    assert placed == {} and edges == {(root, "S1"), ("S1", "R2")}
+
+
 def test_rca_names_the_nearest_parent_that_is_down():
     from app.services import rca_engine
     from app.services.topology import topology_manager
