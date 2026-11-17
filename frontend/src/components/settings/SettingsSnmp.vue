@@ -96,6 +96,9 @@
               <input v-model="form.community" type="password" autocomplete="new-password"
                      :placeholder="form.has_community ? 'Stored: leave empty to keep' : ''" />
             </label>
+            <p v-if="hasEdgeSpace(form.community)" class="warn small" role="alert">
+              The community starts or ends with a space. It is saved exactly as typed; remove the space unless the device's community has one.
+            </p>
           </template>
 
           <template v-else>
@@ -126,10 +129,18 @@
                        :placeholder="form.has_priv_password ? 'Stored: leave empty to keep' : 'At least 8 characters'" />
               </label>
             </div>
+            <p v-if="form.auth_protocol" class="hint">
+              Privacy must match the device's user: choose <strong>None</strong> for a user set up with
+              authentication only (authNoPriv), such as a Cisco <code>snmp-server user … auth sha …</code> with no <code>priv</code>.
+            </p>
             <label v-if="form.priv_protocol" class="check">
               <input type="checkbox" v-model="form.priv_same" />
               Use the authentication password for privacy too (Meraki and UniFi need this)
             </label>
+            <p v-if="spacedPasswords.length" class="warn small" role="alert">
+              The {{ spacedPasswords.join(' and ') }} {{ spacedPasswords.length > 1 ? 'start' : 'starts' }} or {{ spacedPasswords.length > 1 ? 'end' : 'ends' }} with a space. {{ spacedPasswords.length > 1 ? 'They are' : 'It is' }} saved exactly as typed;
+              remove the space unless the device's password has one (a pasted password often brings one along).
+            </p>
             <p v-if="form.priv_protocol === 'aes256' || form.priv_protocol === 'aes192'" class="hint">
               net-snmp-style keys. Cisco, HPE Aruba AOS-S and FortiGate "aes256cisco" use the Cisco-style
               option instead; if a test gets no reply after the device answered discovery, try the other.
@@ -157,6 +168,7 @@
             </div>
             <div v-if="testResult" class="test-result" :class="testResult.ok ? 'ok' : 'bad'">
               <strong>{{ testResult.ok ? 'The device answered.' : 'No good: ' + (testResult.error || 'see below') }}</strong>
+              <p v-if="privacyHint" class="small">{{ privacyHint }}</p>
               <ul v-if="testResult.findings && testResult.findings.length">
                 <li v-for="f in testResult.findings" :key="f">{{ f }}</li>
               </ul>
@@ -176,7 +188,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useModalDialog } from '../../composables/useModalDialog.js'
 import { useToast } from 'primevue/usetoast'
 import {
@@ -220,6 +232,33 @@ function securityLabel(s) {
   return s.priv_protocol ? `v3 ${(s.auth_protocol || '').toUpperCase()} + ${p ? p.label : s.priv_protocol}`
     : s.auth_protocol ? `v3 ${s.auth_protocol.toUpperCase()}, no encryption` : 'v3, no authentication'
 }
+
+// A password or community pasted from a document often brings a leading or trailing space.
+// It is kept as typed (a device may really have one), but the agent then answers "wrong digest"
+// or nothing, which reads like a wrong password (GNS3 LNMP II lab, 2026-11-17). So warn.
+function hasEdgeSpace(v) {
+  return typeof v === 'string' && v.length > 0 && v !== v.trim()
+}
+const spacedPasswords = computed(() => {
+  if (form.version !== '3' || !form.auth_protocol) return []
+  const names = []
+  if (hasEdgeSpace(form.auth_password)) names.push('authentication password')
+  if (form.priv_protocol && !form.priv_same && hasEdgeSpace(form.priv_password)) names.push('privacy password')
+  return names
+})
+
+// Privacy defaults to AES-128 because most v3 users have it, so a set for an auth-only user
+// (authNoPriv) fails until Privacy is set to None, and the device's answer ("unsupported
+// security level", or silence) does not say so. After a failed test of such a set, say it.
+// testedPriv is the privacy the test ran with, so editing the form afterwards does not
+// change what the message says about that test.
+const testedPriv = ref(null)
+const privacyHint = computed(() => {
+  const r = testResult.value
+  if (!r || r.ok || !testedPriv.value) return ''
+  const label = PRIV.find((x) => x.value === testedPriv.value)?.label || testedPriv.value
+  return `This set uses privacy (${label}). If the device's user was set up with authentication only, set Privacy to None and test again.`
+})
 
 function missingSecret(s) {
   if (s.version === '2c') return !s.has_community
@@ -310,6 +349,8 @@ async function remove(s) {
 async function runTest() {
   testing.value = true
   testResult.value = null
+  // A stored set is tested with its saved privacy; the form shows the same value.
+  testedPriv.value = form.version === '3' && form.auth_protocol ? form.priv_protocol : null
   try {
     // A stored set with no changed secrets is tested as stored; otherwise the form's values.
     const body = form.id && !form.community && !form.auth_password && !form.priv_password

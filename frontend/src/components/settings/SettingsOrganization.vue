@@ -21,10 +21,11 @@
         <div class="form-layout">
           <!-- Left Column: Text Inputs -->
           <div class="form-fields">
+            <!-- Labels name their boxes (for/id), for screen readers and label clicks (GNS3 LNMP II lab). -->
             <div class="form-group">
-              <label class="setting-label">Company / Organization Name</label>
+              <label class="setting-label" for="org-company-organization-name">Company / Organization Name</label>
               <p class="setting-hint">Appears in document headers and official audit title lines.</p>
-              <input 
+              <input id="org-company-organization-name" 
                 type="text" 
                 v-model="form.companyName" 
                 placeholder="Company name here" 
@@ -35,9 +36,9 @@
             </div>
 
             <div class="form-group">
-              <label class="setting-label">Department / Business Unit</label>
+              <label class="setting-label" for="org-department-business-unit">Department / Business Unit</label>
               <p class="setting-hint">Designates the operational entity responsible for the network scope.</p>
-              <input 
+              <input id="org-department-business-unit" 
                 type="text" 
                 v-model="form.department" 
                 placeholder="Department here (e.g. NOC)" 
@@ -48,9 +49,9 @@
             </div>
 
             <div class="form-group">
-              <label class="setting-label">Report Confidentiality Footer</label>
+              <label class="setting-label" for="org-report-confidentiality-footer">Report Confidentiality Footer</label>
               <p class="setting-hint">Legal disclaimer printed across the bottom margin of every report page.</p>
-              <input 
+              <input id="org-report-confidentiality-footer" 
                 type="text" 
                 v-model="form.reportFooter" 
                 placeholder="Report footer disclaimer here (e.g. Confidential — Internal Audit)" 

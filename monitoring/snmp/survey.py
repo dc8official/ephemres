@@ -282,13 +282,17 @@ def findings(report: Dict[str, Any]) -> List[str]:
     out.append("reboot clocks answered: " + (", ".join(clocks) if clocks else "none"))
     if report.get("addresses") is not None:
         out.append(f"IPv4 addresses listed: {len(report['addresses'])}")
+    def count(n: int, word: str) -> str:
+        # "1 neighbour", "2 neighbours": the Test result is read by people (GNS3 LNMP II lab).
+        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
     lldp = report.get("lldp")
     if lldp is not None:
-        out.append(f"LLDP ({lldp['mib']}): {len(lldp['neighbours'])} neighbours on {lldp['local_ports']} local ports"
+        out.append(f"LLDP ({lldp['mib']}): {count(len(lldp['neighbours']), 'neighbour')} on {count(lldp['local_ports'], 'local port')}"
                    if lldp["answered"] else "LLDP: not answered (neither LLDP-MIB nor LLDP-V2-MIB)")
     cdp = report.get("cdp")
     if cdp is not None:
-        out.append(f"CDP: {len(cdp['neighbours'])} neighbours" if cdp["answered"] else "CDP: no neighbours or not answered")
+        out.append(f"CDP: {count(len(cdp['neighbours']), 'neighbour')}" if cdp["answered"] else "CDP: no neighbours or not answered")
     if report.get("unanswered_columns"):
         out.append("columns the device never answered (walked alone after a multi-column request got no reply): "
                    + ", ".join(sorted(report["unanswered_columns"])))

@@ -18,6 +18,7 @@ from app.models.rca_incident import EndpointRCAIncident
 from app.models.system_setting import AppSetting
 from app.services import conversations as conversation_queries
 from app.services.flow_metrics import (
+    PORTED_PROTOCOLS,
     ROLE_WAN,
     ZONE_EAST_WEST,
     ZONE_EXTERNAL_TRANSIT,
@@ -28,6 +29,7 @@ from app.services.flow_metrics import (
     dscp_breakdown,
     interface_alias,
     interface_role,
+    service_label,
     service_name,
     utilization_pct,
 )
@@ -114,8 +116,11 @@ def format_speed(mbps: int) -> str:
 
 def format_port_label(port: int, proto: int) -> str:
     """"443 / HTTPS", "443 / QUIC (HTTP/3)", or "1434 / TCP": the names the Traffic page uses
-    (flow_metrics.service_name)."""
+    (flow_metrics.service_name). A protocol without ports (ICMP, OSPF) is its name alone, and
+    port 0 is "UDP (no port)", as on the Traffic page (flow_metrics.service_label)."""
     p = int(port or 0)
+    if int(proto or 0) not in PORTED_PROTOCOLS or p == 0:
+        return service_label(proto, p)
     name = service_name(proto, p)
     if name:
         return f"{p} / {name}"

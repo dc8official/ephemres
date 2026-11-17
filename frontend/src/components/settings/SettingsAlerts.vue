@@ -258,10 +258,12 @@
             </div>
           </div>
 
+          <!-- Each label names its box (for/id) for screen readers and label clicks (GNS3 LNMP II lab
+               found unnamed boxes on the settings pages, 2026-11-17). -->
           <!-- Channel Name -->
           <div class="form-group">
-            <label class="setting-label">Channel Display Name *</label>
-            <input 
+            <label class="setting-label" for="alert-channel-display-name">Channel Display Name *</label>
+            <input id="alert-channel-display-name" 
               v-model="channelForm.name" 
               type="text" 
               placeholder="e.g. NOC Critical Alerts / Team Chat" 
@@ -272,11 +274,12 @@
 
           <!-- Provider Specific Inputs -->
           <div v-if="channelForm.channel_type !== 'EMAIL_SMTP'" class="form-group">
-            <label class="setting-label">
+            <label class="setting-label" for="alert-webhook-url">
               Webhook Destination URL *
               <span class="label-hint">(Must be a valid HTTP/HTTPS endpoint. Private and loopback IPs are blocked by SSRF defense)</span>
             </label>
-            <input 
+            <input
+              id="alert-webhook-url" 
               v-model="channelForm.config.webhook_url" 
               type="url" 
               :placeholder="getWebhookPlaceholder(channelForm.channel_type)" 
@@ -287,8 +290,8 @@
 
           <!-- Generic Webhook Headers -->
           <div v-if="channelForm.channel_type === 'GENERIC_WEBHOOK'" class="form-group">
-            <label class="setting-label">Custom HTTP Headers (Optional JSON object)</label>
-            <textarea 
+            <label class="setting-label" for="alert-custom-http-headers-optional">Custom HTTP Headers (Optional JSON object)</label>
+            <textarea id="alert-custom-http-headers-optional" 
               v-model="channelForm.headersRaw" 
               placeholder='{ "Authorization": "Bearer YOUR_TOKEN" }'
               rows="2"
@@ -300,34 +303,34 @@
           <div v-if="channelForm.channel_type === 'EMAIL_SMTP'" class="smtp-config-box">
             <div class="form-row-2">
               <div class="form-group">
-                <label class="setting-label">SMTP Host *</label>
-                <input v-model="channelForm.config.smtp_host" type="text" placeholder="smtp.office365.com" required class="form-input font-mono" />
+                <label class="setting-label" for="alert-smtp-host">SMTP Host *</label>
+                <input id="alert-smtp-host" v-model="channelForm.config.smtp_host" type="text" placeholder="smtp.office365.com" required class="form-input font-mono" />
               </div>
               <div class="form-group">
-                <label class="setting-label">SMTP Port *</label>
-                <input v-model.number="channelForm.config.smtp_port" type="number" placeholder="587" required class="form-input font-mono" />
-              </div>
-            </div>
-
-            <div class="form-row-2">
-              <div class="form-group">
-                <label class="setting-label">SMTP Username</label>
-                <input v-model="channelForm.config.username" type="text" placeholder="alerts@corp.net" class="form-input" />
-              </div>
-              <div class="form-group">
-                <label class="setting-label">SMTP Password</label>
-                <input v-model="channelForm.config.password" type="password" placeholder="••••••••••••" class="form-input" />
+                <label class="setting-label" for="alert-smtp-port">SMTP Port *</label>
+                <input id="alert-smtp-port" v-model.number="channelForm.config.smtp_port" type="number" placeholder="587" required class="form-input font-mono" />
               </div>
             </div>
 
             <div class="form-row-2">
               <div class="form-group">
-                <label class="setting-label">From Address *</label>
-                <input v-model="channelForm.config.from_email" type="email" placeholder="ephemres-alerts@corp.net" required class="form-input" />
+                <label class="setting-label" for="alert-smtp-username">SMTP Username</label>
+                <input id="alert-smtp-username" v-model="channelForm.config.username" type="text" placeholder="alerts@corp.net" class="form-input" />
               </div>
               <div class="form-group">
-                <label class="setting-label">Recipient Email(s) * (comma-separated)</label>
-                <input v-model="channelForm.toEmailsRaw" type="text" placeholder="ops@corp.net, noc-oncall@corp.net" required class="form-input font-mono" />
+                <label class="setting-label" for="alert-smtp-password">SMTP Password</label>
+                <input id="alert-smtp-password" v-model="channelForm.config.password" type="password" placeholder="••••••••••••" class="form-input" />
+              </div>
+            </div>
+
+            <div class="form-row-2">
+              <div class="form-group">
+                <label class="setting-label" for="alert-from-address">From Address *</label>
+                <input id="alert-from-address" v-model="channelForm.config.from_email" type="email" placeholder="ephemres-alerts@corp.net" required class="form-input" />
+              </div>
+              <div class="form-group">
+                <label class="setting-label" for="alert-recipient-emails">Recipient Email(s) * (comma-separated)</label>
+                <input id="alert-recipient-emails" v-model="channelForm.toEmailsRaw" type="text" placeholder="ops@corp.net, noc-oncall@corp.net" required class="form-input font-mono" />
               </div>
             </div>
           </div>
@@ -373,11 +376,12 @@
 
           <!-- Subnet Filters -->
           <div class="form-group">
-            <label class="setting-label">
+            <label class="setting-label" for="alert-subnet-filters">
               Subnet Filters (Optional)
               <span class="label-hint">(Comma-separated CIDR notation, e.g. 10.0.0.0/16, 192.168.1.0/24)</span>
             </label>
-            <input 
+            <input
+              id="alert-subnet-filters" 
               v-model="channelForm.subnetFiltersRaw" 
               type="text" 
               placeholder="e.g. 10.0.0.0/16, 192.168.1.0/24" 

@@ -292,12 +292,28 @@ def test_interface_role(alias, expected):
         (6, 23, "Telnet"),
         (17, 514, "Syslog"),
         (6, 1434, "TCP/1434"),
-        (47, 0, "GRE/0"),
-        (99, 7, "PROTO-99/7"),
+        # Protocols without ports are their name; port 0 says so (GNS3 LNMP II lab: "ICMP/0").
+        (47, 0, "GRE"),
+        (1, 0, "ICMP"),
+        (1, 2048, "ICMP"),  # ICMP type 8 code 0 in the port field (NetFlow v9)
+        (89, 0, "OSPF"),
+        (17, 0, "UDP (no port)"),
+        (99, 7, "PROTO-99"),
+        (132, 3868, "SCTP/3868"),
     ],
 )
 def test_service_label(protocol, port, label):
     assert fm.service_label(protocol, port) == label
+
+
+def test_services_with_one_label_are_one_row():
+    # DHCP on both its ports and ICMP under several types were listed twice or more in
+    # Applications (GNS3 LNMP II lab, 2026-11-17). The merged row keeps its biggest port.
+    # DNS over UDP and TCP is one row too; unnamed ports keep their protocol apart.
+    rows = fm.merge_services([(17, 68, 300), (6, 443, 1000), (17, 67, 500), (1, 2048, 40), (1, 0, 60),
+                              (6, 8080, 10), (17, 53, 70), (6, 53, 5), (6, 1434, 4), (17, 1434, 3)])
+    assert rows == [(6, 443, 1000), (17, 67, 800), (1, 0, 100), (17, 53, 75), (6, 8080, 10),
+                    (6, 1434, 4), (17, 1434, 3)]
 
 
 def test_pdf_port_label_uses_the_same_names():

@@ -60,13 +60,16 @@
         </div>
       </div>
 
+      <!-- Each box is tied to its label (for/id), so screen readers name it and a click on the
+           label focuses it; the NetFlow, IPFIX and sampling boxes had none (GNS3 LNMP II lab). -->
       <div v-if="settings.flowIngestionEnabled" class="flow-config-fields mt-3">
         <div class="setting-row">
           <div>
-            <label class="setting-label">NetFlow Listen Port (v5 / v9)</label>
+            <label class="setting-label" for="flow-netflow-port">NetFlow Listen Port (v5 / v9)</label>
             <p class="setting-hint">UDP port for Cisco, Fortinet, Mikrotik NetFlow streams.</p>
           </div>
-          <input 
+          <input
+            id="flow-netflow-port" 
             type="number" 
             v-model.number="settings.flowNetflowPort" 
             class="setting-input font-mono tnum" 
@@ -78,10 +81,11 @@
 
         <div class="setting-row">
           <div>
-            <label class="setting-label">IPFIX Listen Port (v10)</label>
+            <label class="setting-label" for="flow-ipfix-port">IPFIX Listen Port (v10)</label>
             <p class="setting-hint">UDP port for standard RFC 7011 IPFIX / Juniper J-Flow.</p>
           </div>
-          <input 
+          <input
+            id="flow-ipfix-port" 
             type="number" 
             v-model.number="settings.flowIpfixPort" 
             class="setting-input font-mono tnum" 
@@ -109,10 +113,11 @@
 
         <div class="setting-row">
           <div>
-            <label class="setting-label">Sampling Multiplier Override</label>
+            <label class="setting-label" for="flow-sampling-multiplier">Sampling Multiplier Override</label>
             <p class="setting-hint">Hardware sampling scale factor (1 = 1:1 unsampled, e.g. 1000 for 1:1000 sampling). Not applied to sFlow or to NetFlow v5 that reports its own rate.</p>
           </div>
-          <input 
+          <input
+            id="flow-sampling-multiplier" 
             type="number" 
             v-model.number="settings.flowSamplingMultiplier" 
             class="setting-input font-mono tnum" 

@@ -313,7 +313,7 @@ def test_survey_report_end_to_end_without_secrets():
     assert report["lldp"]["neighbours"][0]["local_port"] == "Gi0/1"
     assert report["cdp"]["neighbours"][0]["remote_address"] == "192.0.2.1"
     text = render_text(report)
-    assert "64-bit counters on 4 of 4 interfaces" in text and "CDP: 1 neighbours" in text
+    assert "64-bit counters on 4 of 4 interfaces" in text and "CDP: 1 neighbour" in text and "1 neighbours" not in text
     dumped = json.dumps(_jsonable(report))
     assert "authpass123" not in dumped and "privpass123" not in dumped
     assert '"sysObjectID": "1.3.6.1.4.1.9.1.1"' in dumped

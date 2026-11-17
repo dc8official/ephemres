@@ -32,6 +32,7 @@ from app.services.flow_metrics import (
     bulk_sql,
     dscp_from_tos,
     internal_sql,
+    merge_services,
     service_name,
     tcp_anomaly_sql,
     zone_sql,
@@ -535,7 +536,8 @@ async def traffic_breakdown(db: AsyncSession, where_sql: str, params: Dict[str, 
             zones[r["zone"]] = {"bytes": b, "flows": f}
         else:
             total_bytes = b
-    applications.sort(key=lambda a: a[2], reverse=True)
+    # One row per label: DHCP's two ports and ICMP's types each come as one service.
+    applications = merge_services(applications)
     return {"applications": applications, "qos": qos, "zones": zones, "total_bytes": total_bytes}
 
 

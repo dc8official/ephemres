@@ -43,6 +43,13 @@ const routes = [
     name: 'EndpointDetail',
     component: () => import('../views/EndpointDetailView.vue'),
   },
+  // Anything else: a page that says so, instead of an empty content area. It must stay last;
+  // signed-out visitors still go to /login first (beforeEach below).
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    component: () => import('../views/NotFoundView.vue'),
+  },
 ]
 
 const router = createRouter({

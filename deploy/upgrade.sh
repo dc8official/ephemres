@@ -883,6 +883,51 @@ migrate_legacy_services() {
     fi
 }
 
+# Adds the template's Content-Security-Policy (v3.3.6) to an existing ephemres nginx site.
+# install.sh writes the site only once, so a server installed before v3.3.6 never got the header
+# (found in the GNS3 LNMP II lab upgrade, 2026-11-17). The line is copied from the template, so
+# the policy is written in one place only. It goes into the page's `location / { }` block,
+# after the Referrer-Policy header the installer always wrote there. A site without that line
+# was edited by hand: it is left alone and the admin is told what to add. A header the site
+# already has (an admin's own policy) is kept. nginx -t must pass, or the site is put back; a
+# missing header is not worth failing an upgrade over, so that only warns.
+ensure_nginx_csp() {
+    local site="/etc/nginx/sites-available/ephemres"
+    local csp_line
+    [[ -f "${site}" ]] || return 0
+    grep -q "Content-Security-Policy" "${site}" && return 0
+    csp_line=$(grep -m1 "add_header Content-Security-Policy" "${INSTALL_DIR}/deploy/nginx.conf.template" | sed 's/^[[:space:]]*//')
+    [[ -n "${csp_line}" ]] || return 0
+
+    local updated
+    updated=$(mktemp)
+    # in_page: inside `location / {`; added: the line went in once (later blocks are untouched).
+    # awk is the if's condition because of set -e: its "not added" exit must not end the upgrade.
+    if ! awk -v csp="${csp_line}" '
+        /^[[:space:]]*location[[:space:]]+\/[[:space:]]*\{/ { in_page = 1 }
+        { print }
+        in_page && !added && /add_header[[:space:]]+Referrer-Policy/ {
+            match($0, /^[[:space:]]*/); print substr($0, 1, RLENGTH) csp; added = 1
+        }
+        in_page && /^[[:space:]]*\}/ { in_page = 0 }
+        END { exit added ? 0 : 1 }' "${site}" > "${updated}"; then
+        rm -f "${updated}"
+        echo -e "${YELLOW}[NOTICE] ${site} has no Content-Security-Policy and was edited by hand, so it was left as it is.${NC}"
+        echo -e "${YELLOW}         Add the add_header Content-Security-Policy line from ${INSTALL_DIR}/deploy/nginx.conf.template to its location / block.${NC}"
+        return 0
+    fi
+
+    cp -p "${site}" "${site}.pre-csp"
+    cat "${updated}" > "${site}"   # keeps the file's owner and mode
+    rm -f "${updated}"
+    if command -v nginx &>/dev/null && ! nginx -t 2>>"${UPGRADE_LOG}"; then
+        cp -p "${site}.pre-csp" "${site}"
+        echo -e "${YELLOW}[WARN] nginx rejected ${site} with the Content-Security-Policy added; the site was put back as it was (see ${UPGRADE_LOG}).${NC}"
+        return 0
+    fi
+    echo -e "${GREEN}[INFO] Added the Content-Security-Policy header to ${site} (previous version kept as ${site}.pre-csp).${NC}"
+}
+
 # 9. Service Unit Refresh, Auto-Start Enablement & Restart
 echo -e "\n${BLUE}--- Step 7/7: Refreshing Systemd Units, Enabling Auto-Start & Starting Services ---${NC}"
 if [[ ${DRY_RUN} -eq 0 ]]; then
@@ -945,6 +990,7 @@ EOF
     if ! systemctl restart ephemres-api ephemres-engine; then
         upgrade_failed "systemctl could not start ephemres-api / ephemres-engine."
     fi
+    ensure_nginx_csp
     systemctl restart nginx || true
 
     # SNMP poller (v3.3.6): always running, idle until SNMP is switched on in Settings. New and
@@ -990,7 +1036,18 @@ EOF
     echo -e "${GREEN}[SUCCESS] Primary platform services (ephemres-api, ephemres-engine) are active, enabled on boot, and the API answers its health check.${NC}"
     UPGRADE_FINISHED=1
 else
-    echo -e "[DRY-RUN] Would run: systemctl enable & restart ephemres-api ephemres-engine (and ephemres-flowd if enabled)"
+    echo -e "[DRY-RUN] Would run: systemctl enable & restart ephemres-api ephemres-engine ephemres-snmpd (and ephemres-flowd if enabled)"
+    echo -e "[DRY-RUN] Would add the template's Content-Security-Policy to /etc/nginx/sites-available/ephemres if it has none, then restart nginx"
+fi
+
+# A dry run changed nothing, so it must not end with the success banner and a backup path that
+# was never written (found in the GNS3 LNMP II lab, 2026-11-17).
+if [[ ${DRY_RUN} -eq 1 ]]; then
+    UPGRADE_FINISHED=1
+    echo -e "\n${YELLOW}========================================================================${NC}"
+    echo -e "${YELLOW}   [DRY RUN COMPLETE] Nothing was changed. Run without --dry-run to upgrade to v${RELEASE_VERSION}.${NC}"
+    echo -e "${YELLOW}========================================================================${NC}"
+    exit 0
 fi
 
 echo -e "\n${GREEN}========================================================================${NC}"

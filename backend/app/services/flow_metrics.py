@@ -20,6 +20,7 @@ PROTOCOL_MAP: Dict[int, str] = {
     50: "ESP",
     58: "IPv6-ICMP",
     89: "OSPF",
+    132: "SCTP",  # carries ports, so service_label names it like TCP and UDP
 }
 
 # Link speed assumed for interfaces whose alias carries no speed.
@@ -342,13 +343,47 @@ def service_name(protocol: int, port: int) -> Optional[str]:
     return SERVICE_NAMES_BY_PROTOCOL.get(key) or SERVICE_NAMES.get(key[1])
 
 
+# Protocols whose flows carry service ports. Every other protocol (ICMP, OSPF, GRE, ESP...) has
+# none: exporters put 0 there, or for ICMP the type and code (NetFlow v9 / IPFIX put
+# type * 256 + code in the destination port), which is not a service.
+PORTED_PROTOCOLS = frozenset({6, 17, 132})  # TCP, UDP, SCTP
+
+
 def service_label(protocol: int, port: int) -> str:
-    """"HTTPS", "QUIC (HTTP/3)", or "TCP/1434" when the port has no name."""
-    name = service_name(protocol, port)
+    """"HTTPS", "QUIC (HTTP/3)", "TCP/1434" when the port has no name, "ICMP" or "OSPF" for a
+    protocol without ports, and "UDP (no port)" for port 0, which is mostly IP fragments after
+    the first (they carry no transport header). The lab showed "ICMP/0", "OSPF/0" and "UDP/0"
+    before (GNS3 LNMP II, 2026-11-17)."""
+    proto_id, port = int(protocol or 0), int(port or 0)
+    proto = PROTOCOL_MAP.get(proto_id, f"PROTO-{proto_id}")
+    if proto_id not in PORTED_PROTOCOLS:
+        return proto
+    name = service_name(proto_id, port)
     if name:
         return name
-    proto = PROTOCOL_MAP.get(int(protocol or 0), f"PROTO-{protocol}")
-    return f"{proto}/{port}"
+    return f"{proto} (no port)" if port == 0 else f"{proto}/{port}"
+
+
+def merge_services(applications: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    """Folds (protocol, port, bytes) rows that get the same label into one, largest first.
+
+    Some services use two ports (DHCP: the server on 67, the client on 68, and a reply's
+    service port is the client's), some run over TCP and UDP alike (DNS, SIP), and protocols
+    without ports come with ICMP types or zeros. Applications listed each of them twice or more
+    (GNS3 LNMP II lab, 2026-11-17). The label is the key, so names with the protocol in them
+    ("TCP/1434", "UDP/1434") stay apart. A merged row keeps the protocol and port of its biggest
+    part, which is what a click on the row filters the conversations by.
+    """
+    merged: Dict[str, List[int]] = {}
+    for proto, port, b in sorted(applications, key=lambda a: a[2], reverse=True):
+        key = service_label(proto, port)
+        if key in merged:
+            merged[key][2] += b
+        else:
+            merged[key] = [int(proto), int(port), b]
+    rows = [(proto, port, b) for proto, port, b in merged.values()]
+    rows.sort(key=lambda a: a[2], reverse=True)
+    return rows
 
 
 def tcp_anomaly_sql(flags_expr: str, protocol_expr: str) -> str:

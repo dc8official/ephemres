@@ -544,10 +544,31 @@ if [ "$DRY_RUN" = false ]; then
     
     if [ ! -f "$CERT_DIR/ephemres.crt" ] || [ ! -f "$KEY_DIR/ephemres.key" ]; then
         echo "--> Generating self-signed SSL certificate for $DOMAIN_NAME"
+        # Browsers ignore the CN and match the address bar only against subjectAltName, so a
+        # certificate without one is refused even after an admin trusts it (GNS3 LNMP II lab,
+        # 2026-11-17). The SAN lists the configured name (as an IP entry when it is an address)
+        # and every address the server has, so https://<any of its IPs> works once trusted.
+        SAN_LIST=""
+        add_san() {
+            # add_san VALUE: an IPv4/IPv6 address becomes IP:, anything else DNS:; no duplicates.
+            local v="$1" entry
+            [ -n "$v" ] || return 0
+            if [[ "$v" =~ ^[0-9.]+$ || "$v" == *:* ]]; then entry="IP:$v"; else entry="DNS:$v"; fi
+            case ",$SAN_LIST," in *",$entry,"*) return 0 ;; esac
+            SAN_LIST="${SAN_LIST:+$SAN_LIST,}$entry"
+        }
+        add_san "$DOMAIN_NAME"
+        for addr in $(hostname -I 2>/dev/null); do
+            case "$addr" in fe80:*) continue ;; esac  # link-local: never in an address bar
+            add_san "$addr"
+        done
+        add_san "$(hostname -f 2>/dev/null || hostname)"
+        echo "    Certificate names: $SAN_LIST"
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
             -keyout "$KEY_DIR/ephemres.key" \
             -out "$CERT_DIR/ephemres.crt" \
-            -subj "/C=US/ST=State/L=City/O=Ephemres/CN=$DOMAIN_NAME" 2>/dev/null
+            -subj "/C=US/ST=State/L=City/O=Ephemres/CN=$DOMAIN_NAME" \
+            -addext "subjectAltName=$SAN_LIST" 2>/dev/null
         chmod 600 "$KEY_DIR/ephemres.key"
         chmod 644 "$CERT_DIR/ephemres.crt"
         echo "Self-signed certificate generated successfully."
